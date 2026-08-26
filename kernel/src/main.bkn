@@ -38,6 +38,8 @@ import kernel::baken_p2p::*;
 import kernel::baken_ui::*;
 import kernel::splash_screen::*;
 import kernel::boot_manager::*;
+import kernel::control_center::*;
+import kernel::kernel_selftest::*;
 import kernel::window_manager::*;
 import kernel::desktop_shell::*;
 
@@ -110,13 +112,17 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     baken_p2p_init();
     baken_ui_init();
 
-    // 9. Inicializa o Temporizador APIC Local e CLI
+    // 9. Executa Suíte de Auto-Testes Integrada do Kernel
+    splash_screen_render_step(90, b"Executando Auto-Testes de Integridade (PMM, VMM, BakenFS, Q-HAL)...\0".as_ptr());
+    kernel_run_all_selftests();
+
+    // 10. Inicializa o Temporizador APIC Local e CLI
     splash_screen_render_step(95, b"Iniciando Temporizador APIC Local e Interpretador Shell CLI...\0".as_ptr());
     lapic_init();
     shell_cli_init();
     wm_init();
 
-    // 10. Conclui Boot e Carrega Desktop Shell Soberano
+    // 11. Conclui Boot e Carrega Desktop Shell Soberano
     splash_screen_render_step(100, b"Iniciando Desktop Shell Soberano...\0".as_ptr());
     desktop_shell_init((*boot_info).screen_width, (*boot_info).screen_height);
 

@@ -7,6 +7,7 @@ import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::baken_font_engine::*;
 import kernel::shell_cli::*;
+import kernel::control_center::*;
 
 pub const MAX_WINDOWS: usize = 16;
 pub const TITLE_BAR_HEIGHT: u32 = 36;
@@ -456,5 +457,9 @@ fn wm_render_single_window(win: &Window) {
         gfx_draw_glass_rect(card_x, content_y + 84, card_w, 60, 0x000F172A, 200, 0x00818CF8, 6);
         gfx_draw_text_alpha(card_x + 12, content_y + 94, b"Entanglement: EPR Bell\0".as_ptr(), 0x00818CF8, 1, 255);
         gfx_draw_text_alpha(card_x + 12, content_y + 114, b"Entropy: 0.0001 bit\0".as_ptr(), 0x00E2E8F0, 1, 230);
+
+    } else if win.id == 4 {
+        // === JANELA 4: CENTRAL DE CONTROLE & CONFIGURAÇÕES ===
+        control_center_render_interior(content_x, content_y, content_w, content_h);
     }
 }
