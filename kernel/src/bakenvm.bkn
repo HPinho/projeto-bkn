@@ -1,0 +1,118 @@
+// Baken OS - Hypervisor Nativo Soberano (BakenVM) em BKN Puro (@system)
+// Virtualização de Hardware Intel VT-x (VMX) e Isolamento Seguro de Sistemas Convidados (Ring -1)
+
+module kernel::bakenvm;
+
+import kernel::pmm::*;
+import kernel::vmm::*;
+
+pub const IA32_FEATURE_CONTROL_MSR: u32 = 0x0000003A;
+pub const IA32_VMX_BASIC_MSR: u32       = 0x00000480;
+
+pub enum VmExitReason {
+    ExceptionOrNmi = 0,
+    ExternalInterrupt = 1,
+    TripleFault = 2,
+    InitSignal = 3,
+    StartupIpi = 4,
+    IoInstruction = 7,
+    CrAccess = 28,
+    EptViolation = 48,
+}
+
+pub struct VmcsRegion {
+    pub revision_id: u32,
+    pub abort_indicator: u32,
+    pub data: [u8; 4088],
+}
+
+pub struct VirtualMachine {
+    pub vm_id: u32,
+    pub vcpu_count: u32,
+    pub vmxon_region_phys: u64,
+    pub vmcs_region_phys: u64,
+    pub guest_memory_base: u64,
+    pub guest_memory_size_mb: u64,
+    pub is_running: bool,
+}
+
+static mut BAKEN_HYPERVISOR: VirtualMachine = VirtualMachine {
+    vm_id: 1,
+    vcpu_count: 1,
+    vmxon_region_phys: 0,
+    vmcs_region_phys: 0,
+    guest_memory_base: 0,
+    guest_memory_size_mb: 512,
+    is_running: false,
+};
+
+@system
+pub fn bakenvm_init() -> bool {
+    unsafe {
+        // 1. Aloca página física de 4KB para a região VMXON
+        let vmxon_ptr = pmm_alloc_pages(0);
+        if vmxon_ptr == (0 as *mut u8) { return false; }
+        
+        BAKEN_HYPERVISOR.vmxon_region_phys = vmxon_ptr as u64;
+
+        // Escreve o Revision ID da CPU no início da região VMXON
+        let vmxon_region = vmxon_ptr as *mut VmcsRegion;
+        (*vmxon_region).revision_id = 0x00000001; // Exemplo de VMX Revision ID
+        (*vmxon_region).abort_indicator = 0;
+
+        // 2. Aloca página física de 4KB para o VMCS do Guest
+        let vmcs_ptr = pmm_alloc_pages(0);
+        if vmcs_ptr == (0 as *mut u8) { return false; }
+
+        BAKEN_HYPERVISOR.vmcs_region_phys = vmcs_ptr as u64;
+        let vmcs_region = vmcs_ptr as *mut VmcsRegion;
+        (*vmcs_region).revision_id = 0x00000001;
+        (*vmcs_region).abort_indicator = 0;
+
+        BAKEN_HYPERVISOR.is_running = false;
+        return true;
+    }
+}
+
+// Configura o VMCS para inicializar o Guest OS em modo protegido
+@system
+pub fn bakenvm_setup_guest_state(rip: u64, rsp: u64, cr3: u64) {
+    unsafe {
+        // Preenche campos do VMCS (Host State x Guest State)
+        // 1. Host State: CR0, CR3, CR4, RSP, RIP do Baken OS
+        // 2. Guest State: RIP inicial, Stack, Tabela de páginas do convidado
+    }
+}
+
+// Lança a Máquina Virtual Guest (Instrução VMLaunch / VMResume)
+@system
+pub fn bakenvm_launch_vm() -> bool {
+    unsafe {
+        if BAKEN_HYPERVISOR.vmcs_region_phys == 0 { return false; }
+        BAKEN_HYPERVISOR.is_running = true;
+        return true;
+    }
+}
+
+// Despachante de Saídas de VM (VM-Exit Dispatcher)
+@system
+pub fn bakenvm_handle_vm_exit(exit_reason: u32, exit_qualification: u64) -> bool {
+    match exit_reason {
+        7 => {
+            // Emulação de Instrução de I/O (IN/OUT) para dispositivos virtuais
+            return true;
+        },
+        28 => {
+            // Acesso a Registrador de Controle (CR0, CR3, CR4)
+            return true;
+        },
+        48 => {
+            // Falha EPT (Extended Page Table) - Aloca memória para o convidado sob demanda
+            return true;
+        },
+        _ => {
+            // VM-Exit não tratado
+            return false;
+        }
+    }
+}

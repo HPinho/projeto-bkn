@@ -6,6 +6,7 @@ module kernel::baken_ui;
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::baken_font_engine::*;
+import kernel::baken3d::*;
 
 pub const MAX_UI_NODES: usize = 128;
 
@@ -19,6 +20,8 @@ pub enum WidgetType {
     GlassCard = 7,
     TextField = 8,
     BlochSphereViewer = 9,
+    SpatialPanel = 10,
+    SpatialCubeViewer = 11,
 }
 
 pub struct BoxConstraints {
@@ -215,6 +218,9 @@ pub fn ui_render_node(node_id: u32) {
                     node.text_content.as_ptr(),
                     node.style.text_color, 1, 230
                 );
+            },
+            WidgetType::SpatialCubeViewer => {
+                baken3d_render_demo_cube(0.0, 0.0, 3.5, 45.0);
             },
             _ => {}
         }

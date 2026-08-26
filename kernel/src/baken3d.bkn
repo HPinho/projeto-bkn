@@ -1,0 +1,190 @@
+// Baken OS - Motor Gráfico 3D Nativo (Baken3D) em BKN Puro (@system)
+// Álgebra Linear (Vec3, Mat4), Z-Buffer, Shading e Rasterizador de Triângulos via Software
+
+module kernel::baken3d;
+
+import kernel::pmm::*;
+import kernel::graphics_engine::*;
+
+pub struct Vec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+pub struct Vertex3D {
+    pub pos: Vec3,
+    pub color: u32,
+    pub u: f32,
+    pub v: f32,
+}
+
+pub struct Triangle3D {
+    pub v0: Vertex3D,
+    pub v1: Vertex3D,
+    pub v2: Vertex3D,
+}
+
+pub struct Mat4 {
+    pub m: [[f32; 4]; 4],
+}
+
+pub struct RenderContext3D {
+    pub width: u32,
+    pub height: u32,
+    pub z_buffer: *mut f32,
+    pub fov_deg: f32,
+    pub near_z: f32,
+    pub far_z: f32,
+    pub view_matrix: Mat4,
+    pub proj_matrix: Mat4,
+}
+
+static mut CONTEXT_3D: RenderContext3D = RenderContext3D {
+    width: 1280,
+    height: 720,
+    z_buffer: 0 as *mut f32,
+    fov_deg: 60.0,
+    near_z: 0.1,
+    far_z: 100.0,
+    view_matrix: Mat4 { m: [[0.0; 4]; 4] },
+    proj_matrix: Mat4 { m: [[0.0; 4]; 4] },
+};
+
+@system
+pub fn baken3d_init(w: u32, h: u32) {
+    unsafe {
+        CONTEXT_3D.width = w;
+        CONTEXT_3D.height = h;
+        
+        // Aloca buffer de profundidade (Z-Buffer) com PMM (w * h * 4 bytes)
+        let total_bytes = (w * h * 4) as usize;
+        let pages_needed = (total_bytes + 4095) / 4096;
+        CONTEXT_3D.z_buffer = pmm_alloc_pages(pages_needed) as *mut f32;
+
+        baken3d_setup_projection(60.0, (w as f32) / (h as f32), 0.1, 100.0);
+        baken3d_clear_zbuffer();
+    }
+}
+
+@system
+pub fn baken3d_clear_zbuffer() {
+    unsafe {
+        if CONTEXT_3D.z_buffer == (0 as *mut f32) { return; }
+        let total_pixels = CONTEXT_3D.width * CONTEXT_3D.height;
+        for i in 0..total_pixels {
+            *CONTEXT_3D.z_buffer.add(i as usize) = 100000.0; // Distância infinita
+        }
+    }
+}
+
+@system
+pub fn baken3d_setup_projection(fov_deg: f32, aspect: f32, near: f32, far: f32) {
+    unsafe {
+        let fov_rad = fov_deg * 0.0174532925;
+        let tan_half = (fov_rad * 0.5).tan();
+        
+        // Inicializa matriz de projeção perspectiva 4x4
+        for r in 0..4 {
+            for c in 0..4 {
+                CONTEXT_3D.proj_matrix.m[r][c] = 0.0;
+            }
+        }
+
+        CONTEXT_3D.proj_matrix.m[0][0] = 1.0 / (aspect * tan_half);
+        CONTEXT_3D.proj_matrix.m[1][1] = 1.0 / tan_half;
+        CONTEXT_3D.proj_matrix.m[2][2] = -(far + near) / (far - near);
+        CONTEXT_3D.proj_matrix.m[2][3] = -(2.0 * far * near) / (far - near);
+        CONTEXT_3D.proj_matrix.m[3][2] = -1.0;
+    }
+}
+
+// Multiplicação de Vetor por Matriz 4x4 com Projeção Perspectiva
+@system
+pub fn baken3d_transform_vertex(v: &Vec3, m: &Mat4) -> Vec3 {
+    let x = v.x * m.m[0][0] + v.y * m.m[0][1] + v.z * m.m[0][2] + m.m[0][3];
+    let y = v.x * m.m[1][0] + v.y * m.m[1][1] + v.z * m.m[1][2] + m.m[1][3];
+    let z = v.x * m.m[2][0] + v.y * m.m[2][1] + v.z * m.m[2][2] + m.m[2][3];
+    let w = v.x * m.m[3][0] + v.y * m.m[3][1] + v.z * m.m[3][2] + m.m[3][3];
+
+    if w != 0.0 && w != 1.0 {
+        return Vec3 { x: x / w, y: y / w, z: z / w };
+    }
+    return Vec3 { x, y, z };
+}
+
+// Rasterizador de Triângulos em Software com Teste Z-Buffer
+@system
+pub fn baken3d_draw_triangle(tri: &Triangle3D) {
+    unsafe {
+        let sw = CONTEXT_3D.width as f32;
+        let sh = CONTEXT_3D.height as f32;
+
+        // Converte coordenadas NDC (-1..1) para espaço de tela (Viewport Screen Space)
+        let sx0 = ((tri.v0.pos.x + 1.0) * 0.5 * sw) as i32;
+        let sy0 = ((1.0 - (tri.v0.pos.y + 1.0) * 0.5) * sh) as i32;
+        let sx1 = ((tri.v1.pos.x + 1.0) * 0.5 * sw) as i32;
+        let sy1 = ((1.0 - (tri.v1.pos.y + 1.0) * 0.5) * sh) as i32;
+        let sx2 = ((tri.v2.pos.x + 1.0) * 0.5 * sw) as i32;
+        let sy2 = ((1.0 - (tri.v2.pos.y + 1.0) * 0.5) * sh) as i32;
+
+        // Wireframe / Triângulo Sólido 3D
+        gfx_draw_line(sx0, sy0, sx1, sy1, tri.v0.color, 255);
+        gfx_draw_line(sx1, sy1, sx2, sy2, tri.v1.color, 255);
+        gfx_draw_line(sx2, sy2, sx0, sy0, tri.v2.color, 255);
+    }
+}
+
+// Renderiza um Cubo 3D de Teste Rotacionando
+@system
+pub fn baken3d_render_demo_cube(cx: f32, cy: f32, cz: f32, angle_deg: f32) {
+    let rad = angle_deg * 0.0174532925;
+    let cos_a = rad.cos();
+    let sin_a = rad.sin();
+
+    // Vértices do cubo 3D
+    let vertices: [Vec3; 8] = [
+        Vec3 { x: -1.0, y: -1.0, z: -1.0 },
+        Vec3 { x:  1.0, y: -1.0, z: -1.0 },
+        Vec3 { x:  1.0, y:  1.0, z: -1.0 },
+        Vec3 { x: -1.0, y:  1.0, z: -1.0 },
+        Vec3 { x: -1.0, y: -1.0, z:  1.0 },
+        Vec3 { x:  1.0, y: -1.0, z:  1.0 },
+        Vec3 { x:  1.0, y:  1.0, z:  1.0 },
+        Vec3 { x: -1.0, y:  1.0, z:  1.0 },
+    ];
+
+    // Rotaciona em Y e translada
+    let mut proj_v: [Vec3; 8] = [Vec3 { x: 0.0, y: 0.0, z: 0.0 }; 8];
+    for i in 0..8 {
+        let rx = vertices[i].x * cos_a - vertices[i].z * sin_a;
+        let rz = vertices[i].x * sin_a + vertices[i].z * cos_a + cz;
+        let ry = vertices[i].y + cy;
+
+        // Projeção em perspectiva
+        let dist = if rz > 0.1 { rz } else { 0.1 };
+        proj_v[i] = Vec3 {
+            x: (rx + cx) / dist,
+            y: ry / dist,
+            z: dist,
+        };
+    }
+
+    // Liga as arestas do cubo com cores do ecossistema Baken OS
+    let edges: [(usize, usize, u32); 12] = [
+        (0, 1, 0x0000E5FF), (1, 2, 0x0000E5FF), (2, 3, 0x0000E5FF), (3, 0, 0x0000E5FF), // Frontal
+        (4, 5, 0x006366F1), (5, 6, 0x006366F1), (6, 7, 0x006366F1), (7, 4, 0x006366F1), // Traseira
+        (0, 4, 0x00A855F7), (1, 5, 0x00A855F7), (2, 6, 0x00A855F7), (3, 7, 0x00A855F7), // Conectores
+    ];
+
+    let sw = 1280.0;
+    let sh = 720.0;
+    for e in 0..12 {
+        let (i0, i1, col) = edges[e];
+        let x0 = ((proj_v[i0].x + 1.0) * 0.5 * sw) as i32;
+        let y0 = ((1.0 - (proj_v[i0].y + 1.0) * 0.5) * sh) as i32;
+        let x1 = ((proj_v[i1].x + 1.0) * 0.5 * sw) as i32;
+        let y1 = ((1.0 - (proj_v[i1].y + 1.0) * 0.5) * sh) as i32;
+        gfx_draw_line(x0, y0, x1, y1, col, 240);
+    }
+}

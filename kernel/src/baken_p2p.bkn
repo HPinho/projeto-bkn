@@ -1,0 +1,107 @@
+// Baken OS - Rede P2P e Cluster Descentralizado (BakenCloud) em BKN Puro (@system)
+// Protocolo Gossip, Tabela Hash Distribuída (DHT) e Compartilhamento de Recursos em Malha
+
+module kernel::baken_p2p;
+
+import kernel::pmm::*;
+import kernel::net::*;
+
+pub const MAX_PEER_NODES: usize = 32;
+pub const P2P_CLUSTER_PORT: u16 = 9080;
+
+pub struct PeerNode {
+    pub node_id: [u8; 16],
+    pub ip_addr: [u8; 4],
+    pub port: u16,
+    pub cpu_cores: u32,
+    pub ram_free_mb: u64,
+    pub latency_ms: u32,
+    pub is_alive: bool,
+}
+
+pub struct MeshClusterState {
+    pub local_node_id: [u8; 16],
+    pub active_peer_count: usize,
+    pub cluster_total_ram_mb: u64,
+    pub is_mesh_connected: bool,
+    pub socket_fd: i32,
+}
+
+static mut CLUSTER: MeshClusterState = MeshClusterState {
+    local_node_id: [0xBA, 0xCE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E],
+    active_peer_count: 0,
+    cluster_total_ram_mb: 4096,
+    is_mesh_connected: false,
+    socket_fd: -1,
+};
+
+static mut PEER_ROUTING_TABLE: [PeerNode; MAX_PEER_NODES] = [PeerNode {
+    node_id: [0; 16],
+    ip_addr: [0; 4],
+    port: P2P_CLUSTER_PORT,
+    cpu_cores: 0,
+    ram_free_mb: 0,
+    latency_ms: 0,
+    is_alive: false,
+}; MAX_PEER_NODES];
+
+@system
+pub fn baken_p2p_init() {
+    unsafe {
+        CLUSTER.active_peer_count = 0;
+        CLUSTER.is_mesh_connected = false;
+
+        for i in 0..MAX_PEER_NODES {
+            PEER_ROUTING_TABLE[i].is_alive = false;
+        }
+
+        // Abre socket UDP para o protocolo Gossip
+        CLUSTER.socket_fd = bkn_socket(IP_PROTO_UDP);
+        if CLUSTER.socket_fd > 0 {
+            bkn_bind(CLUSTER.socket_fd, P2P_CLUSTER_PORT);
+            CLUSTER.is_mesh_connected = true;
+        }
+    }
+}
+
+// Registra ou atualiza heartbeat de um nó peer na malha
+@system
+pub fn baken_p2p_register_peer(ip: [u8; 4], cpu_cores: u32, ram_free_mb: u64) -> bool {
+    unsafe {
+        for i in 0..MAX_PEER_NODES {
+            if PEER_ROUTING_TABLE[i].is_alive && PEER_ROUTING_TABLE[i].ip_addr == ip {
+                PEER_ROUTING_TABLE[i].cpu_cores = cpu_cores;
+                PEER_ROUTING_TABLE[i].ram_free_mb = ram_free_mb;
+                return true;
+            }
+        }
+
+        for i in 0..MAX_PEER_NODES {
+            if !PEER_ROUTING_TABLE[i].is_alive {
+                PEER_ROUTING_TABLE[i].ip_addr = ip;
+                PEER_ROUTING_TABLE[i].port = P2P_CLUSTER_PORT;
+                PEER_ROUTING_TABLE[i].cpu_cores = cpu_cores;
+                PEER_ROUTING_TABLE[i].ram_free_mb = ram_free_mb;
+                PEER_ROUTING_TABLE[i].is_alive = true;
+
+                CLUSTER.active_peer_count += 1;
+                CLUSTER.cluster_total_ram_mb += ram_free_mb;
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+// Envia mensagem Gossip para todos os nós vizinhos conhecidos
+@system
+pub fn baken_p2p_broadcast_gossip(data: *const u8, len: usize) {
+    unsafe {
+        if CLUSTER.socket_fd <= 0 { return; }
+        for i in 0..MAX_PEER_NODES {
+            if PEER_ROUTING_TABLE[i].is_alive {
+                bkn_send(CLUSTER.socket_fd, data, len);
+            }
+        }
+    }
+}

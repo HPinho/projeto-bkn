@@ -17,6 +17,11 @@ import kernel::mouse::*;
 import kernel::nvme::*;
 import kernel::audio::*;
 import kernel::graphics_engine::*;
+import kernel::baken3d::*;
+import kernel::bakenvm::*;
+import kernel::bakendb::*;
+import kernel::baken_p2p::*;
+import kernel::baken_ui::*;
 import kernel::window_manager::*;
 import kernel::desktop_shell::*;
 
@@ -72,6 +77,21 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
 
     // 10. Inicializa o Sistema de Arquivos BakenFS
     bakenfs_init();
+
+    // 11. Inicializa Motor Gráfico 3D (Baken3D) e Z-Buffer
+    baken3d_init((*boot_info).screen_width, (*boot_info).screen_height);
+
+    // 12. Inicializa Hypervisor Nativo (BakenVM)
+    bakenvm_init();
+
+    // 13. Inicializa Banco de Dados Embutido ACID (BakenDB)
+    bakendb_init();
+
+    // 14. Inicializa Rede P2P Descentralizada (BakenCloud)
+    baken_p2p_init();
+
+    // 15. Inicializa Framework Declarativo BakenUI
+    baken_ui_init();
 
     // 8. Inicializa o Gerenciador de Janelas e Composicao
     wm_init();

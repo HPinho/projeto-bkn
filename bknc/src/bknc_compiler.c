@@ -283,11 +283,28 @@ BknFunction* bknc_parse_function(BknParser* parser, bool is_system, bool is_quan
 // GERADOR DE LLVM IR TEXTUAL (.ll)
 // ========================================================================
 
+typedef enum {
+    TARGET_X86_64,
+    TARGET_AARCH64,
+    TARGET_RISCV64
+} BknTargetArch;
+
+static BknTargetArch g_target_arch = TARGET_X86_64;
+
 void bknc_emit_llvm_ir(BknModule* mod, FILE* out) {
     fprintf(out, "; ModuleID = '%s'\n", mod->name ? mod->name : "bkn_module");
-    fprintf(out, "source_filename = \"%s.bkn\"\n", mod->name ? mod->name : "main");
-    fprintf(out, "target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n");
-    fprintf(out, "target triple = \"x86_64-pc-none-elf\"\n\n");
+    fprintf(out, "source_filename = \"%s\"\n", mod->name ? mod->name : "bkn_module");
+    
+    if (g_target_arch == TARGET_AARCH64) {
+        fprintf(out, "target datalayout = \"e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128\"\n");
+        fprintf(out, "target triple = \"aarch64-unknown-none-elf\"\n\n");
+    } else if (g_target_arch == TARGET_RISCV64) {
+        fprintf(out, "target datalayout = \"e-m:e-p:64:64-i64:64-i128:128-n32:64-S128\"\n");
+        fprintf(out, "target triple = \"riscv64-unknown-none-elf\"\n\n");
+    } else {
+        fprintf(out, "target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-f80:128-n8:16:32:64-S128\"\n");
+        fprintf(out, "target triple = \"x86_64-pc-none-elf\"\n\n");
+    }
 
     // Prototipos de Runtime
     fprintf(out, "declare void @qhal_apply_hadamard(i32)\n");
