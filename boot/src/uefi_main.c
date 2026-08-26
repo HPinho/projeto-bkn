@@ -235,14 +235,14 @@ static int g_control_center_open = 0;
 static int g_active_editor_tab = 0;
 static int g_anim_frame = 0;
 
-static int g_win_ide_x = 36;
-static int g_win_ide_y = 58;
-static int g_win_ide_open = 0;
+static int g_win_ide_x = 24;
+static int g_win_ide_y = 54;
+static int g_win_ide_open = 1;
 static int g_win_ide_maximized = 0;
 
-static int g_win_qpu_x = 540;
-static int g_win_qpu_y = 58;
-static int g_win_qpu_open = 0;
+static int g_win_qpu_x = 524;
+static int g_win_qpu_y = 54;
+static int g_win_qpu_open = 1;
 static int g_win_qpu_maximized = 0;
 
 static int g_dragging_win = 0; // 0: nenhum, 1: IDE, 2: Q-HAL
@@ -1365,6 +1365,39 @@ static void run_baken_gui_shell(
                 g_control_center_open = !g_control_center_open;
                 render_full_frame_to_backbuffer(cmd_buffer);
             }
+            // Clique dentro do Menu Iniciar (App Drawer)
+            else if (g_start_menu_open && g_mouse_x >= 20 && g_mouse_x <= 330 && g_mouse_y >= 48 && g_mouse_y <= 410) {
+                if (g_mouse_y >= 126 && g_mouse_y < 152) {
+                    // 1. BKN Studio IDE
+                    g_win_ide_open = 1;
+                    g_active_editor_tab = 0;
+                    g_win_z_order[0] = 1; g_win_z_order[1] = 0;
+                    g_start_menu_open = 0;
+                } else if (g_mouse_y >= 152 && g_mouse_y < 178) {
+                    // 2. Q-HAL Quantum Studio
+                    g_win_qpu_open = 1;
+                    g_win_z_order[0] = 0; g_win_z_order[1] = 1;
+                    g_start_menu_open = 0;
+                } else if (g_mouse_y >= 178 && g_mouse_y < 204) {
+                    // 3. BakenFS File Explorer
+                    g_start_menu_open = 0;
+                } else if (g_mouse_y >= 204 && g_mouse_y < 230) {
+                    // 4. Quantum PQC Shield
+                    g_win_ide_open = 1;
+                    g_active_editor_tab = 1;
+                    g_win_z_order[0] = 1; g_win_z_order[1] = 0;
+                    g_start_menu_open = 0;
+                } else if (g_mouse_y >= 230 && g_mouse_y < 256) {
+                    // 5. Audio Studio
+                    g_start_menu_open = 0;
+                } else if (g_mouse_y >= 256 && g_mouse_y < 285) {
+                    // 6. Terminal / BKNC Compiler
+                    g_win_ide_open = 1;
+                    g_win_z_order[0] = 1; g_win_z_order[1] = 0;
+                    g_start_menu_open = 0;
+                }
+                render_full_frame_to_backbuffer(cmd_buffer);
+            }
             // Janela 1 IDE: Foco, Abas, Controles e Arrasto
             else if (g_win_ide_open && g_mouse_x >= win1_x && g_mouse_x <= win1_x + win1_w && g_mouse_y >= win1_y && g_mouse_y <= win1_y + 42) {
                 g_win_z_order[0] = 1; g_win_z_order[1] = 0;
@@ -1436,7 +1469,9 @@ static void run_baken_gui_shell(
                     g_win_z_order[0] = 0; g_win_z_order[1] = 1;
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= 710 && g_mouse_x <= 770) {
-                    g_start_menu_open = 1;
+                    g_win_ide_open = 1;
+                    g_active_editor_tab = 1;
+                    g_win_z_order[0] = 1; g_win_z_order[1] = 0;
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= 850 && g_mouse_x <= 910) {
                     g_control_center_open = 1;
@@ -1446,24 +1481,32 @@ static void run_baken_gui_shell(
             // Dock Flutuante no Rodapé
             else if (g_mouse_y >= g_dock_y && g_mouse_y <= g_dock_y + g_dock_h) {
                 if (g_mouse_x >= g_icon_centers[0] - 25 && g_mouse_x <= g_icon_centers[0] + 25) {
-                    g_win_ide_open = !g_win_ide_open;
-                    if (g_win_ide_open) { g_win_z_order[0] = 1; g_win_z_order[1] = 0; }
+                    // Terminal
+                    g_win_ide_open = 1;
+                    g_win_z_order[0] = 1; g_win_z_order[1] = 0;
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= g_icon_centers[1] - 25 && g_mouse_x <= g_icon_centers[1] + 25) {
+                    // BKN Studio IDE
                     g_win_ide_open = !g_win_ide_open;
                     if (g_win_ide_open) { g_win_z_order[0] = 1; g_win_z_order[1] = 0; }
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= g_icon_centers[2] - 25 && g_mouse_x <= g_icon_centers[2] + 25) {
+                    // Start Menu / File Explorer
                     g_start_menu_open = !g_start_menu_open;
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= g_icon_centers[3] - 25 && g_mouse_x <= g_icon_centers[3] + 25) {
+                    // Q-HAL 3D Studio
                     g_win_qpu_open = !g_win_qpu_open;
                     if (g_win_qpu_open) { g_win_z_order[0] = 0; g_win_z_order[1] = 1; }
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= g_icon_centers[4] - 25 && g_mouse_x <= g_icon_centers[4] + 25) {
-                    g_start_menu_open = !g_start_menu_open;
+                    // PQC Shield
+                    g_win_ide_open = 1;
+                    g_active_editor_tab = 1;
+                    g_win_z_order[0] = 1; g_win_z_order[1] = 0;
                     render_full_frame_to_backbuffer(cmd_buffer);
                 } else if (g_mouse_x >= g_icon_centers[5] - 25 && g_mouse_x <= g_icon_centers[5] + 25) {
+                    // Settings / Quick Settings
                     g_control_center_open = !g_control_center_open;
                     render_full_frame_to_backbuffer(cmd_buffer);
                 }
