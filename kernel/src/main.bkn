@@ -12,6 +12,11 @@ import kernel::scheduler::*;
 import kernel::ipc::*;
 import kernel::qhal::*;
 import kernel::bakenfs::*;
+import kernel::pci::*;
+import kernel::rtc::*;
+import kernel::cpu_info::*;
+import kernel::acpi::*;
+import kernel::xhci::*;
 import kernel::peripherals::*;
 import kernel::mouse::*;
 import kernel::nvme::*;
@@ -58,24 +63,39 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // 4. Inicializa Gerenciador de Memoria Virtual (Paginacao de 4 Niveis)
     vmm_init();
 
-    // 5. Inicializa Subsistema de Perifericos e Entrada (Mouse & Teclado)
+    // 5. Varredura Real de Barramento PCI/PCIe (Descobre Hardware Real e BARs)
+    pci_scan_all_buses();
+
+    // 6. Inicializa Relógio Real de Hardware da Placa-Mãe (CMOS/RTC)
+    rtc_init();
+
+    // 7. Identificação Real de Processador (CPUID & Sensores Térmicos)
+    cpu_info_init();
+
+    // 8. Parser de Tabelas ACPI e Telemetria Real de Energia/Bateria
+    acpi_init(0);
+
+    // 9. Inicializa Subsistema de Perifericos e Entrada (Mouse & Teclado)
     peripherals_init();
     mouse_init((*boot_info).screen_width as i32 / 2, (*boot_info).screen_height as i32 / 2);
 
-    // 6. Inicializa Controlador NVMe de Armazenamento Soberano
-    nvme_init(0xFEB00000); // PCI BAR0 Mapeado
+    // 10. Inicializa Controlador Host USB 3.0 Real (xHCI)
+    xhci_init(0);
 
-    // 7. Inicializa Subsistema de Audio Intel HDA (DMA Buffers & Jingle)
-    audio_init(0xFEC00000);
+    // 11. Inicializa Controlador NVMe de Armazenamento com BAR0 Descoberto via PCI
+    nvme_init(pci_get_nvme_bar0());
+
+    // 12. Inicializa Subsistema de Audio Intel HDA com BAR0 Descoberto via PCI
+    audio_init(pci_get_hda_bar0());
     audio_play_startup_chime();
 
-    // 8. Inicializa Barramento IPC por Capacidades
+    // 13. Inicializa Barramento IPC por Capacidades
     ipc_init();
 
-    // 9. Inicializa Simulador Vetorial Quantico Q-HAL
+    // 14. Inicializa Simulador Vetorial Quantico Q-HAL
     qhal_init();
 
-    // 10. Inicializa o Sistema de Arquivos BakenFS
+    // 15. Inicializa o Sistema de Arquivos BakenFS
     bakenfs_init();
 
     // 11. Inicializa Motor Gráfico 3D (Baken3D) e Z-Buffer

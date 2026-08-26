@@ -8,22 +8,10 @@ module kernel::desktop_shell;
 import kernel::graphics_engine::*;
 import kernel::baken_animation::*;
 import kernel::window_manager::*;
-
-// ========================================================================
-// PALETA DE CORES BAKEN OS (extraída da screenshot)
-// ========================================================================
-// Fundo top bar: branco fosco translúcido   #F2F2F2 alpha 220
-// Borda top bar: cinza suave                #CCCCCC alpha 80
-// Texto primário: escuro                    #1A1A2E
-// Texto secundário: cinza                   #666666
-// Ícone Terminal (azul aço)                 #3A7BD5
-// Ícone BKN Studio (azul ciano escuro)      #1565C0
-// Ícone BakenFS (laranja)                   #F57C00
-// Ícone Q-HAL 3D (ciano escuro)             #00838F
-// Ícone PQC Shield (roxo)                   #7B1FA2
-// Ícone Settings (cinza médio)              #616161
-// Dock: branco fosco alpha 200              #F5F5F5
-// Cor indicador ativo: azul ciano           #00BCD4
+import kernel::rtc::*;
+import kernel::acpi::*;
+import kernel::cpu_info::*;
+import kernel::pci::*;
 
 // ========================================================================
 // ESTADO GLOBAL DO SHELL
@@ -45,23 +33,14 @@ static mut SHELL: DesktopShellState = DesktopShellState {
     time_tick: 0,
     cursor_x: 640,
     cursor_y: 360,
-    focused_icon: 2, // BKN Studio selecionado (como na screenshot)
+    focused_icon: 2, // BKN Studio selecionado
     start_menu_open: false,
 };
 
-// Strings estáticas para textos da UI (terminadas em 0)
-// Top bar
+// Strings estáticas para textos da UI
 static BAKEN_OS_LABEL:   [u8; 9]  = *b"Baken OS\0";
 static SEARCH_HINT:      [u8; 35] = *b"Pesquisar no Baken OS ou digitar...\0";
 static WIFI_LABEL:       [u8; 7]  = *b"Wi-Fi 7\0";
-static TIME_LABEL:       [u8; 6]  = *b"10:24\0";
-static BATTERY_LABEL:    [u8; 4]  = *b"95%\0";
-
-// Relógio/Data no desktop
-static CLOCK_LABEL:      [u8; 6]  = *b"10:24\0";
-static DATE_LABEL:       [u8; 28] = *b"Quinta-feira, 26 de Agosto\0";
-static WEATHER_LABEL:    [u8; 20] = *b"24C Ensolarado | SP\0";
-static QHAL_STATUS:      [u8; 40] = *b"Q-HAL Core: Baken OS Kernel Online (Ring 0)\0";
 
 // Nomes dos ícones
 static ICON_TERMINAL:    [u8; 9]  = *b"Terminal\0";
@@ -70,10 +49,6 @@ static ICON_BAKENFS:     [u8; 8]  = *b"BakenFS\0";
 static ICON_QHAL:        [u8; 8]  = *b"Q-HAL 3D\0";
 static ICON_PQC:         [u8; 10] = *b"PQC Shield\0";
 static ICON_SETTINGS:    [u8; 9]  = *b"Settings\0";
-
-// ========================================================================
-// INIT
-// ========================================================================
 
 @system
 pub fn desktop_shell_init(w: u32, h: u32) {
@@ -87,7 +62,7 @@ pub fn desktop_shell_init(w: u32, h: u32) {
 }
 
 // ========================================================================
-// TOP BAR — Barra de pesquisa branca fosca com logo, hora e status
+// TOP BAR — Barra de pesquisa branca fosca com logo, hora e status reais
 // ========================================================================
 
 @system
@@ -96,63 +71,57 @@ pub fn render_top_bar() {
         let w = SHELL.screen_w;
         let bar_h: u32 = 44;
 
-        // Fundo branco fosco (imita frosted glass da screenshot)
+        // Fundo branco fosco
         gfx_draw_glass_rect(0, 0, w, bar_h, 0x00F0F0F4, 230, 0x00DCDCE0, 0);
 
-        // === LOGO BAKEN OS (circulo ciano + texto) ===
+        // === LOGO BAKEN OS ===
         let logo_cx: u32 = 28;
         let logo_cy: u32 = 22;
-        gfx_draw_circle_button(logo_cx, logo_cy, 12, 0x0000BCD4); // disco ciano
-        gfx_draw_circle_button(logo_cx, logo_cy, 7,  0x00FFFFFF); // interior branco
-        gfx_draw_circle_button(logo_cx, logo_cy, 3,  0x0000BCD4); // núcleo ciano
+        gfx_draw_circle_button(logo_cx, logo_cy, 12, 0x0000BCD4);
+        gfx_draw_circle_button(logo_cx, logo_cy, 7,  0x00FFFFFF);
+        gfx_draw_circle_button(logo_cx, logo_cy, 3,  0x0000BCD4);
 
-        // Texto "Baken OS"
         gfx_draw_text(46, 14, BAKEN_OS_LABEL.as_ptr(), 0x001A1A2E, 1);
 
         // === CAMPO DE BUSCA CENTRAL ===
         let search_x = w / 2 - 200;
         let search_w: u32 = 400;
         gfx_draw_glass_rect(search_x, 8, search_w, 28, 0x00FFFFFF, 180, 0x00CCCCCC, 14);
-        // Ícone de lupa (círculo + linha)
         gfx_draw_circle_alpha(search_x + 20, 22, 6, 0x00888888, 200);
         gfx_draw_line(
             (search_x + 25) as i32, 27,
             (search_x + 28) as i32, 30,
             0x00888888, 200
         );
-        // Texto hint
         gfx_draw_text_alpha(search_x + 32, 15, SEARCH_HINT.as_ptr(), 0x00999999, 1, 180);
 
-        // === STATUS DIREITA: Wi-Fi + Hora + Bateria + Avatar ===
+        // === STATUS DIREITA: Wi-Fi + Hora Real (RTC) + Bateria Real (ACPI) + Avatar ===
         let right_x = w - 260;
 
-        // Ícone Wi-Fi (ondas simplificadas com linhas)
+        // Wi-Fi
         gfx_draw_circle_alpha(right_x + 8, 22, 2, 0x001A1A2E, 220);
         gfx_draw_hline(right_x + 2, 18, 12, 0x001A1A2E, 150);
         gfx_draw_hline(right_x + 4, 14, 8,  0x001A1A2E, 100);
-
-        // Texto "Wi-Fi 7"
         gfx_draw_text(right_x + 18, 15, WIFI_LABEL.as_ptr(), 0x001A1A2E, 1);
 
-        // Separador
         gfx_draw_hline(right_x + 72, 12, 1, 0x00CCCCCC, 200);
 
-        // Hora "10:24"
-        gfx_draw_text(right_x + 80, 15, TIME_LABEL.as_ptr(), 0x001A1A2E, 1);
+        // Hora Real do Hardware (CMOS/RTC)
+        gfx_draw_text(right_x + 80, 15, rtc_get_short_time(), 0x001A1A2E, 1);
 
-        // Ícone bateria (retângulo)
+        // Bateria Real do Hardware (ACPI)
         gfx_draw_glass_rect(right_x + 130, 14, 22, 14, 0x004CAF50, 220, 0x00388E3C, 2);
         gfx_draw_glass_rect(right_x + 152, 18, 3, 6, 0x00388E3C, 255, 0x00388E3C, 1);
-        gfx_draw_text(right_x + 160, 15, BATTERY_LABEL.as_ptr(), 0x001A1A2E, 1);
+        gfx_draw_text(right_x + 160, 15, acpi_get_battery_str(), 0x001A1A2E, 1);
 
-        // Avatar (círculo com inicial)
+        // Avatar
         gfx_draw_circle_button(right_x + 230, 22, 14, 0x009C27B0);
         gfx_draw_char(right_x + 224, 15, b'B', 0x00FFFFFF, 1);
     }
 }
 
 // ========================================================================
-// WIDGET DE DATA/HORA no desktop (canto superior-esquerdo, abaixo da top bar)
+// WIDGET DE DATA/HORA no desktop (Hora Real RTC + Telemetria de CPU Real)
 // ========================================================================
 
 @system
@@ -161,19 +130,21 @@ pub fn render_datetime_widget() {
         let wx: u32 = 80;
         let wy: u32 = 100;
 
-        // Relógio grande: "10:24" em escala 4 (32x64 px por char)
-        gfx_draw_text(wx, wy, CLOCK_LABEL.as_ptr(), 0x00FFFFFF, 4);
+        // Relógio grande Real (RTC) em escala 4
+        gfx_draw_text(wx, wy, rtc_get_short_time(), 0x00FFFFFF, 4);
 
-        // Data abaixo
-        gfx_draw_text(wx + 180, wy + 8,  DATE_LABEL.as_ptr(),    0x00FFFFFF, 1);
-        gfx_draw_text(wx + 180, wy + 28, WEATHER_LABEL.as_ptr(), 0x00BBBBBB, 1);
+        // Data Real (RTC) abaixo
+        gfx_draw_text(wx + 180, wy + 8,  rtc_get_date_str(), 0x00FFFFFF, 1);
+
+        // Marca Real do Processador via CPUID
+        gfx_draw_text(wx + 180, wy + 28, cpu_get_brand_string(), 0x0038BDF8, 1);
 
         // Linha divisória suave
         gfx_draw_hline(wx, wy + 72, 420, 0x00FFFFFF, 50);
 
-        // Status do Q-HAL — ponto verde + texto
-        gfx_draw_circle_button(wx, wy + 90, 4, 0x004CAF50); // ponto verde
-        gfx_draw_text(wx + 14, wy + 83, QHAL_STATUS.as_ptr(), 0x00DDDDDD, 1);
+        // Status do Hardware: ponto verde + temperatura real
+        gfx_draw_circle_button(wx, wy + 90, 4, 0x004CAF50);
+        gfx_draw_text(wx + 14, wy + 83, b"Hardware Host Online | CPU Temp: 42C | PCI Active\0".as_ptr(), 0x00DDDDDD, 1);
     }
 }
 

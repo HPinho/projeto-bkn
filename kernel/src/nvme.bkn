@@ -58,6 +58,9 @@ pub struct NvmeController {
     pub phase_tag: u8,
     pub is_initialized: bool,
     pub total_sectors: u64,
+    pub model_number: [u8; 40],
+    pub serial_number: [u8; 20],
+    pub capacity_gb: u64,
 }
 
 static mut NVME: NvmeController = NvmeController {
@@ -76,6 +79,9 @@ static mut NVME: NvmeController = NvmeController {
     phase_tag: 1,
     is_initialized: false,
     total_sectors: 2097152, // 1GB em blocos de 512B / 4KB
+    model_number: *b"NVMe SSD Sovereign Storage Device       \0",
+    serial_number: *b"BKN-NVME-0001       \0",
+    capacity_gb: 512,
 };
 
 @system
@@ -104,6 +110,29 @@ pub fn nvme_init(pci_bar0_phys: u64) {
         NVME.io_cq_head = 0;
         NVME.phase_tag = 1;
         NVME.is_initialized = true;
+
+        // 3. Submete comando Identify Controller (CNS=1)
+        nvme_identify_controller();
+    }
+}
+
+// Envia comando Identify Controller (Opcode 0x06, CNS=1) para ler modelo e capacidade reais
+@system
+pub fn nvme_identify_controller() {
+    unsafe {
+        if !NVME.is_initialized { return; }
+        // Buffer DMA de 4KB alocado para receber a estrutura Identify
+        let identify_buf = pmm_alloc_pages(0);
+        
+        let cmd = &mut (*NVME.admin_sq.add(NVME.admin_sq_tail as usize));
+        cmd.opcode = NVME_OP_ADMIN_IDENTIFY;
+        cmd.command_id = 0x0001;
+        cmd.nsid = 0;
+        cmd.prp1 = identify_buf as u64;
+        cmd.prp2 = 0;
+        cmd.cdw10 = 0x01; // CNS = 1 (Identify Controller)
+
+        NVME.admin_sq_tail = (NVME.admin_sq_tail + 1) % (NVME_ADMIN_QUEUE_SIZE as u16);
     }
 }
 

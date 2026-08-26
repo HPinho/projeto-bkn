@@ -147,6 +147,30 @@ pub fn net_init() {
     }
 }
 
+// Inicializa Placa de Rede Física com base no BAR0 PCI e lê MAC da EEPROM
+@system
+pub fn net_init_hardware_nic(pci_bar0: u64) {
+    unsafe {
+        if pci_bar0 == 0 { return; }
+        let mmio = pci_bar0 as *const u32;
+
+        // Leitura de registradores de MAC Hardware (Receive Address Low/High: RAL/RAH)
+        // Offset 0x5400: RAL, 0x5404: RAH (Padrão Intel e1000 / e1000e)
+        let ral = *mmio.add(0x5400 / 4);
+        let rah = *mmio.add(0x5404 / 4);
+
+        if ral != 0 && ral != 0xFFFFFFFF {
+            NET.mac_addr[0] = (ral & 0xFF) as u8;
+            NET.mac_addr[1] = ((ral >> 8) & 0xFF) as u8;
+            NET.mac_addr[2] = ((ral >> 16) & 0xFF) as u8;
+            NET.mac_addr[3] = ((ral >> 24) & 0xFF) as u8;
+            NET.mac_addr[4] = (rah & 0xFF) as u8;
+            NET.mac_addr[5] = ((rah >> 8) & 0xFF) as u8;
+            NET.is_link_up = true;
+        }
+    }
+}
+
 // Calculo de Checksum IPv4 / ICMP
 @system
 pub fn net_calculate_checksum(data: *const u16, len_words: usize) -> u16 {
