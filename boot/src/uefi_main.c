@@ -237,12 +237,12 @@ static int g_anim_frame = 0;
 
 static int g_win_ide_x = 24;
 static int g_win_ide_y = 54;
-static int g_win_ide_open = 0;
+static int g_win_ide_open = 1;
 static int g_win_ide_maximized = 0;
 
 static int g_win_qpu_x = 524;
 static int g_win_qpu_y = 54;
-static int g_win_qpu_open = 0;
+static int g_win_qpu_open = 1;
 static int g_win_qpu_maximized = 0;
 
 static int g_dragging_win = 0; // 0: nenhum, 1: IDE, 2: Q-HAL
@@ -353,22 +353,21 @@ static void bakenfx_present_frame() {
 // -------------------------------------------------------------
 
 // -------------------------------------------------------------
-// MOTOR TIPOGRÁFICO SANS-SERIF PROPORCIONAL & SUBPIXEL ANTI-ALIASING HD
+// MOTOR TIPOGRÁFICO DE ALTA DEFINIÇÃO E LEGIBILIDADE PIXEL-PERFECT
 // -------------------------------------------------------------
 
-// Largura Proporcional de cada caractere (em pixels) para visual moderno não-monospaçado
+// Largura Proporcional de cada caractere (em pixels) para visual elegante e natural
 static inline int get_char_advance(char c) {
-    if (c == ' ' || c == '\t') return 4;
-    if (c == '.' || c == ',' || c == ':' || c == ';' || c == '\'' || c == '`' || c == '!') return 3;
-    if (c == 'i' || c == 'l' || c == 'j' || c == '|' || c == '(' || c == ')' || c == '[' || c == ']') return 4;
-    if (c == 'f' || c == 't' || c == 'r' || c == '-' || c == 'I') return 5;
-    if (c == 'w' || c == 'm' || c == 'M' || c == 'W' || c == '@' || c == '%') return 10;
+    if (c == ' ' || c == '\t') return 5;
+    if (c == '.' || c == ',' || c == ':' || c == ';' || c == '\'' || c == '!') return 4;
+    if (c == 'i' || c == 'l' || c == 'j' || c == '|' || c == '(' || c == ')' || c == '[' || c == ']' || c == '1') return 5;
+    if (c == 'f' || c == 't' || c == 'r' || c == '-' || c == 'I') return 6;
+    if (c == 'm' || c == 'w' || c == 'M' || c == 'W' || c == '@' || c == '%') return 9;
     if (c >= 'A' && c <= 'Z') return 8;
-    if (c >= '0' && c <= '9') return 7;
-    return 6;
+    return 7;
 }
 
-// Renderizador de Texto Proporcional com Anti-Aliasing Subpixel Gaussian Filter
+// Renderizador de Texto Nítido e Preciso (100% legibilidade sem distorções)
 static void draw_text_smooth(int x, int y, const char *str, unsigned int color) {
     int cx = x;
     while (*str) {
@@ -376,47 +375,19 @@ static void draw_text_smooth(int x, int y, const char *str, unsigned int color) 
         if ((unsigned char)c < 128) {
             const uint8_t *glyph = bkn_font8x16[(unsigned char)c];
             int advance = get_char_advance(c);
-            int start_col = 0;
-            if (advance <= 4 && c != ' ') start_col = 1;
 
             for (int row = 0; row < 16; row++) {
                 uint8_t bits = glyph[row];
-                for (int col = start_col; col < start_col + advance && col < 8; col++) {
-                    int bit_on = (bits >> (7 - col)) & 1;
-                    int px = cx + (col - start_col);
-                    int py = y + row;
-
-                    if (bit_on) {
-                        // Pixel central do traço com opacidade plena
-                        put_pixel_alpha(px, py, color, 255);
-                    } else {
-                        // Convolução Gaussiana 3x3 de Subpixel Anti-Aliasing
-                        int left   = (col > 0) ? ((bits >> (8 - col)) & 1) : 0;
-                        int right  = (col < 7) ? ((bits >> (6 - col)) & 1) : 0;
-                        int up     = (row > 0) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (7 - col)) & 1) : 0;
-                        int down   = (row < 15) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (7 - col)) & 1) : 0;
-
-                        int direct_neighbors = left + right + up + down;
-                        if (direct_neighbors >= 2) {
-                            put_pixel_alpha(px, py, color, 140);
-                        } else if (direct_neighbors == 1) {
-                            put_pixel_alpha(px, py, color, 60);
-                        } else {
-                            // Vizinhos diagonais
-                            int ul = (row > 0 && col > 0) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (8 - col)) & 1) : 0;
-                            int ur = (row > 0 && col < 7) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (6 - col)) & 1) : 0;
-                            int dl = (row < 15 && col > 0) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (8 - col)) & 1) : 0;
-                            int dr = (row < 15 && col < 7) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (6 - col)) & 1) : 0;
-                            if (ul + ur + dl + dr >= 2) {
-                                put_pixel_alpha(px, py, color, 30);
-                            }
-                        }
+                if (!bits) continue;
+                for (int col = 0; col < 8; col++) {
+                    if ((bits >> (7 - col)) & 1) {
+                        put_pixel_fast(cx + col, y + row, color);
                     }
                 }
             }
             cx += advance + 1;
         } else {
-            cx += 6;
+            cx += 8;
         }
         str++;
     }
@@ -576,55 +547,161 @@ static void draw_material_elevation_shadow(int x, int y, int w, int h, int radiu
     }
 }
 
-// Filtro Kawase Blur para Superfícies de Vidro Acrílico (Glassmorphism)
-static void apply_kawase_blur(int x, int y, int w, int h, int distance) {
-    if (!g_back_fb || distance <= 0) return;
+// Micro-ruído procedural (3-4% Dither) para eliminar degradação e color banding em gradientes
+static inline unsigned int apply_micro_noise_dither_c(int px, int py, unsigned int base_color, int noise_level) {
+    int r = (base_color >> 16) & 0xFF;
+    int g = (base_color >> 8) & 0xFF;
+    int b = base_color & 0xFF;
+
+    // Spatial pseudo-random hash dither
+    unsigned int h = ((unsigned int)px * 1234567U) ^ ((unsigned int)py * 7654321U);
+    int hash = (int)(h % 100);
+    int delta = (hash * noise_level) / 100 - (noise_level / 2);
+
+    int nr = r + delta; if (nr < 0) nr = 0; if (nr > 255) nr = 255;
+    int ng = g + delta; if (ng < 0) ng = 0; if (ng > 255) ng = 255;
+    int nb = b + delta; if (nb < 0) nb = 0; if (nb > 255) nb = 255;
+
+    return ((unsigned int)nr << 16) | ((unsigned int)ng << 8) | (unsigned int)nb;
+}
+
+// Filtro Multi-Pass Progressive Dual Kawase Blur para Superfícies de Vidro Acrílico (Liquid Glass / Acrylic)
+static void apply_dual_kawase_blur(int x, int y, int w, int h, int passes) {
+    if (!g_back_fb || passes <= 0) return;
 
     int x0 = (x < 0) ? 0 : x;
     int y0 = (y < 0) ? 0 : y;
     int x1 = (x + w >= (int)g_width) ? (int)g_width - 1 : x + w;
     int y1 = (y + h >= (int)g_height) ? (int)g_height - 1 : y + h;
 
-    int d = distance;
+    int step_distances[5] = { 4, 8, 12, 6, 2 };
+    int total_passes = (passes > 5) ? 5 : passes;
 
-    for (int py = y0; py < y1; py += 2) {
-        for (int px = x0; px < x1; px += 2) {
-            int sx0 = (px - d >= 0) ? px - d : px;
-            int sy0 = (py - d >= 0) ? py - d : py;
-            int sx1 = (px + d < (int)g_width) ? px + d : px;
-            int sy1 = (py + d < (int)g_height) ? py + d : py;
+    for (int p = 0; p < total_passes; p++) {
+        int d = step_distances[p];
+        for (int py = y0; py < y1; py++) {
+            int sy0 = (py - d >= 0) ? py - d : 0;
+            int sy1 = (py + d < (int)g_height) ? py + d : (int)g_height - 1;
+            unsigned int *row_mid = &g_back_fb[py * g_pitch];
+            unsigned int *row_top = &g_back_fb[sy0 * g_pitch];
+            unsigned int *row_bot = &g_back_fb[sy1 * g_pitch];
 
-            unsigned int c1 = g_back_fb[sy0 * g_pitch + sx0];
-            unsigned int c2 = g_back_fb[sy0 * g_pitch + sx1];
-            unsigned int c3 = g_back_fb[sy1 * g_pitch + sx0];
-            unsigned int c4 = g_back_fb[sy1 * g_pitch + sx1];
+            for (int px = x0; px < x1; px++) {
+                int sx0 = (px - d >= 0) ? px - d : 0;
+                int sx1 = (px + d < (int)g_width) ? px + d : (int)g_width - 1;
 
-            unsigned int r = (((c1 >> 16) & 0xFF) + ((c2 >> 16) & 0xFF) + ((c3 >> 16) & 0xFF) + ((c4 >> 16) & 0xFF)) / 4;
-            unsigned int g = (((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF) + ((c3 >> 8) & 0xFF) + ((c4 >> 8) & 0xFF)) / 4;
-            unsigned int b = ((c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF) + (c4 & 0xFF)) / 4;
+                unsigned int c_tl = row_top[sx0];
+                unsigned int c_tr = row_top[sx1];
+                unsigned int c_bl = row_bot[sx0];
+                unsigned int c_br = row_bot[sx1];
 
-            unsigned int avg = (r << 16) | (g << 8) | b;
-            g_back_fb[py * g_pitch + px] = avg;
-            if (px + 1 < (int)g_width) g_back_fb[py * g_pitch + (px + 1)] = avg;
-            if (py + 1 < (int)g_height) g_back_fb[(py + 1) * g_pitch + px] = avg;
-            if (px + 1 < (int)g_width && py + 1 < (int)g_height) g_back_fb[(py + 1) * g_pitch + (px + 1)] = avg;
+                unsigned int c_t  = row_top[px];
+                unsigned int c_b  = row_bot[px];
+                unsigned int c_l  = row_mid[sx0];
+                unsigned int c_r  = row_mid[sx1];
+                unsigned int c_c  = row_mid[px];
+
+                // Tent filter: Center 4x, Cardinals 2x each, Corners 1x each (Total = 16)
+                unsigned int r = (((c_c >> 16) & 0xFF) * 4 +
+                                  (((c_t >> 16) & 0xFF) + ((c_b >> 16) & 0xFF) + ((c_l >> 16) & 0xFF) + ((c_r >> 16) & 0xFF)) * 2 +
+                                  ((c_tl >> 16) & 0xFF) + ((c_tr >> 16) & 0xFF) + ((c_bl >> 16) & 0xFF) + ((c_br >> 16) & 0xFF)) >> 4;
+
+                unsigned int g = (((c_c >> 8) & 0xFF) * 4 +
+                                  (((c_t >> 8) & 0xFF) + ((c_b >> 8) & 0xFF) + ((c_l >> 8) & 0xFF) + ((c_r >> 8) & 0xFF)) * 2 +
+                                  ((c_tl >> 8) & 0xFF) + ((c_tr >> 8) & 0xFF) + ((c_bl >> 8) & 0xFF) + ((c_br >> 8) & 0xFF)) >> 4;
+
+                unsigned int b = ((c_c & 0xFF) * 4 +
+                                  ((c_t & 0xFF) + (c_b & 0xFF) + (c_l & 0xFF) + (c_r & 0xFF)) * 2 +
+                                  (c_tl & 0xFF) + (c_tr & 0xFF) + (c_bl & 0xFF) + (c_br & 0xFF)) >> 4;
+
+                row_mid[px] = (r << 16) | (g << 8) | b;
+            }
         }
     }
 }
 
-// Painel de Superfície Material 3 com Cantos Suaves
-static void draw_googlebook_card(int x, int y, int w, int h, int radius, unsigned int bg_color, unsigned char alpha, unsigned int border_color) {
-    draw_material_elevation_shadow(x, y, w, h, radius, 22, 8, 110);
-    apply_kawase_blur(x, y, w, h, 3);
-    draw_rounded_rect_sdf(x, y, w, h, radius, bg_color, alpha, border_color, 80, 1);
+static void __attribute__((unused)) apply_kawase_blur(int x, int y, int w, int h, int distance) {
+    apply_dual_kawase_blur(x, y, w, h, (distance > 1 ? 3 : 2));
+}
 
+// Pipeline Liquid Glass / Fluent Acrylic / macOS Vibrancy com Efeito Fresnel e Micro-Dither
+static void draw_liquid_glass_panel(
+    int x, int y, int w, int h, int radius,
+    unsigned int bg_color, unsigned char bg_alpha,
+    unsigned int border_color, unsigned char specular_intensity, int blur_passes
+) {
+    // 1. Sombra volumétrica de elevação profunda
+    draw_material_elevation_shadow(x, y, w, h, radius, 24, 10, 130);
+
+    // 2. Dual Kawase Blur Multi-Pass progressivo no fundo
+    if (blur_passes > 0) {
+        apply_dual_kawase_blur(x, y, w, h, blur_passes);
+    }
+
+    int x1 = x;
+    int y1 = y;
+    int x2 = x + w;
+    int y2 = y + h;
+
+    int min_x = (x1 > 0) ? x1 : 0;
+    int max_x = (x2 < (int)g_width) ? x2 : (int)g_width;
+    int min_y = (y1 > 0) ? y1 : 0;
+    int max_y = (y2 < (int)g_height) ? y2 : (int)g_height;
+
+    int r = (radius > 0) ? radius : 0;
+    float inv_h = (h > 0) ? (1.0f / (float)h) : 1.0f;
+
+    // Normaliza alfa para verdadeira translucidez de vidro (45% a 55% de opacidade)
+    unsigned char glass_alpha = (bg_alpha > 140) ? 130 : bg_alpha;
+
+    // 3. Shading de Superfície Translúcida com Micro-ruído e Fresnel Specular
+    for (int py = min_y; py < max_y; py++) {
+        float fy_rel = (float)(py - y) * inv_h; // 0.0 no topo, 1.0 na base
+        for (int px = min_x; px < max_x; px++) {
+            int cx = (px < x1 + r) ? (x1 + r) : ((px > x2 - r - 1) ? (x2 - r - 1) : px);
+            int cy = (py < y1 + r) ? (y1 + r) : ((py > y2 - r - 1) ? (y2 - r - 1) : py);
+
+            int dx = px - cx;
+            int dy = py - cy;
+            int dist_sq = dx * dx + dy * dy;
+
+            if (dist_sq <= r * r) {
+                int is_border = 0;
+                if (px == x1 || px == x2 - 1 || py == y1 || py == y2 - 1 ||
+                    (r > 0 && dist_sq >= (r - 1) * (r - 1))) {
+                    is_border = 1;
+                }
+
+                if (is_border) {
+                    // Fresnel Specular Gradient: Topo com reflexo branco nítido (Apple/Fluent Glass)
+                    float spec = (1.0f - fy_rel) * (float)specular_intensity;
+                    unsigned char b_alpha = (unsigned char)(120.0f + spec * 0.5f);
+                    unsigned int b_col = (spec > 40.0f) ? 0x00FFFFFF : border_color;
+                    put_pixel_alpha(px, py, b_col, b_alpha);
+                } else {
+                    // Preenchimento com dither micro-ruído (3% noise) sobre o fundo borrado
+                    unsigned int dithered_col = apply_micro_noise_dither_c(px, py, bg_color, 4);
+                    put_pixel_alpha(px, py, dithered_col, glass_alpha);
+                }
+            } else if (dist_sq <= (r + 1) * (r + 1)) {
+                put_pixel_alpha(px, py, border_color, 70);
+            }
+        }
+    }
+
+    // 4. Linha de destaque especular de topo (1px Specular Highlight Rim)
     int hl_x1 = x + radius;
     int hl_x2 = x + w - radius;
     if (hl_x2 > hl_x1 && (y + 1) < (int)g_height) {
         for (int px = hl_x1; px < hl_x2; px++) {
-            put_pixel_alpha(px, y + 1, 0x00FFFFFF, 50);
+            put_pixel_alpha(px, y + 1, 0x00FFFFFF, (unsigned char)(specular_intensity > 0 ? (specular_intensity + 40 > 255 ? 255 : specular_intensity + 40) : 180));
         }
     }
+}
+
+// Painel de Superfície Material 3 com Cantos Suaves (Compatibilidade / Liquid Glass Wrapper)
+static void __attribute__((unused)) draw_googlebook_card(int x, int y, int w, int h, int radius, unsigned int bg_color, unsigned char alpha, unsigned int border_color) {
+    draw_liquid_glass_panel(x, y, w, h, radius, bg_color, alpha, border_color, 160, 4);
 }
 
 // Círculo com Suavização de Borda
@@ -838,7 +915,7 @@ static void draw_quantum_wave_graph(int x, int y, int w, int h) {
     }
 }
 
-// Papel de Parede Nebula Bloom Orgânico de Alta Definição
+// Papel de Parede Nebula Bloom Orgânico de Alta Definição (Luminoso para Frosted Glass Vibrancy)
 static void init_wallpaper_cache() {
     if (!g_wallpaper_cache) return;
 
@@ -847,31 +924,31 @@ static void init_wallpaper_cache() {
         for (unsigned int x = 0; x < g_width; x++) {
             float nx = (float)x / (float)g_width;
 
-            // Foco 1: Aurora Ciano / Azul Elétrico no Canto Superior Direito
-            float dx1 = nx - 0.75f;
-            float dy1 = ny - 0.25f;
-            float d1 = (dx1 * dx1 + dy1 * dy1) * 1.8f;
-            float w1 = 1.0f - d1;
+            // Foco 1: Aurora Ciano / Turquesa Elétrico no Canto Superior Direito
+            float dx1 = nx - 0.72f;
+            float dy1 = ny - 0.22f;
+            float d1 = (dx1 * dx1 * 1.6f + dy1 * dy1 * 2.0f);
+            float w1 = 1.0f - d1 * 1.7f;
             if (w1 < 0.0f) w1 = 0.0f;
 
-            // Foco 2: Orbe Magenta / Púrpura no Canto Inferior Esquerdo
-            float dx2 = nx - 0.20f;
-            float dy2 = ny - 0.75f;
-            float d2 = (dx2 * dx2 + dy2 * dy2) * 2.2f;
-            float w2 = 1.0f - d2;
+            // Foco 2: Orbe Magenta / Rosa Neon no Canto Inferior Esquerdo
+            float dx2 = nx - 0.22f;
+            float dy2 = ny - 0.72f;
+            float d2 = (dx2 * dx2 * 2.2f + dy2 * dy2 * 1.6f);
+            float w2 = 1.0f - d2 * 1.9f;
             if (w2 < 0.0f) w2 = 0.0f;
 
-            // Foco 3: Halo Central Sutil
+            // Foco 3: Halo Violeta / Púrpura Central Vibrante
             float dx3 = nx - 0.50f;
-            float dy3 = ny - 0.45f;
-            float d3 = (dx3 * dx3 + dy3 * dy3) * 3.0f;
+            float dy3 = ny - 0.48f;
+            float d3 = (dx3 * dx3 + dy3 * dy3) * 2.6f;
             float w3 = 1.0f - d3;
             if (w3 < 0.0f) w3 = 0.0f;
 
-            // Cores ricas e luminosas (Sapphire, Cyan, Indigo, Violet)
-            int r = (int)(12.0f + 35.0f * w1 + 110.0f * w2 + 25.0f * w3 + 10.0f * ny);
-            int g = (int)(18.0f + 95.0f * w1 + 30.0f * w2 + 40.0f * w3 + 15.0f * ny);
-            int b = (int)(45.0f + 160.0f * w1 + 140.0f * w2 + 80.0f * w3 + 55.0f * ny);
+            // Cores ricas e luminosas (Sapphire, Electric Cyan, Neon Magenta, Cosmic Indigo)
+            int r = (int)(22.0f + 45.0f * w1 + 185.0f * w2 + 95.0f * w3 + 15.0f * ny);
+            int g = (int)(26.0f + 160.0f * w1 + 40.0f * w2 + 55.0f * w3 + 22.0f * ny);
+            int b = (int)(65.0f + 225.0f * w1 + 200.0f * w2 + 170.0f * w3 + 75.0f * ny);
 
             if (r > 255) r = 255;
             if (g > 255) g = 255;
@@ -939,160 +1016,132 @@ static void restore_cursor_frontbuffer(int x, int y) {
 }
 
 // -------------------------------------------------------------
-// RENDERIZADORES DE JANELAS (BKN Studio IDE e Q-HAL Studio)
+// RENDERIZADORES DE JANELAS (Terminal Soberano e Q-HAL Studio)
 // -------------------------------------------------------------
 
-// Janela 1: BKN Studio IDE
+// Janela 1: Terminal Soberano (Liquid Glass & Ring 0 Console)
 static void render_window_ide(const char* current_input) {
     if (!g_win_ide_open) return;
 
-    int win1_w = g_win_ide_maximized ? (g_width - 40) : 490;
-    int win1_h = g_win_ide_maximized ? (g_height - 130) : (g_height - 150);
-    if (!g_win_ide_maximized && win1_h > 530) win1_h = 530;
+    int half_w = ((int)g_width - 60) / 2;
+    if (half_w < 440) half_w = 440;
+    int win1_w = g_win_ide_maximized ? ((int)g_width - 40) : half_w;
+    int win1_h = g_win_ide_maximized ? ((int)g_height - 130) : ((int)g_height - 150);
+    if (!g_win_ide_maximized && win1_h > 560) win1_h = 560;
 
     int win1_x = g_win_ide_maximized ? 20 : g_win_ide_x;
     int win1_y = g_win_ide_maximized ? 54 : g_win_ide_y;
 
-    draw_googlebook_card(win1_x, win1_y, win1_w, win1_h, 20, 0x000B101E, 250, 0x003B82F6);
+    // Corpo de Vidro Translúcido com Dual Kawase Blur e Fresnel Specular Rim
+    draw_liquid_glass_panel(win1_x, win1_y, win1_w, win1_h, 20, 0x00060C18, 130, 0x0038BDF8, 185, 4);
 
-    // Barra Superior da Janela (Title Bar)
-    draw_rounded_rect_sdf(win1_x, win1_y, win1_w, 42, 20, 0x00131C31, 255, 0x003B82F6, 60, 1);
+    // Barra Superior da Janela (Title Bar com Divisor Translúcido)
+    draw_rounded_rect_sdf(win1_x, win1_y, win1_w, 40, 20, 0x000F172A, 90, 0x0038BDF8, 50, 1);
+    draw_smooth_circle(win1_x + 22, win1_y + 20, 4, 0x0010B981, 0x0034D399);
+    draw_text_smooth(win1_x + 34, win1_y + 12, "Terminal Soberano - Ring 0 Microkernel", 0x00F8FAFC);
+    draw_material_window_controls(win1_x + win1_w - 90, win1_y + 20);
 
-    // Abas Material You
-    unsigned int tab1_bg = (g_active_editor_tab == 0) ? 0x001D4ED8 : 0x001E293B;
-    draw_rounded_rect_sdf(win1_x + 16, win1_y + 8, 130, 26, 13, tab1_bg, 255, 0x0060A5FA, 180, 1);
-    draw_smooth_circle(win1_x + 28, win1_y + 21, 3, 0x0000E5FF, 0x0000E5FF);
-    draw_text_smooth(win1_x + 38, win1_y + 13, "quantum.bkn", (g_active_editor_tab == 0) ? 0x00FFFFFF : 0x0094A3B8);
+    // Status Chip Sub-header
+    draw_rounded_rect_sdf(win1_x + 16, win1_y + 48, win1_w - 32, 28, 8, 0x000F172A, 110, 0x001E293B, 80, 1);
+    draw_text_smooth(win1_x + 26, win1_y + 54, "ARCH: x86_64 | STATUS: RING 0 SOVEREIGN | MEM: 4096 MB", 0x0038BDF8);
 
-    unsigned int tab2_bg = (g_active_editor_tab == 1) ? 0x006D28D9 : 0x001E293B;
-    draw_rounded_rect_sdf(win1_x + 152, win1_y + 8, 136, 26, 13, tab2_bg, 255, 0x00C084FC, 180, 1);
-    draw_smooth_circle(win1_x + 164, win1_y + 21, 3, 0x00C084FC, 0x00C084FC);
-    draw_text_smooth(win1_x + 174, win1_y + 13, "crypto_pqc.bkn", (g_active_editor_tab == 1) ? 0x00FFFFFF : 0x0094A3B8);
+    // Console Output Canvas (Vidro Escuro Translúcido)
+    int term_inner_y = win1_y + 84;
+    int term_inner_h = win1_h - 136;
+    draw_rounded_rect_sdf(win1_x + 16, term_inner_y, win1_w - 32, term_inner_h, 12, 0x0003070E, 140, 0x001E293B, 70, 1);
 
-    draw_material_window_controls(win1_x + win1_w - 90, win1_y + 21);
+    // Linhas de Histórico Formatadas
+    draw_text_smooth(win1_x + 28, term_inner_y + 14, "[SYSTEM] Baken OS Microkernel v2.0 carregado em Ring 0.", 0x0094A3B8);
+    draw_text_smooth(win1_x + 28, term_inner_y + 36, "[Q-HAL] Coprocessador Quantico ativo (32 Qubits virtuais).", 0x0038BDF8);
+    draw_text_smooth(win1_x + 28, term_inner_y + 58, "[PQC Shield] Chaves ML-KEM-768 e ML-DSA-65 validadas.", 0x00C084FC);
+    draw_text_smooth(win1_x + 28, term_inner_y + 80, "[TELEMETRY] Pipeline Liquid Glass & Dual Kawase a 60 FPS.", 0x0010B981);
 
-    // Sidebar Mini-Explorer Material
-    int sb_w = 92;
-    draw_rounded_rect_sdf(win1_x + 12, win1_y + 50, sb_w, win1_h - 110, 12, 0x00080D1A, 255, 0x001E293B, 80, 1);
-    draw_text_smooth(win1_x + 20, win1_y + 60, "PROJECT", 0x0064748B);
-    draw_text_smooth(win1_x + 20, win1_y + 80, "kernel/", 0x0038BDF8);
-    draw_text_smooth(win1_x + 28, win1_y + 98, "main.bkn", 0x0094A3B8);
-    draw_text_smooth(win1_x + 28, win1_y + 116, "teleport", 0x0000E5FF);
-    draw_text_smooth(win1_x + 20, win1_y + 136, "libbkn/", 0x0038BDF8);
-    draw_text_smooth(win1_x + 28, win1_y + 154, "gui.bkn", 0x0010B981);
+    // Linhas do Buffer do Usuário
+    draw_text_smooth(win1_x + 28, term_inner_y + 112, g_term_history[0], 0x00CBD5E1);
+    draw_text_smooth(win1_x + 28, term_inner_y + 134, g_term_history[1], 0x0060A5FA);
+    draw_text_smooth(win1_x + 28, term_inner_y + 156, g_term_history[2], 0x0034D399);
 
-    // Editor Canvas
-    int editor_x = win1_x + sb_w + 20;
-    int code_y = win1_y + 54;
-    for (int l = 1; l <= 11; l++) {
-        char num[4];
-        num[0] = (l < 10) ? ' ' : '1';
-        num[1] = '0' + (l % 10);
-        num[2] = '\0';
-        draw_text_smooth(editor_x, code_y + (l - 1) * 18, num, 0x00475569);
-    }
-
-    int text_x = editor_x + 22;
-    if (g_active_editor_tab == 0) {
-        draw_text_smooth(text_x, code_y + 0 * 18,   "module kernel::quantum_teleport;", 0x0094A3B8);
-        draw_text_smooth(text_x, code_y + 1 * 18,   "import libbkn::gui::*; import libbkn::quantum::*;", 0x0060A5FA);
-        draw_text_smooth(text_x, code_y + 2 * 18,   "@quantum", 0x00C084FC);
-        draw_text_smooth(text_x, code_y + 3 * 18,   "pub fn teleport_qubit(src: qubit) -> (u8, u8) {", 0x0038BDF8);
-        draw_text_smooth(text_x + 14, code_y + 4 * 18,  "let mut bell = qreg::alloc(2);", 0x00F8FAFC);
-        draw_text_smooth(text_x + 14, code_y + 5 * 18,  "H(bell[0]);", 0x0060A5FA);
-        draw_text_smooth(text_x + 14, code_y + 6 * 18,  "CNOT(bell[0], bell[1]); // EPR Pair", 0x0010B981);
-        draw_text_smooth(text_x + 14, code_y + 7 * 18,  "CNOT(src, bell[0]);", 0x0060A5FA);
-        draw_text_smooth(text_x + 14, code_y + 8 * 18,  "let m0 = measure(src);", 0x00F59E0B);
-        draw_text_smooth(text_x + 14, code_y + 9 * 18,  "let m1 = measure(bell[0]);", 0x00F59E0B);
-        draw_text_smooth(text_x + 14, code_y + 10 * 18, "return (m0, m1);", 0x0038BDF8);
-    } else {
-        draw_text_smooth(text_x, code_y + 0 * 18,   "module kernel::crypto_pqc;", 0x0094A3B8);
-        draw_text_smooth(text_x, code_y + 1 * 18,   "import libbkn::crypto::{ml_kem_768, ml_dsa_65};", 0x0060A5FA);
-        draw_text_smooth(text_x, code_y + 2 * 18,   "@system", 0x00C084FC);
-        draw_text_smooth(text_x, code_y + 3 * 18,   "pub fn encapsulate_key(pk: &[u8; 1184]) -> [u8; 32] {", 0x0038BDF8);
-        draw_text_smooth(text_x + 14, code_y + 4 * 18,  "let (ct, secret) = ml_kem_768::encaps(pk);", 0x0010B981);
-        draw_text_smooth(text_x + 14, code_y + 5 * 18,  "return secret; // Quantum-Safe Shield", 0x00F59E0B);
-        draw_text_smooth(text_x, code_y + 6 * 18,   "}", 0x0038BDF8);
-    }
-
-    // Terminal Integrado
-    int term_y = win1_h - 96 + win1_y;
-    int term_w = win1_w - 24;
-    draw_rounded_rect_sdf(win1_x + 12, term_y, term_w, 82, 12, 0x00060A14, 255, 0x0038BDF8, 120, 1);
-
-    draw_text_smooth(win1_x + 22, term_y + 8, g_term_history[0], 0x0094A3B8);
-    draw_text_smooth(win1_x + 22, term_y + 24, g_term_history[1], 0x0060A5FA);
-    draw_text_smooth(win1_x + 22, term_y + 40, g_term_history[2], 0x0034D399);
+    // Linha de Comando / Prompt Interativo
+    int prompt_y = term_inner_y + term_inner_h - 34;
+    draw_rounded_rect_sdf(win1_x + 24, prompt_y - 4, win1_w - 48, 28, 6, 0x000A1322, 160, 0x0000E5FF, 100, 1);
 
     char prompt_buf[140];
     prompt_buf[0] = 'b'; prompt_buf[1] = 'a'; prompt_buf[2] = 'k'; prompt_buf[3] = 'e';
-    prompt_buf[4] = 'n'; prompt_buf[5] = '>'; prompt_buf[6] = ' ';
+    prompt_buf[4] = 'n'; prompt_buf[5] = '@'; prompt_buf[6] = 'r'; prompt_buf[7] = 'i';
+    prompt_buf[8] = 'n'; prompt_buf[9] = 'g'; prompt_buf[10] = '0'; prompt_buf[11] = ':';
+    prompt_buf[12] = '~'; prompt_buf[13] = '$'; prompt_buf[14] = ' ';
     int pi = 0;
-    while (current_input[pi] && pi < 45) {
-        prompt_buf[7 + pi] = current_input[pi];
+    while (current_input[pi] && pi < 35) {
+        prompt_buf[15 + pi] = current_input[pi];
         pi++;
     }
-    prompt_buf[7 + pi] = '_';
-    prompt_buf[8 + pi] = '\0';
-    draw_text_smooth(win1_x + 22, term_y + 58, prompt_buf, 0x0000E5FF);
+    prompt_buf[15 + pi] = '_';
+    prompt_buf[16 + pi] = '\0';
+    draw_text_smooth(win1_x + 32, prompt_y + 2, prompt_buf, 0x0000E5FF);
+
+    // Quick Command Shortcuts Bar no Rodapé da Janela
+    draw_text_smooth(win1_x + 20, win1_y + win1_h - 22, "Comandos: 'qpu bell', 'pqc shield', 'bknc build', 'fs ls'", 0x0064748B);
 }
 
-// Janela 2: Q-HAL Quantum AI Studio
+// Janela 2: Q-HAL Quantum Studio (Liquid Glass & 3D Bloch Sphere)
 static void render_window_qpu() {
     if (!g_win_qpu_open) return;
 
-    int win2_w = g_win_qpu_maximized ? (g_width - 40) : (g_width - g_win_qpu_x - 36);
-    if (!g_win_qpu_maximized && win2_w < 410) win2_w = 410;
-    int win2_h = g_win_qpu_maximized ? (g_height - 130) : (g_height - 150);
-    if (!g_win_qpu_maximized && win2_h > 530) win2_h = 530;
+    int half_w = ((int)g_width - 60) / 2;
+    if (half_w < 440) half_w = 440;
+    int win2_w = g_win_qpu_maximized ? ((int)g_width - 40) : half_w;
+    int win2_h = g_win_qpu_maximized ? ((int)g_height - 130) : ((int)g_height - 150);
+    if (!g_win_qpu_maximized && win2_h > 560) win2_h = 560;
 
-    int win2_x = g_win_qpu_maximized ? 20 : g_win_qpu_x;
+    int win2_x = g_win_qpu_maximized ? 20 : (20 + half_w + 16);
     int win2_y = g_win_qpu_maximized ? 54 : g_win_qpu_y;
 
-    draw_googlebook_card(win2_x, win2_y, win2_w, win2_h, 20, 0x00070F1C, 250, 0x0000E5FF);
+    // Corpo de Vidro Translúcido com Dual Kawase Blur e Fresnel Specular Rim
+    draw_liquid_glass_panel(win2_x, win2_y, win2_w, win2_h, 20, 0x00070F1C, 130, 0x0000E5FF, 185, 4);
 
-    // Barra de Título
-    draw_rounded_rect_sdf(win2_x, win2_y, win2_w, 42, 20, 0x000F2942, 255, 0x0000E5FF, 60, 1);
-    draw_text_smooth(win2_x + 20, win2_y + 13, "Q-HAL 3D Quantum Coprocessor", 0x0000E5FF);
-    draw_material_window_controls(win2_x + win2_w - 90, win2_y + 21);
+    // Barra de Título Translúcida
+    draw_rounded_rect_sdf(win2_x, win2_y, win2_w, 40, 20, 0x000F2942, 90, 0x0000E5FF, 50, 1);
+    draw_smooth_circle(win2_x + 22, win2_y + 20, 4, 0x0000E5FF, 0x00FFFFFF);
+    draw_text_smooth(win2_x + 34, win2_y + 12, "Q-HAL 3D Quantum Coprocessor Studio", 0x0000E5FF);
+    draw_material_window_controls(win2_x + win2_w - 90, win2_y + 20);
 
     // Esfera de Bloch 3D Fluida
     int sphere_cx = win2_x + (win2_w / 2);
-    int sphere_cy = win2_y + 105;
-    draw_bloch_sphere_3d(sphere_cx, sphere_cy, 48, g_anim_frame);
+    int sphere_cy = win2_y + 110;
+    draw_bloch_sphere_3d(sphere_cx, sphere_cy, 46, g_anim_frame);
 
-    draw_text_smooth(sphere_cx - 10, sphere_cy - 66, "|0>", 0x0000E5FF);
-    draw_text_smooth(sphere_cx - 10, sphere_cy + 56, "|1>", 0x0000E5FF);
-    draw_text_smooth(sphere_cx + 56, sphere_cy - 6, "|+>", 0x00818CF8);
-    draw_text_smooth(sphere_cx - 72, sphere_cy - 6, "|->", 0x00818CF8);
+    draw_text_smooth(sphere_cx - 10, sphere_cy - 64, "|0>", 0x0000E5FF);
+    draw_text_smooth(sphere_cx - 10, sphere_cy + 54, "|1>", 0x0000E5FF);
+    draw_text_smooth(sphere_cx + 54, sphere_cy - 6, "|+>", 0x00818CF8);
+    draw_text_smooth(sphere_cx - 70, sphere_cy - 6, "|->", 0x00818CF8);
 
-    // Gráfico de Onda
-    int wave_y = win2_y + 172;
+    // Gráfico de Onda Quântica
+    int wave_y = win2_y + 178;
     int wave_w = win2_w - 28;
-    draw_quantum_wave_graph(win2_x + 14, wave_y, wave_w, 76);
+    draw_quantum_wave_graph(win2_x + 14, wave_y, wave_w, 74);
 
-    // Cartões Material 3 em Grade
-    int card_y = wave_y + 86;
-    int half_w = (wave_w - 12) / 2;
+    // Cartões Material 3 em Vidro Translúcido
+    int card_y = wave_y + 84;
+    int half_card_w = (wave_w - 12) / 2;
 
     // Card 1: Qubit Telemetry
-    draw_rounded_rect_sdf(win2_x + 14, card_y, half_w, 64, 12, 0x000A1A2E, 230, 0x0000E5FF, 120, 1);
+    draw_rounded_rect_sdf(win2_x + 14, card_y, half_card_w, 64, 12, 0x000A1A2E, 120, 0x0000E5FF, 120, 1);
     draw_text_smooth(win2_x + 24, card_y + 12, "EPR Bell State", 0x0000E5FF);
     draw_text_smooth(win2_x + 24, card_y + 34, "Fidelity: 99.99%", 0x0010B981);
 
     // Card 2: Engine AVX-512
-    draw_rounded_rect_sdf(win2_x + 20 + half_w, card_y, half_w, 64, 12, 0x00172554, 230, 0x003B82F6, 120, 1);
-    draw_text_smooth(win2_x + 30 + half_w, card_y + 12, "AVX-512 Matrix", 0x0060A5FA);
-    draw_text_smooth(win2_x + 30 + half_w, card_y + 34, "32 Qubits Active", 0x0093C5FD);
+    draw_rounded_rect_sdf(win2_x + 20 + half_card_w, card_y, half_card_w, 64, 12, 0x00172554, 120, 0x003B82F6, 120, 1);
+    draw_text_smooth(win2_x + 30 + half_card_w, card_y + 12, "AVX-512 Matrix", 0x0060A5FA);
+    draw_text_smooth(win2_x + 30 + half_card_w, card_y + 34, "32 Qubits Active", 0x0093C5FD);
 
     // Card 3: PQC Shield Full Width
-    draw_rounded_rect_sdf(win2_x + 14, card_y + 72, wave_w, 54, 12, 0x001E1B4B, 230, 0x00C084FC, 120, 1);
+    draw_rounded_rect_sdf(win2_x + 14, card_y + 72, wave_w, 54, 12, 0x001E1B4B, 120, 0x00C084FC, 120, 1);
     draw_text_smooth(win2_x + 24, card_y + 82, "PQC Shield: ML-KEM-768 + ML-DSA-65", 0x00C084FC);
     draw_text_smooth(win2_x + 24, card_y + 102, "Zero-Trust Ring 0 Enclave [Secured]", 0x0010B981);
 }
 
 // -------------------------------------------------------------
-// RENDERIZADOR DO DESKTOP SOBERANO / MATERIAL 3
+// RENDERIZADOR DO DESKTOP SOBERANO / LIQUID GLASS & MATERIAL 3
 // -------------------------------------------------------------
 
 static void render_full_frame_to_backbuffer(const char* current_input) {
@@ -1104,18 +1153,18 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
         g_back_fb[i] = g_wallpaper_cache[i];
     }
 
-    // 2. Barra Superior Flutuante Material You (Floating Top Bar)
-    draw_googlebook_card(20, 10, g_width - 40, 38, 19, 0x000B0F19, 210, 0x001E293B);
+    // 2. Barra Superior Flutuante Liquid Glass (Floating Top Bar)
+    draw_liquid_glass_panel(20, 10, g_width - 40, 38, 19, 0x000B0F19, 125, 0x001E293B, 170, 4);
 
     // Baken OS Logo Pill
-    draw_rounded_rect_sdf(30, 16, 110, 26, 13, 0x001E1B4B, 255, 0x00818CF8, 160, 1);
+    draw_rounded_rect_sdf(30, 16, 110, 26, 13, 0x001E1B4B, 180, 0x00818CF8, 160, 1);
     draw_smooth_circle(44, 29, 6, 0x0000E5FF, 0x00FFFFFF);
     draw_text_smooth(56, 22, "Baken OS", 0x00FFFFFF);
 
     // Barra de Pesquisa Centralizada (com Ícone Lupa)
     int search_w = 340;
     int search_x = (g_width - search_w) / 2;
-    draw_rounded_rect_sdf(search_x, 16, search_w, 26, 13, 0x001E293B, 240, 0x0038BDF8, 120, 1);
+    draw_rounded_rect_sdf(search_x, 16, search_w, 26, 13, 0x001E293B, 130, 0x0038BDF8, 120, 1);
     // Ícone Lupa
     draw_smooth_circle(search_x + 18, 29, 4, 0x001E293B, 0x0038BDF8);
     draw_line_alpha(search_x + 21, 32, search_x + 25, 36, 0x0038BDF8, 255);
@@ -1123,7 +1172,7 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
 
     // Status da Direita (Ícones Vetoriais Wi-Fi, Bateria e Relógio)
     int status_x = g_width - 250;
-    draw_rounded_rect_sdf(status_x, 16, 220, 26, 13, 0x00172554, 255, 0x003B82F6, 140, 1);
+    draw_rounded_rect_sdf(status_x, 16, 220, 26, 13, 0x00172554, 150, 0x003B82F6, 140, 1);
 
     // Ícone Wi-Fi (3 Arcos)
     draw_smooth_circle(status_x + 18, 31, 2, 0x0060A5FA, 0x0060A5FA);
@@ -1144,12 +1193,12 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
 
     // 2.5. Área de Trabalho Limpa (At a Glance Smart Widget & Ícones de Desktop)
     if (!g_win_ide_open && !g_win_qpu_open) {
-        // Smart Widget Central "At a Glance"
+        // Smart Widget Central "At a Glance" em Vidro Líquido Translúcido
         int aag_w = 480;
         int aag_x = (g_width - aag_w) / 2;
         int aag_y = 110;
 
-        draw_googlebook_card(aag_x, aag_y, aag_w, 124, 24, 0x000D1527, 210, 0x002A3B5C);
+        draw_liquid_glass_panel(aag_x, aag_y, aag_w, 124, 24, 0x000D1527, 125, 0x002A3B5C, 160, 4);
 
         // Relógio Digital Display Grande em Vetor Suave (36px)
         draw_display_clock_text(aag_x + 24, aag_y + 16, "10:24", 0x0000E5FF);
@@ -1159,7 +1208,7 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
         draw_text_smooth(aag_x + 160, aag_y + 36, "24 C Ensolarado | Sao Paulo", 0x0038BDF8);
 
         // Chip de Status Q-HAL Core
-        draw_rounded_rect_sdf(aag_x + 24, aag_y + 76, aag_w - 48, 30, 15, 0x00131F37, 240, 0x0000E5FF, 140, 1);
+        draw_rounded_rect_sdf(aag_x + 24, aag_y + 76, aag_w - 48, 30, 15, 0x00131F37, 150, 0x0000E5FF, 140, 1);
         draw_smooth_circle(aag_x + 38, aag_y + 91, 4, 0x0010B981, 0x004ADE80);
         draw_text_smooth(aag_x + 50, aag_y + 83, "Baken OS Soberano • Microkernel Ring 0 Online", 0x00F8FAFC);
 
@@ -1197,71 +1246,68 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
         }
     }
 
-    // 5. Dock Flutuante Material You (Floating Shelf)
+    // 5. Dock Flutuante Liquid Glass (Floating Frosted Shelf)
+    g_dock_w = 440;
+    g_dock_h = 66;
     g_dock_x = (g_width - g_dock_w) / 2;
     g_dock_y = g_height - 76;
 
-    draw_googlebook_card(g_dock_x, g_dock_y, g_dock_w, g_dock_h, 28, 0x000B101E, 230, 0x003B82F6);
+    draw_liquid_glass_panel(g_dock_x, g_dock_y, g_dock_w, g_dock_h, 28, 0x000B101E, 125, 0x003B82F6, 185, 4);
 
-    g_icon_centers[0] = g_dock_x + 50;
-    g_icon_centers[1] = g_dock_x + 130;
-    g_icon_centers[2] = g_dock_x + 210;
-    g_icon_centers[3] = g_dock_x + 290;
-    g_icon_centers[4] = g_dock_x + 370;
-    g_icon_centers[5] = g_dock_x + 450;
-
+    int icon_step = g_dock_w / 6;
     for (int i = 0; i < 6; i++) {
-        int cx = g_icon_centers[i];
+        int cx = g_dock_x + (icon_step / 2) + (i * icon_step);
+        g_icon_centers[i] = cx;
         int cy = g_dock_y + 33;
 
         int dist = (g_mouse_x - cx) >= 0 ? (g_mouse_x - cx) : -(g_mouse_x - cx);
-        int is_near = (dist < 40 && g_mouse_y >= g_dock_y - 10);
-        int size = is_near ? 50 : 44;
-        int draw_cy = is_near ? (cy - 6) : cy;
+        int is_near = (dist < 36 && g_mouse_y >= g_dock_y - 10);
+        int size = is_near ? 48 : 42;
+        int draw_cy = is_near ? (cy - 4) : cy;
 
         draw_material_app_icon(cx, draw_cy, size, i, is_near);
 
-        if (i == 0 || (i == 1 && g_win_ide_open) || (i == 3 && g_win_qpu_open)) {
-            draw_smooth_circle(cx, g_dock_y + 58, 2, 0x0038BDF8, 0x0038BDF8);
+        if ((i == 0 && g_win_ide_open) || (i == 3 && g_win_qpu_open)) {
+            draw_smooth_circle(cx, g_dock_y + 57, 2, 0x0038BDF8, 0x0038BDF8);
         }
     }
 
-    // 6. Central de Controle Material 3 (Se Aberta)
+    // 6. Central de Controle Liquid Glass (Se Aberta)
     if (g_control_center_open) {
         int cc_w = 320;
         int cc_x = g_width - cc_w - 20;
-        draw_googlebook_card(cc_x, 48, cc_w, 340, 20, 0x000F172A, 252, 0x0038BDF8);
+        draw_liquid_glass_panel(cc_x, 48, cc_w, 340, 20, 0x000F172A, 135, 0x0038BDF8, 185, 4);
 
         draw_text_smooth(cc_x + 24, 64, "QUICK SETTINGS", 0x0060A5FA);
 
-        // Tiles
-        draw_rounded_rect_sdf(cc_x + 20, 90, 132, 54, 14, 0x00064E3B, 255, 0x0010B981, 200, 1);
+        // Tiles Translúcidos
+        draw_rounded_rect_sdf(cc_x + 20, 90, 132, 54, 14, 0x00064E3B, 180, 0x0010B981, 200, 1);
         draw_text_smooth(cc_x + 30, 102, "Wi-Fi 7 MLO", 0x0010B981);
         draw_text_smooth(cc_x + 30, 122, "5.8 Gbps", 0x0094A3B8);
 
-        draw_rounded_rect_sdf(cc_x + 164, 90, 132, 54, 14, 0x00172554, 255, 0x003B82F6, 200, 1);
+        draw_rounded_rect_sdf(cc_x + 164, 90, 132, 54, 14, 0x00172554, 180, 0x003B82F6, 200, 1);
         draw_text_smooth(cc_x + 174, 102, "Bluetooth 5.4", 0x0060A5FA);
         draw_text_smooth(cc_x + 174, 122, "Connected", 0x0094A3B8);
 
-        // Sliders
+        // Sliders Translúcidos
         draw_text_smooth(cc_x + 24, 160, "Volume (85%)", 0x00F8FAFC);
-        draw_rounded_rect_sdf(cc_x + 20, 180, 276, 16, 8, 0x001E293B, 255, 0x00475569, 150, 1);
+        draw_rounded_rect_sdf(cc_x + 20, 180, 276, 16, 8, 0x001E293B, 180, 0x00475569, 150, 1);
         draw_rounded_rect_sdf(cc_x + 20, 180, (276 * g_volume_level) / 100, 16, 8, 0x0010B981, 255, 0x0010B981, 255, 1);
 
         draw_text_smooth(cc_x + 24, 210, "Brightness (95%)", 0x00F8FAFC);
-        draw_rounded_rect_sdf(cc_x + 20, 230, 276, 16, 8, 0x001E293B, 255, 0x00475569, 150, 1);
+        draw_rounded_rect_sdf(cc_x + 20, 230, 276, 16, 8, 0x001E293B, 180, 0x00475569, 150, 1);
         draw_rounded_rect_sdf(cc_x + 20, 230, (276 * g_brightness_level) / 100, 16, 8, 0x0000E5FF, 255, 0x0000E5FF, 255, 1);
 
-        draw_rounded_rect_sdf(cc_x + 20, 264, 276, 56, 12, 0x001E1B4B, 240, 0x00C084FC, 180, 1);
+        draw_rounded_rect_sdf(cc_x + 20, 264, 276, 56, 12, 0x001E1B4B, 160, 0x00C084FC, 180, 1);
         draw_text_smooth(cc_x + 30, 276, "QPU Quantum State: Active", 0x00C084FC);
         draw_text_smooth(cc_x + 30, 296, "Quantum Telemetry: 120 FPS", 0x0010B981);
     }
 
-    // 7. Menu Iniciar / App Drawer (Se Aberto)
+    // 7. Menu Iniciar / App Drawer Liquid Glass (Se Aberto)
     if (g_start_menu_open) {
-        draw_googlebook_card(20, 48, 310, 360, 20, 0x000B0F19, 252, 0x003B82F6);
+        draw_liquid_glass_panel(20, 48, 310, 360, 20, 0x000B0F19, 135, 0x003B82F6, 185, 4);
 
-        draw_rounded_rect_sdf(32, 62, 286, 34, 10, 0x001E293B, 255, 0x0060A5FA, 200, 1);
+        draw_rounded_rect_sdf(32, 62, 286, 34, 10, 0x001E293B, 160, 0x0060A5FA, 200, 1);
         draw_text_smooth(44, 71, "Pesquisar no Baken OS...", 0x0094A3B8);
 
         draw_text_smooth(36, 110, "APLICATIVOS SOBERANOS", 0x0060A5FA);
@@ -1272,7 +1318,7 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
         draw_text_smooth(36, 240, "5. Audio Studio & Synth", 0x00EC4899);
         draw_text_smooth(36, 266, "6. Terminal / BKNC Compiler", 0x0010B981);
 
-        draw_rounded_rect_sdf(32, 298, 286, 56, 12, 0x000F172A, 240, 0x0010B981, 180, 1);
+        draw_rounded_rect_sdf(32, 298, 286, 56, 12, 0x000F172A, 160, 0x0010B981, 180, 1);
         draw_text_smooth(42, 308, "BakenUI: Native Vector Engine", 0x0010B981);
         draw_text_smooth(42, 328, "Memory: 512 MB / 4096 MB", 0x0038BDF8);
     }

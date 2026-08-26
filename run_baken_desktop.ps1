@@ -1,11 +1,18 @@
 # Baken OS - Launcher Oficial do Desktop Shell Fluido em Flutter (120 FPS)
 
-$root = "E:\projeto-bkn"
-$ui_dir = "$root\ui\baken_shell"
+$root = "c:\Projetos\projeto-bkn"
+$exe_path = "$root\ui\baken_shell\build\windows\x64\runner\Release\baken_shell.exe"
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "    INICIANDO BAKEN OS DESKTOP SHELL (FLUTTER AERO-QUANTUM 120 FPS)  " -ForegroundColor Cyan
+Write-Host "    INICIANDO BAKEN OS DESKTOP SHELL (GPU ACCELERATED 120 FPS)   " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
-Set-Location $ui_dir
-flutter run -d windows
+if (Test-Path $exe_path) {
+    Write-Host "[OK] Executando binario nativo Release em: $exe_path" -ForegroundColor Green
+    Start-Process -FilePath $exe_path
+} else {
+    Write-Host "[...] Compilando e iniciando via Flutter..." -ForegroundColor Yellow
+    Set-Location "$root\ui\baken_shell"
+    flutter run -d windows
+}
+

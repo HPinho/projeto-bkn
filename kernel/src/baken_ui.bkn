@@ -22,6 +22,7 @@ pub enum WidgetType {
     BlochSphereViewer = 9,
     SpatialPanel = 10,
     SpatialCubeViewer = 11,
+    GlassPanel = 12,
 }
 
 pub struct BoxConstraints {
@@ -155,7 +156,7 @@ pub fn ui_layout_pass(node_id: u32, x: i32, y: i32, parent_w: u32, parent_h: u32
         node.y = y + node.style.margin_y as i32;
 
         match node.widget_type {
-            WidgetType::Container | WidgetType::GlassCard => {
+            WidgetType::Container | WidgetType::GlassCard | WidgetType::GlassPanel => {
                 node.width = parent_w;
                 node.height = parent_h;
             },
@@ -189,6 +190,17 @@ pub fn ui_render_node(node_id: u32) {
         let ny = if node.y > 0 { node.y as u32 } else { 0 };
 
         match node.widget_type {
+            WidgetType::GlassPanel => {
+                let bb = gfx_get_backbuffer();
+                let pitch = gfx_get_pitch();
+                sdf_render_liquid_glass_panel(
+                    bb, pitch,
+                    nx, ny, node.width, node.height,
+                    node.style.border_radius as u32,
+                    node.style.bg_color, node.style.alpha,
+                    node.style.border_color, 75, 2
+                );
+            },
             WidgetType::GlassCard => {
                 sdf_render_smooth_card(
                     nx, ny, node.width, node.height,

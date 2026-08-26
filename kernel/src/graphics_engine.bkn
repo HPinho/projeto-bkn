@@ -52,6 +52,34 @@ pub fn gfx_init(base: *mut u32, width: u32, height: u32, pitch: u32) {
     }
 }
 
+@system
+pub fn gfx_get_backbuffer() -> *mut u32 {
+    unsafe {
+        return FB.backbuffer;
+    }
+}
+
+@system
+pub fn gfx_get_pitch() -> u32 {
+    unsafe {
+        return FB.pitch;
+    }
+}
+
+@system
+pub fn gfx_get_width() -> u32 {
+    unsafe {
+        return FB.width;
+    }
+}
+
+@system
+pub fn gfx_get_height() -> u32 {
+    unsafe {
+        return FB.height;
+    }
+}
+
 // Troca de Buffers Atômica com Cópia Rápida de 64-bit / AVX2 (Zero Screen Tearing)
 @system
 pub fn gfx_swap_buffers() {
@@ -182,12 +210,15 @@ pub fn gfx_draw_line(x0: i32, y0: i32, x1: i32, y1: i32, color: u32, alpha: u8) 
     }
 }
 
-// --- Retângulo com vidro fosco acrílico e borda arredondada ---
+// --- Retângulo com vidro fosco acrílico, micro-dither e borda com destaque especular ---
 @system
 pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) {
     let r2 = (radius * radius) as i32;
+    let glass_a = if alpha > 140 { 130 } else { alpha };
 
     for py in y..(y + h) {
+        let fy_rel = (py - y) as f32 / (if h > 0 { h as f32 } else { 1.0 });
+
         for px in x..(x + w) {
             let mut is_corner = false;
             let mut inside = true;
@@ -213,9 +244,12 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
                                });
 
                 if is_border {
-                    gfx_put_pixel_alpha(px, py, border_color, 200);
+                    let spec = (1.0 - fy_rel) * 160.0;
+                    let b_col = if spec > 40.0 { 0x00FFFFFF } else { border_color };
+                    let b_alpha = (120.0 + spec * 0.5) as u8;
+                    gfx_put_pixel_alpha(px, py, b_col, b_alpha);
                 } else {
-                    gfx_put_pixel_alpha(px, py, bg_color, alpha);
+                    gfx_put_pixel_alpha(px, py, bg_color, glass_a);
                 }
             }
         }

@@ -28,6 +28,16 @@ pub struct FxRect {
     pub shadow_spread: u8,
 }
 
+pub struct FxGlassMaterial {
+    pub blur_passes: u8,
+    pub tint_color: u32,
+    pub tint_alpha: u8,
+    pub border_color: u32,
+    pub corner_radius: u32,
+    pub specular_intensity: u8,
+    pub noise_ratio: u8, // 0..100 (ex: 4 = 4% micro-dither)
+}
+
 pub struct BknFxDevice {
     pub width: u32,
     pub height: u32,
@@ -75,4 +85,18 @@ pub fn bakenfx_blend_pixel(bg: u32, fg: u32, alpha: u8) -> u32 {
     let out_b = ((fg_b * a) + (bg_b * inv_a)) / 255;
 
     return (out_r << 16) | (out_g << 8) | out_b;
+}
+
+@system
+pub fn bakenfx_get_backbuffer() -> *mut u32 {
+    unsafe {
+        return FX_DEVICE.back_buffer as *mut u32;
+    }
+}
+
+@system
+pub fn bakenfx_get_pitch() -> u32 {
+    unsafe {
+        return FX_DEVICE.pitch;
+    }
 }

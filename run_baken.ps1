@@ -87,6 +87,8 @@ Write-Host "      INICIANDO BAKEN OS NO QEMU (PRESSIONE CTRL+C PARA SAIR)    " -
 Write-Host "=================================================================" -ForegroundColor Green
 
 $qemu_args = @(
+    "-accel", "tcg,thread=multi",
+    "-cpu", "max",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf",
     "-drive", "format=raw,file=$disk",
     "-device", "usb-ehci,id=ehci",
@@ -97,6 +99,7 @@ $qemu_args = @(
     "-m", "4G",
     "-smp", "4",
     "-vga", "std",
+    "-global", "VGA.vgamem_mb=64",
     "-name", "Baken OS - Sovereign Quantum Desktop"
 )
 

@@ -342,11 +342,16 @@ fn wm_render_single_window(win: &Window) {
     // Sombra da Janela
     gfx_draw_drop_shadow(wx, wy, win.width, win.height, 16, 3);
 
-    // Corpo da Janela com Cantos Arredondados
+    // Corpo da Janela com Liquid Glass / Fluent Acrylic e Efeito Fresnel no Topo
     let border_col = if win.is_focused { win.border_color } else { 0x00475569 };
-    sdf_render_smooth_card(
+    let bb = gfx_get_backbuffer();
+    let pitch = gfx_get_pitch();
+    let specular: u8 = if win.is_focused { 85 } else { 40 };
+
+    sdf_render_liquid_glass_panel(
+        bb, pitch,
         wx, wy, win.width, win.height,
-        14, win.bg_color, win.bg_alpha, border_col, 1.5
+        14, win.bg_color, win.bg_alpha, border_col, specular, 2
     );
 
     // Barra de Titulo (com divisor)
