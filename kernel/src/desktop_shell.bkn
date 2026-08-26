@@ -12,6 +12,7 @@ import kernel::rtc::*;
 import kernel::acpi::*;
 import kernel::cpu_info::*;
 import kernel::pci::*;
+import kernel::toast_notification::*;
 
 // ========================================================================
 // ESTADO GLOBAL DO SHELL
@@ -384,10 +385,13 @@ pub fn desktop_shell_render_frame() {
         // 6. Dock inferior flutuante
         render_floating_dock();
 
-        // 7. Cursor do mouse
+        // 7. Notificações Flutuantes Aero Toast
+        toast_render_all(SHELL.screen_w);
+
+        // 8. Cursor do mouse
         render_cursor();
 
-        // 8. Swapchain: Apresenta o quadro completo do backbuffer sem tearing
+        // 9. Swapchain: Apresenta o quadro completo do backbuffer sem tearing
         gfx_swap_buffers();
     }
 }

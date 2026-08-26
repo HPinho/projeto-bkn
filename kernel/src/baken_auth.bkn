@@ -1,0 +1,97 @@
+// Baken OS - Sistema de Autenticação e Permissões RBAC em BKN Puro (@system)
+// Perfis de Usuário, Hashes Pós-Quânticos e Tokens de Capacidade de Sessão
+
+module kernel::baken_auth;
+
+pub const MAX_USERS: usize = 8;
+
+pub enum UserRole {
+    Root = 0,
+    Developer = 1,
+    StandardUser = 2,
+    Guest = 3,
+}
+
+pub struct UserAccount {
+    pub uid: u32,
+    pub gid: u32,
+    pub username: [u8; 32],
+    pub role: UserRole,
+    pub password_pqc_hash: [u8; 32],
+    pub is_active: bool,
+}
+
+pub struct AuthSessionState {
+    pub current_uid: u32,
+    pub current_role: UserRole,
+    pub session_token: u64,
+    pub user_count: usize,
+    pub is_authenticated: bool,
+}
+
+static mut AUTH_SESSION: AuthSessionState = AuthSessionState {
+    current_uid: 0,
+    current_role: UserRole::Root,
+    session_token: 0xBA00112233445566,
+    user_count: 2,
+    is_authenticated: true,
+};
+
+static mut USERS: [UserAccount; MAX_USERS] = [UserAccount {
+    uid: 0, gid: 0, username: [0; 32],
+    role: UserRole::Root, password_pqc_hash: [0; 32], is_active: false,
+}; MAX_USERS];
+
+@system
+pub fn auth_init() {
+    unsafe {
+        // 1. Usuário Root
+        USERS[0].uid = 0;
+        USERS[0].gid = 0;
+        USERS[0].role = UserRole::Root;
+        USERS[0].is_active = true;
+        copy_user_name(b"root\0".as_ptr(), USERS[0].username.as_mut_ptr());
+
+        // 2. Usuário Desenvolvedor Padrão
+        USERS[1].uid = 1000;
+        USERS[1].gid = 1000;
+        USERS[1].role = UserRole::Developer;
+        USERS[1].is_active = true;
+        copy_user_name(b"bkn_developer\0".as_ptr(), USERS[1].username.as_mut_ptr());
+
+        AUTH_SESSION.current_uid = 0;
+        AUTH_SESSION.current_role = UserRole::Root;
+        AUTH_SESSION.is_authenticated = true;
+    }
+}
+
+// Verifica se a sessão atual tem permissão para uma ação de segurança
+@system
+pub fn auth_check_permission(required_role: UserRole) -> bool {
+    unsafe {
+        if !AUTH_SESSION.is_authenticated { return false; }
+        if AUTH_SESSION.current_role == UserRole::Root { return true; }
+        return AUTH_SESSION.current_role == required_role;
+    }
+}
+
+@system
+pub fn auth_get_current_username() -> *const u8 {
+    unsafe {
+        for i in 0..MAX_USERS {
+            if USERS[i].is_active && USERS[i].uid == AUTH_SESSION.current_uid {
+                return USERS[i].username.as_ptr();
+            }
+        }
+        return b"root\0".as_ptr();
+    }
+}
+
+@system
+fn copy_user_name(src: *const u8, dst: *mut u8) {
+    for i in 0..32 {
+        let ch = unsafe { *src.add(i) };
+        unsafe { *dst.add(i) = ch; }
+        if ch == 0 { break; }
+    }
+}

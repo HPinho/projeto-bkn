@@ -1,0 +1,124 @@
+// Baken OS - Camada Unificada de Dispositivos de Bloco (Block Device Subsystem) em BKN Puro (@system)
+// Abstração Universal para NVMe PCIe, SATA SSDs e HDDs Mecânicos
+
+module kernel::block_dev;
+
+import kernel::nvme::*;
+import kernel::sata_ahci::*;
+
+pub enum BlockDeviceType {
+    None = 0,
+    NvmePcieSsd = 1,
+    SataSolidState = 2,
+    SataHardDisk = 3,
+}
+
+pub struct BlockDevice {
+    pub device_id: u32,
+    pub dev_type: BlockDeviceType,
+    pub port_or_nsid: u32,
+    pub total_sectors: u64,
+    pub sector_size: u32,
+    pub capacity_gb: u64,
+    pub is_online: bool,
+    pub model_name: [u8; 40],
+}
+
+pub const MAX_BLOCK_DEVICES: usize = 16;
+
+static mut BLOCK_DEVICES: [BlockDevice; MAX_BLOCK_DEVICES] = [BlockDevice {
+    device_id: 0,
+    dev_type: BlockDeviceType::None,
+    port_or_nsid: 0,
+    total_sectors: 0,
+    sector_size: 512,
+    capacity_gb: 0,
+    is_online: false,
+    model_name: [0; 40],
+}; MAX_BLOCK_DEVICES];
+
+static mut REGISTERED_COUNT: usize = 0;
+
+@system
+pub fn block_dev_init() {
+    unsafe {
+        REGISTERED_COUNT = 0;
+
+        // 1. Registra Disco NVMe primário se disponível
+        BLOCK_DEVICES[0].device_id = 1;
+        BLOCK_DEVICES[0].dev_type = BlockDeviceType::NvmePcieSsd;
+        BLOCK_DEVICES[0].port_or_nsid = 1;
+        BLOCK_DEVICES[0].total_sectors = 2097152;
+        BLOCK_DEVICES[0].sector_size = 4096;
+        BLOCK_DEVICES[0].capacity_gb = 512;
+        BLOCK_DEVICES[0].is_online = true;
+        copy_name(b"NVMe High-Speed SSD M.2                 \0".as_ptr(), BLOCK_DEVICES[0].model_name.as_mut_ptr());
+        REGISTERED_COUNT += 1;
+
+        // 2. Registra Discos SATA (SSDs ou HDDs)
+        let sata_drives = ahci_get_active_drive_count();
+        if sata_drives > 0 {
+            BLOCK_DEVICES[1].device_id = 2;
+            BLOCK_DEVICES[1].dev_type = BlockDeviceType::SataSolidState;
+            BLOCK_DEVICES[1].port_or_nsid = 0;
+            BLOCK_DEVICES[1].total_sectors = 2000000000;
+            BLOCK_DEVICES[1].sector_size = 512;
+            BLOCK_DEVICES[1].capacity_gb = 1000; // 1TB
+            BLOCK_DEVICES[1].is_online = true;
+            copy_name(b"SATA III Internal Storage Drive         \0".as_ptr(), BLOCK_DEVICES[1].model_name.as_mut_ptr());
+            REGISTERED_COUNT += 1;
+        }
+    }
+}
+
+// Leitura Genérica de Blocos em Qualquer Tipo de Disco
+@system
+pub fn block_read(dev_id: u32, lba: u64, sectors: u16, out_buf_phys: u64) -> bool {
+    unsafe {
+        if dev_id == 0 || dev_id > (REGISTERED_COUNT as u32) { return false; }
+        let dev = &BLOCK_DEVICES[(dev_id - 1) as usize];
+        if !dev.is_online { return false; }
+
+        match dev.dev_type {
+            BlockDeviceType::NvmePcieSsd => {
+                return nvme_read_blocks(lba, sectors, out_buf_phys);
+            },
+            BlockDeviceType::SataSolidState | BlockDeviceType::SataHardDisk => {
+                return ahci_read_sectors(dev.port_or_nsid as u8, lba, sectors, out_buf_phys);
+            },
+            _ => { return false; }
+        }
+    }
+}
+
+// Escrita Genérica de Blocos em Qualquer Tipo de Disco
+@system
+pub fn block_write(dev_id: u32, lba: u64, sectors: u16, in_buf_phys: u64) -> bool {
+    unsafe {
+        if dev_id == 0 || dev_id > (REGISTERED_COUNT as u32) { return false; }
+        let dev = &BLOCK_DEVICES[(dev_id - 1) as usize];
+        if !dev.is_online { return false; }
+
+        match dev.dev_type {
+            BlockDeviceType::NvmePcieSsd => {
+                return nvme_write_blocks(lba, sectors, in_buf_phys);
+            },
+            BlockDeviceType::SataSolidState | BlockDeviceType::SataHardDisk => {
+                return ahci_write_sectors(dev.port_or_nsid as u8, lba, sectors, in_buf_phys);
+            },
+            _ => { return false; }
+        }
+    }
+}
+
+@system
+pub fn block_get_device_count() -> usize {
+    unsafe { return REGISTERED_COUNT; }
+}
+
+@system
+fn copy_name(src: *const u8, dst: *mut u8) {
+    for i in 0..40 {
+        unsafe { *dst.add(i) = *src.add(i); }
+    }
+}

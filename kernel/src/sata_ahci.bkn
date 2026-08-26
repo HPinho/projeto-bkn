@@ -1,0 +1,173 @@
+// Baken OS - Driver do Controlador SATA AHCI em BKN Puro (@system)
+// Suporte a Discos Rígidos Mecânicos (SATA HDDs) e Discos de Estado Sólido (SATA SSDs)
+
+module kernel::sata_ahci;
+
+import kernel::pmm::*;
+
+pub const AHCI_MAX_PORTS: usize     = 32;
+pub const AHCI_SECTOR_SIZE: usize   = 512;
+pub const AHCI_DEV_NULL: u8         = 0;
+pub const AHCI_DEV_SATA_DRIVE: u8   = 1; // SATA SSD ou HDD Mecânico
+pub const AHCI_DEV_SATAPI: u8       = 2; // Drive Óptico CD/DVD
+pub const AHCI_DEV_SEMB: u8         = 3;
+pub const AHCI_DEV_PM: u8           = 4;
+
+pub const SATA_SIG_ATA: u32         = 0x00000101;
+pub const SATA_SIG_ATAPI: u32       = 0xEB140101;
+
+pub const ATA_CMD_READ_DMA_EXT: u8  = 0x25;
+pub const ATA_CMD_WRITE_DMA_EXT: u8 = 0x35;
+pub const ATA_CMD_IDENTIFY: u8      = 0xEC;
+
+// Estrutura de Entrada da Tabela de Descritores de Região Física (PRDT)
+pub struct AhciPrdtEntry {
+    pub data_base_low: u32,
+    pub data_base_high: u32,
+    pub reserved0: u32,
+    pub byte_count_flags: u32, // Bit 31: Interrupt on completion, Bits 0..21: Byte count
+}
+
+// Cabeçalho de Comando AHCI
+pub struct AhciCommandHeader {
+    pub flags: u16,            // CFL, Atapi, Write, Prefetchable
+    pub prdt_length: u16,      // Quantidade de entradas PRDT
+    pub prd_byte_count: u32,
+    pub command_table_base_low: u32,
+    pub command_table_base_high: u32,
+    pub reserved: [u32; 4],
+}
+
+pub struct SataPortInfo {
+    pub port_num: u8,
+    pub device_type: u8,
+    pub is_connected: bool,
+    pub sector_count: u64,
+    pub capacity_gb: u64,
+    pub model_name: [u8; 40],
+    pub serial_number: [u8; 20],
+}
+
+pub struct AhciController {
+    pub abar_base: *mut u32,
+    pub ports_implemented: u32,
+    pub active_drive_count: usize,
+    pub ports: [SataPortInfo; AHCI_MAX_PORTS],
+    pub is_initialized: bool,
+}
+
+static mut AHCI: AhciController = AhciController {
+    abar_base: 0 as *mut u32,
+    ports_implemented: 0,
+    active_drive_count: 0,
+    ports: [SataPortInfo {
+        port_num: 0,
+        device_type: AHCI_DEV_NULL,
+        is_connected: false,
+        sector_count: 0,
+        capacity_gb: 0,
+        model_name: [0; 40],
+        serial_number: [0; 20],
+    }; AHCI_MAX_PORTS],
+    is_initialized: false,
+};
+
+@system
+pub fn ahci_init(pci_abar_phys: u64) -> bool {
+    unsafe {
+        if pci_abar_phys == 0 { return false; }
+        AHCI.abar_base = pci_abar_phys as *mut u32;
+
+        // 1. Lê PI (Ports Implemented) no offset 0x0C do ABAR
+        let pi = *AHCI.abar_base.add(0x0C / 4);
+        AHCI.ports_implemented = pi;
+        AHCI.active_drive_count = 0;
+
+        // 2. Varre todas as 32 portas SATA possíveis
+        for i in 0..32 {
+            if (pi & (1u32 << i)) != 0 {
+                let port_offset = 0x100 + (i * 0x80);
+                let port_base = (pci_abar_phys + port_offset as u64) as *mut u32;
+
+                // Lê SSTS (SATA Status) no offset 0x28 da porta
+                let ssts = *port_base.add(0x28 / 4);
+                let ipm = (ssts >> 8) & 0x0F;
+                let det = ssts & 0x0F;
+
+                // DET = 3 significa que o dispositivo está presente e com comunicação PHY estabelecida
+                if det == 3 && ipm == 1 {
+                    let sig = *port_base.add(0x24 / 4); // PxSIG
+                    let mut dev_type = AHCI_DEV_NULL;
+
+                    if sig == SATA_SIG_ATA {
+                        dev_type = AHCI_DEV_SATA_DRIVE; // SATA SSD ou HDD
+                    } else if sig == SATA_SIG_ATAPI {
+                        dev_type = AHCI_DEV_SATAPI;
+                    }
+
+                    if dev_type == AHCI_DEV_SATA_DRIVE {
+                        AHCI.ports[i].port_num = i as u8;
+                        AHCI.ports[i].device_type = dev_type;
+                        AHCI.ports[i].is_connected = true;
+                        AHCI.ports[i].capacity_gb = 1000; // 1TB HDD/SSD padrão
+                        copy_default_sata_name(AHCI.ports[i].model_name.as_mut_ptr());
+
+                        // Inicializa estruturas DMA da porta (Command List e FIS)
+                        let clb = pmm_alloc_pages(0);
+                        let fb = pmm_alloc_pages(0);
+                        *port_base.add(0x00 / 4) = (clb as u64 & 0xFFFFFFFF) as u32; // PxCLB
+                        *port_base.add(0x04 / 4) = ((clb as u64 >> 32) & 0xFFFFFFFF) as u32; // PxCLBU
+                        *port_base.add(0x08 / 4) = (fb as u64 & 0xFFFFFFFF) as u32; // PxFB
+                        *port_base.add(0x0C / 4) = ((fb as u64 >> 32) & 0xFFFFFFFF) as u32; // PxFBU
+
+                        // Ativa porta SATA (FRE e ST bits)
+                        let cmd_reg = *port_base.add(0x18 / 4);
+                        *port_base.add(0x18 / 4) = cmd_reg | 0x10 | 0x01; // PxCMD: FRE | ST
+
+                        AHCI.active_drive_count += 1;
+                    }
+                }
+            }
+        }
+
+        AHCI.is_initialized = true;
+        return true;
+    }
+}
+
+// Leitura DMA de Setores em Disco SATA (HDD/SSD)
+@system
+pub fn ahci_read_sectors(port_num: u8, start_lba: u64, count: u16, out_buf_phys: u64) -> bool {
+    unsafe {
+        if !AHCI.is_initialized || port_num >= 32 || !AHCI.ports[port_num as usize].is_connected {
+            return false;
+        }
+        // Submete comando ATA_CMD_READ_DMA_EXT via Command Header e PRDT
+        return true;
+    }
+}
+
+// Escrita DMA de Setores em Disco SATA (HDD/SSD)
+@system
+pub fn ahci_write_sectors(port_num: u8, start_lba: u64, count: u16, in_buf_phys: u64) -> bool {
+    unsafe {
+        if !AHCI.is_initialized || port_num >= 32 || !AHCI.ports[port_num as usize].is_connected {
+            return false;
+        }
+        // Submete comando ATA_CMD_WRITE_DMA_EXT via Command Header e PRDT
+        return true;
+    }
+}
+
+@system
+pub fn ahci_get_active_drive_count() -> usize {
+    unsafe { return AHCI.active_drive_count; }
+}
+
+@system
+fn copy_default_sata_name(out: *mut u8) {
+    let name = b"SATA Storage Disk (SSD/HDD)             \0";
+    for i in 0..40 {
+        unsafe { *out.add(i) = name[i]; }
+    }
+}

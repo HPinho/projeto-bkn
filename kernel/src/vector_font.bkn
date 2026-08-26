@@ -1,0 +1,78 @@
+// Baken OS - Renderizador de Fontes Vetoriais Escaláveis (Bézier Curves) em BKN Puro (@system)
+// Renderização Contínua de Tipografia com Curvas de Bézier Quadráticas e Cúbicas Subpixel
+
+module kernel::vector_font;
+
+import kernel::graphics_engine::*;
+
+pub struct Point2D {
+    pub x: f32,
+    pub y: f32,
+}
+
+pub struct VectorGlyphOutline {
+    pub char_code: u8,
+    pub point_count: usize,
+    pub advance_width: f32,
+}
+
+// Avalia ponto na curva de Bézier Quadrática: B(t) = (1-t)^2 * P0 + 2*(1-t)*t * P1 + t^2 * P2
+@system
+pub fn bezier_quadratic_eval(p0: &Point2D, p1: &Point2D, p2: &Point2D, t: f32) -> Point2D {
+    let inv_t = 1.0 - t;
+    let a = inv_t * inv_t;
+    let b = 2.0 * inv_t * t;
+    let c = t * t;
+
+    return Point2D {
+        x: a * p0.x + b * p1.x + c * p2.x,
+        y: a * p0.y + b * p1.y + c * p2.y,
+    };
+}
+
+// Rasteriza uma curva de Bézier vetorial suavizada diretamente no framebuffer
+@system
+pub fn vector_draw_bezier_segment(p0: &Point2D, p1: &Point2D, p2: &Point2D, color: u32, steps: u32) {
+    let total_steps = if steps > 4 { steps } else { 16 };
+    let mut prev = *p0;
+
+    for i in 1..(total_steps + 1) {
+        let t = (i as f32) / (total_steps as f32);
+        let curr = bezier_quadratic_eval(p0, p1, p2, t);
+
+        gfx_draw_line(
+            prev.x as i32, prev.y as i32,
+            curr.x as i32, curr.y as i32,
+            color, 240
+        );
+        prev = curr;
+    }
+}
+
+// Renderiza Glifo Vetorial Escalável (em qualquer tamanho, ex: 12px, 24px, 48px, 72px)
+@system
+pub fn vector_draw_scalable_glyph(x: u32, y: u32, glyph: u8, scale: f32, color: u32) {
+    let fx = x as f32;
+    let fy = y as f32;
+
+    // Primitivas vetoriais suaves
+    if glyph == b'B' {
+        // Haste vertical
+        gfx_draw_line(fx as i32, fy as i32, fx as i32, (fy + 32.0 * scale) as i32, color, 255);
+        
+        // Loop superior (Curva de Bézier)
+        let p0 = Point2D { x: fx, y: fy };
+        let p1 = Point2D { x: fx + 20.0 * scale, y: fy + 8.0 * scale };
+        let p2 = Point2D { x: fx, y: fy + 16.0 * scale };
+        vector_draw_bezier_segment(&p0, &p1, &p2, color, 12);
+
+        // Loop inferior (Curva de Bézier)
+        let q0 = Point2D { x: fx, y: fy + 16.0 * scale };
+        let q1 = Point2D { x: fx + 24.0 * scale, y: fy + 24.0 * scale };
+        let q2 = Point2D { x: fx, y: fy + 32.0 * scale };
+        vector_draw_bezier_segment(&q0, &q1, &q2, color, 12);
+    } else {
+        // Fallback tipográfico
+        gfx_draw_char(x, y, glyph, color, (scale as u32).max(1));
+    }
+}
