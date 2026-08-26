@@ -237,12 +237,12 @@ static int g_anim_frame = 0;
 
 static int g_win_ide_x = 24;
 static int g_win_ide_y = 54;
-static int g_win_ide_open = 1;
+static int g_win_ide_open = 0;
 static int g_win_ide_maximized = 0;
 
 static int g_win_qpu_x = 524;
 static int g_win_qpu_y = 54;
-static int g_win_qpu_open = 1;
+static int g_win_qpu_open = 0;
 static int g_win_qpu_maximized = 0;
 
 static int g_dragging_win = 0; // 0: nenhum, 1: IDE, 2: Q-HAL
@@ -408,35 +408,58 @@ static void draw_text_smooth(int x, int y, const char *str, unsigned int color) 
     }
 }
 
-// Renderizador de Fonte Display Grande (32px) para o Relógio Digital e Destaques
+// Forward Declarations de Primitivas Gráficas
+static void draw_rounded_rect_sdf(int x, int y, int w, int h, int radius, unsigned int bg_color, unsigned char bg_alpha, unsigned int border_color, unsigned char border_alpha, int border_width);
+static void draw_smooth_circle(int cx, int cy, int radius, unsigned int fill_color, unsigned int border_color);
+
+// Renderizador de Segmentos Vetoriais Suaves para Dígitos de Alta Definição (36px)
+static void draw_smooth_segment(int x, int y, int w, int h, int radius, unsigned int color) {
+    draw_rounded_rect_sdf(x, y, w, h, radius, color, 255, 0x00FFFFFF, 80, 1);
+}
+
+// Renderizador de Numerais Vetoriais de Alta Definição (Estilo Modern Clock Display)
 static void draw_display_clock_numeral(int x, int y, char c, unsigned int color) {
-    if ((unsigned char)c >= 128) return;
-    const uint8_t *glyph = bkn_font8x16[(unsigned char)c];
-
-    for (int row = 0; row < 16; row++) {
-        uint8_t bits = glyph[row];
-        for (int col = 0; col < 8; col++) {
-            int bit_on = (bits >> (7 - col)) & 1;
-            int px = x + col * 2;
-            int py = y + row * 2;
-
-            if (bit_on) {
-                // Desenha bloco 2x2 com bordas suavizadas
-                put_pixel_alpha(px, py, color, 255);
-                put_pixel_alpha(px + 1, py, color, 255);
-                put_pixel_alpha(px, py + 1, color, 255);
-                put_pixel_alpha(px + 1, py + 1, color, 255);
-            } else {
-                int left   = (col > 0) ? ((bits >> (8 - col)) & 1) : 0;
-                int right  = (col < 7) ? ((bits >> (6 - col)) & 1) : 0;
-                int up     = (row > 0) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (7 - col)) & 1) : 0;
-                int down   = (row < 15) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (7 - col)) & 1) : 0;
-                if (left + right + up + down >= 2) {
-                    put_pixel_alpha(px, py, color, 75);
-                }
-            }
-        }
+    if (c == ':') {
+        draw_smooth_circle(x + 5, y + 12, 3, 0x0000E5FF, 0x00FFFFFF);
+        draw_smooth_circle(x + 5, y + 26, 3, 0x0000E5FF, 0x00FFFFFF);
+        return;
     }
+
+    if (c < '0' || c > '9') return;
+    int digit = c - '0';
+
+    // Segmentos: Top, Top-Left, Top-Right, Mid, Bot-Left, Bot-Right, Bot
+    // 0: T, TL, TR, BL, BR, B
+    // 1: TR, BR
+    // 2: T, TR, M, BL, B
+    // 3: T, TR, M, BR, B
+    // 4: TL, TR, M, BR
+    // 5: T, TL, M, BR, B
+    // 6: T, TL, M, BL, BR, B
+    // 7: T, TR, BR
+    // 8: T, TL, TR, M, BL, BR, B
+    // 9: T, TL, TR, M, BR, B
+
+    int seg_t  = (digit != 1 && digit != 4);
+    int seg_tl = (digit == 0 || digit == 4 || digit == 5 || digit == 6 || digit == 8 || digit == 9);
+    int seg_tr = (digit != 5 && digit != 6);
+    int seg_m  = (digit != 0 && digit != 1 && digit != 7);
+    int seg_bl = (digit == 0 || digit == 2 || digit == 6 || digit == 8);
+    int seg_br = (digit != 2);
+    int seg_b  = (digit != 1 && digit != 4 && digit != 7);
+
+    int w = 22;
+    int h = 36;
+    int th = 4;
+    int r = 2;
+
+    if (seg_t)  draw_smooth_segment(x + 2, y, w - 4, th, r, color);
+    if (seg_tl) draw_smooth_segment(x, y + 2, th, (h / 2) - 2, r, color);
+    if (seg_tr) draw_smooth_segment(x + w - th, y + 2, th, (h / 2) - 2, r, color);
+    if (seg_m)  draw_smooth_segment(x + 2, y + (h / 2) - (th / 2), w - 4, th, r, color);
+    if (seg_bl) draw_smooth_segment(x, y + (h / 2), th, (h / 2) - 2, r, color);
+    if (seg_br) draw_smooth_segment(x + w - th, y + (h / 2), th, (h / 2) - 2, r, color);
+    if (seg_b)  draw_smooth_segment(x + 2, y + h - th, w - 4, th, r, color);
 }
 
 static void draw_display_clock_text(int x, int y, const char *str, unsigned int color) {
@@ -444,8 +467,8 @@ static void draw_display_clock_text(int x, int y, const char *str, unsigned int 
     while (*str) {
         char c = *str;
         draw_display_clock_numeral(cx, y, c, color);
-        if (c == ':') cx += 12;
-        else cx += 17;
+        if (c == ':') cx += 14;
+        else cx += 26;
         str++;
     }
 }
@@ -801,7 +824,7 @@ static void draw_quantum_wave_graph(int x, int y, int w, int h) {
     }
 }
 
-// Papel de Parede Nebula Bloom Orgânico
+// Papel de Parede Nebula Bloom Orgânico de Alta Definição
 static void init_wallpaper_cache() {
     if (!g_wallpaper_cache) return;
 
@@ -810,27 +833,31 @@ static void init_wallpaper_cache() {
         for (unsigned int x = 0; x < g_width; x++) {
             float nx = (float)x / (float)g_width;
 
-            float dx1 = nx - 0.80f;
-            float dy1 = ny - 0.20f;
-            float d1 = (dx1 * dx1 + dy1 * dy1) * 2.2f;
+            // Foco 1: Aurora Ciano / Azul Elétrico no Canto Superior Direito
+            float dx1 = nx - 0.75f;
+            float dy1 = ny - 0.25f;
+            float d1 = (dx1 * dx1 + dy1 * dy1) * 1.8f;
             float w1 = 1.0f - d1;
             if (w1 < 0.0f) w1 = 0.0f;
 
-            float dx2 = nx - 0.15f;
-            float dy2 = ny - 0.85f;
-            float d2 = (dx2 * dx2 + dy2 * dy2) * 2.6f;
+            // Foco 2: Orbe Magenta / Púrpura no Canto Inferior Esquerdo
+            float dx2 = nx - 0.20f;
+            float dy2 = ny - 0.75f;
+            float d2 = (dx2 * dx2 + dy2 * dy2) * 2.2f;
             float w2 = 1.0f - d2;
             if (w2 < 0.0f) w2 = 0.0f;
 
+            // Foco 3: Halo Central Sutil
             float dx3 = nx - 0.50f;
-            float dy3 = ny - 0.50f;
-            float d3 = (dx3 * dx3 + dy3 * dy3) * 3.5f;
+            float dy3 = ny - 0.45f;
+            float d3 = (dx3 * dx3 + dy3 * dy3) * 3.0f;
             float w3 = 1.0f - d3;
             if (w3 < 0.0f) w3 = 0.0f;
 
-            int r = (int)(6.0f + 32.0f * w1 + 18.0f * w3 + 8.0f * ny);
-            int g = (int)(9.0f + 28.0f * w1 + 52.0f * w2 + 12.0f * ny);
-            int b = (int)(18.0f + 105.0f * w1 + 70.0f * w2 + 45.0f * w3 + 40.0f * ny);
+            // Cores ricas e luminosas (Sapphire, Cyan, Indigo, Violet)
+            int r = (int)(12.0f + 35.0f * w1 + 110.0f * w2 + 25.0f * w3 + 10.0f * ny);
+            int g = (int)(18.0f + 95.0f * w1 + 30.0f * w2 + 40.0f * w3 + 15.0f * ny);
+            int b = (int)(45.0f + 160.0f * w1 + 140.0f * w2 + 80.0f * w3 + 55.0f * ny);
 
             if (r > 255) r = 255;
             if (g > 255) g = 255;
@@ -1104,23 +1131,23 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
     // 2.5. Área de Trabalho Limpa (At a Glance Smart Widget & Ícones de Desktop)
     if (!g_win_ide_open && !g_win_qpu_open) {
         // Smart Widget Central "At a Glance"
-        int aag_w = 460;
+        int aag_w = 480;
         int aag_x = (g_width - aag_w) / 2;
-        int aag_y = 105;
+        int aag_y = 110;
 
-        draw_googlebook_card(aag_x, aag_y, aag_w, 120, 24, 0x000B101E, 190, 0x001E293B);
+        draw_googlebook_card(aag_x, aag_y, aag_w, 124, 24, 0x000D1527, 210, 0x002A3B5C);
 
-        // Relógio Digital Display Grande (32px)
-        draw_display_clock_text(aag_x + 24, aag_y + 16, "10:24", 0x00FFFFFF);
+        // Relógio Digital Display Grande em Vetor Suave (36px)
+        draw_display_clock_text(aag_x + 24, aag_y + 16, "10:24", 0x0000E5FF);
 
         // Data e Clima com Tipografia Proporcional
-        draw_text_smooth(aag_x + 130, aag_y + 18, "Quinta-feira, 26 de Agosto", 0x00CBD5E1);
-        draw_text_smooth(aag_x + 130, aag_y + 36, "24 C Ensolarado | Sao Paulo", 0x0038BDF8);
+        draw_text_smooth(aag_x + 160, aag_y + 18, "Quinta-feira, 26 de Agosto", 0x00F1F5F9);
+        draw_text_smooth(aag_x + 160, aag_y + 36, "24 C Ensolarado | Sao Paulo", 0x0038BDF8);
 
         // Chip de Status Q-HAL Core
-        draw_rounded_rect_sdf(aag_x + 24, aag_y + 74, aag_w - 48, 30, 15, 0x001E1B4B, 230, 0x00C084FC, 180, 1);
-        draw_smooth_circle(aag_x + 38, aag_y + 89, 4, 0x0000E5FF, 0x00FFFFFF);
-        draw_text_smooth(aag_x + 50, aag_y + 81, "Q-HAL Core: Baken OS Kernel Online (Ring 0)", 0x0000E5FF);
+        draw_rounded_rect_sdf(aag_x + 24, aag_y + 76, aag_w - 48, 30, 15, 0x00131F37, 240, 0x0000E5FF, 140, 1);
+        draw_smooth_circle(aag_x + 38, aag_y + 91, 4, 0x0010B981, 0x004ADE80);
+        draw_text_smooth(aag_x + 50, aag_y + 83, "Baken OS Soberano • Microkernel Ring 0 Online", 0x00F8FAFC);
 
         // Grade de Ícones na Área de Trabalho (Desktop App Squircles)
         int desk_app_x[6] = { 180, 320, 460, 600, 740, 880 };
@@ -1142,7 +1169,7 @@ static void render_full_frame_to_backbuffer(const char* current_input) {
             while (*lp) { label_w += get_char_advance(*lp) + 1; lp++; }
             int label_x = cx - label_w / 2;
 
-            draw_text_smooth(label_x, cy + 34, desk_labels[i], is_near ? 0x00FFFFFF : 0x00CBD5E1);
+            draw_text_smooth(label_x, cy + 34, desk_labels[i], is_near ? 0x0000E5FF : 0x00CBD5E1);
         }
     }
 
