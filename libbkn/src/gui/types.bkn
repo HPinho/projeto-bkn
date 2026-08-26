@@ -1,0 +1,215 @@
+// BKN Standard Library - GUI Geometry & Math Types (libbkn::gui::types)
+// Estruturas fundamentais de geometria, cores, métricas e transformações 2D
+
+module libbkn::gui::types;
+
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Point {
+    pub fn new(x: f32, y: f32) -> Self {
+        return Point { x: x, y: y };
+    }
+
+    pub fn zero() -> Self {
+        return Point { x: 0.0, y: 0.0 };
+    }
+
+    pub fn distance_to(&self, other: Point) -> f32 {
+        let dx = self.x - other.x;
+        let dy = self.y - other.y;
+        return (dx * dx + dy * dy).sqrt();
+    }
+
+    pub fn lerp(&self, target: Point, t: f32) -> Point {
+        return Point {
+            x: self.x + (target.x - self.x) * t,
+            y: self.y + (target.y - self.y) * t,
+        };
+    }
+}
+
+pub struct Size {
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Size {
+    pub fn new(width: f32, height: f32) -> Self {
+        return Size { width: width, height: height };
+    }
+
+    pub fn zero() -> Self {
+        return Size { width: 0.0, height: 0.0 };
+    }
+
+    pub fn is_empty(&self) -> bool {
+        return self.width <= 0.0 || self.height <= 0.0;
+    }
+}
+
+pub struct Rect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Rect {
+    pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        return Rect { x: x, y: y, width: width, height: height };
+    }
+
+    pub fn from_origin_size(origin: Point, size: Size) -> Self {
+        return Rect {
+            x: origin.x,
+            y: origin.y,
+            width: size.width,
+            height: size.height,
+        };
+    }
+
+    pub fn contains(&self, p: Point) -> bool {
+        return p.x >= self.x && p.x <= (self.x + self.width) &&
+               p.y >= self.y && p.y <= (self.y + self.height);
+    }
+
+    pub fn intersects(&self, other: Rect) -> bool {
+        return self.x < (other.x + other.width) && (self.x + self.width) > other.x &&
+               self.y < (other.y + other.height) && (self.y + self.height) > other.y;
+    }
+
+    pub fn deflate(&self, thickness: Thickness) -> Rect {
+        return Rect {
+            x: self.x + thickness.left,
+            y: self.y + thickness.top,
+            width: (self.width - thickness.left - thickness.right).max(0.0),
+            height: (self.height - thickness.top - thickness.bottom).max(0.0),
+        };
+    }
+
+    pub fn inflate(&self, thickness: Thickness) -> Rect {
+        return Rect {
+            x: self.x - thickness.left,
+            y: self.y - thickness.top,
+            width: self.width + thickness.left + thickness.right,
+            height: self.height + thickness.top + thickness.bottom,
+        };
+    }
+}
+
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl Color {
+    pub fn from_rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        return Color { r: r, g: g, b: b, a: a };
+    }
+
+    pub fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        return Color { r: r, g: g, b: b, a: 255 };
+    }
+
+    pub fn from_hex(hex: u32) -> Self {
+        let r = ((hex >> 16) & 0xFF) as u8;
+        let g = ((hex >> 8) & 0xFF) as u8;
+        let b = (hex & 0xFF) as u8;
+        let a = ((hex >> 24) & 0xFF) as u8;
+        let alpha = if a == 0 { 255 } else { a };
+        return Color { r: r, g: g, b: b, a: alpha };
+    }
+
+    pub fn to_u32(&self) -> u32 {
+        return ((self.a as u32) << 24) |
+               ((self.r as u32) << 16) |
+               ((self.g as u32) << 8) |
+               (self.b as u32);
+    }
+
+    pub fn with_alpha(&self, alpha: u8) -> Color {
+        return Color { r: self.r, g: self.g, b: self.b, a: alpha };
+    }
+
+    pub fn lerp(&self, other: Color, t: f32) -> Color {
+        let t_clamped = t.clamp(0.0, 1.0);
+        let r = (self.r as f32 + (other.r as f32 - self.r as f32) * t_clamped) as u8;
+        let g = (self.g as f32 + (other.g as f32 - self.g as f32) * t_clamped) as u8;
+        let b = (self.b as f32 + (other.b as f32 - self.b as f32) * t_clamped) as u8;
+        let a = (self.a as f32 + (other.a as f32 - self.a as f32) * t_clamped) as u8;
+        return Color { r: r, g: g, b: b, a: a };
+    }
+
+    // Cores Padrão Aero-Quantum
+    pub fn cyan() -> Color { return Color::from_hex(0x00E5FF); }
+    pub fn neon_indigo() -> Color { return Color::from_hex(0x6366F1); }
+    pub fn dark_navy() -> Color { return Color::from_hex(0x060913); }
+    pub fn glass_surface() -> Color { return Color::from_rgba(15, 23, 42, 220); }
+    pub fn white() -> Color { return Color::from_rgba(255, 255, 255, 255); }
+    pub fn transparent() -> Color { return Color::from_rgba(0, 0, 0, 0); }
+}
+
+pub struct Thickness {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+impl Thickness {
+    pub fn all(value: f32) -> Self {
+        return Thickness { left: value, top: value, right: value, bottom: value };
+    }
+
+    pub fn symmetric(horizontal: f32, vertical: f32) -> Self {
+        return Thickness { left: horizontal, top: vertical, right: horizontal, bottom: vertical };
+    }
+
+    pub fn new(left: f32, top: f32, right: f32, bottom: f32) -> Self {
+        return Thickness { left: left, top: top, right: right, bottom: bottom };
+    }
+}
+
+pub struct CornerRadius {
+    pub top_left: f32,
+    pub top_right: f32,
+    pub bottom_right: f32,
+    pub bottom_left: f32,
+}
+
+impl CornerRadius {
+    pub fn all(radius: f32) -> Self {
+        return CornerRadius {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+    }
+
+    pub fn new(tl: f32, tr: f32, br: f32, bl: f32) -> Self {
+        return CornerRadius {
+            top_left: tl,
+            top_right: tr,
+            bottom_right: br,
+            bottom_left: bl,
+        };
+    }
+}
+
+pub enum Orientation {
+    Horizontal,
+    Vertical,
+}
+
+pub enum Alignment {
+    Start,
+    Center,
+    End,
+    Stretch,
+}

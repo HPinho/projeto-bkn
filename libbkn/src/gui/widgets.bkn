@@ -1,0 +1,257 @@
+// BKN Standard Library - Modern Widget Tree & Standard Controls (libbkn::gui::widgets)
+// Button com estados reativos, TextBox, Label, Slider, ProgressBar, Window e Dock
+
+module libbkn::gui::widgets;
+
+import libbkn::gui::types::*;
+import libbkn::gui::materials::*;
+import libbkn::gui::font::*;
+import libbkn::gui::canvas::*;
+import libbkn::gui::events::*;
+import libbkn::gui::theme::*;
+
+pub enum WidgetState {
+    Normal,
+    Hovered,
+    Pressed,
+    Focused,
+    Disabled,
+}
+
+pub struct Button {
+    pub id: u32,
+    pub bounds: Rect,
+    pub text: [u8; 32],
+    pub text_len: usize,
+    pub is_accent: bool,
+    pub corner_radius: f32,
+    pub state: WidgetState,
+}
+
+impl Button {
+    pub fn new(id: u32, text_str: str, is_accent: bool) -> Self {
+        return Button {
+            id: id,
+            bounds: Rect::new(0.0, 0.0, 120.0, 36.0),
+            text: [0; 32],
+            text_len: 0,
+            is_accent: is_accent,
+            corner_radius: 8.0,
+            state: WidgetState::Normal,
+        };
+    }
+
+    pub fn paint(&self, canvas: &mut Canvas, theme: &Theme) {
+        let (bg_color, border_color) = if self.is_accent {
+            match self.state {
+                WidgetState::Normal => (theme.colors.accent, theme.colors.border_highlight),
+                WidgetState::Hovered => (theme.colors.accent_hover, theme.colors.glow),
+                WidgetState::Pressed => (theme.colors.accent.lerp(Color::from_rgb(0,0,0), 0.2), theme.colors.accent),
+                _ => (theme.colors.accent, theme.colors.border),
+            }
+        } else {
+            match self.state {
+                WidgetState::Normal => (theme.colors.surface, theme.colors.border),
+                WidgetState::Hovered => (theme.colors.surface_hover, theme.colors.border_highlight),
+                WidgetState::Pressed => (theme.colors.surface_pressed, theme.colors.border_highlight),
+                _ => (theme.colors.surface, theme.colors.border),
+            }
+        };
+
+        // 1. Sombra ao passar o mouse ou acento ativo
+        if self.is_accent || self.state == WidgetState::Hovered {
+            let glow = DropShadow::quantum_glow(if self.is_accent { theme.colors.accent } else { theme.colors.border_highlight });
+            canvas.draw_drop_shadow(self.bounds, glow);
+        }
+
+        // 2. Retângulo arredondado com anti-aliasing via SDF
+        canvas.draw_rounded_rect_sdf(
+            self.bounds,
+            CornerRadius::all(self.corner_radius),
+            bg_color,
+            border_color,
+            1.0
+        );
+    }
+
+    pub fn handle_mouse(&mut self, event: &MouseEvent) -> bool {
+        let is_inside = self.bounds.contains(event.position);
+        match event.event_type {
+            MouseEventType::Move => {
+                if is_inside {
+                    self.state = WidgetState::Hovered;
+                } else if self.state == WidgetState::Hovered {
+                    self.state = WidgetState::Normal;
+                }
+            },
+            MouseEventType::Down => {
+                if is_inside && event.button == MouseButton::Left {
+                    self.state = WidgetState::Pressed;
+                    return true; // Click acionado
+                }
+            },
+            MouseEventType::Up => {
+                if self.state == WidgetState::Pressed {
+                    self.state = if is_inside { WidgetState::Hovered } else { WidgetState::Normal };
+                }
+            },
+            _ => {},
+        }
+        return false;
+    }
+}
+
+pub struct TextBox {
+    pub id: u32,
+    pub bounds: Rect,
+    pub placeholder: [u8; 32],
+    pub buffer: [u8; 128],
+    pub cursor_pos: usize,
+    pub is_focused: bool,
+}
+
+impl TextBox {
+    pub fn new(id: u32, x: f32, y: f32, w: f32, h: f32) -> Self {
+        return TextBox {
+            id: id,
+            bounds: Rect::new(x, y, w, h),
+            placeholder: [0; 32],
+            buffer: [0; 128],
+            cursor_pos: 0,
+            is_focused: false,
+        };
+    }
+
+    pub fn paint(&self, canvas: &mut Canvas, theme: &Theme) {
+        let border_col = if self.is_focused { theme.colors.accent } else { theme.colors.border };
+        let bg_col = theme.colors.surface.lerp(Color::from_rgb(0,0,0), 0.3);
+
+        // Fundo e Borda
+        canvas.draw_rounded_rect_sdf(
+            self.bounds,
+            CornerRadius::all(6.0),
+            bg_col,
+            border_col,
+            if self.is_focused { 1.5 } else { 1.0 }
+        );
+
+        // Se focado, desenha cursor piscante
+        if self.is_focused {
+            let cursor_x = (self.bounds.x + 10.0 + (self.cursor_pos as f32) * 8.0) as u32;
+            let cursor_y = (self.bounds.y + 6.0) as u32;
+            let cursor_h = (self.bounds.height - 12.0) as u32;
+            for py in cursor_y..(cursor_y + cursor_h) {
+                canvas.blend_pixel(cursor_x, py, theme.colors.accent);
+            }
+        }
+    }
+}
+
+pub struct ProgressBar {
+    pub bounds: Rect,
+    pub value: f32, // 0.0 a 100.0
+    pub max_value: f32,
+    pub color: Color,
+}
+
+impl ProgressBar {
+    pub fn new(bounds: Rect, value: f32) -> Self {
+        return ProgressBar {
+            bounds: bounds,
+            value: value,
+            max_value: 100.0,
+            color: Color::cyan(),
+        };
+    }
+
+    pub fn paint(&self, canvas: &mut Canvas, theme: &Theme) {
+        // Trilho de fundo
+        canvas.draw_rounded_rect_sdf(
+            self.bounds,
+            CornerRadius::all(self.bounds.height * 0.5),
+            theme.colors.surface,
+            theme.colors.border,
+            1.0
+        );
+
+        // Barra de progresso preenchida com brilho ciano
+        let ratio = (self.value / self.max_value).clamp(0.0, 1.0);
+        let filled_w = (self.bounds.width * ratio).max(self.bounds.height);
+        let filled_rect = Rect::new(self.bounds.x, self.bounds.y, filled_w, self.bounds.height);
+
+        canvas.draw_rounded_rect_sdf(
+            filled_rect,
+            CornerRadius::all(self.bounds.height * 0.5),
+            self.color,
+            Color::from_rgba(255,255,255,180),
+            1.0
+        );
+    }
+}
+
+pub struct ModernWindow {
+    pub id: u32,
+    pub title: [u8; 32],
+    pub bounds: Rect,
+    pub is_focused: bool,
+    pub is_minimized: bool,
+    pub is_maximized: bool,
+    pub is_dragging: bool,
+    pub acrylic: AcrylicMaterial,
+}
+
+impl ModernWindow {
+    pub fn new(id: u32, title_str: str, bounds: Rect) -> Self {
+        return ModernWindow {
+            id: id,
+            title: [0; 32],
+            bounds: bounds,
+            is_focused: true,
+            is_minimized: false,
+            is_maximized: false,
+            is_dragging: false,
+            acrylic: AcrylicMaterial::aero_quantum(),
+        };
+    }
+
+    pub fn paint(&self, canvas: &mut Canvas, theme: &Theme) {
+        if self.is_minimized { return; }
+
+        // 1. Sombra Volumétrica Projetada
+        let shadow = if self.is_focused {
+            DropShadow::soft_window()
+        } else {
+            DropShadow {
+                offset_x: 0.0,
+                offset_y: 4.0,
+                blur_radius: 12.0,
+                spread: 0.0,
+                color: Color::from_rgba(0,0,0,90),
+            }
+        };
+        canvas.draw_drop_shadow(self.bounds, shadow);
+
+        // 2. Vidro Fosco Acrílico da Janela
+        canvas.draw_acrylic_panel(self.bounds, CornerRadius::all(12.0), &self.acrylic);
+
+        // 3. Barra de Título Glassmorphic Superior (Altura: 36px)
+        let title_bar_rect = Rect::new(self.bounds.x, self.bounds.y, self.bounds.width, 36.0);
+        canvas.draw_rounded_rect_sdf(
+            title_bar_rect,
+            CornerRadius::new(12.0, 12.0, 0.0, 0.0),
+            Color::from_rgba(30, 27, 75, 180),
+            theme.colors.border_highlight,
+            1.0
+        );
+
+        // 4. Botões de Controle da Janela (Fechar, Minimizar, Maximizar estilo macOS/Aero)
+        let cx = self.bounds.x + 18.0;
+        let cy = self.bounds.y + 18.0;
+        // Fechar (Vermelho Coral)
+        canvas.draw_rounded_rect_sdf(Rect::new(cx, cy - 6.0, 12.0, 12.0), CornerRadius::all(6.0), Color::from_hex(0xFF5F56), Color::transparent(), 0.0);
+        // Minimizar (Amarelo Âmbar)
+        canvas.draw_rounded_rect_sdf(Rect::new(cx + 18.0, cy - 6.0, 12.0, 12.0), CornerRadius::all(6.0), Color::from_hex(0xFFBD2E), Color::transparent(), 0.0);
+        // Maximizar (Verde Esmeralda)
+        canvas.draw_rounded_rect_sdf(Rect::new(cx + 36.0, cy - 6.0, 12.0, 12.0), CornerRadius::all(6.0), Color::from_hex(0x27C93F), Color::transparent(), 0.0);
+    }
+}

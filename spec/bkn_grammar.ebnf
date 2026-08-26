@@ -1,0 +1,136 @@
+# Especificação Formal da Linguagem BKN (Baken Language)
+Versão: 1.0.0-PROD
+Arquitetura: Híbrida Clássica-Quântica Nativa
+
+---
+
+## 1. Gramática EBNF Formal
+
+```ebnf
+(* ========================================================================= *)
+(*                           GRAMÁTICA FORMAL BKN                            *)
+(* ========================================================================= *)
+
+Program             ::= { TopLevelDeclaration } ;
+
+TopLevelDeclaration ::= ModuleDecl
+                      | ImportDecl
+                      | ConstDecl
+                      | StructDecl
+                      | ClassDecl
+                      | InterfaceDecl
+                      | TraitDecl
+                      | ImplBlock
+                      | FunctionDecl
+                      | QuantumCircuitDecl ;
+
+(* Classes e Interfaces OOP *)
+ClassDecl           ::= [ Visibility ] "class" Identifier [ "extends" Identifier ] [ "implements" IdentifierList ] "{" { ClassMember } "}" ;
+ClassMember         ::= [ Visibility ] [ "mut" ] Identifier ":" Type ";"
+                      | [ Visibility ] [ "override" ] "fn" Identifier "(" [ ParameterList ] ")" [ "->" Type ] Block ;
+InterfaceDecl       ::= [ Visibility ] "interface" Identifier "{" { MethodSignature ";" } "}" ;
+MethodSignature     ::= "fn" Identifier "(" [ ParameterList ] ")" [ "->" Type ] ;
+
+(* Módulos e Importações *)
+ModuleDecl          ::= "module" Identifier ";" ;
+ImportDecl          ::= "import" Path [ "as" Identifier ] ";" ;
+Path                ::= Identifier { "::" Identifier } ;
+
+(* Declaração de Tipos e Modificadores *)
+Visibility          ::= "pub" | /* privado */ ;
+Mutability          ::= "mut" | "const" ;
+
+Type                ::= PrimitiveType
+                      | CustomType
+                      | PointerType
+                      | ReferenceType
+                      | QuantumType
+                      | ArrayType
+                      | TupleType
+                      | FunctionType ;
+
+PrimitiveType       ::= "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                      | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                      | "f32" | "f64"
+                      | "bool" | "char" | "void" ;
+
+PointerType         ::= "*" Mutability Type ;
+ReferenceType       ::= "&" [ "mut" ] Type ;
+QuantumType         ::= "qubit" | "qreg" "[" Expression "]" ;
+ArrayType           ::= "[" Type ";" Expression "]" ;
+TupleType           ::= "(" Type { "," Type } ")" ;
+CustomType          ::= Identifier [ "<" TypeList ">" ] ;
+TypeList            ::= Type { "," Type } ;
+
+(* Funções Clássicas e de Sistema *)
+FunctionDecl        ::= [ FunctionAttribute ] Visibility "fn" Identifier [ "<" GenericParams ">" ] 
+                        "(" [ ParameterList ] ")" [ "->" Type ] Block ;
+
+FunctionAttribute   ::= "@system" | "@quantum" | "@inline" | "@naked" | "@export" ;
+GenericParams       ::= Identifier { "," Identifier } ;
+ParameterList       ::= Parameter { "," Parameter } ;
+Parameter           ::= [ Mutability | "&" | "&mut" ] Identifier ":" Type ;
+
+(* Estruturas e Traits *)
+StructDecl          ::= Visibility "struct" Identifier [ "<" GenericParams ">" ] "{" { StructField } "}" ;
+StructField         ::= [ Visibility ] Identifier ":" Type ";" ;
+
+TraitDecl           ::= Visibility "trait" Identifier [ "<" GenericParams ">" ] "{" { TraitMethod } "}" ;
+TraitMethod         ::= Visibility "fn" Identifier "(" [ ParameterList ] ")" [ "->" Type ] ";" ;
+
+ImplBlock           ::= "impl" [ "<" GenericParams ">" ] [ Identifier "for" ] Type "{" { FunctionDecl } "}" ;
+
+(* Declaração de Circuitos Quânticos *)
+QuantumCircuitDecl  ::= Visibility "quantum" Identifier "(" [ ParameterList ] ")" [ "->" Type ] "{" { QuantumStatement } "}" ;
+QuantumStatement    ::= GateOp | MeasureOp | QuantumIf | BarrierOp ;
+
+GateOp              ::= SingleQubitGate | TwoQubitGate | MultiQubitGate | ParametricGate ;
+SingleQubitGate     ::= ("H" | "X" | "Y" | "Z" | "S" | "T") "(" Identifier [ "[" Expression "]" ] ")" ";" ;
+TwoQubitGate        ::= ("CNOT" | "CZ" | "SWAP") "(" Expression "," Expression ")" ";" ;
+MultiQubitGate      ::= ("TOFFOLI" | "CSWAP") "(" Expression "," Expression "," Expression ")" ";" ;
+ParametricGate      ::= ("RX" | "RY" | "RZ" | "PHASE") "(" Expression "," Expression ")" ";" ;
+MeasureOp           ::= "measure" "(" Expression ")" "->" Identifier ";" ;
+BarrierOp           ::= "barrier" "(" [ ExpressionList ] ")" ";" ;
+QuantumIf           ::= "if" "(" Identifier ")" "{" { QuantumStatement } "}" ;
+
+(* Blocos e Instruções *)
+Block               ::= "{" { Statement } "}" ;
+Statement           ::= LetStatement
+                      | AssignmentStatement
+                      | IfStatement
+                      | WhileStatement
+                      | ForStatement
+                      | ReturnStatement
+                      | InlineAsm
+                      | QuantumBlock
+                      | ExpressionStatement ;
+
+LetStatement        ::= "let" [ Mutability ] Identifier [ ":" Type ] "=" Expression ";" ;
+AssignmentStatement ::= LValue "=" Expression ";" ;
+LValue              ::= Identifier | LValue "." Identifier | LValue "[" Expression "]" | "*" LValue ;
+
+IfStatement         ::= "if" "(" Expression ")" Block [ "else" ( IfStatement | Block ) ] ;
+WhileStatement      ::= "while" "(" Expression ")" Block ;
+ForStatement        ::= "for" "(" Identifier "in" Expression ")" Block ;
+ReturnStatement     ::= "return" [ Expression ] ";" ;
+
+InlineAsm           ::= "asm!" "(" StringLiteral { "," AsmOperand } ")" ";" ;
+AsmOperand          ::= ("in" | "out" | "inout" | "clobber") "(" ( Identifier | StringLiteral ) ")" ;
+
+QuantumBlock        ::= "quantum" "{" { QuantumStatement } "}" ;
+
+ExpressionStatement ::= Expression ";" ;
+Expression          ::= LogicalOrExpr ;
+LogicalOrExpr       ::= LogicalAndExpr { "||" LogicalAndExpr } ;
+LogicalAndExpr      ::= BitwiseOrExpr { "&&" BitwiseOrExpr } ;
+BitwiseOrExpr       ::= BitwiseXorExpr { "|" BitwiseXorExpr } ;
+BitwiseXorExpr      ::= BitwiseAndExpr { "^" BitwiseAndExpr } ;
+BitwiseAndExpr      ::= EqualityExpr { "&" EqualityExpr } ;
+EqualityExpr        ::= RelationalExpr { ("==" | "!=") RelationalExpr } ;
+RelationalExpr      ::= ShiftExpr { ("<" | "<=" | ">" | ">=") ShiftExpr } ;
+ShiftExpr           ::= AdditiveExpr { ("<<" | ">>") AdditiveExpr } ;
+AdditiveExpr        ::= MultiplicativeExpr { ("+" | "-") MultiplicativeExpr } ;
+MultiplicativeExpr  ::= UnaryExpr { ("*" | "/" | "%") UnaryExpr } ;
+UnaryExpr           ::= ("!" | "-" | "~" | "*" | "&" | "&mut") UnaryExpr | PrimaryExpr ;
+PrimaryExpr         ::= Literal | Identifier | "(" Expression ")" | ArrayAccess | FieldAccess | FunctionCall ;
+```

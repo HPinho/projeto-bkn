@@ -1,0 +1,191 @@
+// Baken OS - Driver de Mouse e Teclado em BKN Puro (@system)
+// Decodificacao de Pacotes PS/2 & USB HID, Scancodes para ASCII e Buffer de Eventos
+
+module kernel::mouse;
+
+import kernel::window_manager::*;
+import kernel::peripherals::*;
+
+pub struct MouseState {
+    pub x: i32,
+    pub y: i32,
+    pub left_button: bool,
+    pub right_button: bool,
+    pub middle_button: bool,
+    pub scroll_delta: i16,
+    pub is_dragging: bool,
+    pub dragged_window_id: u32,
+}
+
+pub struct KeyboardState {
+    pub shift_down: bool,
+    pub ctrl_down: bool,
+    pub alt_down: bool,
+    pub caps_lock: bool,
+}
+
+static mut MOUSE: MouseState = MouseState {
+    x: 640,
+    y: 360,
+    left_button: false,
+    right_button: false,
+    middle_button: false,
+    scroll_delta: 0,
+    is_dragging: false,
+    dragged_window_id: 0,
+};
+
+static mut KEYBOARD: KeyboardState = KeyboardState {
+    shift_down: false,
+    ctrl_down: false,
+    alt_down: false,
+    caps_lock: false,
+};
+
+// Tabela de Scancode Set 1 para ASCII Normal
+static SCANCODE_MAP_NORMAL: [u8; 128] = [
+    0,   27,  b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', b'-', b'=', 8,   // 0x00 - 0x0E
+    9,   b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i', b'o', b'p', b'[', b']', b'\n', 0, // 0x0F - 0x1D
+    b'a', b's', b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';', b'\'', b'`', 0, b'\\',     // 0x1E - 0x2B
+    b'z', b'x', b'c', b'v', b'b', b'n', b'm', b',', b'.', b'/', 0,   b'*', 0,   b' ', 0,   // 0x2C - 0x3A
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+// Tabela de Scancode com SHIFT pressionado
+static SCANCODE_MAP_SHIFT: [u8; 128] = [
+    0,   27,  b'!', b'@', b'#', b'$', b'%', b'^', b'&', b'*', b'(', b')', b'_', b'+', 8,
+    9,   b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I', b'O', b'P', b'{', b'}', b'\n', 0,
+    b'A', b'S', b'D', b'F', b'G', b'H', b'J', b'K', b'L', b':', b'"', b'~', 0, b'|',
+    b'Z', b'X', b'C', b'V', b'B', b'N', b'M', b'<', b'>', b'?', 0,   b'*', 0,   b' ', 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+@system
+pub fn mouse_init(initial_x: i32, initial_y: i32) {
+    unsafe {
+        MOUSE.x = initial_x;
+        MOUSE.y = initial_y;
+        MOUSE.left_button = false;
+        MOUSE.right_button = false;
+        MOUSE.middle_button = false;
+        MOUSE.scroll_delta = 0;
+        MOUSE.is_dragging = false;
+        MOUSE.dragged_window_id = 0;
+    }
+}
+
+// Processa pacote padrao de 3/4 bytes de mouse PS2 / USB HID
+@system
+pub fn mouse_process_packet(b0: u8, b1: u8, b2: u8, b3: u8, max_w: i32, max_h: i32) {
+    unsafe {
+        let left_btn = (b0 & 0x01) != 0;
+        let right_btn = (b0 & 0x02) != 0;
+        let middle_btn = (b0 & 0x04) != 0;
+
+        // Sinal de X e Y extendidos para i32
+        let mut dx: i32 = b1 as i32;
+        if (b0 & 0x10) != 0 { dx |= -256; }
+
+        let mut dy: i32 = b2 as i32;
+        if (b0 & 0x20) != 0 { dy |= -256; }
+        dy = -dy; // Inverte eixo Y para coordenadas de tela padrão
+
+        // Atualiza posicao absoluta
+        MOUSE.x += dx;
+        MOUSE.y += dy;
+
+        if MOUSE.x < 0 { MOUSE.x = 0; }
+        if MOUSE.x >= max_w { MOUSE.x = max_w - 1; }
+        if MOUSE.y < 0 { MOUSE.y = 0; }
+        if MOUSE.y >= max_h { MOUSE.y = max_h - 1; }
+
+        // Detecta transicoes de clique
+        if left_btn != MOUSE.left_button {
+            MOUSE.left_button = left_btn;
+            if left_btn {
+                wm_handle_mouse_down(MOUSE.x, MOUSE.y);
+            } else {
+                wm_handle_mouse_up();
+            }
+        }
+
+        if right_btn != MOUSE.right_button {
+            MOUSE.right_button = right_btn;
+        }
+
+        MOUSE.middle_button = middle_btn;
+        MOUSE.scroll_delta = (b3 as i8) as i16;
+
+        // Propaga movimento ao gerenciador de janelas
+        wm_handle_mouse_move(MOUSE.x, MOUSE.y);
+
+        // Envia evento unificado para a fila de perifericos
+        let ev = UnifiedInputEvent {
+            device_kind: DeviceKind::MouseRel,
+            device_id: 1,
+            buttons: (if left_btn { 1 } else { 0 }) | (if right_btn { 2 } else { 0 }) | (if middle_btn { 4 } else { 0 }),
+            x: MOUSE.x,
+            y: MOUSE.y,
+            dx: dx,
+            dy: dy,
+            scroll: MOUSE.scroll_delta,
+            keycode: 0,
+            timestamp_ns: 0,
+        };
+        peripherals_push_event(ev);
+    }
+}
+
+// Processa Scancode recebido da porta 0x60 (Teclado)
+@system
+pub fn keyboard_process_scancode(scancode: u8) -> u8 {
+    unsafe {
+        // Checa Break codes (liberacao de tecla: bit 7 ativo)
+        if (scancode & 0x80) != 0 {
+            let key = scancode & 0x7F;
+            if key == 0x2A || key == 0x36 { KEYBOARD.shift_down = false; }
+            if key == 0x1D { KEYBOARD.ctrl_down = false; }
+            if key == 0x38 { KEYBOARD.alt_down = false; }
+            return 0;
+        }
+
+        // Make codes (tecla pressionada)
+        if scancode == 0x2A || scancode == 0x36 { KEYBOARD.shift_down = true; return 0; }
+        if scancode == 0x1D { KEYBOARD.ctrl_down = true; return 0; }
+        if scancode == 0x38 { KEYBOARD.alt_down = true; return 0; }
+        if scancode == 0x3A { KEYBOARD.caps_lock = !KEYBOARD.caps_lock; return 0; }
+
+        let ascii = if KEYBOARD.shift_down || KEYBOARD.caps_lock {
+            SCANCODE_MAP_SHIFT[scancode as usize]
+        } else {
+            SCANCODE_MAP_NORMAL[scancode as usize]
+        };
+
+        if ascii > 0 {
+            let ev = UnifiedInputEvent {
+                device_kind: DeviceKind::Keyboard,
+                device_id: 2,
+                buttons: 0,
+                x: 0, y: 0, dx: 0, dy: 0, scroll: 0,
+                keycode: ascii as u16,
+                timestamp_ns: 0,
+            };
+            peripherals_push_event(ev);
+        }
+
+        return ascii;
+    }
+}
+
+@system
+pub fn mouse_get_state() -> MouseState {
+    unsafe {
+        return MOUSE;
+    }
+}

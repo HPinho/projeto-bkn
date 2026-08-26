@@ -1,0 +1,82 @@
+// Baken OS - Motor de Tipografia com Anti-Aliasing e Layout de Texto em BKN Puro (@system)
+// Renderizacao de Glifos, Medicao de Strings, Quebra de Linha e Subpixel Layout
+
+module kernel::baken_font_engine;
+
+import kernel::graphics_engine::*;
+
+pub struct TextBounds {
+    pub width: u32,
+    pub height: u32,
+    pub line_count: u32,
+}
+
+pub struct FontStyle {
+    pub size_scale: u32,
+    pub color: u32,
+    pub alpha: u8,
+    pub letter_spacing: i32,
+    pub line_height: u32,
+}
+
+@system
+pub fn font_measure_text(text_ptr: *const u8, scale: u32) -> TextBounds {
+    let char_w = 8 * scale + scale;
+    let char_h = 16 * scale;
+    let mut max_w: u32 = 0;
+    let mut cur_w: u32 = 0;
+    let mut lines: u32 = 1;
+    let mut i: usize = 0;
+
+    loop {
+        let ch = unsafe { *text_ptr.add(i) };
+        if ch == 0 || i > 1024 { break; }
+
+        if ch == b'\n' {
+            lines += 1;
+            if cur_w > max_w { max_w = cur_w; }
+            cur_w = 0;
+        } else {
+            cur_w += char_w;
+        }
+        i += 1;
+    }
+
+    if cur_w > max_w { max_w = cur_w; }
+
+    return TextBounds {
+        width: max_w,
+        height: lines * (char_h + 4 * scale),
+        line_count: lines,
+    };
+}
+
+@system
+pub fn font_draw_wrapped_text(
+    x: u32, y: u32, max_w: u32,
+    text_ptr: *const u8,
+    style: &FontStyle
+) -> u32 {
+    let char_w = (8 * style.size_scale + style.size_scale) as i32 + style.letter_spacing;
+    let line_h = if style.line_height > 0 { style.line_height } else { 16 * style.size_scale + 4 * style.size_scale };
+
+    let mut cx = x;
+    let mut cy = y;
+    let mut i: usize = 0;
+
+    loop {
+        let ch = unsafe { *text_ptr.add(i) };
+        if ch == 0 || i > 2048 { break; }
+
+        if ch == b'\n' || (cx + (char_w as u32) > x + max_w && ch == b' ') {
+            cx = x;
+            cy += line_h;
+        } else {
+            gfx_draw_char_alpha(cx, cy, ch, style.color, style.size_scale, style.alpha);
+            cx += char_w as u32;
+        }
+        i += 1;
+    }
+
+    return cy + line_h - y; // Altura total consumida
+}

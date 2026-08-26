@@ -1,0 +1,93 @@
+// BKN Standard Library - Event Routing & Input Dispatcher (libbkn::gui::events)
+// Gerenciamento central de eventos de mouse, teclado, foco e propagação em árvore
+
+module libbkn::gui::events;
+
+import libbkn::gui::types::*;
+
+pub enum MouseButton {
+    None = 0,
+    Left = 1,
+    Right = 2,
+    Middle = 3,
+}
+
+pub enum MouseEventType {
+    Down,
+    Up,
+    Move,
+    Wheel,
+    Enter,
+    Leave,
+}
+
+pub struct MouseEvent {
+    pub event_type: MouseEventType,
+    pub button: MouseButton,
+    pub position: Point,
+    pub delta_x: f32,
+    pub delta_y: f32,
+}
+
+impl MouseEvent {
+    pub fn move_to(pos: Point) -> Self {
+        return MouseEvent {
+            event_type: MouseEventType::Move,
+            button: MouseButton::None,
+            position: pos,
+            delta_x: 0.0,
+            delta_y: 0.0,
+        };
+    }
+
+    pub fn click(pos: Point, button: MouseButton) -> Self {
+        return MouseEvent {
+            event_type: MouseEventType::Down,
+            button: button,
+            position: pos,
+            delta_x: 0.0,
+            delta_y: 0.0,
+        };
+    }
+}
+
+pub enum KeyEventType {
+    Down,
+    Up,
+    Char,
+}
+
+pub struct KeyEvent {
+    pub event_type: KeyEventType,
+    pub key_code: u32,
+    pub char_code: u32,
+    pub shift_down: bool,
+    pub ctrl_down: bool,
+    pub alt_down: bool,
+}
+
+pub struct FocusManager {
+    pub active_focused_id: u32,
+    pub hovered_widget_id: u32,
+}
+
+impl FocusManager {
+    pub fn new() -> Self {
+        return FocusManager {
+            active_focused_id: 0,
+            hovered_widget_id: 0,
+        };
+    }
+
+    pub fn request_focus(&mut self, widget_id: u32) {
+        self.active_focused_id = widget_id;
+    }
+
+    pub fn clear_focus(&mut self) {
+        self.active_focused_id = 0;
+    }
+
+    pub fn is_focused(&self, widget_id: u32) -> bool {
+        return self.active_focused_id == widget_id && widget_id != 0;
+    }
+}

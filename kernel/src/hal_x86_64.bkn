@@ -1,0 +1,66 @@
+// Baken OS - Camada de Abstração de Hardware (HAL) x86_64 em BKN (@system)
+
+module kernel::hal_x86_64;
+
+pub struct GdtDescriptor {
+    pub limit: u16,
+    pub base: u64,
+}
+
+pub struct IdtEntry {
+    pub offset_low: u16,
+    pub selector: u16,
+    pub ist: u8,
+    pub type_attr: u8,
+    pub offset_mid: u16,
+    pub offset_high: u32,
+    pub zero: u32,
+}
+
+static mut IDT_TABLE: [IdtEntry; 256] = [IdtEntry {
+    offset_low: 0,
+    selector: 0x08,
+    ist: 0,
+    type_attr: 0x8E, // Presente, Ring 0, 64-bit Interrupt Gate
+    offset_mid: 0,
+    offset_high: 0,
+    zero: 0,
+}; 256];
+
+@system
+pub fn hal_init_cpu() {
+    // Configura registradores de controle da CPU (CR0, CR4)
+    unsafe {
+        // Habilita SSE/AVX (CR4.OSFXSR | CR4.OSXMMEXCPT)
+        asm!(
+            "mov rax, cr4",
+            "or rax, 0x600",
+            "mov cr4, rax",
+            clobber("rax")
+        );
+
+        // Carrega tabela de interrupções IDT
+        let idtr = GdtDescriptor {
+            limit: (256 * 16 - 1) as u16,
+            base: (&raw const IDT_TABLE) as u64,
+        };
+        asm!(
+            "lidt [{0}]",
+            in(reg) &idtr
+        );
+    }
+}
+
+@system
+pub fn hal_enable_interrupts() {
+    unsafe {
+        asm!("sti");
+    }
+}
+
+@system
+pub fn hal_disable_interrupts() {
+    unsafe {
+        asm!("cli");
+    }
+}

@@ -1,0 +1,453 @@
+// Baken OS - Gerenciador de Janelas e Composicao em BKN Puro (@system)
+// Janelas Arrastaveis, Redimensionaveis, Z-Order Dinamico, Botoes de Controle e Hit-Testing
+
+module kernel::window_manager;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+import kernel::baken_font_engine::*;
+
+pub const MAX_WINDOWS: usize = 16;
+pub const TITLE_BAR_HEIGHT: u32 = 36;
+pub const RESIZE_BORDER_THICKNESS: i32 = 6;
+
+pub enum WindowFlags {
+    None = 0,
+    Frameless = 1 << 0,
+    AlwaysOnTop = 1 << 1,
+    Transparent = 1 << 2,
+    FixedSize = 1 << 3,
+}
+
+pub struct Window {
+    pub id: u32,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub min_width: u32,
+    pub min_height: u32,
+    pub z_index: u8,
+    pub is_open: bool,
+    pub is_focused: bool,
+    pub is_minimized: bool,
+    pub is_maximized: bool,
+    pub saved_x: i32,
+    pub saved_y: i32,
+    pub saved_w: u32,
+    pub saved_h: u32,
+    pub title: [u8; 48],
+    pub bg_color: u32,
+    pub bg_alpha: u8,
+    pub border_color: u32,
+}
+
+pub struct DragState {
+    pub is_dragging: bool,
+    pub is_resizing: bool,
+    pub active_win_id: u32,
+    pub drag_start_x: i32,
+    pub drag_start_y: i32,
+    pub win_start_x: i32,
+    pub win_start_y: i32,
+    pub win_start_w: u32,
+    pub win_start_h: u32,
+    pub resize_edges: u8, // 1=L, 2=R, 4=T, 8=B
+}
+
+pub struct WindowManagerContext {
+    pub window_count: usize,
+    pub focused_win_id: u32,
+    pub drag_state: DragState,
+}
+
+static mut WM_CTX: WindowManagerContext = WindowManagerContext {
+    window_count: 0,
+    focused_win_id: 0,
+    drag_state: DragState {
+        is_dragging: false,
+        is_resizing: false,
+        active_win_id: 0,
+        drag_start_x: 0,
+        drag_start_y: 0,
+        win_start_x: 0,
+        win_start_y: 0,
+        win_start_w: 0,
+        win_start_h: 0,
+        resize_edges: 0,
+    },
+};
+
+static mut WINDOW_LIST: [Window; MAX_WINDOWS] = [Window {
+    id: 0, x: 0, y: 0, width: 0, height: 0,
+    min_width: 200, min_height: 150,
+    z_index: 0, is_open: false, is_focused: false,
+    is_minimized: false, is_maximized: false,
+    saved_x: 0, saved_y: 0, saved_w: 0, saved_h: 0,
+    title: [0; 48],
+    bg_color: 0x000F172A, bg_alpha: 225,
+    border_color: 0x0038BDF8,
+}; MAX_WINDOWS];
+
+@system
+pub fn wm_init() {
+    unsafe {
+        WM_CTX.window_count = 0;
+        WM_CTX.focused_win_id = 0;
+        WM_CTX.drag_state.is_dragging = false;
+        WM_CTX.drag_state.is_resizing = false;
+
+        // Janela 1: BKN Studio IDE
+        wm_create_window(
+            1,
+            b"BKN Studio IDE -- Main.bkn\0".as_ptr(),
+            80, 80, 680, 480,
+            0x000B1020, 235, 0x0000E5FF
+        );
+
+        // Janela 2: Terminal Baken Shell
+        wm_create_window(
+            2,
+            b"Baken Shell Console (Ring 0)\0".as_ptr(),
+            450, 160, 560, 360,
+            0x00060913, 240, 0x0010B981
+        );
+
+        // Janela 3: Q-HAL Quantum Telemetry
+        wm_create_window(
+            3,
+            b"Q-HAL 3D State Simulator\0".as_ptr(),
+            200, 120, 520, 420,
+            0x000F172A, 230, 0x00818CF8
+        );
+        WINDOW_LIST[2].is_open = false; // Fecha inicialmente a 3a janela
+
+        wm_bring_to_front(1);
+    }
+}
+
+@system
+pub fn wm_create_window(
+    id: u32,
+    title_ptr: *const u8,
+    x: i32, y: i32, w: u32, h: u32,
+    bg_color: u32, bg_alpha: u8, border_color: u32
+) -> *mut Window {
+    unsafe {
+        if WM_CTX.window_count >= MAX_WINDOWS {
+            return 0 as *mut Window;
+        }
+
+        let idx = WM_CTX.window_count;
+        let win = &mut WINDOW_LIST[idx] as *mut Window;
+
+        (*win).id = id;
+        (*win).x = x;
+        (*win).y = y;
+        (*win).width = w;
+        (*win).height = h;
+        (*win).min_width = 240;
+        (*win).min_height = 160;
+        (*win).z_index = idx as u8;
+        (*win).is_open = true;
+        (*win).is_focused = false;
+        (*win).is_minimized = false;
+        (*win).is_maximized = false;
+        (*win).saved_x = x;
+        (*win).saved_y = y;
+        (*win).saved_w = w;
+        (*win).saved_h = h;
+        (*win).bg_color = bg_color;
+        (*win).bg_alpha = bg_alpha;
+        (*win).border_color = border_color;
+
+        let mut i: usize = 0;
+        while i < 47 {
+            let ch = *title_ptr.add(i);
+            if ch == 0 { break; }
+            (*win).title[i] = ch;
+            i += 1;
+        }
+        (*win).title[i] = 0;
+
+        WM_CTX.window_count += 1;
+        return win;
+    }
+}
+
+@system
+pub fn wm_bring_to_front(win_id: u32) {
+    unsafe {
+        let mut target_idx: usize = MAX_WINDOWS;
+        for i in 0..WM_CTX.window_count {
+            if WINDOW_LIST[i].id == win_id {
+                target_idx = i;
+                break;
+            }
+        }
+
+        if target_idx == MAX_WINDOWS { return; }
+
+        let old_z = WINDOW_LIST[target_idx].z_index;
+
+        for i in 0..WM_CTX.window_count {
+            if WINDOW_LIST[i].z_index > old_z {
+                WINDOW_LIST[i].z_index -= 1;
+            }
+            WINDOW_LIST[i].is_focused = false;
+        }
+
+        WINDOW_LIST[target_idx].z_index = (WM_CTX.window_count - 1) as u8;
+        WINDOW_LIST[target_idx].is_focused = true;
+        WINDOW_LIST[target_idx].is_minimized = false;
+        WINDOW_LIST[target_idx].is_open = true;
+        WM_CTX.focused_win_id = win_id;
+    }
+}
+
+@system
+pub fn wm_handle_mouse_down(mouse_x: i32, mouse_y: i32) -> bool {
+    unsafe {
+        // Itera de maior z-index para menor (ordem visual de cima para baixo)
+        let mut top_win_idx: usize = MAX_WINDOWS;
+        let mut max_z: i32 = -1;
+
+        for i in 0..WM_CTX.window_count {
+            let win = &WINDOW_LIST[i];
+            if !win.is_open || win.is_minimized { continue; }
+
+            if mouse_x >= win.x && mouse_x < win.x + win.width as i32 &&
+               mouse_y >= win.y && mouse_y < win.y + win.height as i32 {
+                if win.z_index as i32 > max_z {
+                    max_z = win.z_index as i32;
+                    top_win_idx = i;
+                }
+            }
+        }
+
+        if top_win_idx == MAX_WINDOWS {
+            return false; // Clique no desktop
+        }
+
+        let win = &mut WINDOW_LIST[top_win_idx];
+        wm_bring_to_front(win.id);
+
+        // 1. Checa cliques nos botoes de controle (Fechar, Minimizar, Maximizar)
+        let btn_y = win.y + 18;
+        let close_x = win.x + 18;
+        let min_x = win.x + 34;
+        let max_x = win.x + 50;
+
+        let dist_close = (mouse_x - close_x).abs() + (mouse_y - btn_y).abs();
+        if dist_close < 8 {
+            win.is_open = false;
+            return true;
+        }
+
+        let dist_min = (mouse_x - min_x).abs() + (mouse_y - btn_y).abs();
+        if dist_min < 8 {
+            win.is_minimized = true;
+            return true;
+        }
+
+        let dist_max = (mouse_x - max_x).abs() + (mouse_y - btn_y).abs();
+        if dist_max < 8 {
+            if win.is_maximized {
+                win.x = win.saved_x;
+                win.y = win.saved_y;
+                win.width = win.saved_w;
+                win.height = win.saved_h;
+                win.is_maximized = false;
+            } else {
+                win.saved_x = win.x;
+                win.saved_y = win.y;
+                win.saved_w = win.width;
+                win.saved_h = win.height;
+                win.x = 0;
+                win.y = 44; // Abaixo da top bar
+                win.width = 1280;
+                win.height = 720 - 44 - 64; // Acima do dock
+                win.is_maximized = true;
+            }
+            return true;
+        }
+
+        // 2. Checa clique na Barra de Titulo (Iniciar Drag)
+        if mouse_y >= win.y && mouse_y <= win.y + TITLE_BAR_HEIGHT as i32 {
+            WM_CTX.drag_state.is_dragging = true;
+            WM_CTX.drag_state.active_win_id = win.id;
+            WM_CTX.drag_state.drag_start_x = mouse_x;
+            WM_CTX.drag_state.drag_start_y = mouse_y;
+            WM_CTX.drag_state.win_start_x = win.x;
+            WM_CTX.drag_state.win_start_y = win.y;
+            return true;
+        }
+
+        return true;
+    }
+}
+
+@system
+pub fn wm_handle_mouse_move(mouse_x: i32, mouse_y: i32) {
+    unsafe {
+        if WM_CTX.drag_state.is_dragging {
+            let dx = mouse_x - WM_CTX.drag_state.drag_start_x;
+            let dy = mouse_y - WM_CTX.drag_state.drag_start_y;
+
+            for i in 0..WM_CTX.window_count {
+                if WINDOW_LIST[i].id == WM_CTX.drag_state.active_win_id {
+                    WINDOW_LIST[i].x = WM_CTX.drag_state.win_start_x + dx;
+                    WINDOW_LIST[i].y = WM_CTX.drag_state.win_start_y + dy;
+                    break;
+                }
+            }
+        }
+    }
+}
+
+@system
+pub fn wm_handle_mouse_up() {
+    unsafe {
+        WM_CTX.drag_state.is_dragging = false;
+        WM_CTX.drag_state.is_resizing = false;
+    }
+}
+
+@system
+pub fn wm_render_windows() {
+    unsafe {
+        // Desenha janelas em ordem crescente de z_index
+        for z in 0..(WM_CTX.window_count as u8) {
+            for i in 0..WM_CTX.window_count {
+                let win = &WINDOW_LIST[i];
+                if win.z_index == z && win.is_open && !win.is_minimized {
+                    wm_render_single_window(win);
+                }
+            }
+        }
+    }
+}
+
+@system
+fn wm_render_single_window(win: &Window) {
+    if win.x + (win.width as i32) < 0 || win.y + (win.height as i32) < 0 { return; }
+
+    let wx = if win.x > 0 { win.x as u32 } else { 0 };
+    let wy = if win.y > 0 { win.y as u32 } else { 0 };
+
+    // Sombra da Janela
+    gfx_draw_drop_shadow(wx, wy, win.width, win.height, 16, 3);
+
+    // Corpo da Janela com Cantos Arredondados
+    let border_col = if win.is_focused { win.border_color } else { 0x00475569 };
+    sdf_render_smooth_card(
+        wx, wy, win.width, win.height,
+        14, win.bg_color, win.bg_alpha, border_col, 1.5
+    );
+
+    // Barra de Titulo (com divisor)
+    gfx_draw_hline(wx + 1, wy + TITLE_BAR_HEIGHT, win.width - 2, border_col, 60);
+
+    // Botoes Mac-style (Fechar: Vermelho, Minimizar: Amarelo, Maximizar: Verde)
+    gfx_draw_circle_button(wx + 18, wy + 18, 6, 0x00EF4444); // Vermelho Fechar
+    gfx_draw_circle_button(wx + 36, wy + 18, 6, 0x00F59E0B); // Amarelo Minimizar
+    gfx_draw_circle_button(wx + 54, wy + 18, 6, 0x0010B981); // Verde Maximizar
+
+    // Titulo da Janela
+    gfx_draw_text_alpha(wx + 72, wy + 11, win.title.as_ptr(), 0x00FFFFFF, 1, 230);
+
+    // ====================================================================
+    // CONTEÚDO INTERNO DA JANELA (POR APLICATIVO)
+    // ====================================================================
+    let content_x = wx + 8;
+    let content_y = wy + TITLE_BAR_HEIGHT + 6;
+    let content_w = win.width - 16;
+    let content_h = win.height - TITLE_BAR_HEIGHT - 14;
+
+    if win.id == 1 {
+        // === JANELA 1: BKN STUDIO IDE ===
+        // Barra de Abas (Tabs)
+        gfx_draw_glass_rect(content_x, content_y, 140, 26, 0x001E293B, 220, 0x0038BDF8, 6);
+        gfx_draw_text_alpha(content_x + 12, content_y + 6, b"main.bkn\0".as_ptr(), 0x0038BDF8, 1, 255);
+
+        gfx_draw_glass_rect(content_x + 148, content_y, 160, 26, 0x000F172A, 140, 0x00334155, 6);
+        gfx_draw_text_alpha(content_x + 160, content_y + 6, b"graphics.bkn\0".as_ptr(), 0x0094A3B8, 1, 180);
+
+        // Botao Compilar [>] Run no topo direito
+        let btn_x = content_x + content_w - 90;
+        gfx_draw_glass_rect(btn_x, content_y, 82, 26, 0x00059669, 220, 0x0010B981, 6);
+        gfx_draw_text_alpha(btn_x + 16, content_y + 6, b"> RUN\0".as_ptr(), 0x00FFFFFF, 1, 255);
+
+        // Area de Codigo Fonte com Gutter e Realce de Sintaxe
+        let code_y = content_y + 32;
+        let code_h = content_h - 38;
+        gfx_draw_glass_rect(content_x, code_y, content_w, code_h, 0x00030712, 220, 0x001E293B, 8);
+
+        // Gutter (Numeros de Linha)
+        gfx_draw_vline(content_x + 36, code_y + 4, code_h - 8, 0x001E293B, 150);
+        for l in 1..11 {
+            let ly = code_y + 10 + (l - 1) * 20;
+            if ly + 16 < code_y + code_h {
+                let digit_ch = (b'0' + (l as u8));
+                gfx_draw_char(content_x + 14, ly, digit_ch, 0x00475569, 1);
+            }
+        }
+
+        // Linhas de Codigo BKN com Cores
+        let cx_code = content_x + 46;
+        let cy_base = code_y + 10;
+        gfx_draw_text(cx_code, cy_base,       b"module main;\0".as_ptr(), 0x00F43F5E, 1);
+        gfx_draw_text(cx_code, cy_base + 20,  b"import kernel::qhal::*;\0".as_ptr(), 0x0038BDF8, 1);
+        gfx_draw_text(cx_code, cy_base + 40,  b"@quantum\0".as_ptr(), 0x00EAB308, 1);
+        gfx_draw_text(cx_code, cy_base + 60,  b"pub fn bell_teleport() {\0".as_ptr(), 0x00A855F7, 1);
+        gfx_draw_text(cx_code + 20, cy_base + 80,  b"let q0 = qubit::new();\0".as_ptr(), 0x00E2E8F0, 1);
+        gfx_draw_text(cx_code + 20, cy_base + 100, b"qhal_apply_hadamard(0);\0".as_ptr(), 0x0022C55E, 1);
+        gfx_draw_text(cx_code + 20, cy_base + 120, b"qhal_apply_cnot(0, 1);\0".as_ptr(), 0x0022C55E, 1);
+        gfx_draw_text(cx_code, cy_base + 140, b"}\0".as_ptr(), 0x00A855F7, 1);
+
+    } else if win.id == 2 {
+        // === JANELA 2: TERMINAL BAKEN SHELL ===
+        gfx_draw_glass_rect(content_x, content_y, content_w, content_h, 0x00020617, 240, 0x000F172A, 8);
+
+        let tx = content_x + 14;
+        let ty = content_y + 12;
+
+        gfx_draw_text(tx, ty,       b"Baken OS Ring 0 Sovereign Console [v2.0]\0".as_ptr(), 0x0022D3EE, 1);
+        gfx_draw_text(tx, ty + 22,  b"Zero dependencies. Pure BKN Microkernel.\0".as_ptr(), 0x0064748B, 1);
+        gfx_draw_hline(tx, ty + 42, content_w - 28, 0x001E293B, 120);
+
+        gfx_draw_text(tx, ty + 54,  b"root@baken-core:~# pmm-status\0".as_ptr(), 0x00F8FAFC, 1);
+        gfx_draw_text(tx, ty + 74,  b"[PMM] Total: 4096 MB | Free: 3840 MB (93%)\0".as_ptr(), 0x004ADE80, 1);
+
+        gfx_draw_text(tx, ty + 100, b"root@baken-core:~# bknc --version\0".as_ptr(), 0x00F8FAFC, 1);
+        gfx_draw_text(tx, ty + 120, b"BKNC v2.0 (LLVM IR + Q-IR + ML-DSA-65)\0".as_ptr(), 0x00FACC15, 1);
+
+        // Linha do Prompt Ativo
+        let prompt_y = content_y + content_h - 32;
+        gfx_draw_text(tx, prompt_y, b"root@baken-core:~# _\0".as_ptr(), 0x0038BDF8, 1);
+
+    } else if win.id == 3 {
+        // === JANELA 3: Q-HAL QUANTUM 3D SIMULATOR ===
+        gfx_draw_glass_rect(content_x, content_y, content_w, content_h, 0x00030712, 230, 0x001E1B4B, 8);
+
+        let sphere_cx = content_x + 120;
+        let sphere_cy = content_y + (content_h / 2);
+        let radius: u32 = 70;
+
+        // Esfera de Bloch: Circulo e Equador
+        gfx_draw_circle_button(sphere_cx, sphere_cy, radius, 0x000F172A);
+        gfx_draw_circle_button(sphere_cx, sphere_cy, 3, 0x0000E5FF);
+
+        // Cartao de Telemetria Quântica ao Lado
+        let card_x = content_x + 220;
+        let card_w = content_w - 235;
+
+        gfx_draw_glass_rect(card_x, content_y + 14, card_w, 60, 0x000F172A, 200, 0x0000E5FF, 6);
+        gfx_draw_text_alpha(card_x + 12, content_y + 24, b"Qubit State: |Psi>\0".as_ptr(), 0x0000E5FF, 1, 255);
+        gfx_draw_text_alpha(card_x + 12, content_y + 44, b"Fidelity: 99.99%\0".as_ptr(), 0x004ADE80, 1, 255);
+
+        gfx_draw_glass_rect(card_x, content_y + 84, card_w, 60, 0x000F172A, 200, 0x00818CF8, 6);
+        gfx_draw_text_alpha(card_x + 12, content_y + 94, b"Entanglement: EPR Bell\0".as_ptr(), 0x00818CF8, 1, 255);
+        gfx_draw_text_alpha(card_x + 12, content_y + 114, b"Entropy: 0.0001 bit\0".as_ptr(), 0x00E2E8F0, 1, 230);
+    }
+}

@@ -1,0 +1,209 @@
+// Baken OS - Gerenciador de Memoria Fisica (PMM) em BKN Puro (@system)
+// Buddy Allocator Soberano com suporte a Ordens 0..10 (4KB ate 4MB) e Bitmap de Paginas
+
+module kernel::pmm;
+
+pub const PAGE_SIZE: usize = 4096;
+pub const MAX_BUDDY_ORDER: usize = 11; // 0=4KB, 1=8KB, 2=16KB, 3=32KB, ..., 10=4MB
+pub const MAX_PAGES_TRACKED: usize = 1048576; // 4GB em paginas de 4KB
+
+pub struct FreePageBlock {
+    pub next: *mut FreePageBlock,
+    pub order: u8,
+    pub is_free: bool,
+}
+
+pub struct PmmStats {
+    pub total_pages: u64,
+    pub free_pages: u64,
+    pub reserved_pages: u64,
+    pub alloc_counter: u64,
+    pub free_counter: u64,
+}
+
+static mut FREE_LISTS: [*mut FreePageBlock; 11] = [0 as *mut FreePageBlock; 11];
+static mut PAGE_BITMAP: [u64; 16384] = [0; 16384]; // 1048576 bits (1 bit por pagina)
+static mut STATS: PmmStats = PmmStats {
+    total_pages: 0,
+    free_pages: 0,
+    reserved_pages: 0,
+    alloc_counter: 0,
+    free_counter: 0,
+};
+
+static mut MEMORY_BASE: usize = 0x1000000; // 16MB inicial (apos kernel base)
+
+@system
+pub fn pmm_bitmap_set(page_idx: usize) {
+    unsafe {
+        if page_idx < MAX_PAGES_TRACKED {
+            let word = page_idx / 64;
+            let bit = page_idx % 64;
+            PAGE_BITMAP[word] |= (1u64 << bit);
+        }
+    }
+}
+
+@system
+pub fn pmm_bitmap_clear(page_idx: usize) {
+    unsafe {
+        if page_idx < MAX_PAGES_TRACKED {
+            let word = page_idx / 64;
+            let bit = page_idx % 64;
+            PAGE_BITMAP[word] &= !(1u64 << bit);
+        }
+    }
+}
+
+@system
+pub fn pmm_bitmap_test(page_idx: usize) -> bool {
+    unsafe {
+        if page_idx >= MAX_PAGES_TRACKED {
+            return true; // Considera ocupado se fora do limite
+        }
+        let word = page_idx / 64;
+        let bit = page_idx % 64;
+        return (PAGE_BITMAP[word] & (1u64 << bit)) != 0;
+    }
+}
+
+@system
+pub fn pmm_init(mem_base: usize, total_bytes: usize) {
+    unsafe {
+        STATS.total_pages = (total_bytes / PAGE_SIZE) as u64;
+        if STATS.total_pages > (MAX_PAGES_TRACKED as u64) {
+            STATS.total_pages = MAX_PAGES_TRACKED as u64;
+        }
+        STATS.free_pages = 0;
+        STATS.reserved_pages = 0;
+        STATS.alloc_counter = 0;
+        STATS.free_counter = 0;
+        MEMORY_BASE = (mem_base + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+        // Inicializa listas livres
+        for i in 0..MAX_BUDDY_ORDER {
+            FREE_LISTS[i] = 0 as *mut FreePageBlock;
+        }
+
+        // Marca todas as paginas como ocupadas no bitmap inicialmente
+        for i in 0..16384 {
+            PAGE_BITMAP[i] = 0xFFFFFFFFFFFFFFFF;
+        }
+
+        // Adiciona memoria disponivel ao buddy allocator
+        let mut addr = MEMORY_BASE;
+        let end_addr = MEMORY_BASE + (STATS.total_pages as usize * PAGE_SIZE);
+
+        while addr + (4 * 1024 * 1024) <= end_addr {
+            pmm_free_pages(addr as *mut u8, 10); // Blocos de 4MB (Order 10)
+            addr += 4 * 1024 * 1024;
+        }
+
+        while addr + PAGE_SIZE <= end_addr {
+            pmm_free_pages(addr as *mut u8, 0); // Paginas restantes de 4KB
+            addr += PAGE_SIZE;
+        }
+    }
+}
+
+@system
+pub fn pmm_alloc_pages(order: usize) -> *mut u8 {
+    if order >= MAX_BUDDY_ORDER {
+        return 0 as *mut u8;
+    }
+
+    unsafe {
+        for current_order in order..MAX_BUDDY_ORDER {
+            if FREE_LISTS[current_order] != (0 as *mut FreePageBlock) {
+                let block = FREE_LISTS[current_order];
+                FREE_LISTS[current_order] = (*block).next;
+
+                // Split de blocos maiores em potencias de 2 (Buddy algorithm)
+                let mut o = current_order;
+                while o > order {
+                    o -= 1;
+                    let block_addr = block as usize;
+                    let buddy_addr = block_addr + (PAGE_SIZE << o);
+
+                    let buddy = buddy_addr as *mut FreePageBlock;
+                    (*buddy).next = FREE_LISTS[o];
+                    (*buddy).order = o as u8;
+                    (*buddy).is_free = true;
+                    FREE_LISTS[o] = buddy;
+                }
+
+                let pages_count = 1usize << order;
+                STATS.free_pages -= pages_count as u64;
+                STATS.alloc_counter += 1;
+
+                let page_idx = (block as usize) / PAGE_SIZE;
+                for i in 0..pages_count {
+                    pmm_bitmap_set(page_idx + i);
+                }
+
+                (*block).is_free = false;
+                (*block).order = order as u8;
+                return block as *mut u8;
+            }
+        }
+    }
+
+    return 0 as *mut u8; // Memoria esgotada
+}
+
+@system
+pub fn pmm_alloc_page() -> *mut u8 {
+    return pmm_alloc_pages(0);
+}
+
+@system
+pub fn pmm_free_pages(ptr: *mut u8, order: usize) {
+    if ptr == (0 as *mut u8) || order >= MAX_BUDDY_ORDER {
+        return;
+    }
+
+    unsafe {
+        let block_addr = ptr as usize;
+        let page_idx = block_addr / PAGE_SIZE;
+        let pages_count = 1usize << order;
+
+        for i in 0..pages_count {
+            pmm_bitmap_clear(page_idx + i);
+        }
+
+        let block = ptr as *mut FreePageBlock;
+        (*block).order = order as u8;
+        (*block).is_free = true;
+        (*block).next = FREE_LISTS[order];
+        FREE_LISTS[order] = block;
+
+        STATS.free_pages += pages_count as u64;
+        STATS.free_counter += 1;
+    }
+}
+
+@system
+pub fn pmm_free_page(ptr: *mut u8) {
+    pmm_free_pages(ptr, 0);
+}
+
+@system
+pub fn pmm_get_free_kb() -> u64 {
+    unsafe {
+        return (STATS.free_pages * (PAGE_SIZE as u64)) / 1024;
+    }
+}
+
+@system
+pub fn pmm_get_total_kb() -> u64 {
+    unsafe {
+        return (STATS.total_pages * (PAGE_SIZE as u64)) / 1024;
+    }
+}
+
+@system
+pub fn pmm_get_used_kb() -> u64 {
+    unsafe {
+        return ((STATS.total_pages - STATS.free_pages) * (PAGE_SIZE as u64)) / 1024;
+    }
+}

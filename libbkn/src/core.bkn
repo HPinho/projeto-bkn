@@ -1,0 +1,55 @@
+// libbkn - Biblioteca Padrão Central da Linguagem BKN
+// Módulo: Núcleo (Core), Alocação Determinística e Primitivas de Sistema
+
+module libbkn::core;
+
+pub struct Option<T> {
+    pub is_some: bool,
+    pub value: T,
+}
+
+impl<T> Option<T> {
+    pub fn some(val: T) -> Option<T> {
+        return Option { is_some: true, value: val };
+    }
+
+    pub fn none() -> Option<T> {
+        return Option { is_some: false, value: val };
+    }
+
+    pub fn unwrap(self) -> T {
+        if !self.is_some {
+            panic!("Tentativa de unwrap em Option::none");
+        }
+        return self.value;
+    }
+}
+
+pub struct Result<T, E> {
+    pub is_ok: bool,
+    pub value: T,
+    pub error: E,
+}
+
+impl<T, E> Result<T, E> {
+    pub fn ok(val: T) -> Result<T, E> {
+        return Result { is_ok: true, value: val, error: 0 as E };
+    }
+
+    pub fn err(err: E) -> Result<T, E> {
+        return Result { is_ok: false, value: 0 as T, error: err };
+    }
+}
+
+// Token de Capacidade de Segurança do Baken OS
+pub struct CapabilityToken {
+    pub object_id: u64,
+    pub permissions: u32,
+    pub generation: u32,
+}
+
+impl CapabilityToken {
+    pub fn has_permission(&self, perm: u32) -> bool {
+        return (self.permissions & perm) == perm;
+    }
+}

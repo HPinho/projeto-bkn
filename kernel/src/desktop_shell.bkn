@@ -1,0 +1,461 @@
+// Baken OS - Desktop Shell Soberano em BKN Puro (@system)
+// Visual: Top Search Bar + Grade de Ícones + Widget Data/Hora + Dock Inferior Flutuante
+// Renderizado pixel a pixel via graphics_engine — SEM dependências externas
+// Referência visual: screenshot Baken OS (roxo/azul cósmico, ícones coloridos, dock compacto)
+
+module kernel::desktop_shell;
+
+import kernel::graphics_engine::*;
+import kernel::baken_animation::*;
+import kernel::window_manager::*;
+
+// ========================================================================
+// PALETA DE CORES BAKEN OS (extraída da screenshot)
+// ========================================================================
+// Fundo top bar: branco fosco translúcido   #F2F2F2 alpha 220
+// Borda top bar: cinza suave                #CCCCCC alpha 80
+// Texto primário: escuro                    #1A1A2E
+// Texto secundário: cinza                   #666666
+// Ícone Terminal (azul aço)                 #3A7BD5
+// Ícone BKN Studio (azul ciano escuro)      #1565C0
+// Ícone BakenFS (laranja)                   #F57C00
+// Ícone Q-HAL 3D (ciano escuro)             #00838F
+// Ícone PQC Shield (roxo)                   #7B1FA2
+// Ícone Settings (cinza médio)              #616161
+// Dock: branco fosco alpha 200              #F5F5F5
+// Cor indicador ativo: azul ciano           #00BCD4
+
+// ========================================================================
+// ESTADO GLOBAL DO SHELL
+// ========================================================================
+
+pub struct DesktopShellState {
+    pub screen_w: u32,
+    pub screen_h: u32,
+    pub time_tick: u32,
+    pub cursor_x: i32,
+    pub cursor_y: i32,
+    pub focused_icon: u8,  // 0 = nenhum, 1..6 = ícone
+    pub start_menu_open: bool,
+}
+
+static mut SHELL: DesktopShellState = DesktopShellState {
+    screen_w: 1280,
+    screen_h: 720,
+    time_tick: 0,
+    cursor_x: 640,
+    cursor_y: 360,
+    focused_icon: 2, // BKN Studio selecionado (como na screenshot)
+    start_menu_open: false,
+};
+
+// Strings estáticas para textos da UI (terminadas em 0)
+// Top bar
+static BAKEN_OS_LABEL:   [u8; 9]  = *b"Baken OS\0";
+static SEARCH_HINT:      [u8; 35] = *b"Pesquisar no Baken OS ou digitar...\0";
+static WIFI_LABEL:       [u8; 7]  = *b"Wi-Fi 7\0";
+static TIME_LABEL:       [u8; 6]  = *b"10:24\0";
+static BATTERY_LABEL:    [u8; 4]  = *b"95%\0";
+
+// Relógio/Data no desktop
+static CLOCK_LABEL:      [u8; 6]  = *b"10:24\0";
+static DATE_LABEL:       [u8; 28] = *b"Quinta-feira, 26 de Agosto\0";
+static WEATHER_LABEL:    [u8; 20] = *b"24C Ensolarado | SP\0";
+static QHAL_STATUS:      [u8; 40] = *b"Q-HAL Core: Baken OS Kernel Online (Ring 0)\0";
+
+// Nomes dos ícones
+static ICON_TERMINAL:    [u8; 9]  = *b"Terminal\0";
+static ICON_BKN_STUDIO:  [u8; 11] = *b"BKN Studio\0";
+static ICON_BAKENFS:     [u8; 8]  = *b"BakenFS\0";
+static ICON_QHAL:        [u8; 8]  = *b"Q-HAL 3D\0";
+static ICON_PQC:         [u8; 10] = *b"PQC Shield\0";
+static ICON_SETTINGS:    [u8; 9]  = *b"Settings\0";
+
+// ========================================================================
+// INIT
+// ========================================================================
+
+@system
+pub fn desktop_shell_init(w: u32, h: u32) {
+    unsafe {
+        SHELL.screen_w = w;
+        SHELL.screen_h = h;
+        SHELL.time_tick = 0;
+        SHELL.cursor_x = (w / 2) as i32;
+        SHELL.cursor_y = (h / 2) as i32;
+    }
+}
+
+// ========================================================================
+// TOP BAR — Barra de pesquisa branca fosca com logo, hora e status
+// ========================================================================
+
+@system
+pub fn render_top_bar() {
+    unsafe {
+        let w = SHELL.screen_w;
+        let bar_h: u32 = 44;
+
+        // Fundo branco fosco (imita frosted glass da screenshot)
+        gfx_draw_glass_rect(0, 0, w, bar_h, 0x00F0F0F4, 230, 0x00DCDCE0, 0);
+
+        // === LOGO BAKEN OS (circulo ciano + texto) ===
+        let logo_cx: u32 = 28;
+        let logo_cy: u32 = 22;
+        gfx_draw_circle_button(logo_cx, logo_cy, 12, 0x0000BCD4); // disco ciano
+        gfx_draw_circle_button(logo_cx, logo_cy, 7,  0x00FFFFFF); // interior branco
+        gfx_draw_circle_button(logo_cx, logo_cy, 3,  0x0000BCD4); // núcleo ciano
+
+        // Texto "Baken OS"
+        gfx_draw_text(46, 14, BAKEN_OS_LABEL.as_ptr(), 0x001A1A2E, 1);
+
+        // === CAMPO DE BUSCA CENTRAL ===
+        let search_x = w / 2 - 200;
+        let search_w: u32 = 400;
+        gfx_draw_glass_rect(search_x, 8, search_w, 28, 0x00FFFFFF, 180, 0x00CCCCCC, 14);
+        // Ícone de lupa (círculo + linha)
+        gfx_draw_circle_alpha(search_x + 20, 22, 6, 0x00888888, 200);
+        gfx_draw_line(
+            (search_x + 25) as i32, 27,
+            (search_x + 28) as i32, 30,
+            0x00888888, 200
+        );
+        // Texto hint
+        gfx_draw_text_alpha(search_x + 32, 15, SEARCH_HINT.as_ptr(), 0x00999999, 1, 180);
+
+        // === STATUS DIREITA: Wi-Fi + Hora + Bateria + Avatar ===
+        let right_x = w - 260;
+
+        // Ícone Wi-Fi (ondas simplificadas com linhas)
+        gfx_draw_circle_alpha(right_x + 8, 22, 2, 0x001A1A2E, 220);
+        gfx_draw_hline(right_x + 2, 18, 12, 0x001A1A2E, 150);
+        gfx_draw_hline(right_x + 4, 14, 8,  0x001A1A2E, 100);
+
+        // Texto "Wi-Fi 7"
+        gfx_draw_text(right_x + 18, 15, WIFI_LABEL.as_ptr(), 0x001A1A2E, 1);
+
+        // Separador
+        gfx_draw_hline(right_x + 72, 12, 1, 0x00CCCCCC, 200);
+
+        // Hora "10:24"
+        gfx_draw_text(right_x + 80, 15, TIME_LABEL.as_ptr(), 0x001A1A2E, 1);
+
+        // Ícone bateria (retângulo)
+        gfx_draw_glass_rect(right_x + 130, 14, 22, 14, 0x004CAF50, 220, 0x00388E3C, 2);
+        gfx_draw_glass_rect(right_x + 152, 18, 3, 6, 0x00388E3C, 255, 0x00388E3C, 1);
+        gfx_draw_text(right_x + 160, 15, BATTERY_LABEL.as_ptr(), 0x001A1A2E, 1);
+
+        // Avatar (círculo com inicial)
+        gfx_draw_circle_button(right_x + 230, 22, 14, 0x009C27B0);
+        gfx_draw_char(right_x + 224, 15, b'B', 0x00FFFFFF, 1);
+    }
+}
+
+// ========================================================================
+// WIDGET DE DATA/HORA no desktop (canto superior-esquerdo, abaixo da top bar)
+// ========================================================================
+
+@system
+pub fn render_datetime_widget() {
+    unsafe {
+        let wx: u32 = 80;
+        let wy: u32 = 100;
+
+        // Relógio grande: "10:24" em escala 4 (32x64 px por char)
+        gfx_draw_text(wx, wy, CLOCK_LABEL.as_ptr(), 0x00FFFFFF, 4);
+
+        // Data abaixo
+        gfx_draw_text(wx + 180, wy + 8,  DATE_LABEL.as_ptr(),    0x00FFFFFF, 1);
+        gfx_draw_text(wx + 180, wy + 28, WEATHER_LABEL.as_ptr(), 0x00BBBBBB, 1);
+
+        // Linha divisória suave
+        gfx_draw_hline(wx, wy + 72, 420, 0x00FFFFFF, 50);
+
+        // Status do Q-HAL — ponto verde + texto
+        gfx_draw_circle_button(wx, wy + 90, 4, 0x004CAF50); // ponto verde
+        gfx_draw_text(wx + 14, wy + 83, QHAL_STATUS.as_ptr(), 0x00DDDDDD, 1);
+    }
+}
+
+// ========================================================================
+// GRADE DE ÍCONES DO DESKTOP (6 apps como na screenshot)
+// ========================================================================
+
+// Estrutura de cada ícone
+pub struct AppIcon {
+    pub label_ptr: *const u8,
+    pub bg_color: u32,      // cor do fundo do ícone
+    pub glyph_char: u8,     // caractere central (letra/símbolo)
+    pub glyph_color: u32,   // cor do glifo
+}
+
+// Renderiza um ícone de app estilo launcher (retângulo arredondado + letra + label)
+@system
+pub fn render_app_icon(cx: u32, cy: u32, icon_bg: u32, glyph: u8, glyph_color: u32,
+                        label_ptr: *const u8, is_focused: bool) {
+    let icon_size: u32 = 72;
+    let ix = cx - icon_size / 2;
+    let iy = cy - icon_size / 2;
+
+    // Sombra
+    gfx_draw_drop_shadow(ix, iy, icon_size, icon_size, 12, 2);
+
+    // Fundo do ícone arredondado
+    if is_focused {
+        // Destaque: fundo levemente mais claro com borda
+        gfx_draw_glass_rect(ix - 6, iy - 6, icon_size + 12, icon_size + 12,
+                            0x00FFFFFF, 40, 0x00DDDDDD, 16);
+    }
+    gfx_draw_glass_rect(ix, iy, icon_size, icon_size, icon_bg, 240, 0x00000000, 16);
+
+    // Glifo central (escala 3 = 24x48 px, centralizado no ícone 72x72)
+    let gx = ix + (icon_size / 2) - 12; // 12 = (8*3)/2
+    let gy = iy + (icon_size / 2) - 24; // 24 = (16*3)/2
+    gfx_draw_char(gx, gy, glyph, glyph_color, 3);
+
+    // Label abaixo do ícone
+    gfx_draw_text_alpha(cx - 30, cy + icon_size / 2 + 10, label_ptr, 0x00FFFFFF, 1, 230);
+}
+
+@system
+pub fn render_app_icons() {
+    unsafe {
+        let sw = SHELL.screen_w;
+        let sh = SHELL.screen_h;
+
+        // Grade: 6 ícones em linha horizontal, centralizados
+        // Posição Y: centro vertical levemente acima do dock
+        let grid_y: u32 = sh / 2 + 20;
+        let spacing: u32 = 140;
+        let total_w = 6 * spacing;
+        let start_x = (sw - total_w) / 2 + spacing / 2;
+
+        // Ícone 1: Terminal (azul aço, "T")
+        render_app_icon(
+            start_x,
+            grid_y,
+            0x003A7BD5,   // azul aço
+            b'T',
+            0x00FFFFFF,
+            ICON_TERMINAL.as_ptr(),
+            SHELL.focused_icon == 1
+        );
+
+        // Ícone 2: BKN Studio (azul escuro, "</>")
+        // Usamos '<' como glifo aproximado
+        render_app_icon(
+            start_x + spacing,
+            grid_y,
+            0x001565C0,   // azul escuro
+            b'<',
+            0x0000E5FF,
+            ICON_BKN_STUDIO.as_ptr(),
+            SHELL.focused_icon == 2   // selecionado na screenshot
+        );
+
+        // Ícone 3: BakenFS (laranja, engrenagem → usamos '*')
+        render_app_icon(
+            start_x + spacing * 2,
+            grid_y,
+            0x00F57C00,   // laranja
+            b'*',
+            0x00FFFFFF,
+            ICON_BAKENFS.as_ptr(),
+            SHELL.focused_icon == 3
+        );
+
+        // Ícone 4: Q-HAL 3D (ciano escuro, losango → usamos 'Q')
+        render_app_icon(
+            start_x + spacing * 3,
+            grid_y,
+            0x00006064,   // ciano escuro
+            b'Q',
+            0x0000E5FF,
+            ICON_QHAL.as_ptr(),
+            SHELL.focused_icon == 4
+        );
+
+        // Ícone 5: PQC Shield (roxo, átomo → usamos '@')
+        render_app_icon(
+            start_x + spacing * 4,
+            grid_y,
+            0x007B1FA2,   // roxo
+            b'@',
+            0x00E040FB,
+            ICON_PQC.as_ptr(),
+            SHELL.focused_icon == 5
+        );
+
+        // Ícone 6: Settings (cinza, engrenagem → usamos '#')
+        render_app_icon(
+            start_x + spacing * 5,
+            grid_y,
+            0x00424242,   // cinza escuro
+            b'#',
+            0x00EEEEEE,
+            ICON_SETTINGS.as_ptr(),
+            SHELL.focused_icon == 6
+        );
+    }
+}
+
+// ========================================================================
+// DOCK INFERIOR FLUTUANTE — compacto, branco fosco, com 6 mini-ícones
+// ========================================================================
+
+@system
+pub fn render_floating_dock() {
+    unsafe {
+        let sw = SHELL.screen_w;
+        let sh = SHELL.screen_h;
+
+        let dock_w: u32 = 340;
+        let dock_h: u32 = 58;
+        let dock_x = (sw - dock_w) / 2;
+        let dock_y = sh - dock_h - 16;
+
+        // Sombra do dock
+        gfx_draw_drop_shadow(dock_x, dock_y, dock_w, dock_h, 18, 3);
+
+        // Corpo do dock: branco fosco arredondado
+        gfx_draw_glass_rect(dock_x, dock_y, dock_w, dock_h, 0x00F0F0F4, 210, 0x00DDDDDD, 22);
+
+        // 6 mini-ícones no dock (largura: 46px cada, padding: 10px nas laterais)
+        let icon_size_sm: u32 = 38;
+        let total_icons: u32 = 6;
+        let icon_spacing = dock_w / total_icons;
+        let icon_start_x = dock_x + icon_spacing / 2 - icon_size_sm / 2;
+
+        let dock_icons: [(u32, u8, bool); 6] = [
+            (0x003A7BD5, b'T', false),  // Terminal
+            (0x001565C0, b'<', true),   // BKN Studio (ativo)
+            (0x00F57C00, b'*', false),  // BakenFS
+            (0x00006064, b'Q', false),  // Q-HAL
+            (0x007B1FA2, b'@', false),  // PQC Shield
+            (0x00424242, b'#', false),  // Settings
+        ];
+
+        for i in 0..6 {
+            let (bg, glyph, is_open) = dock_icons[i as usize];
+            let icon_x = icon_start_x + i * icon_spacing;
+            let icon_y = dock_y + (dock_h - icon_size_sm) / 2;
+
+            // Fundo do mini-ícone
+            gfx_draw_glass_rect(icon_x, icon_y, icon_size_sm, icon_size_sm, bg, 220, 0x00000000, 10);
+
+            // Letra central (escala 2 = 16x32 px, centrada em 38x38)
+            let gx = icon_x + icon_size_sm / 2 - 8; // 8 = (8*2)/2
+            let gy = icon_y + icon_size_sm / 2 - 16; // 16 = (16*2)/2
+            gfx_draw_char(gx, gy, glyph, 0x00FFFFFF, 2);
+
+            // Ponto indicador (app aberto) — ciano abaixo do ícone
+            if is_open {
+                gfx_draw_circle_button(
+                    icon_x + icon_size_sm / 2,
+                    dock_y + dock_h - 5,
+                    3,
+                    0x0000BCD4
+                );
+            }
+        }
+    }
+}
+
+// ========================================================================
+// CURSOR DO MOUSE (ponteiro simples de 16x16 pixels)
+// ========================================================================
+
+@system
+pub fn render_cursor() {
+    unsafe {
+        let cx = SHELL.cursor_x as u32;
+        let cy = SHELL.cursor_y as u32;
+        let col = 0x00FFFFFF;
+        let col_shadow = 0x00000000;
+
+        // Sombra do cursor (offset +1, +1)
+        gfx_draw_line(cx as i32 + 1, cy as i32 + 1,
+                      cx as i32 + 1, (cy + 12) as i32, col_shadow, 120);
+        gfx_draw_line(cx as i32 + 1, cy as i32 + 1,
+                      (cx + 9) as i32, cy as i32 + 7, col_shadow, 120);
+
+        // Cursor branco
+        gfx_draw_line(cx as i32, cy as i32, cx as i32, (cy + 12) as i32, col, 255);
+        gfx_draw_line(cx as i32, cy as i32, (cx + 9) as i32, cy as i32 + 7, col, 255);
+        gfx_draw_line(cx as i32, (cy + 12) as i32, (cx + 4) as i32, cy as i32 + 7, col, 255);
+    }
+}
+
+// ========================================================================
+// LOOP PRINCIPAL DE RENDERIZAÇÃO
+// ========================================================================
+
+@system
+pub fn desktop_shell_render_frame() {
+    unsafe {
+        SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
+
+        // 1. Papel de parede cósmico roxo-azul animado
+        gfx_draw_background_gradient(SHELL.time_tick);
+
+        // 2. Widget de data/hora no desktop
+        render_datetime_widget();
+
+        // 3. Grade de ícones dos aplicativos
+        render_app_icons();
+
+        // 4. Renderiza Janelas Ativas do Window Manager (Z-Ordered)
+        wm_render_windows();
+
+        // 5. Barra superior de pesquisa (branca fosca, moderna)
+        render_top_bar();
+
+        // 6. Dock inferior flutuante
+        render_floating_dock();
+
+        // 7. Cursor do mouse
+        render_cursor();
+    }
+}
+
+// ========================================================================
+// ATUALIZAÇÃO DO ESTADO (chamado pelo driver de mouse/teclado)
+// ========================================================================
+
+@system
+pub fn shell_update_cursor(x: i32, y: i32) {
+    unsafe {
+        SHELL.cursor_x = x;
+        SHELL.cursor_y = y;
+        SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
+        wm_handle_mouse_move(x, y);
+    }
+}
+
+@system
+pub fn shell_handle_click(button: u8, is_down: bool) {
+    unsafe {
+        if is_down {
+            let handled = wm_handle_mouse_down(SHELL.cursor_x, SHELL.cursor_y);
+            if !handled {
+                // Checa cliques no Dock ou Grade de Icones
+                let sh = SHELL.screen_h;
+                let dock_y = sh - 58 - 16;
+                if (SHELL.cursor_y as u32) >= dock_y {
+                    // Clique no Dock
+                    wm_bring_to_front(1); // Abre BKN Studio
+                }
+            }
+        } else {
+            wm_handle_mouse_up();
+        }
+    }
+}
+
+@system
+pub fn shell_set_focused_icon(icon_id: u8) {
+    unsafe {
+        SHELL.focused_icon = icon_id;
+    }
+}
+

@@ -1,0 +1,59 @@
+// Baken OS - Compositor Gráfico Direto (bkn-compositor) em BKN (@system)
+// Renderização Direta no Framebuffer com Suporte a Janelas e Estética Glassmorphic
+
+module kernel::compositor;
+
+import kernel::framebuffer::*;
+
+pub struct Window {
+    pub id: u32,
+    pub title: [u8; 32],
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub is_focused: bool,
+    pub background_color: u32,
+}
+
+static mut WINDOW_LIST: [Window; 16] = [Window {
+    id: 0,
+    title: [0; 32],
+    x: 0, y: 0, width: 0, height: 0,
+    is_focused: false,
+    background_color: 0x000F172A,
+}; 16];
+
+static mut ACTIVE_WINDOWS: usize = 0;
+
+@system
+pub fn compositor_init() {
+    unsafe {
+        ACTIVE_WINDOWS = 0;
+    }
+}
+
+@system
+pub fn compositor_render_desktop() {
+    // 1. Fundo Gradiente Aero-Quantum (#0B1021)
+    fb_clear(0x000B1021);
+
+    // 2. Barra Superior Translúcida (Top Status Bar)
+    fb_draw_rect(0, 0, 1920, 36, 0x00101827);
+    fb_draw_string(20, 10, "BAKEN OS - AERO-QUANTUM DESKTOP", 0x0000E5FF);
+    fb_draw_string(450, 10, "ML-DSA Ativo | Wi-Fi 7 (5.8 Gbps) | Q-HAL Online", 0x0000E676);
+
+    // 3. Janela do BKN Studio IDE
+    fb_draw_rect(60, 60, 900, 520, 0x000D1220); // Fundo da Janela
+    fb_draw_rect(60, 60, 900, 32, 0x00172033);  // Barra de Título
+    fb_draw_string(80, 70, "BKN Studio IDE - [quantum_core.bkn]", 0x00FFFFFF);
+
+    // 4. Janela Lateral do Monitor Q-HAL
+    fb_draw_rect(980, 60, 420, 520, 0x000E1528);
+    fb_draw_rect(980, 60, 420, 32, 0x0018223C);
+    fb_draw_string(1000, 70, "Q-HAL Quantum Telemetry", 0x0000E5FF);
+
+    // 5. Dock Flutuante Inferior
+    fb_draw_rect(460, 620, 500, 56, 0x001E293B);
+    fb_draw_string(480, 638, "[ Terminal ]  [ BKN Studio ]  [ Files ]  [ Net ]", 0x0080D8FF);
+}

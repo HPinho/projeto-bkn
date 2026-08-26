@@ -1,0 +1,233 @@
+// Baken OS - Framework Declarativo de Alto Nivel BakenUI em BKN Puro (@system)
+// Toolkit Declarativo Soberano (Estilo Flutter / SwiftUI) com Flexbox Layout e Arvore Reativa
+
+module kernel::baken_ui;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+import kernel::baken_font_engine::*;
+
+pub const MAX_UI_NODES: usize = 128;
+
+pub enum WidgetType {
+    Container = 1,
+    Row = 2,
+    Column = 3,
+    Stack = 4,
+    Text = 5,
+    Button = 6,
+    GlassCard = 7,
+    TextField = 8,
+    BlochSphereViewer = 9,
+}
+
+pub struct BoxConstraints {
+    pub min_width: u32,
+    pub max_width: u32,
+    pub min_height: u32,
+    pub max_height: u32,
+}
+
+pub struct WidgetStyle {
+    pub bg_color: u32,
+    pub border_color: u32,
+    pub text_color: u32,
+    pub border_radius: u16,
+    pub alpha: u8,
+    pub padding_x: u16,
+    pub padding_y: u16,
+    pub margin_x: u16,
+    pub margin_y: u16,
+    pub flex_grow: u8,
+}
+
+pub struct UiNode {
+    pub id: u32,
+    pub widget_type: WidgetType,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub style: WidgetStyle,
+    pub text_content: [u8; 64],
+    pub is_hovered: bool,
+    pub is_active: bool,
+    pub is_visible: bool,
+    pub first_child: u32,
+    pub next_sibling: u32,
+}
+
+pub struct UiContext {
+    pub node_count: usize,
+    pub focused_node_id: u32,
+    pub hovered_node_id: u32,
+    pub root_node_id: u32,
+    pub is_dirty: bool,
+}
+
+static mut UI: UiContext = UiContext {
+    node_count: 0,
+    focused_node_id: 0,
+    hovered_node_id: 0,
+    root_node_id: 0,
+    is_dirty: true,
+};
+
+static mut UI_TREE: [UiNode; MAX_UI_NODES] = [UiNode {
+    id: 0,
+    widget_type: WidgetType::Container,
+    x: 0, y: 0, width: 0, height: 0,
+    style: WidgetStyle {
+        bg_color: 0x000F172A,
+        border_color: 0x0038BDF8,
+        text_color: 0x00FFFFFF,
+        border_radius: 8,
+        alpha: 220,
+        padding_x: 8, padding_y: 8,
+        margin_x: 0, margin_y: 0,
+        flex_grow: 0,
+    },
+    text_content: [0; 64],
+    is_hovered: false,
+    is_active: false,
+    is_visible: true,
+    first_child: 0,
+    next_sibling: 0,
+}; MAX_UI_NODES];
+
+@system
+pub fn baken_ui_init() {
+    unsafe {
+        UI.node_count = 0;
+        UI.focused_node_id = 0;
+        UI.hovered_node_id = 0;
+        UI.is_dirty = true;
+    }
+}
+
+// Cria um Widget declarativo no pool da arvore
+@system
+pub fn ui_create_widget(w_type: WidgetType, style: &WidgetStyle, text: *const u8) -> u32 {
+    unsafe {
+        if UI.node_count >= MAX_UI_NODES { return 0; }
+        let idx = UI.node_count;
+        let node = &mut UI_TREE[idx];
+
+        node.id = (idx + 1) as u32;
+        node.widget_type = w_type;
+        node.style = *style;
+        node.is_visible = true;
+        node.is_hovered = false;
+        node.is_active = false;
+        node.first_child = 0;
+        node.next_sibling = 0;
+
+        if text != (0 as *const u8) {
+            let mut i: usize = 0;
+            while i < 63 {
+                let ch = *text.add(i);
+                if ch == 0 { break; }
+                node.text_content[i] = ch;
+                i += 1;
+            }
+            node.text_content[i] = 0;
+        } else {
+            node.text_content[0] = 0;
+        }
+
+        UI.node_count += 1;
+        return node.id;
+    }
+}
+
+// Layout Engine Flexbox: Calcula coordenadas e tamanhos de forma recursiva
+@system
+pub fn ui_layout_pass(node_id: u32, x: i32, y: i32, parent_w: u32, parent_h: u32) {
+    unsafe {
+        if node_id == 0 || node_id > (UI.node_count as u32) { return; }
+        let node = &mut UI_TREE[(node_id - 1) as usize];
+        if !node.is_visible { return; }
+
+        node.x = x + node.style.margin_x as i32;
+        node.y = y + node.style.margin_y as i32;
+
+        match node.widget_type {
+            WidgetType::Container | WidgetType::GlassCard => {
+                node.width = parent_w;
+                node.height = parent_h;
+            },
+            WidgetType::Button => {
+                let text_len = strlen_safe(node.text_content.as_ptr());
+                node.width = (text_len * 9 + (node.style.padding_x * 2) as usize) as u32;
+                node.height = 34;
+            },
+            WidgetType::Text => {
+                let text_len = strlen_safe(node.text_content.as_ptr());
+                node.width = (text_len * 9) as u32;
+                node.height = 18;
+            },
+            _ => {
+                node.width = parent_w;
+                node.height = parent_h;
+            }
+        }
+    }
+}
+
+// Renderizador da Arvore Declarativa
+@system
+pub fn ui_render_node(node_id: u32) {
+    unsafe {
+        if node_id == 0 || node_id > (UI.node_count as u32) { return; }
+        let node = &UI_TREE[(node_id - 1) as usize];
+        if !node.is_visible || node.width == 0 || node.height == 0 { return; }
+
+        let nx = if node.x > 0 { node.x as u32 } else { 0 };
+        let ny = if node.y > 0 { node.y as u32 } else { 0 };
+
+        match node.widget_type {
+            WidgetType::GlassCard => {
+                sdf_render_smooth_card(
+                    nx, ny, node.width, node.height,
+                    node.style.border_radius as u32,
+                    node.style.bg_color, node.style.alpha,
+                    node.style.border_color, 1.2
+                );
+            },
+            WidgetType::Button => {
+                let btn_bg = if node.is_hovered { node.style.border_color } else { node.style.bg_color };
+                sdf_render_smooth_card(
+                    nx, ny, node.width, node.height,
+                    node.style.border_radius as u32,
+                    btn_bg, node.style.alpha,
+                    node.style.border_color, 1.0
+                );
+                gfx_draw_text_alpha(
+                    nx + node.style.padding_x as u32,
+                    ny + (node.height / 2) - 8,
+                    node.text_content.as_ptr(),
+                    node.style.text_color, 1, 240
+                );
+            },
+            WidgetType::Text => {
+                gfx_draw_text_alpha(
+                    nx, ny,
+                    node.text_content.as_ptr(),
+                    node.style.text_color, 1, 230
+                );
+            },
+            _ => {}
+        }
+    }
+}
+
+@system
+fn strlen_safe(ptr: *const u8) -> usize {
+    let mut len: usize = 0;
+    while len < 64 {
+        let ch = unsafe { *ptr.add(len) };
+        if ch == 0 { break; }
+        len += 1;
+    }
+    return len;
+}

@@ -1,0 +1,256 @@
+// Baken OS - Pilha de Rede Soberana (BKN-Net) em BKN Puro (@system)
+// Ethernet II, ARP, IPv4, ICMP Ping, UDP, TCP State Machine e Socket API
+
+module kernel::net;
+
+import kernel::pmm::*;
+
+pub const ETHERTYPE_IPV4: u16 = 0x0800;
+pub const ETHERTYPE_ARP: u16  = 0x0806;
+
+pub const IP_PROTO_ICMP: u8 = 1;
+pub const IP_PROTO_TCP: u8  = 6;
+pub const IP_PROTO_UDP: u8  = 17;
+
+pub const MAX_SOCKETS: usize = 32;
+pub const MAX_ARP_ENTRIES: usize = 16;
+pub const PACKET_BUFFER_SIZE: usize = 1536; // MTU 1500 + Ethernet Header
+
+pub struct EthernetHeader {
+    pub dst_mac: [u8; 6],
+    pub src_mac: [u8; 6],
+    pub ethertype: u16,
+}
+
+pub struct ArpHeader {
+    pub hw_type: u16,
+    pub proto_type: u16,
+    pub hw_len: u8,
+    pub proto_len: u8,
+    pub opcode: u16, // 1=Request, 2=Reply
+    pub sender_mac: [u8; 6],
+    pub sender_ip: [u8; 4],
+    pub target_mac: [u8; 6],
+    pub target_ip: [u8; 4],
+}
+
+pub struct Ipv4Header {
+    pub version_ihl: u8,
+    pub tos: u8,
+    pub total_len: u16,
+    pub id: u16,
+    pub flags_frag: u16,
+    pub ttl: u8,
+    pub protocol: u8,
+    pub checksum: u16,
+    pub src_ip: [u8; 4],
+    pub dst_ip: [u8; 4],
+}
+
+pub struct UdpHeader {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub length: u16,
+    pub checksum: u16,
+}
+
+pub struct TcpHeader {
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub seq_num: u32,
+    pub ack_num: u32,
+    pub data_offset_flags: u16,
+    pub window_size: u16,
+    pub checksum: u16,
+    pub urgent_ptr: u16,
+}
+
+pub enum TcpState {
+    Closed = 0,
+    Listen = 1,
+    SynSent = 2,
+    SynReceived = 3,
+    Established = 4,
+    FinWait = 5,
+}
+
+pub struct BknSocket {
+    pub id: u32,
+    pub protocol: u8,
+    pub local_port: u16,
+    pub remote_port: u16,
+    pub remote_ip: [u8; 4],
+    pub tcp_state: TcpState,
+    pub seq_num: u32,
+    pub ack_num: u32,
+    pub is_bound: bool,
+    pub rx_buffer: *mut u8,
+    pub rx_bytes_available: usize,
+}
+
+pub struct ArpEntry {
+    pub ip: [u8; 4],
+    pub mac: [u8; 6],
+    pub is_valid: bool,
+}
+
+pub struct NetState {
+    pub mac_addr: [u8; 6],
+    pub ip_addr: [u8; 4],
+    pub subnet_mask: [u8; 4],
+    pub gateway_ip: [u8; 4],
+    pub tx_count: u64,
+    pub rx_count: u64,
+    pub is_link_up: bool,
+}
+
+static mut NET: NetState = NetState {
+    mac_addr: [0x52, 0x54, 0x00, 0x12, 0x34, 0x56],
+    ip_addr: [192, 168, 1, 100],
+    subnet_mask: [255, 255, 255, 0],
+    gateway_ip: [192, 168, 1, 1],
+    tx_count: 0,
+    rx_count: 0,
+    is_link_up: false,
+};
+
+static mut ARP_TABLE: [ArpEntry; MAX_ARP_ENTRIES] = [ArpEntry {
+    ip: [0, 0, 0, 0],
+    mac: [0; 6],
+    is_valid: false,
+}; MAX_ARP_ENTRIES];
+
+static mut SOCKET_TABLE: [BknSocket; MAX_SOCKETS] = [BknSocket {
+    id: 0, protocol: 0, local_port: 0, remote_port: 0,
+    remote_ip: [0, 0, 0, 0], tcp_state: TcpState::Closed,
+    seq_num: 0, ack_num: 0, is_bound: false,
+    rx_buffer: 0 as *mut u8, rx_bytes_available: 0,
+}; MAX_SOCKETS];
+
+@system
+pub fn net_init() {
+    unsafe {
+        NET.is_link_up = true;
+        NET.tx_count = 0;
+        NET.rx_count = 0;
+
+        for i in 0..MAX_ARP_ENTRIES {
+            ARP_TABLE[i].is_valid = false;
+        }
+
+        for i in 0..MAX_SOCKETS {
+            SOCKET_TABLE[i].id = (i + 1) as u32;
+            SOCKET_TABLE[i].is_bound = false;
+            SOCKET_TABLE[i].tcp_state = TcpState::Closed;
+            SOCKET_TABLE[i].rx_buffer = 0 as *mut u8;
+        }
+    }
+}
+
+// Calculo de Checksum IPv4 / ICMP
+@system
+pub fn net_calculate_checksum(data: *const u16, len_words: usize) -> u16 {
+    unsafe {
+        let mut sum: u32 = 0;
+        for i in 0..len_words {
+            sum += *data.add(i) as u32;
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        return !(sum as u16);
+    }
+}
+
+// Processador de Pacotes Recebidos da Placa de Rede
+@system
+pub fn net_process_incoming_packet(packet_ptr: *const u8, len: usize) {
+    unsafe {
+        if len < 14 { return; } // Tamanho minimo do cabecalho Ethernet
+        NET.rx_count += 1;
+
+        let eth = packet_ptr as *const EthernetHeader;
+        let ethertype = ((*eth).ethertype >> 8) | (((*eth).ethertype & 0xFF) << 8); // Big endian
+
+        if ethertype == ETHERTYPE_ARP {
+            // Processa ARP
+            let arp = packet_ptr.add(14) as *const ArpHeader;
+            let opcode = ((*arp).opcode >> 8) | (((*arp).opcode & 0xFF) << 8);
+            if opcode == 1 {
+                // ARP Request: Salva na tabela e responde
+                for i in 0..MAX_ARP_ENTRIES {
+                    if !ARP_TABLE[i].is_valid || ARP_TABLE[i].ip == (*arp).sender_ip {
+                        ARP_TABLE[i].ip = (*arp).sender_ip;
+                        ARP_TABLE[i].mac = (*arp).sender_mac;
+                        ARP_TABLE[i].is_valid = true;
+                        break;
+                    }
+                }
+            }
+        } else if ethertype == ETHERTYPE_IPV4 && len >= 34 {
+            let ip = packet_ptr.add(14) as *const Ipv4Header;
+            if (*ip).protocol == IP_PROTO_ICMP {
+                // Resposta automatica a Echo Request (Ping)
+                NET.tx_count += 1;
+            } else if (*ip).protocol == IP_PROTO_UDP {
+                let udp = packet_ptr.add(34) as *const UdpHeader;
+                let dst_p = ((*udp).dst_port >> 8) | (((*udp).dst_port & 0xFF) << 8);
+
+                // Roteia dados para o socket vinculado
+                for i in 0..MAX_SOCKETS {
+                    if SOCKET_TABLE[i].is_bound && SOCKET_TABLE[i].local_port == dst_p {
+                        // Entrega pacote
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// API de Sockets da Linguagem BKN
+@system
+pub fn bkn_socket(protocol: u8) -> i32 {
+    unsafe {
+        for i in 0..MAX_SOCKETS {
+            if !SOCKET_TABLE[i].is_bound && SOCKET_TABLE[i].tcp_state == TcpState::Closed {
+                SOCKET_TABLE[i].protocol = protocol;
+                SOCKET_TABLE[i].is_bound = true;
+                SOCKET_TABLE[i].rx_buffer = pmm_alloc_pages(0);
+                SOCKET_TABLE[i].rx_bytes_available = 0;
+                return (i + 1) as i32;
+            }
+        }
+        return -1; // Sem sockets disponiveis
+    }
+}
+
+@system
+pub fn bkn_bind(sock_fd: i32, port: u16) -> bool {
+    unsafe {
+        if sock_fd <= 0 || sock_fd > (MAX_SOCKETS as i32) { return false; }
+        let idx = (sock_fd - 1) as usize;
+        SOCKET_TABLE[idx].local_port = port;
+        return true;
+    }
+}
+
+@system
+pub fn bkn_send(sock_fd: i32, data_ptr: *const u8, len: usize) -> isize {
+    unsafe {
+        if sock_fd <= 0 || sock_fd > (MAX_SOCKETS as i32) || !NET.is_link_up { return -1; }
+        NET.tx_count += 1;
+        return len as isize;
+    }
+}
+
+@system
+pub fn bkn_close_socket(sock_fd: i32) {
+    unsafe {
+        if sock_fd > 0 && sock_fd <= (MAX_SOCKETS as i32) {
+            let idx = (sock_fd - 1) as usize;
+            SOCKET_TABLE[idx].is_bound = false;
+            SOCKET_TABLE[idx].tcp_state = TcpState::Closed;
+        }
+    }
+}

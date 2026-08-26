@@ -1,0 +1,53 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "BKN Language",
+  "scopeName": "source.bkn",
+  "patterns": [
+    {
+      "name": "comment.line.double-slash.bkn",
+      "match": "//.*$"
+    },
+    {
+      "name": "comment.block.bkn",
+      "begin": "/\\*",
+      "end": "\\*/"
+    },
+    {
+      "name": "keyword.control.bkn",
+      "match": "\\b(if|else|while|for|in|return|break|continue|match)\\b"
+    },
+    {
+      "name": "keyword.other.bkn",
+      "match": "\\b(fn|struct|trait|impl|module|import|as|pub|mut|const|quantum|measure|barrier)\\b"
+    },
+    {
+      "name": "entity.name.function.attribute.bkn",
+      "match": "@(system|quantum|inline|naked|export)"
+    },
+    {
+      "name": "storage.type.primitive.bkn",
+      "match": "\\b(u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|bool|char|void)\\b"
+    },
+    {
+      "name": "storage.type.quantum.bkn",
+      "match": "\\b(qubit|qreg)\\b"
+    },
+    {
+      "name": "entity.name.function.quantum.gate.bkn",
+      "match": "\\b(H|X|Y|Z|S|T|RX|RY|RZ|PHASE|CNOT|CZ|SWAP|TOFFOLI|CSWAP)\\b"
+    },
+    {
+      "name": "support.function.macro.bkn",
+      "match": "\\b(asm!|panic!|assert!|log!)\\b"
+    },
+    {
+      "name": "constant.numeric.bkn",
+      "match": "\\b(0x[0-9a-fA-F_]+|0b[01_]+|[0-9][0-9_]*(\\.[0-9_]+)?([eE][+-]?[0-9_]+)?)\\b"
+    },
+    {
+      "name": "string.quoted.double.bkn",
+      "begin": "\"",
+      "end": "\""
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+// BKN Standard Library - Animation & Physics Engine (libbkn::gui::animation)
+// Interpolação Bézier, Física de Molas (Spring Dynamics) e Efeito de Lupa Suave
+
+module libbkn::gui::animation;
+
+import libbkn::gui::types::*;
+
+pub enum EasingType {
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    Spring,
+}
+
+pub struct SpringPhysics {
+    pub stiffness: f32,
+    pub damping: f32,
+    pub mass: f32,
+    pub current_val: f32,
+    pub target_val: f32,
+    pub velocity: f32,
+}
+
+impl SpringPhysics {
+    pub fn new(stiffness: f32, damping: f32, initial_val: f32) -> Self {
+        return SpringPhysics {
+            stiffness: stiffness,
+            damping: damping,
+            mass: 1.0,
+            current_val: initial_val,
+            target_val: initial_val,
+            velocity: 0.0,
+        };
+    }
+
+    pub fn set_target(&mut self, target: f32) {
+        self.target_val = target;
+    }
+
+    pub fn update(&mut self, dt: f32) -> f32 {
+        let displacement = self.current_val - self.target_val;
+        let spring_force = -self.stiffness * displacement;
+        let damping_force = -self.damping * self.velocity;
+        let acceleration = (spring_force + damping_force) / self.mass;
+
+        self.velocity += acceleration * dt;
+        self.current_val += self.velocity * dt;
+        return self.current_val;
+    }
+}
+
+pub struct Transition {
+    pub from: f32,
+    pub to: f32,
+    pub duration: f32,
+    pub elapsed: f32,
+    pub is_finished: bool,
+}
+
+impl Transition {
+    pub fn new(from: f32, to: f32, duration: f32) -> Self {
+        return Transition {
+            from: from,
+            to: to,
+            duration: duration.max(0.001),
+            elapsed: 0.0,
+            is_finished: false,
+        };
+    }
+
+    pub fn step(&mut self, dt: f32) -> f32 {
+        self.elapsed += dt;
+        if self.elapsed >= self.duration {
+            self.elapsed = self.duration;
+            self.is_finished = true;
+            return self.to;
+        }
+
+        let progress = self.elapsed / self.duration;
+        // Curva Ease-Out Cúbica
+        let t = 1.0 - progress;
+        let ease_out = 1.0 - (t * t * t);
+        return self.from + (self.to - self.from) * ease_out;
+    }
+}
+
+pub struct DockMagnifier {
+    pub max_scale: f32,
+    pub influence_radius: f32,
+}
+
+impl DockMagnifier {
+    pub fn new(max_scale: f32, radius: f32) -> Self {
+        return DockMagnifier {
+            max_scale: max_scale,
+            influence_radius: radius,
+        };
+    }
+
+    pub fn calculate_scale(&self, cursor_x: f32, icon_center_x: f32) -> f32 {
+        let dist = (cursor_x - icon_center_x).abs();
+        if dist >= self.influence_radius {
+            return 1.0;
+        }
+
+        let normalized = (self.influence_radius - dist) / self.influence_radius;
+        // Curva gaussiana harmônica
+        let factor = (normalized * 3.14159 * 0.5).sin();
+        return 1.0 + (self.max_scale - 1.0) * (factor * factor);
+    }
+}

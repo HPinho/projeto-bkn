@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+*.img
+*.iso
+*.fd
+*.bin
+*.o
+*.obj
+*.exe
+*.ll
+*.bkn_exec
+
+# Toolchains and third-party binaries
+tools/w64devkit/
+tools/bin/
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.swp
+*.tmp
