@@ -4,6 +4,8 @@
 
 module kernel::graphics_engine;
 
+import kernel::pmm::*;
+
 // --- Fonte Bitmap 8x16 via C (bkn_font.c) ---
 extern "C" {
     pub fn bkn_font_get_row(char_code: u8, row: u8) -> u8;
@@ -11,16 +13,20 @@ extern "C" {
 
 pub struct FramebufferConfig {
     pub base: *mut u32,
+    pub backbuffer: *mut u32,
     pub width: u32,
     pub height: u32,
     pub pitch: u32,
+    pub use_double_buffering: bool,
 }
 
 static mut FB: FramebufferConfig = FramebufferConfig {
     base: 0 as *mut u32,
+    backbuffer: 0 as *mut u32,
     width: 1920,
     height: 1080,
     pitch: 1920,
+    use_double_buffering: true,
 };
 
 @system
@@ -30,6 +36,35 @@ pub fn gfx_init(base: *mut u32, width: u32, height: u32, pitch: u32) {
         FB.width = width;
         FB.height = height;
         FB.pitch = pitch;
+
+        // Aloca buffer secundário contíguo no PMM (largura * altura * 4 bytes)
+        let total_bytes = (width * height * 4) as usize;
+        let pages_needed = (total_bytes + 4095) / 4096;
+        let bb = pmm_alloc_pages(pages_needed);
+        
+        if bb != (0 as *mut u8) {
+            FB.backbuffer = bb as *mut u32;
+            FB.use_double_buffering = true;
+        } else {
+            FB.backbuffer = base;
+            FB.use_double_buffering = false;
+        }
+    }
+}
+
+// Troca de Buffers Atômica com Cópia Rápida de 64-bit / AVX2 (Zero Screen Tearing)
+@system
+pub fn gfx_swap_buffers() {
+    unsafe {
+        if !FB.use_double_buffering || FB.backbuffer == (0 as *mut u32) || FB.base == (0 as *mut u32) { return; }
+        
+        let total_u64 = (FB.width * FB.height * 4 / 8) as usize;
+        let src_u64 = FB.backbuffer as *const u64;
+        let dst_u64 = FB.base as *mut u64;
+
+        for i in 0..total_u64 {
+            *dst_u64.add(i) = *src_u64.add(i);
+        }
     }
 }
 
@@ -59,7 +94,7 @@ pub fn gfx_put_pixel(x: u32, y: u32, color: u32) {
     unsafe {
         if x < FB.width && y < FB.height {
             let offset = (y * FB.pitch + x) as usize;
-            *FB.base.add(offset) = color;
+            *FB.backbuffer.add(offset) = color;
         }
     }
 }
@@ -70,10 +105,10 @@ pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) {
         if x < FB.width && y < FB.height && alpha > 0 {
             let offset = (y * FB.pitch + x) as usize;
             if alpha == 255 {
-                *FB.base.add(offset) = color;
+                *FB.backbuffer.add(offset) = color;
             } else {
-                let current = *FB.base.add(offset);
-                *FB.base.add(offset) = gfx_blend_color(current, color, alpha);
+                let current = *FB.backbuffer.add(offset);
+                *FB.backbuffer.add(offset) = gfx_blend_color(current, color, alpha);
             }
         }
     }

@@ -6,6 +6,7 @@ module kernel::window_manager;
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::baken_font_engine::*;
+import kernel::shell_cli::*;
 
 pub const MAX_WINDOWS: usize = 16;
 pub const TITLE_BAR_HEIGHT: u32 = 36;
@@ -406,25 +407,31 @@ fn wm_render_single_window(win: &Window) {
         gfx_draw_text(cx_code, cy_base + 140, b"}\0".as_ptr(), 0x00A855F7, 1);
 
     } else if win.id == 2 {
-        // === JANELA 2: TERMINAL BAKEN SHELL ===
+        // === JANELA 2: TERMINAL BAKEN SHELL (INTERATIVO) ===
         gfx_draw_glass_rect(content_x, content_y, content_w, content_h, 0x00020617, 240, 0x000F172A, 8);
 
         let tx = content_x + 14;
-        let ty = content_y + 12;
+        let mut ty = content_y + 12;
 
-        gfx_draw_text(tx, ty,       b"Baken OS Ring 0 Sovereign Console [v2.0]\0".as_ptr(), 0x0022D3EE, 1);
-        gfx_draw_text(tx, ty + 22,  b"Zero dependencies. Pure BKN Microkernel.\0".as_ptr(), 0x0064748B, 1);
-        gfx_draw_hline(tx, ty + 42, content_w - 28, 0x001E293B, 120);
+        let line_count = shell_cli_get_history_count();
+        let max_render = if line_count > 8 { 8 } else { line_count };
 
-        gfx_draw_text(tx, ty + 54,  b"root@baken-core:~# pmm-status\0".as_ptr(), 0x00F8FAFC, 1);
-        gfx_draw_text(tx, ty + 74,  b"[PMM] Total: 4096 MB | Free: 3840 MB (93%)\0".as_ptr(), 0x004ADE80, 1);
+        for l in 0..max_render {
+            let line_ptr = shell_cli_get_line(l);
+            if line_ptr != (0 as *const u8) {
+                gfx_draw_text(tx, ty, line_ptr, 0x00F8FAFC, 1);
+                ty += 18;
+            }
+        }
 
-        gfx_draw_text(tx, ty + 100, b"root@baken-core:~# bknc --version\0".as_ptr(), 0x00F8FAFC, 1);
-        gfx_draw_text(tx, ty + 120, b"BKNC v2.0 (LLVM IR + Q-IR + ML-DSA-65)\0".as_ptr(), 0x00FACC15, 1);
-
-        // Linha do Prompt Ativo
-        let prompt_y = content_y + content_h - 32;
-        gfx_draw_text(tx, prompt_y, b"root@baken-core:~# _\0".as_ptr(), 0x0038BDF8, 1);
+        // Linha do Prompt Ativo em Tempo Real com Buffer de Digitação
+        let prompt_y = content_y + content_h - 28;
+        gfx_draw_text(tx, prompt_y, b"root@bkn:~# \0".as_ptr(), 0x0038BDF8, 1);
+        gfx_draw_text(tx + 88, prompt_y, shell_cli_get_input_buffer(), 0x00FFFFFF, 1);
+        
+        // Cursor Piscante
+        let input_offset = strlen_safe(shell_cli_get_input_buffer()) as u32 * 9;
+        gfx_draw_char(tx + 88 + input_offset, prompt_y, b'_', 0x0000E5FF, 1);
 
     } else if win.id == 3 {
         // === JANELA 3: Q-HAL QUANTUM 3D SIMULATOR ===

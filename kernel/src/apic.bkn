@@ -1,0 +1,90 @@
+// Baken OS - Local APIC Timer e Multiprocessamento SMP em BKN Puro (@system)
+// Temporizador de Alta Resolução e Inicialização Multi-Core x86_64 via IPI
+
+module kernel::apic;
+
+import kernel::vmm::*;
+
+pub const LAPIC_DEFAULT_BASE: u64 = 0xFEE00000;
+
+// Registradores do Local APIC (Offsets em bytes)
+pub const LAPIC_ID: u32         = 0x0020;
+pub const LAPIC_VERSION: u32    = 0x0030;
+pub const LAPIC_TPR: u32        = 0x0080;
+pub const LAPIC_EOI: u32        = 0x00B0;
+pub const LAPIC_SVR: u32        = 0x00F0;
+pub const LAPIC_ESR: u32        = 0x0280;
+pub const LAPIC_ICR_LOW: u32    = 0x0300;
+pub const LAPIC_ICR_HIGH: u32   = 0x0310;
+pub const LAPIC_LVT_TIMER: u32  = 0x0320;
+pub const LAPIC_TIMER_INIT: u32 = 0x0380;
+pub const LAPIC_TIMER_CURR: u32 = 0x0390;
+pub const LAPIC_TIMER_DIV: u32  = 0x03E0;
+
+pub struct ApicState {
+    pub lapic_base_ptr: *mut u32,
+    pub is_enabled: bool,
+    pub timer_ticks_per_ms: u32,
+    pub active_cores: u32,
+}
+
+static mut LAPIC: ApicState = ApicState {
+    lapic_base_ptr: LAPIC_DEFAULT_BASE as *mut u32,
+    is_enabled: false,
+    timer_ticks_per_ms: 100000,
+    active_cores: 1,
+};
+
+@system
+pub fn lapic_read(reg_offset: u32) -> u32 {
+    unsafe {
+        let ptr = (LAPIC.lapic_base_ptr as u64 + reg_offset as u64) as *const u32;
+        return *ptr;
+    }
+}
+
+@system
+pub fn lapic_write(reg_offset: u32, val: u32) {
+    unsafe {
+        let ptr = (LAPIC.lapic_base_ptr as u64 + reg_offset as u64) as *mut u32;
+        *ptr = val;
+    }
+}
+
+@system
+pub fn lapic_init() {
+    unsafe {
+        // 1. Habilita o Local APIC através do Spurious Vector Register (SVR)
+        // Bit 8 = 1 (APIC Software Enable), Vetor Spurious = 0xFF
+        lapic_write(LAPIC_SVR, 0x1FF);
+
+        // 2. Configura divisor do APIC Timer para 16 (Divide Value 0x03)
+        lapic_write(LAPIC_TIMER_DIV, 0x03);
+
+        // 3. Configura LVT Timer em Modo Periódico (Bit 17 = 1) no Vetor 0x20 (Timer IRQ)
+        lapic_write(LAPIC_LVT_TIMER, 0x20020);
+
+        // 4. Carrega contagem inicial para disparo a 1000 Hz (1 ms quantum)
+        lapic_write(LAPIC_TIMER_INIT, LAPIC.timer_ticks_per_ms);
+
+        LAPIC.is_enabled = true;
+    }
+}
+
+// Sinaliza Fim de Interrupção (End of Interrupt - EOI) ao Local APIC
+@system
+pub fn lapic_send_eoi() {
+    lapic_write(LAPIC_EOI, 0);
+}
+
+// Envia comando IPI (Inter-Processor Interrupt) para inicializar núcleos secundários (SMP)
+@system
+pub fn lapic_send_ipi_sipi(target_apic_id: u8, vector_page: u8) {
+    // 1. Envia INIT IPI
+    lapic_write(LAPIC_ICR_HIGH, (target_apic_id as u32) << 24);
+    lapic_write(LAPIC_ICR_LOW, 0x00004500);
+
+    // 2. Envia Startup IPI (SIPI) apontando para o vetor de boot
+    lapic_write(LAPIC_ICR_HIGH, (target_apic_id as u32) << 24);
+    lapic_write(LAPIC_ICR_LOW, 0x00004600 | (vector_page as u32));
+}

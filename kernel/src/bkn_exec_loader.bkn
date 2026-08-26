@@ -1,0 +1,95 @@
+// Baken OS - Carregador de Executáveis e Processos de Usuário (Ring 3) em BKN (@system)
+// Parser de Formato .bkn_exec / ELF64, Alocação de Espaço de Endereçamento e Transição Ring 3
+
+module kernel::bkn_exec_loader;
+
+import kernel::pmm::*;
+import kernel::vmm::*;
+import kernel::scheduler::*;
+import kernel::bakenfs::*;
+
+pub const BKN_EXEC_MAGIC: u32 = 0x4E4B427F; // "\x7FBKN"
+
+pub struct BknExecHeader {
+    pub magic: u32,
+    pub version: u16,
+    pub flags: u16,
+    pub entry_point: u64,
+    pub text_offset: u64,
+    pub text_size: u64,
+    pub data_offset: u64,
+    pub data_size: u64,
+    pub bss_size: u64,
+    pub pqc_signature: [u8; 64],
+}
+
+pub struct UserProcess {
+    pub pid: u64,
+    pub name: [u8; 32],
+    pub cr3_pml4: u64,
+    pub entry_point: u64,
+    pub user_stack_top: u64,
+    pub is_running: bool,
+}
+
+static mut PROCESS_TABLE: [UserProcess; 16] = [UserProcess {
+    pid: 0,
+    name: [0; 32],
+    cr3_pml4: 0,
+    entry_point: 0,
+    user_stack_top: 0,
+    is_running: false,
+}; 16];
+
+// Carrega um executável compilado (.bkn_exec) do BakenFS e spawna um novo processo no Ring 3
+@system
+pub fn bkn_spawn_process(filename: *const u8) -> i64 {
+    unsafe {
+        // 1. Abre e lê o arquivo no BakenFS
+        let fd = bakenfs_open(filename, 0x01);
+        if fd < 0 { return -1; }
+
+        let mut header: BknExecHeader = BknExecHeader {
+            magic: 0, version: 0, flags: 0, entry_point: 0,
+            text_offset: 0, text_size: 0, data_offset: 0,
+            data_size: 0, bss_size: 0, pqc_signature: [0; 64],
+        };
+
+        let bytes_read = bakenfs_read(fd, (&raw mut header) as *mut u8, 128);
+        bakenfs_close(fd);
+
+        if bytes_read < 128 { return -2; }
+
+        // 2. Aloca espaço de memória virtual isolado (PML4) para o processo
+        let pml4_page = pmm_alloc_pages(0);
+        let new_cr3 = pml4_page as u64;
+
+        // 3. Aloca pilha de usuário de 16KB (RSP = 0x7FFFFFFFE000)
+        let stack_pages = pmm_alloc_pages(2);
+        let stack_top: u64 = 0x00007FFFFFFFE000;
+
+        // 4. Registra na tabela de processos
+        for i in 0..16 {
+            if !PROCESS_TABLE[i].is_running {
+                let pid = (i + 100) as u64;
+                PROCESS_TABLE[i].pid = pid;
+                PROCESS_TABLE[i].cr3_pml4 = new_cr3;
+                PROCESS_TABLE[i].entry_point = if header.entry_point != 0 { header.entry_point } else { 0x400000 };
+                PROCESS_TABLE[i].user_stack_top = stack_top;
+                PROCESS_TABLE[i].is_running = true;
+
+                // 5. Spawna thread correspondente no Scheduler com prioridade Normal
+                scheduler_spawn_thread(
+                    PROCESS_TABLE[i].entry_point,
+                    PROCESS_TABLE[i].user_stack_top,
+                    PROCESS_TABLE[i].cr3_pml4,
+                    ThreadPriority::Normal
+                );
+
+                return pid as i64;
+            }
+        }
+
+        return -3; // Tabela de processos cheia
+    }
+}

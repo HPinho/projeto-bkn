@@ -17,6 +17,10 @@ import kernel::rtc::*;
 import kernel::cpu_info::*;
 import kernel::acpi::*;
 import kernel::xhci::*;
+import kernel::panic::*;
+import kernel::shell_cli::*;
+import kernel::bkn_exec_loader::*;
+import kernel::apic::*;
 import kernel::peripherals::*;
 import kernel::mouse::*;
 import kernel::nvme::*;
@@ -113,10 +117,16 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // 15. Inicializa Framework Declarativo BakenUI
     baken_ui_init();
 
-    // 8. Inicializa o Gerenciador de Janelas e Composicao
+    // 16. Inicializa o Temporizador de Alta Resolução APIC Local (1000 Hz)
+    lapic_init();
+
+    // 17. Inicializa o Interpretador de Comandos do Baken Shell CLI
+    shell_cli_init();
+
+    // 18. Inicializa o Gerenciador de Janelas e Composicao
     wm_init();
 
-    // 9. Inicializa o Desktop Shell Soberano (Top bar, Dock, Widgets, Icons)
+    // 19. Inicializa o Desktop Shell Soberano (Top bar, Dock, Widgets, Icons)
     desktop_shell_init((*boot_info).screen_width, (*boot_info).screen_height);
 
     // 10. Registra e Inicia o Escalonador Preemptivo Hibrido

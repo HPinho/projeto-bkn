@@ -16,6 +16,17 @@ pub struct HdaBdlEntry {
     pub flags: u32, // Bit 0: Interrupt on Completion (IOC)
 }
 
+pub const MAX_AUDIO_MIXER_CHANNELS: usize = 8;
+
+pub struct MixerChannel {
+    pub sample_ptr: *const i16,
+    pub total_samples: usize,
+    pub current_sample: usize,
+    pub volume: u8,
+    pub is_active: bool,
+    pub loop_playback: bool,
+}
+
 pub struct AudioDevice {
     pub bar0_base: *mut u32,
     pub sample_rate: u32,
@@ -28,6 +39,7 @@ pub struct AudioDevice {
     pub dma_buf0_virt: *mut i16,
     pub dma_buf1_virt: *mut i16,
     pub active_buffer: u8,
+    pub mixer_channels: [MixerChannel; MAX_AUDIO_MIXER_CHANNELS],
 }
 
 static mut AUDIO_DEV: AudioDevice = AudioDevice {
@@ -42,6 +54,14 @@ static mut AUDIO_DEV: AudioDevice = AudioDevice {
     dma_buf0_virt: 0 as *mut i16,
     dma_buf1_virt: 0 as *mut i16,
     active_buffer: 0,
+    mixer_channels: [MixerChannel {
+        sample_ptr: 0 as *const i16,
+        total_samples: 0,
+        current_sample: 0,
+        volume: 100,
+        is_active: false,
+        loop_playback: false,
+    }; MAX_AUDIO_MIXER_CHANNELS],
 };
 
 @system

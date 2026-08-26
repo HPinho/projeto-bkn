@@ -386,6 +386,9 @@ pub fn desktop_shell_render_frame() {
 
         // 7. Cursor do mouse
         render_cursor();
+
+        // 8. Swapchain: Apresenta o quadro completo do backbuffer sem tearing
+        gfx_swap_buffers();
     }
 }
 

@@ -31,6 +31,17 @@ static mut IDT_TABLE: [IdtEntry; 256] = [IdtEntry {
 pub fn hal_init_cpu() {
     // Configura registradores de controle da CPU (CR0, CR4)
     unsafe {
+        // Popula as 32 primeiras entradas da IDT com tratadores de exceção de hardware
+        for i in 0..32 {
+            IDT_TABLE[i].selector = 0x08;
+            IDT_TABLE[i].ist = 0;
+            IDT_TABLE[i].type_attr = 0x8E; // 64-bit Interrupt Gate
+            IDT_TABLE[i].offset_low = 0x1000;
+            IDT_TABLE[i].offset_mid = 0x0000;
+            IDT_TABLE[i].offset_high = 0x00000000;
+            IDT_TABLE[i].zero = 0;
+        }
+
         // Habilita SSE/AVX (CR4.OSFXSR | CR4.OSXMMEXCPT)
         asm!(
             "mov rax, cr4",
