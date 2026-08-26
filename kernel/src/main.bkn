@@ -36,6 +36,8 @@ import kernel::bakenvm::*;
 import kernel::bakendb::*;
 import kernel::baken_p2p::*;
 import kernel::baken_ui::*;
+import kernel::splash_screen::*;
+import kernel::boot_manager::*;
 import kernel::window_manager::*;
 import kernel::desktop_shell::*;
 
@@ -63,90 +65,62 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         (*boot_info).pixels_per_scanline
     );
 
-    // 2. Inicializa o HAL (GDT, IDT, APIC)
-    hal_init_cpu();
+    // 2. Inicia Tela de Carregamento Ultra-Moderna (Splash Screen)
+    splash_screen_init((*boot_info).screen_width, (*boot_info).screen_height);
 
-    // 3. Inicializa Gerenciador de Memoria Fisica (Buddy Allocator)
+    // 3. Inicializa o HAL (GDT, IDT, APIC) e PMM
+    splash_screen_render_step(10, b"Inicializando HAL x86_64 e Memoria Fisica PMM (Buddy Allocator)...\0".as_ptr());
+    hal_init_cpu();
     pmm_init(0x1000000, 1024 * 1024 * 1024); // 1GB inicial
 
     // 4. Inicializa Gerenciador de Memoria Virtual (Paginacao de 4 Niveis)
+    splash_screen_render_step(25, b"Configurando Espaco de Enderecamento Virtual VMM (PML4)...\0".as_ptr());
     vmm_init();
 
-    // 5. Varredura Real de Barramento PCI/PCIe (Descobre Hardware Real e BARs)
+    // 5. Varredura Real de Barramento PCI/PCIe
+    splash_screen_render_step(40, b"Varrendo Barramento PCI/PCIe e detectando discos NVMe/SATA...\0".as_ptr());
     pci_scan_all_buses();
 
-    // 6. Inicializa Relógio Real de Hardware da Placa-Mãe (CMOS/RTC)
+    // 6. Inicializa Relógio Real de Hardware e ACPI
+    splash_screen_render_step(55, b"Inicializando Relogio RTC e tabelas ACPI da placa-mae...\0".as_ptr());
     rtc_init();
-
-    // 7. Identificação Real de Processador (CPUID & Sensores Térmicos)
     cpu_info_init();
-
-    // 8. Parser de Tabelas ACPI e Telemetria Real de Energia/Bateria
     acpi_init(0);
 
-    // 9. Inicializa Subsistema de Perifericos e Entrada (Mouse & Teclado)
+    // 7. Inicializa Subsistema de Entrada e Controladores de Armazenamento
+    splash_screen_render_step(70, b"Inicializando Controladores NVMe, SATA AHCI e Audio Intel HDA...\0".as_ptr());
     peripherals_init();
     mouse_init((*boot_info).screen_width as i32 / 2, (*boot_info).screen_height as i32 / 2);
-
-    // 10. Inicializa Controlador Host USB 3.0 Real (xHCI)
     xhci_init(0);
-
-    // 11. Inicializa Controlador NVMe de Armazenamento com BAR0 Descoberto via PCI
     nvme_init(pci_get_nvme_bar0());
-
-    // 12. Inicializa Controlador SATA AHCI (Suporte a HDDs e SSDs SATA)
     ahci_init(0xFEB80000);
-
-    // 13. Inicializa Camada Unificada de Dispositivos de Bloco (NVMe + SATA)
     block_dev_init();
-
-    // 14. Inicializa Subsistema de Autenticação e Permissões RBAC
     auth_init();
-
-    // 15. Inicializa Subsistema de Notificações Toast Flutuantes
     toast_init();
-
-    // 16. Inicializa Subsistema de Audio Intel HDA com BAR0 Descoberto via PCI
     audio_init(pci_get_hda_bar0());
-    audio_play_startup_chime();
 
-    // 17. Inicializa Barramento IPC por Capacidades
+    // 8. Inicializa BakenFS, 3D Engine e Q-HAL
+    splash_screen_render_step(85, b"Carregando Sistema de Arquivos BakenFS e Motor Grafico Baken3D...\0".as_ptr());
     ipc_init();
-
-    // 18. Inicializa Simulador Vetorial Quantico Q-HAL
     qhal_init();
-
-    // 19. Inicializa o Sistema de Arquivos BakenFS
     bakenfs_init();
-
-    // 11. Inicializa Motor Gráfico 3D (Baken3D) e Z-Buffer
     baken3d_init((*boot_info).screen_width, (*boot_info).screen_height);
-
-    // 12. Inicializa Hypervisor Nativo (BakenVM)
     bakenvm_init();
-
-    // 13. Inicializa Banco de Dados Embutido ACID (BakenDB)
     bakendb_init();
-
-    // 14. Inicializa Rede P2P Descentralizada (BakenCloud)
     baken_p2p_init();
-
-    // 15. Inicializa Framework Declarativo BakenUI
     baken_ui_init();
 
-    // 16. Inicializa o Temporizador de Alta Resolução APIC Local (1000 Hz)
+    // 9. Inicializa o Temporizador APIC Local e CLI
+    splash_screen_render_step(95, b"Iniciando Temporizador APIC Local e Interpretador Shell CLI...\0".as_ptr());
     lapic_init();
-
-    // 17. Inicializa o Interpretador de Comandos do Baken Shell CLI
     shell_cli_init();
-
-    // 18. Inicializa o Gerenciador de Janelas e Composicao
     wm_init();
 
-    // 19. Inicializa o Desktop Shell Soberano (Top bar, Dock, Widgets, Icons)
+    // 10. Conclui Boot e Carrega Desktop Shell Soberano
+    splash_screen_render_step(100, b"Iniciando Desktop Shell Soberano...\0".as_ptr());
     desktop_shell_init((*boot_info).screen_width, (*boot_info).screen_height);
 
-    // 10. Registra e Inicia o Escalonador Preemptivo Hibrido
+    // 11. Registra e Inicia o Escalonador Preemptivo Hibrido
     scheduler_init();
 
     // Cria a thread de composicao grafica do desktop
@@ -156,6 +130,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         PriorityLevel::High,
         8192
     );
+
+    // Toca som de inicialização do SO
+    audio_play_startup_chime();
 
     // Loop de Execucao do Kernel
     loop {

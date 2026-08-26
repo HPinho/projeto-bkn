@@ -1,0 +1,143 @@
+// Baken OS - Motor de Tela de Carregamento e Splash Screen em BKN Puro (@system)
+// Logotipo com Auréola de Luz Pulsante (Breathing Glow), Barra de Progresso Suave e Telemetria
+
+module kernel::splash_screen;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+
+pub struct SplashState {
+    pub progress_pct: u8,
+    pub glow_pulse: u8,
+    pub status_text: [u8; 80],
+    pub screen_w: u32,
+    pub screen_h: u32,
+}
+
+static mut SPLASH: SplashState = SplashState {
+    progress_pct: 0,
+    glow_pulse: 0,
+    status_text: *b"Iniciando Microkernel Baken OS...\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0",
+    screen_w: 1280,
+    screen_h: 720,
+};
+
+@system
+pub fn splash_screen_init(w: u32, h: u32) {
+    unsafe {
+        SPLASH.screen_w = w;
+        SPLASH.screen_h = h;
+        SPLASH.progress_pct = 0;
+        SPLASH.glow_pulse = 0;
+        splash_screen_render_step(0, b"Iniciando Microkernel Baken OS...\0".as_ptr());
+    }
+}
+
+// Atualiza o progresso do carregamento (0..100) e exibe o subsistema ativo
+@system
+pub fn splash_screen_render_step(progress: u8, status_msg: *const u8) {
+    unsafe {
+        SPLASH.progress_pct = if progress <= 100 { progress } else { 100 };
+        SPLASH.glow_pulse = (SPLASH.glow_pulse + 15) % 180;
+        copy_status_msg(status_msg, SPLASH.status_text.as_mut_ptr());
+
+        let sw = SPLASH.screen_w;
+        let sh = SPLASH.screen_h;
+
+        // 1. Fundo Cósmico Escuro (#070B14)
+        gfx_draw_glass_rect(0, 0, sw, sh, 0x00070B14, 255, 0x00000000, 0);
+
+        let cx = sw / 2;
+        let cy = sh / 2 - 40;
+
+        // 2. Auréola de Luz Pulsante em torno do Logo (Glow Effect)
+        let glow_radius = 48 + (SPLASH.glow_pulse / 10) as u32;
+        gfx_draw_circle_alpha(cx, cy, glow_radius + 8, 0x006366F1, 40);
+        gfx_draw_circle_alpha(cx, cy, glow_radius, 0x0000E5FF, 60);
+
+        // 3. Logotipo Central Baken OS (Geometria em Círculos e Núcleo Ciano)
+        gfx_draw_circle_button(cx, cy, 36, 0x0000BCD4); // Círculo Ciano
+        gfx_draw_circle_button(cx, cy, 22, 0x00070B14); // Interior Escuro
+        gfx_draw_circle_button(cx, cy, 10, 0x0000E5FF); // Núcleo de Luz
+        gfx_draw_circle_button(cx, cy, 4,  0x00FFFFFF); // Ponto de Brilho Puro
+
+        // 4. Tipografia do Título do SO ("B A K E N   O S")
+        let title_y = cy + 56;
+        let title_str = b"B A K E N   O S\0";
+        gfx_draw_text(cx - 72, title_y, title_str.as_ptr(), 0x00FFFFFF, 2);
+
+        // Subtítulo
+        let sub_str = b"Aero-Quantum Sovereign Operating System\0";
+        gfx_draw_text_alpha(cx - 156, title_y + 36, sub_str.as_ptr(), 0x0094A3B8, 1, 200);
+
+        // 5. Barra de Progresso com Cantos Arredondados (Width: 380px, Height: 8px)
+        let bar_w: u32 = 380;
+        let bar_h: u32 = 8;
+        let bar_x = (sw - bar_w) / 2;
+        let bar_y = cy + 120;
+
+        // Trilho de Fundo da Barra
+        sdf_render_smooth_card(bar_x, bar_y, bar_w, bar_h, 4, 0x001E293B, 200, 0x00334155, 1.0);
+
+        // Preenchimento de Progresso Ativo com Gradiente Ciano-Índigo
+        let fill_w = ((bar_w as u64 * SPLASH.progress_pct as u64) / 100) as u32;
+        if fill_w > 4 {
+            sdf_render_smooth_card(bar_x, bar_y, fill_w, bar_h, 4, 0x0000E5FF, 255, 0x00818CF8, 1.0);
+        }
+
+        // 6. Texto de Porcentagem
+        let mut pct_buf: [u8; 6] = [0; 6];
+        format_pct(SPLASH.progress_pct, pct_buf.as_mut_ptr());
+        gfx_draw_text(bar_x + bar_w + 14, bar_y - 4, pct_buf.as_ptr(), 0x0038BDF8, 1);
+
+        // 7. Micro-Log de Telemetria (Qual subsistema está sendo inicializado)
+        let log_y = bar_y + 28;
+        let log_len = strlen_safe(SPLASH.status_text.as_ptr()) as u32;
+        let log_x = if (sw / 2) > (log_len * 9 / 2) { (sw / 2) - (log_len * 9 / 2) } else { 20 };
+        gfx_draw_text_alpha(log_x, log_y, SPLASH.status_text.as_ptr(), 0x00CBD5E1, 1, 220);
+
+        // 8. Swapchain: Exibe o quadro completo do Splash Screen sem cintilação
+        gfx_swap_buffers();
+    }
+}
+
+@system
+fn format_pct(pct: u8, out: *mut u8) {
+    unsafe {
+        if pct == 100 {
+            *out.add(0) = b'1';
+            *out.add(1) = b'0';
+            *out.add(2) = b'0';
+            *out.add(3) = b'%';
+            *out.add(4) = 0;
+        } else {
+            *out.add(0) = b'0' + (pct / 10);
+            *out.add(1) = b'0' + (pct % 10);
+            *out.add(2) = b'%';
+            *out.add(3) = 0;
+        }
+    }
+}
+
+@system
+fn copy_status_msg(src: *const u8, dst: *mut u8) {
+    let mut i = 0;
+    while i < 79 {
+        let ch = unsafe { *src.add(i) };
+        unsafe { *dst.add(i) = ch; }
+        if ch == 0 { break; }
+        i += 1;
+    }
+    unsafe { *dst.add(i) = 0; }
+}
+
+@system
+fn strlen_safe(ptr: *const u8) -> usize {
+    let mut len = 0;
+    while len < 80 {
+        let ch = unsafe { *ptr.add(len) };
+        if ch == 0 { break; }
+        len += 1;
+    }
+    return len;
+}
