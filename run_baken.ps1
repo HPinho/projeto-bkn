@@ -92,15 +92,12 @@ $qemu_args = @(
     "-device", "usb-ehci,id=ehci",
     "-device", "usb-tablet,bus=ehci.0",
     "-device", "usb-kbd,bus=ehci.0",
-    "-audiodev", "dsound,id=snd0",
-    "-device", "intel-hda",
-    "-device", "hda-duplex,audiodev=snd0",
     "-netdev", "user,id=net0",
     "-device", "virtio-net-pci,netdev=net0",
     "-m", "4G",
     "-smp", "4",
     "-vga", "std",
-    "-name", "Baken OS - Quantum Desktop"
+    "-name", "Baken OS - Sovereign Quantum Desktop"
 )
 
 & $qemu @qemu_args
