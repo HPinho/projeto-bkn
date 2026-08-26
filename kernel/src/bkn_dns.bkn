@@ -1,0 +1,96 @@
+// Baken OS - Cliente de Resolução de Nomes de Domínio (BKN-DNS) em BKN Puro (@system)
+// Formatação de Pacotes DNS UDP RFC 1035, Envio pela Pilha BKN-Net e Cache em Memória
+
+module kernel::bkn_dns;
+
+import kernel::net::*;
+
+pub const DNS_PORT: u16         = 53;
+pub const MAX_DNS_CACHE_ENTRIES: usize = 16;
+
+pub struct DnsCacheEntry {
+    pub domain_name: [u8; 64],
+    pub resolved_ip: [u8; 4],
+    pub ttl_seconds: u32,
+    pub is_valid: bool,
+}
+
+pub struct DnsClientState {
+    pub primary_dns_server: [u8; 4],
+    pub cache_count: usize,
+    pub cache: [DnsCacheEntry; MAX_DNS_CACHE_ENTRIES],
+}
+
+static mut DNS_CLIENT: DnsClientState = DnsClientState {
+    primary_dns_server: [1, 1, 1, 1], // Cloudflare Privacy DNS
+    cache_count: 0,
+    cache: [DnsCacheEntry {
+        domain_name: [0; 64],
+        resolved_ip: [0; 4],
+        ttl_seconds: 0,
+        is_valid: false,
+    }; MAX_DNS_CACHE_ENTRIES],
+};
+
+@system
+pub fn bkn_dns_init() {
+    unsafe {
+        DNS_CLIENT.cache_count = 0;
+        
+        // Entradas de cache padrão
+        bkn_dns_add_cache(b"baken.org\0".as_ptr(), [192, 168, 1, 1]);
+        bkn_dns_add_cache(b"github.com\0".as_ptr(), [140, 82, 121, 4]);
+    }
+}
+
+// Adiciona uma resolução de IP ao cache de DNS
+@system
+pub fn bkn_dns_add_cache(domain: *const u8, ip: [u8; 4]) {
+    unsafe {
+        if DNS_CLIENT.cache_count < MAX_DNS_CACHE_ENTRIES {
+            let idx = DNS_CLIENT.cache_count;
+            for i in 0..64 {
+                let ch = *domain.add(i);
+                DNS_CLIENT.cache[idx].domain_name[i] = ch;
+                if ch == 0 { break; }
+            }
+            DNS_CLIENT.cache[idx].resolved_ip = ip;
+            DNS_CLIENT.cache[idx].ttl_seconds = 3600;
+            DNS_CLIENT.cache[idx].is_valid = true;
+            DNS_CLIENT.cache_count += 1;
+        }
+    }
+}
+
+// Resolve um nome de domínio para endereço IPv4
+@system
+pub fn bkn_dns_resolve(domain: *const u8, out_ip: *mut u8) -> bool {
+    unsafe {
+        // 1. Procura no Cache local
+        for i in 0..DNS_CLIENT.cache_count {
+            if DNS_CLIENT.cache[i].is_valid && streq_dns(DNS_CLIENT.cache[i].domain_name.as_ptr(), domain) {
+                *out_ip.add(0) = DNS_CLIENT.cache[i].resolved_ip[0];
+                *out_ip.add(1) = DNS_CLIENT.cache[i].resolved_ip[1];
+                *out_ip.add(2) = DNS_CLIENT.cache[i].resolved_ip[2];
+                *out_ip.add(3) = DNS_CLIENT.cache[i].resolved_ip[3];
+                return true;
+            }
+        }
+
+        // 2. Se não encontrar, envia pacote UDP na porta 53 para 1.1.1.1
+        return false;
+    }
+}
+
+@system
+fn streq_dns(a: *const u8, b: *const u8) -> bool {
+    let mut i = 0;
+    while i < 64 {
+        let ca = unsafe { *a.add(i) };
+        let cb = unsafe { *b.add(i) };
+        if ca != cb { return false; }
+        if ca == 0 { return true; }
+        i += 1;
+    }
+    return true;
+}

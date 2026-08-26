@@ -1,0 +1,60 @@
+// Baken OS - Visualizador de Documentos Vetoriais (Baken Document Viewer) em BKN Puro (@system)
+// Renderização de Manuais, Especificações e Documentações Formatadas
+
+module kernel::doc_viewer;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+import kernel::vector_font::*;
+
+pub struct DocumentViewerState {
+    pub current_page: u32,
+    pub total_pages: u32,
+    pub document_title: [u8; 48],
+}
+
+static mut DOC_VIEWER: DocumentViewerState = DocumentViewerState {
+    current_page: 1,
+    total_pages: 12,
+    document_title: *b"Manual do Desenvolvedor Soberano Baken OS v2.0\0\0",
+};
+
+@system
+pub fn doc_viewer_init() {
+    unsafe {
+        DOC_VIEWER.current_page = 1;
+        DOC_VIEWER.total_pages = 12;
+    }
+}
+
+// Renderiza uma página de documentação formatada
+@system
+pub fn doc_viewer_render_page(x: u32, y: u32, w: u32, h: u32) {
+    unsafe {
+        // Fundo estilo papel fosco escuro
+        sdf_render_smooth_card(x, y, w, h, 8, 0x000F172A, 240, 0x00334155, 1.0);
+
+        // Barra de Título do Documento
+        gfx_draw_text(x + 20, y + 16, DOC_VIEWER.document_title.as_ptr(), 0x0038BDF8, 1);
+        gfx_draw_hline(x + 20, y + 36, w - 40, 0x001E293B, 200);
+
+        // Conteúdo da Página
+        let mut text_y = y + 54;
+        gfx_draw_text(x + 24, text_y, b"1. INTRODUCAO AO MICROKERNEL BKN\0".as_ptr(), 0x0000E5FF, 1);
+        text_y += 24;
+        gfx_draw_text_alpha(x + 24, text_y, b"O Baken OS foi desenvolvido com 100% de soberania, zero dependencias\0".as_ptr(), 0x00CBD5E1, 1, 220);
+        text_y += 18;
+        gfx_draw_text_alpha(x + 24, text_y, b"externas e suporte nativo a computacao quantica e criptografia PQC.\0".as_ptr(), 0x00CBD5E1, 1, 220);
+        text_y += 32;
+
+        // Bloco de Código de Exemplo
+        sdf_render_smooth_card(x + 24, text_y, w - 48, 64, 6, 0x00020617, 240, 0x001E293B, 1.0);
+        gfx_draw_text(x + 36, text_y + 14, b"module main;\0".as_ptr(), 0x00F43F5E, 1);
+        gfx_draw_text(x + 36, text_y + 34, b"pub fn start() { println(\"Baken OS Online!\"); }\0".as_ptr(), 0x0022C55E, 1);
+        text_y += 80;
+
+        // Rodapé com número de página
+        let footer_y = y + h - 28;
+        gfx_draw_text_alpha(x + (w / 2) - 40, footer_y, b"Pagina 1 de 12\0".as_ptr(), 0x0064748B, 1, 180);
+    }
+}

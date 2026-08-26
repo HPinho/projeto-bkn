@@ -8,6 +8,8 @@ import kernel::baken_rasterizer::*;
 import kernel::baken_font_engine::*;
 import kernel::shell_cli::*;
 import kernel::control_center::*;
+import kernel::file_manager::*;
+import kernel::doc_viewer::*;
 
 pub const MAX_WINDOWS: usize = 16;
 pub const TITLE_BAR_HEIGHT: u32 = 36;
@@ -461,5 +463,13 @@ fn wm_render_single_window(win: &Window) {
     } else if win.id == 4 {
         // === JANELA 4: CENTRAL DE CONTROLE & CONFIGURAÇÕES ===
         control_center_render_interior(content_x, content_y, content_w, content_h);
+
+    } else if win.id == 5 {
+        // === JANELA 5: GERENCIADOR DE ARQUIVOS (BAKEN FINDER) ===
+        file_manager_render_interior(content_x, content_y, content_w, content_h);
+
+    } else if win.id == 6 {
+        // === JANELA 6: VISUALIZADOR DE DOCUMENTOS VETORIAIS ===
+        doc_viewer_render_page(content_x, content_y, content_w, content_h);
     }
 }

@@ -40,6 +40,14 @@ import kernel::splash_screen::*;
 import kernel::boot_manager::*;
 import kernel::control_center::*;
 import kernel::kernel_selftest::*;
+import kernel::file_manager::*;
+import kernel::keymap_abnt2::*;
+import kernel::clipboard::*;
+import kernel::bkn_pkg::*;
+import kernel::bkn_dns::*;
+import kernel::keyring_vault::*;
+import kernel::power_manager::*;
+import kernel::doc_viewer::*;
 import kernel::window_manager::*;
 import kernel::desktop_shell::*;
 
@@ -91,6 +99,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
 
     // 7. Inicializa Subsistema de Entrada e Controladores de Armazenamento
     splash_screen_render_step(70, b"Inicializando Controladores NVMe, SATA AHCI e Audio Intel HDA...\0".as_ptr());
+    keymap_init();
+    clipboard_init();
     peripherals_init();
     mouse_init((*boot_info).screen_width as i32 / 2, (*boot_info).screen_height as i32 / 2);
     xhci_init(0);
@@ -98,6 +108,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     ahci_init(0xFEB80000);
     block_dev_init();
     auth_init();
+    keyring_init();
+    power_manager_init();
+    bkn_pkg_init();
+    bkn_dns_init();
     toast_init();
     audio_init(pci_get_hda_bar0());
 
@@ -106,6 +120,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     ipc_init();
     qhal_init();
     bakenfs_init();
+    file_manager_init();
+    doc_viewer_init();
     baken3d_init((*boot_info).screen_width, (*boot_info).screen_height);
     bakenvm_init();
     bakendb_init();

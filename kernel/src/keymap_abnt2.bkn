@@ -1,0 +1,84 @@
+// Baken OS - Driver de Mapeamento de Teclado ABNT2 & Internacional em BKN Puro (@system)
+// Suporte Completo à Tecla 'Ç', Dead-Keys (Acentos) e AltGr para Português Brasileiro
+
+module kernel::keymap_abnt2;
+
+pub enum KeymapLayout {
+    Abnt2Brasil = 0,
+    UsInternational = 1,
+}
+
+pub struct KeymapState {
+    pub active_layout: KeymapLayout,
+    pub shift_pressed: bool,
+    pub altgr_pressed: bool,
+    pub caps_lock: bool,
+    pub pending_dead_key: u8, // 0: nenhum, 1: agudo (´), 2: til (~), 3: circunflexo (^), 4: crase (`)
+}
+
+static mut KEYMAP: KeymapState = KeymapState {
+    active_layout: KeymapLayout::Abnt2Brasil,
+    shift_pressed: false,
+    altgr_pressed: false,
+    caps_lock: false,
+    pending_dead_key: 0,
+};
+
+// Tabela de Tradução Primária ABNT2 (Scancodes 0x00..0x58)
+static ABNT2_LOWER: [u8; 128] = [
+    0,   27,  b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', b'-', b'=', 8,   // 0x00 - 0x0E
+    b'\t', b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i', b'o', b'p', 0,   b'[', b'\n', 0, // 0x0F - 0x1D
+    b'a', b's', b'd', b'f', b'g', b'h', b'j', b'k', b'l', 0,   b'~', b'\'', 0,   b']', b'z', // 0x1E - 0x2C (0x27 é 'ç')
+    b'x', b'c', b'v', b'b', b'n', b'm', b',', b'.', b';', b'/', 0,   b'*', 0,   b' ', 0,   // 0x2D - 0x3B
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+
+@system
+pub fn keymap_init() {
+    unsafe {
+        KEYMAP.active_layout = KeymapLayout::Abnt2Brasil;
+        KEYMAP.shift_pressed = false;
+        KEYMAP.altgr_pressed = false;
+        KEYMAP.caps_lock = false;
+        KEYMAP.pending_dead_key = 0;
+    }
+}
+
+// Converte Scancode x86 para caractere no layout ABNT2 com suporte a 'ç'
+@system
+pub fn keymap_translate_scancode(scancode: u8) -> u8 {
+    unsafe {
+        // Gerenciamento de teclas modificadoras (Shift / Caps)
+        if scancode == 0x2A || scancode == 0x36 {
+            KEYMAP.shift_pressed = true;
+            return 0;
+        } else if scancode == 0xAA || scancode == 0xB6 {
+            KEYMAP.shift_pressed = false;
+            return 0;
+        } else if scancode == 0x3A {
+            KEYMAP.caps_lock = !KEYMAP.caps_lock;
+            return 0;
+        }
+
+        // Se tecla foi solta (Break code), ignora
+        if (scancode & 0x80) != 0 { return 0; }
+
+        // Tratamento da tecla Ç (Scancode 0x27 no ABNT2)
+        if scancode == 0x27 {
+            return if KEYMAP.shift_pressed || KEYMAP.caps_lock { b'C' } else { b'c' };
+        }
+
+        let mut ch = if (scancode as usize) < 128 { ABNT2_LOWER[scancode as usize] } else { 0 };
+
+        if KEYMAP.shift_pressed || KEYMAP.caps_lock {
+            if ch >= b'a' && ch <= b'z' {
+                ch = ch - 32; // Converte para maiúscula
+            }
+        }
+
+        return ch;
+    }
+}

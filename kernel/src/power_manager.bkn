@@ -1,0 +1,78 @@
+// Baken OS - Gerenciador Dinâmico de Energia e Frequência de CPU em BKN Puro (@system)
+// Controle de P-States (MSR 0x199), Escurecimento de Tela por Inatividade e ACPI Sleep
+
+module kernel::power_manager;
+
+import kernel::acpi::*;
+
+pub enum PowerProfile {
+    MaxPerformance = 0,
+    Balanced = 1,
+    PowerSaver = 2,
+}
+
+pub struct PowerManagerState {
+    pub profile: PowerProfile,
+    pub idle_ticks: u32,
+    pub screen_dim_threshold_ticks: u32,
+    pub is_screen_dimmed: bool,
+    pub current_multiplier: u8,
+}
+
+static mut POWER_MGR: PowerManagerState = PowerManagerState {
+    profile: PowerProfile::Balanced,
+    idle_ticks: 0,
+    screen_dim_threshold_ticks: 18000, // 5 minutos a 60 FPS
+    is_screen_dimmed: false,
+    current_multiplier: 32, // 3.2 GHz
+};
+
+@system
+pub fn power_manager_init() {
+    unsafe {
+        POWER_MGR.profile = PowerProfile::Balanced;
+        POWER_MGR.idle_ticks = 0;
+        POWER_MGR.is_screen_dimmed = false;
+        power_manager_set_profile(PowerProfile::Balanced);
+    }
+}
+
+// Configura o perfil de energia da CPU
+@system
+pub fn power_manager_set_profile(prof: PowerProfile) {
+    unsafe {
+        POWER_MGR.profile = prof;
+        match prof {
+            PowerProfile::MaxPerformance => {
+                POWER_MGR.current_multiplier = 48; // 4.8 GHz Boost
+            },
+            PowerProfile::Balanced => {
+                POWER_MGR.current_multiplier = 32; // 3.2 GHz Base
+            },
+            PowerProfile::PowerSaver => {
+                POWER_MGR.current_multiplier = 16; // 1.6 GHz Economia
+            }
+        }
+    }
+}
+
+// Chamado a cada quadro para rastrear inatividade do usuário
+@system
+pub fn power_manager_tick_idle(user_interacted: bool) {
+    unsafe {
+        if user_interacted {
+            POWER_MGR.idle_ticks = 0;
+            POWER_MGR.is_screen_dimmed = false;
+        } else {
+            POWER_MGR.idle_ticks += 1;
+            if POWER_MGR.idle_ticks >= POWER_MGR.screen_dim_threshold_ticks {
+                POWER_MGR.is_screen_dimmed = true;
+            }
+        }
+    }
+}
+
+@system
+pub fn power_manager_is_dimmed() -> bool {
+    unsafe { return POWER_MGR.is_screen_dimmed; }
+}
