@@ -352,19 +352,23 @@ static void bakenfx_present_frame() {
 // MOTOR TIPOGRÁFICO SANS-SERIF PROPORCIONAL & SUBPIXEL ANTI-ALIASING
 // -------------------------------------------------------------
 
+// -------------------------------------------------------------
+// MOTOR TIPOGRÁFICO SANS-SERIF PROPORCIONAL & SUBPIXEL ANTI-ALIASING HD
+// -------------------------------------------------------------
+
 // Largura Proporcional de cada caractere (em pixels) para visual moderno não-monospaçado
 static inline int get_char_advance(char c) {
-    if (c == ' ' || c == '\t') return 5;
-    if (c == '.' || c == ',' || c == ':' || c == ';' || c == '\'' || c == '`' || c == '!') return 4;
-    if (c == 'i' || c == 'l' || c == 'j' || c == '|' || c == '(' || c == ')' || c == '[' || c == ']') return 5;
-    if (c == 'f' || c == 't' || c == 'r' || c == '-' || c == 'I') return 6;
-    if (c == 'w' || c == 'm' || c == 'M' || c == 'W' || c == '@' || c == '%') return 11;
-    if (c >= 'A' && c <= 'Z') return 9;
-    if (c >= '0' && c <= '9') return 8;
-    return 7;
+    if (c == ' ' || c == '\t') return 4;
+    if (c == '.' || c == ',' || c == ':' || c == ';' || c == '\'' || c == '`' || c == '!') return 3;
+    if (c == 'i' || c == 'l' || c == 'j' || c == '|' || c == '(' || c == ')' || c == '[' || c == ']') return 4;
+    if (c == 'f' || c == 't' || c == 'r' || c == '-' || c == 'I') return 5;
+    if (c == 'w' || c == 'm' || c == 'M' || c == 'W' || c == '@' || c == '%') return 10;
+    if (c >= 'A' && c <= 'Z') return 8;
+    if (c >= '0' && c <= '9') return 7;
+    return 6;
 }
 
-// Renderizador de Texto Proporcional com Anti-Aliasing Subpixel
+// Renderizador de Texto Proporcional com Anti-Aliasing Subpixel Gaussian Filter
 static void draw_text_smooth(int x, int y, const char *str, unsigned int color) {
     int cx = x;
     while (*str) {
@@ -373,7 +377,7 @@ static void draw_text_smooth(int x, int y, const char *str, unsigned int color) 
             const uint8_t *glyph = bkn_font8x16[(unsigned char)c];
             int advance = get_char_advance(c);
             int start_col = 0;
-            if (advance <= 5 && c != ' ') start_col = 1;
+            if (advance <= 4 && c != ' ') start_col = 1;
 
             for (int row = 0; row < 16; row++) {
                 uint8_t bits = glyph[row];
@@ -383,26 +387,36 @@ static void draw_text_smooth(int x, int y, const char *str, unsigned int color) 
                     int py = y + row;
 
                     if (bit_on) {
+                        // Pixel central do traço com opacidade plena
                         put_pixel_alpha(px, py, color, 255);
                     } else {
-                        // Suavização anti-aliased baseada em vizinhos (Subpixel Filtering)
+                        // Convolução Gaussiana 3x3 de Subpixel Anti-Aliasing
                         int left   = (col > 0) ? ((bits >> (8 - col)) & 1) : 0;
                         int right  = (col < 7) ? ((bits >> (6 - col)) & 1) : 0;
                         int up     = (row > 0) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (7 - col)) & 1) : 0;
                         int down   = (row < 15) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (7 - col)) & 1) : 0;
 
-                        int neighbors = left + right + up + down;
-                        if (neighbors >= 2) {
-                            put_pixel_alpha(px, py, color, 85);
-                        } else if (neighbors == 1) {
-                            put_pixel_alpha(px, py, color, 35);
+                        int direct_neighbors = left + right + up + down;
+                        if (direct_neighbors >= 2) {
+                            put_pixel_alpha(px, py, color, 140);
+                        } else if (direct_neighbors == 1) {
+                            put_pixel_alpha(px, py, color, 60);
+                        } else {
+                            // Vizinhos diagonais
+                            int ul = (row > 0 && col > 0) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (8 - col)) & 1) : 0;
+                            int ur = (row > 0 && col < 7) ? ((bkn_font8x16[(unsigned char)c][row - 1] >> (6 - col)) & 1) : 0;
+                            int dl = (row < 15 && col > 0) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (8 - col)) & 1) : 0;
+                            int dr = (row < 15 && col < 7) ? ((bkn_font8x16[(unsigned char)c][row + 1] >> (6 - col)) & 1) : 0;
+                            if (ul + ur + dl + dr >= 2) {
+                                put_pixel_alpha(px, py, color, 30);
+                            }
                         }
                     }
                 }
             }
             cx += advance + 1;
         } else {
-            cx += 7;
+            cx += 6;
         }
         str++;
     }
@@ -1604,15 +1618,24 @@ EFI_STATUS efi_main(__attribute__((unused)) EFI_HANDLE ImageHandle, EFI_SYSTEM_T
     EFI_STATUS status = SystemTable->BootServices->LocateProtocol(&GOP_GUID, 0, (void**)&gop);
     if (status == EFI_SUCCESS && gop && gop->Mode && gop->Mode->Info) {
         unsigned int max_mode = gop->Mode->MaxMode;
+        unsigned int best_mode = 0;
+        unsigned int best_pixels = 0;
+
         for (unsigned int m = 0; m < max_mode; m++) {
             EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = 0;
             UINTN size_info = 0;
             if (gop->QueryMode(gop, m, &size_info, &info) == EFI_SUCCESS && info) {
-                if (info->HorizontalResolution == 1024 && info->VerticalResolution == 768) {
-                    gop->SetMode(gop, m);
-                    break;
+                unsigned int pixels = info->HorizontalResolution * info->VerticalResolution;
+                if (info->HorizontalResolution <= 1920 && info->VerticalResolution <= 1080) {
+                    if (pixels > best_pixels) {
+                        best_pixels = pixels;
+                        best_mode = m;
+                    }
                 }
             }
+        }
+        if (best_pixels > 0) {
+            gop->SetMode(gop, best_mode);
         }
 
         g_front_fb = (unsigned int*)gop->Mode->FrameBufferBase;
