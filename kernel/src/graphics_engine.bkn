@@ -9,6 +9,8 @@ import kernel::pmm::*;
 // --- Fonte Bitmap 8x16 via C (bkn_font.c) ---
 extern "C" {
     pub fn bkn_font_get_row(char_code: u8, row: u8) -> u8;
+    pub fn bkn_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32);
+    pub fn bkn_draw_text_large(x: u32, y: u32, text_ptr: *const u8, color: u32);
 }
 
 pub struct FramebufferConfig {
@@ -142,28 +144,34 @@ pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) {
     }
 }
 
-// --- Gradiente de fundo cósmico roxo-azul (igual à screenshot do Baken OS) ---
-// Tons: roxo médio #7B6FA0 transitando para azul #5B7AB5 com onda suave
+// --- Gradiente Mesh Trilinear Soberano (Ciano -> Lilás/Rosa -> Amarelo Dourado) ---
 @system
 pub fn gfx_draw_background_gradient(time_step: u32) {
     unsafe {
-        let t = (time_step % 360) as f32 * 0.01745;
-        for y in 0..FB.height {
-            let fy = y as f32 / FB.height as f32;
-            for x in 0..FB.width {
-                let fx = x as f32 / FB.width as f32;
+        let sw = FB.width;
+        let sh = FB.height;
+        let pitch = FB.pitch;
 
-                // Ondas suaves para animar o wallpaper
-                let wave  = ((fx * 3.14159 + t).sin()        * 0.5 + 0.5) * 18.0;
-                let wave2 = ((fy * 2.71828 + t * 0.7).cos()  * 0.5 + 0.5) * 12.0;
+        for py in 0..sh {
+            let ny = (py as f32) / (sh as f32);
+            for px in 0..sw {
+                let nx = (px as f32) / (sw as f32);
 
-                // Paleta roxo-azul como na screenshot (fundo do Baken OS)
-                let r = (80.0  + fy * 40.0 + wave  * 0.5) as u32;
-                let g = (65.0  + fx * 25.0 + wave2 * 0.4) as u32;
-                let b = (140.0 + fy * 50.0 + wave  * 0.7 + wave2 * 0.5) as u32;
+                let w_cyan = (1.0 - nx) * (1.0 - ny);
+                let w_pink = (nx * 0.75 + ny * 0.55) * (1.0 - (nx * ny * 0.8));
+                let mut w_gold = nx * ny * 1.35;
+                if w_gold > 1.0 { w_gold = 1.0; }
 
-                let color = (r.min(180) << 16) | (g.min(150) << 8) | b.min(210);
-                let offset = (y * FB.pitch + x) as usize;
+                let mut r = (0x00 as f32 * w_cyan) + (0xE8 as f32 * w_pink) + (0xFD as f32 * w_gold);
+                let mut g = (0xD2 as f32 * w_cyan) + (0x79 as f32 * w_pink) + (0xC4 as f32 * w_gold);
+                let mut b = (0xFF as f32 * w_cyan) + (0xF9 as f32 * w_pink) + (0x67 as f32 * w_gold);
+
+                if r > 255.0 { r = 255.0; }
+                if g > 255.0 { g = 255.0; }
+                if b > 255.0 { b = 255.0; }
+
+                let color = (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                let offset = (py * pitch + px) as usize;
                 *FB.base.add(offset) = color;
             }
         }
@@ -344,21 +352,19 @@ pub fn gfx_draw_char(x: u32, y: u32, ch: u8, color: u32, scale: u32) {
 // Cada caractere ocupa (8 * scale + scale) pixels de largura (+ kerning de 1 scale)
 @system
 pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32, scale: u32) {
-    let char_step = 8 * scale + scale; // advance por caractere
-    let mut cx = x;
-    let mut i: usize = 0;
-    loop {
-        let ch = unsafe { *text_ptr.add(i) };
-        if ch == 0 || i > 255 { break; }
-        gfx_draw_char(cx, y, ch, color, scale);
-        cx += char_step;
-        i += 1;
+    unsafe {
+        if scale > 1 {
+            bkn_draw_text_large(x, y, text_ptr, color);
+        } else {
+            bkn_draw_text(x, y, text_ptr, color);
+        }
     }
 }
 
 // Variante com alpha blend — para texto sobre painéis translúcidos
 @system
 pub fn gfx_draw_char_alpha(x: u32, y: u32, ch: u8, color: u32, scale: u32, alpha: u8) {
+    // Fallback para fallback BKN antigo caso chamem por char
     if ch >= 128 { return; }
     for row in 0..16u32 {
         let bits = unsafe { bkn_font_get_row(ch, row as u8) };
@@ -376,14 +382,12 @@ pub fn gfx_draw_char_alpha(x: u32, y: u32, ch: u8, color: u32, scale: u32, alpha
 
 @system
 pub fn gfx_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scale: u32, alpha: u8) {
-    let char_step = 8 * scale + scale;
-    let mut cx = x;
-    let mut i: usize = 0;
-    loop {
-        let ch = unsafe { *text_ptr.add(i) };
-        if ch == 0 || i > 255 { break; }
-        gfx_draw_char_alpha(cx, y, ch, color, scale, alpha);
-        cx += char_step;
-        i += 1;
+    // Por enquanto usa a versao sem alpha via C para garantir a proporcao correta
+    unsafe {
+        if scale > 1 {
+            bkn_draw_text_large(x, y, text_ptr, color);
+        } else {
+            bkn_draw_text(x, y, text_ptr, color);
+        }
     }
 }

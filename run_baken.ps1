@@ -1,6 +1,6 @@
 # Baken OS - Compilador e Launcher Oficial com Janela Adaptativa e Audio Intel HDA
 
-$root = "C:\Projetos\projeto-bkn"
+$root = $PSScriptRoot
 $gcc_bin = "$root\tools\w64devkit\bin"
 $env:PATH = "$gcc_bin;" + $env:PATH
 

@@ -1,7 +1,7 @@
 # Baken OS - Launcher Oficial para Inicialização via Imagem ISO Bootável UEFI
 # Compatível com QEMU, VirtualBox, VMware e Gravação em Pendrive USB (Rufus / Ventoy / BalenaEtcher)
 
-$root = "C:\Projetos\projeto-bkn"
+$root = $PSScriptRoot
 $gcc_bin = "$root\tools\w64devkit\bin"
 $env:PATH = "$gcc_bin;" + $env:PATH
 
@@ -39,17 +39,18 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "      OK: $efi_out gerado." -ForegroundColor Green
 
-# 2. Gera a Imagem ISO Bootável Híbrida El-Torito
-Write-Host "`n[2/3] Gerando imagem ISO bootável UEFI..." -ForegroundColor Yellow
-$py_script = "$root\tools\scripts\create_uefi_iso.py"
-python $py_script
+# 2. Empacota o Baken UI (Flutter) e gera a Imagem ISO & Disco ESP
+Write-Host "`n[2/3] Empacotando Baken UI (Flutter) e gerando ISO & Disco ESP..." -ForegroundColor Yellow
+$py_builder = "$root\tools\scripts\build_flutter_iso.py"
+python $py_builder
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "      ERRO: Falha ao gerar arquivo ISO." -ForegroundColor Red
+$disk = "$root\build\baken_disk.img"
+if (-not (Test-Path $disk)) {
+    Write-Host "      ERRO: Falha ao gerar imagem de disco." -ForegroundColor Red
     exit 1
 }
 $iso_size_mb = [math]::Round(((Get-Item $iso).Length / 1MB), 2)
-Write-Host "      OK: $iso ($iso_size_mb MB) gerado com sucesso." -ForegroundColor Green
+Write-Host "      OK: $iso ($iso_size_mb MB) e $disk gerados com sucesso." -ForegroundColor Green
 
 # 3. Garante firmware UEFI (OVMF)
 Write-Host "`n[3/3] Verificando firmware UEFI (OVMF)..." -ForegroundColor Yellow
@@ -68,14 +69,14 @@ if (-not (Test-Path $ovmf)) {
 }
 
 Write-Host "`n=================================================================" -ForegroundColor Green
-Write-Host "      INICIANDO BAKEN OS VIA ISO NO QEMU (CTRL+C PARA SAIR)      " -ForegroundColor Green
+Write-Host "      INICIANDO BAKEN OS NO QEMU (PRESSIONE CTRL+C PARA SAIR)    " -ForegroundColor Green
 Write-Host "=================================================================" -ForegroundColor Green
 
 $qemu_args = @(
     "-accel", "tcg,thread=multi",
     "-cpu", "max",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf",
-    "-cdrom", $iso,
+    "-drive", "format=raw,file=$disk",
     "-device", "usb-ehci,id=ehci",
     "-device", "usb-tablet,bus=ehci.0",
     "-device", "usb-kbd,bus=ehci.0",
@@ -83,7 +84,7 @@ $qemu_args = @(
     "-smp", "4",
     "-vga", "std",
     "-global", "VGA.vgamem_mb=64",
-    "-name", "Baken OS - Sovereign Bootable ISO"
+    "-name", "Baken OS - Sovereign Quantum Desktop"
 )
 
 & $qemu @qemu_args

@@ -1,6 +1,6 @@
 # Baken OS - Compilador e Launcher Oficial para Oracle VirtualBox (UEFI Native)
 
-$root = "C:\Projetos\projeto-bkn"
+$root = $PSScriptRoot
 $gcc_bin = "$root\tools\w64devkit\bin"
 $env:PATH = "$gcc_bin;" + $env:PATH
 
@@ -9,6 +9,7 @@ $efi_src = "$root\boot\src\uefi_main.c"
 $efi_out = "$root\build\iso_root\EFI\BOOT\BOOTX64.EFI"
 $disk_img = "$root\build\baken_disk.img"
 $disk_vdi = "$root\build\baken_disk.vdi"
+$iso = "$root\build\baken_os.iso"
 $vm_name = "BakenOS"
 
 Write-Host "=================================================================" -ForegroundColor Cyan
@@ -44,21 +45,31 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "      OK: $efi_out gerado." -ForegroundColor Green
 
-# 2. Empacota a imagem de disco FAT32 ESP
-Write-Host "`n[2/4] Criando imagem de disco FAT32 ESP..." -ForegroundColor Yellow
-$py_script = "$root\tools\scripts\create_fat32_img.py"
-python $py_script
+# 2. Empacota o Baken UI (Flutter) e gera a Imagem ISO & Disco ESP
+Write-Host "`n[2/4] Empacotando Baken UI (Flutter) e gerando ISO & Disco ESP..." -ForegroundColor Yellow
+$py_builder = "$root\tools\scripts\build_flutter_iso.py"
+python $py_builder
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "      ERRO: Falha ao criar imagem de disco." -ForegroundColor Red
+    Write-Host "      ERRO: Falha ao empacotar Baken UI e criar imagem de disco." -ForegroundColor Red
     exit 1
 }
-Write-Host "      OK: $disk_img criado." -ForegroundColor Green
+Write-Host "      OK: $disk_img e $iso gerados com sucesso." -ForegroundColor Green
 
 # 3. Converte .IMG para .VDI do VirtualBox
 Write-Host "`n[3/4] Convertendo para disco VirtualBox VDI..." -ForegroundColor Yellow
 if (-not (Test-Path $vbox)) {
     Write-Host "      ERRO: VirtualBox (VBoxManage.exe) nao encontrado em $vbox" -ForegroundColor Red
     exit 1
+}
+
+# Detecta se ha VM existente chamada 'BakenOS' ou 'BakenOS '
+$vms_list = & $vbox list vms
+if ($vms_list -match '"(BakenOS\s*)"') {
+    $vm_name = $matches[1]
+    Write-Host "      OK: VM existente detectada: '$vm_name'" -ForegroundColor Green
+} else {
+    Write-Host "      Criando nova VM '$vm_name'..." -ForegroundColor Yellow
+    & $vbox createvm --name $vm_name --ostype "Linux_64" --register
 }
 
 # Encerra instancias anteriores presas em segundo plano
@@ -83,9 +94,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "      OK: $disk_vdi gerado com sucesso." -ForegroundColor Green
 
-# 4. Configura VM e Inicializa
-Write-Host "`n[4/4] Configurando VM '$vm_name' (Firmware EFI)..." -ForegroundColor Yellow
+# 4. Configura VM e Inicializa em Alta Resolução EFI
+Write-Host "`n[4/4] Configurando VM '$vm_name' (Firmware EFI + Alta Definicao)..." -ForegroundColor Yellow
 & $vbox modifyvm $vm_name --firmware efi --boot1 disk --boot2 none --memory 4096 --cpus 4 --vram 128 --graphicscontroller vboxsvga --mouse usbtablet
+& $vbox setextradata $vm_name "VBoxInternal2/EfiGraphicsResolution" "1280x800" 2>$null
 & $vbox storageattach $vm_name --storagectl "SATA" --port 0 --device 0 --type hdd --medium $disk_vdi
 
 Write-Host "`n=================================================================" -ForegroundColor Green

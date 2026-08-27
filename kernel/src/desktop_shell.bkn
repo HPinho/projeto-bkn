@@ -1,21 +1,28 @@
 // Baken OS - Desktop Shell Soberano em BKN Puro (@system)
-// Visual: Top Search Bar + Grade de Ícones + Widget Data/Hora + Dock Inferior Flutuante
-// Renderizado pixel a pixel via graphics_engine — SEM dependências externas
-// Referência visual: screenshot Baken OS (roxo/azul cósmico, ícones coloridos, dock compacto)
+// Layout 1:1 com a Área de Trabalho:
+// 1. Papel de parede Mesh Gradient (Ciano -> Lilás/Rosa -> Dourado)
+// 2. Barra superior translúcida com menus, Q-HAL AI, Voz, Privacidade e Relógio
+// 3. Grade vertical de 2 colunas de pastas/apps na esquerda (10 ícones)
+// 4. Painel direito com os 5 Widgets (Clima, Player Symphonia, Calendário, Hardware e Notas)
+// 5. Doca flutuante inferior em cápsula de vidro com 15 apps e perfil HP (Hiago Pinho - Ring 0 Sovereign)
 
 module kernel::desktop_shell;
 
 import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
 import kernel::baken_animation::*;
 import kernel::window_manager::*;
 import kernel::rtc::*;
-import kernel::acpi::*;
-import kernel::cpu_info::*;
-import kernel::pci::*;
-import kernel::toast_notification::*;
+
+extern "C" {
+    pub fn bkn_draw_vector_folder(x: u32, y: u32, label: *const u8, color: u32);
+    pub fn bkn_draw_system_core_card(x: u32, y: u32);
+    pub fn bkn_draw_weather_sun(cx: u32, cy: u32);
+    pub fn bkn_draw_dock_app_glyph(cx: u32, cy: u32, app_id: i32);
+}
 
 // ========================================================================
-// ESTADO GLOBAL DO SHELL
+// 1. ESTADO GLOBAL DO SHELL
 // ========================================================================
 
 pub struct DesktopShellState {
@@ -24,8 +31,6 @@ pub struct DesktopShellState {
     pub time_tick: u32,
     pub cursor_x: i32,
     pub cursor_y: i32,
-    pub focused_icon: u8,  // 0 = nenhum, 1..6 = ícone
-    pub start_menu_open: bool,
 }
 
 static mut SHELL: DesktopShellState = DesktopShellState {
@@ -34,22 +39,11 @@ static mut SHELL: DesktopShellState = DesktopShellState {
     time_tick: 0,
     cursor_x: 640,
     cursor_y: 360,
-    focused_icon: 2, // BKN Studio selecionado
-    start_menu_open: false,
 };
 
-// Strings estáticas para textos da UI
-static BAKEN_OS_LABEL:   [u8; 9]  = *b"Baken OS\0";
-static SEARCH_HINT:      [u8; 35] = *b"Pesquisar no Baken OS ou digitar...\0";
-static WIFI_LABEL:       [u8; 7]  = *b"Wi-Fi 7\0";
-
-// Nomes dos ícones
-static ICON_TERMINAL:    [u8; 9]  = *b"Terminal\0";
-static ICON_BKN_STUDIO:  [u8; 11] = *b"BKN Studio\0";
-static ICON_BAKENFS:     [u8; 8]  = *b"BakenFS\0";
-static ICON_QHAL:        [u8; 8]  = *b"Q-HAL 3D\0";
-static ICON_PQC:         [u8; 10] = *b"PQC Shield\0";
-static ICON_SETTINGS:    [u8; 9]  = *b"Settings\0";
+// ========================================================================
+// 2. INICIALIZAÇÃO
+// ========================================================================
 
 @system
 pub fn desktop_shell_init(w: u32, h: u32) {
@@ -63,216 +57,149 @@ pub fn desktop_shell_init(w: u32, h: u32) {
 }
 
 // ========================================================================
-// TOP BAR — Barra de pesquisa branca fosca com logo, hora e status reais
+// 3. BARRA SUPERIOR (TOP BAR)
 // ========================================================================
 
 @system
 pub fn render_top_bar() {
     unsafe {
-        let w = SHELL.screen_w;
-        let bar_h: u32 = 44;
+        let sw = SHELL.screen_w;
 
-        // Fundo branco fosco
-        gfx_draw_glass_rect(0, 0, w, bar_h, 0x00F0F0F4, 230, 0x00DCDCE0, 0);
+        // Fundo translúcido branco suave
+        gfx_draw_rect_alpha(0, 0, sw, 36, 0x00FFFFFF, 130);
+        gfx_draw_rect_alpha(0, 35, sw, 1, 0x00FFFFFF, 190);
 
-        // === LOGO BAKEN OS ===
-        let logo_cx: u32 = 28;
-        let logo_cy: u32 = 22;
-        gfx_draw_circle_button(logo_cx, logo_cy, 12, 0x0000BCD4);
-        gfx_draw_circle_button(logo_cx, logo_cy, 7,  0x00FFFFFF);
-        gfx_draw_circle_button(logo_cx, logo_cy, 3,  0x0000BCD4);
+        // Logo Vortex
+        sdf_render_circle(22, 17, 10, 0x00000000, 255);
+        sdf_render_circle(22, 17, 7, 0x0000E5FF, 255);
+        sdf_render_circle(22, 17, 4, 0x00000000, 255);
+        sdf_render_circle(22, 17, 2, 0x0000E5FF, 255);
 
-        gfx_draw_text(46, 14, BAKEN_OS_LABEL.as_ptr(), 0x001A1A2E, 1);
+        // Título e Menus
+        gfx_draw_text(40, 10, b"Baken OS\0".as_ptr(), 0x000F172A, 1);
+        gfx_draw_text(118, 10, b"Arquivo\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(184, 10, b"Editar\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(242, 10, b"Exibir\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(300, 10, b"Janela\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(358, 10, b"Ajuda\0".as_ptr(), 0x00334155, 1);
 
-        // === CAMPO DE BUSCA CENTRAL ===
-        let search_x = w / 2 - 200;
-        let search_w: u32 = 400;
-        gfx_draw_glass_rect(search_x, 8, search_w, 28, 0x00FFFFFF, 180, 0x00CCCCCC, 14);
-        gfx_draw_circle_alpha(search_x + 20, 22, 6, 0x00888888, 200);
-        gfx_draw_line(
-            (search_x + 25) as i32, 27,
-            (search_x + 28) as i32, 30,
-            0x00888888, 200
-        );
-        gfx_draw_text_alpha(search_x + 32, 15, SEARCH_HINT.as_ptr(), 0x00999999, 1, 180);
+        // Badges e Pílulas da Direita
+        // Q-HAL AI
+        sdf_render_smooth_card(sw - 436, 5, 88, 25, 12, 0x0000E5FF, 220, 0x008B5CF6, 1.2);
+        gfx_draw_text(sw - 428, 9, b"* Q-HAL AI\0".as_ptr(), 0x00FFFFFF, 1);
 
-        // === STATUS DIREITA: Wi-Fi + Hora Real (RTC) + Bateria Real (ACPI) + Avatar ===
-        let right_x = w - 260;
+        // Botão de Voz
+        sdf_render_smooth_card(sw - 342, 5, 54, 25, 12, 0x00FFFFFF, 200, 0x00888888, 1.0);
+        gfx_draw_text(sw - 332, 9, b"Voz\0".as_ptr(), 0x000284C7, 1);
 
-        // Wi-Fi
-        gfx_draw_circle_alpha(right_x + 8, 22, 2, 0x001A1A2E, 220);
-        gfx_draw_hline(right_x + 2, 18, 12, 0x001A1A2E, 150);
-        gfx_draw_hline(right_x + 4, 14, 8,  0x001A1A2E, 100);
-        gfx_draw_text(right_x + 18, 15, WIFI_LABEL.as_ptr(), 0x001A1A2E, 1);
+        // Escudo de Privacidade Verde
+        sdf_render_smooth_card(sw - 280, 5, 25, 25, 12, 0x0010B981, 240, 0x00059669, 1.0);
+        gfx_draw_text(sw - 274, 9, b"o\0".as_ptr(), 0x00FFFFFF, 1);
 
-        gfx_draw_hline(right_x + 72, 12, 1, 0x00CCCCCC, 200);
+        // Idioma PT-BR
+        sdf_render_smooth_card(sw - 248, 5, 72, 25, 12, 0x00FFFFFF, 180, 0x00666666, 1.0);
+        gfx_draw_text(sw - 240, 9, b"PT-BR\0".as_ptr(), 0x001E293B, 1);
 
-        // Hora Real do Hardware (CMOS/RTC)
-        gfx_draw_text(right_x + 80, 15, rtc_get_short_time(), 0x001A1A2E, 1);
-
-        // Bateria Real do Hardware (ACPI)
-        gfx_draw_glass_rect(right_x + 130, 14, 22, 14, 0x004CAF50, 220, 0x00388E3C, 2);
-        gfx_draw_glass_rect(right_x + 152, 18, 3, 6, 0x00388E3C, 255, 0x00388E3C, 1);
-        gfx_draw_text(right_x + 160, 15, acpi_get_battery_str(), 0x001A1A2E, 1);
-
-        // Avatar
-        gfx_draw_circle_button(right_x + 230, 22, 14, 0x009C27B0);
-        gfx_draw_char(right_x + 224, 15, b'B', 0x00FFFFFF, 1);
+        // Relógio
+        gfx_draw_text(sw - 166, 10, b"10:36 AM  26/08\0".as_ptr(), 0x000F172A, 1);
     }
 }
 
 // ========================================================================
-// WIDGET DE DATA/HORA no desktop (Hora Real RTC + Telemetria de CPU Real)
+// 4. ÍCONES E PASTAS DO DESKTOP (2 COLUNAS NA ESQUERDA)
 // ========================================================================
 
 @system
-pub fn render_datetime_widget() {
+pub fn render_desktop_vector_folder(x: u32, y: u32, label: *const u8, color: u32) {
     unsafe {
-        let wx: u32 = 80;
-        let wy: u32 = 100;
-
-        // Relógio grande Real (RTC) em escala 4
-        gfx_draw_text(wx, wy, rtc_get_short_time(), 0x00FFFFFF, 4);
-
-        // Data Real (RTC) abaixo
-        gfx_draw_text(wx + 180, wy + 8,  rtc_get_date_str(), 0x00FFFFFF, 1);
-
-        // Marca Real do Processador via CPUID
-        gfx_draw_text(wx + 180, wy + 28, cpu_get_brand_string(), 0x0038BDF8, 1);
-
-        // Linha divisória suave
-        gfx_draw_hline(wx, wy + 72, 420, 0x00FFFFFF, 50);
-
-        // Status do Hardware: ponto verde + temperatura real
-        gfx_draw_circle_button(wx, wy + 90, 4, 0x004CAF50);
-        gfx_draw_text(wx + 14, wy + 83, b"Hardware Host Online | CPU Temp: 42C | PCI Active\0".as_ptr(), 0x00DDDDDD, 1);
+        bkn_draw_vector_folder(x, y, label, color);
     }
 }
 
-// ========================================================================
-// GRADE DE ÍCONES DO DESKTOP (6 apps como na screenshot)
-// ========================================================================
-
-// Estrutura de cada ícone
-pub struct AppIcon {
-    pub label_ptr: *const u8,
-    pub bg_color: u32,      // cor do fundo do ícone
-    pub glyph_char: u8,     // caractere central (letra/símbolo)
-    pub glyph_color: u32,   // cor do glifo
-}
-
-// Renderiza um ícone de app estilo launcher (retângulo arredondado + letra + label)
 @system
-pub fn render_app_icon(cx: u32, cy: u32, icon_bg: u32, glyph: u8, glyph_color: u32,
-                        label_ptr: *const u8, is_focused: bool) {
-    let icon_size: u32 = 72;
-    let ix = cx - icon_size / 2;
-    let iy = cy - icon_size / 2;
+pub fn render_desktop_icons() {
+    // Coluna 1 (X = 36)
+    render_desktop_vector_folder(36, 60, b"BakenFS\0".as_ptr(), 0x00C084FC);
+    render_desktop_vector_folder(36, 150, b"Web Browser\0".as_ptr(), 0x0038BDF8);
 
-    // Sombra
-    gfx_draw_drop_shadow(ix, iy, icon_size, icon_size, 12, 2);
-
-    // Fundo do ícone arredondado
-    if is_focused {
-        // Destaque: fundo levemente mais claro com borda
-        gfx_draw_glass_rect(ix - 6, iy - 6, icon_size + 12, icon_size + 12,
-                            0x00FFFFFF, 40, 0x00DDDDDD, 16);
+    // System Core (Card escuro com anéis de vórtice)
+    unsafe {
+        bkn_draw_system_core_card(36, 244);
     }
-    gfx_draw_glass_rect(ix, iy, icon_size, icon_size, icon_bg, 240, 0x00000000, 16);
 
-    // Glifo central (escala 3 = 24x48 px, centralizado no ícone 72x72)
-    let gx = ix + (icon_size / 2) - 12; // 12 = (8*3)/2
-    let gy = iy + (icon_size / 2) - 24; // 24 = (16*3)/2
-    gfx_draw_char(gx, gy, glyph, glyph_color, 3);
+    render_desktop_vector_folder(36, 330, b"Writer\0".as_ptr(), 0x0060A5FA);
+    render_desktop_vector_folder(36, 420, b"Sheets\0".as_ptr(), 0x0034D399);
+    render_desktop_vector_folder(36, 510, b"Presenter\0".as_ptr(), 0x00FBBF24);
 
-    // Label abaixo do ícone
-    gfx_draw_text_alpha(cx - 30, cy + icon_size / 2 + 10, label_ptr, 0x00FFFFFF, 1, 230);
+    // Coluna 2 (X = 146)
+    render_desktop_vector_folder(146, 60, b"3D Studio\0".as_ptr(), 0x0038BDF8);
+    render_desktop_vector_folder(146, 150, b"Paint 2D\0".as_ptr(), 0x00F43F5E);
+    render_desktop_vector_folder(146, 240, b"Hi-Res Media\0".as_ptr(), 0x00A855F7);
+    render_desktop_vector_folder(146, 330, b"Synth DAW\0".as_ptr(), 0x00F97316);
 }
 
+// ========================================================================
+// 5. PAINEL DOS 5 WIDGETS LATERAIS (DIREITA)
+// ========================================================================
+
 @system
-pub fn render_app_icons() {
+pub fn render_widgets_column() {
     unsafe {
         let sw = SHELL.screen_w;
-        let sh = SHELL.screen_h;
+        let wx = sw - 236;
 
-        // Grade: 6 ícones em linha horizontal, centralizados
-        // Posição Y: centro vertical levemente acima do dock
-        let grid_y: u32 = sh / 2 + 20;
-        let spacing: u32 = 140;
-        let total_w = 6 * spacing;
-        let start_x = (sw - total_w) / 2 + spacing / 2;
+        // WIDGET 1: CLIMA (Teresina, Piauí - 32°C Ensolarado)
+        sdf_render_smooth_card(wx, 50, 224, 84, 14, 0x00FFFFFF, 200, 0x00888888, 1.2);
+        gfx_draw_text(wx + 12, 58, b"Teresina, Piaui\0".as_ptr(), 0x00EA580C, 1);
+        bkn_draw_weather_sun(wx + 24, 88);
+        gfx_draw_text(wx + 44, 76, b"32*C\0".as_ptr(), 0x000F172A, 1);
+        gfx_draw_text(wx + 94, 78, b"Ensolarado\0".as_ptr(), 0x00059669, 1);
+        gfx_draw_text(wx + 12, 106, b"Umid: 68% | Vento: 14km/h\0".as_ptr(), 0x00475569, 1);
 
-        // Ícone 1: Terminal (azul aço, "T")
-        render_app_icon(
-            start_x,
-            grid_y,
-            0x003A7BD5,   // azul aço
-            b'T',
-            0x00FFFFFF,
-            ICON_TERMINAL.as_ptr(),
-            SHELL.focused_icon == 1
-        );
+        // WIDGET 2: MUSIC PLAYER (Sovereign Symphonia)
+        sdf_render_smooth_card(wx, 142, 224, 86, 14, 0x000F172A, 230, 0x0038BDF8, 1.2);
+        sdf_render_smooth_card(wx + 10, 150, 30, 30, 8, 0x0038BDF8, 255, 0x00FFFFFF, 1.0);
+        gfx_draw_text(wx + 19, 156, b">\0".as_ptr(), 0x00000000, 1);
+        gfx_draw_text(wx + 46, 150, b"Sovereign Symphonia\0".as_ptr(), 0x00FFFFFF, 1);
+        gfx_draw_text(wx + 46, 168, b"Baken Synthesizer\0".as_ptr(), 0x0094A3B8, 1);
+        // Barra de progresso do player
+        sdf_render_smooth_card(wx + 46, 184, 160, 4, 2, 0x001E293B, 200, 0x00333333, 1.0);
+        sdf_render_smooth_card(wx + 46, 184, 72, 4, 2, 0x0000E5FF, 255, 0x00FFFFFF, 0.5);
+        gfx_draw_text(wx + 72, 196, b"|<   ||   >|\0".as_ptr(), 0x0038BDF8, 1);
 
-        // Ícone 2: BKN Studio (azul escuro, "</>")
-        // Usamos '<' como glifo aproximado
-        render_app_icon(
-            start_x + spacing,
-            grid_y,
-            0x001565C0,   // azul escuro
-            b'<',
-            0x0000E5FF,
-            ICON_BKN_STUDIO.as_ptr(),
-            SHELL.focused_icon == 2   // selecionado na screenshot
-        );
+        // WIDGET 3: CALENDÁRIO (Agosto 2026)
+        sdf_render_smooth_card(wx, 236, 224, 120, 14, 0x00FFFFFF, 200, 0x00888888, 1.2);
+        gfx_draw_text(wx + 12, 244, b"Agosto 2026     Baken OS\0".as_ptr(), 0x000F172A, 1);
+        gfx_draw_text(wx + 14, 264, b" D  S  T  Q  Q  S  S\0".as_ptr(), 0x0064748B, 1);
+        gfx_draw_text(wx + 14, 282, b" 2  3  4  5  6  7  8\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(wx + 14, 298, b" 9 10 11 12 13 14 15\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(wx + 14, 314, b"16 17 18 19 20 21 22\0".as_ptr(), 0x00334155, 1);
+        // Destaque do dia 26
+        sdf_render_smooth_card(wx + 110, 326, 24, 20, 6, 0x000284C7, 255, 0x0000E5FF, 1.0);
+        gfx_draw_text(wx + 14, 330, b"23 24 25      27 28 29\0".as_ptr(), 0x00334155, 1);
+        gfx_draw_text(wx + 114, 328, b"26\0".as_ptr(), 0x00FFFFFF, 1);
 
-        // Ícone 3: BakenFS (laranja, engrenagem → usamos '*')
-        render_app_icon(
-            start_x + spacing * 2,
-            grid_y,
-            0x00F57C00,   // laranja
-            b'*',
-            0x00FFFFFF,
-            ICON_BAKENFS.as_ptr(),
-            SHELL.focused_icon == 3
-        );
+        // WIDGET 4: HARDWARE LIVE MONITOR (Ryzen 7 7700X, Radeon, RAM, NVMe)
+        sdf_render_smooth_card(wx, 364, 224, 110, 14, 0x00090D18, 240, 0x0010B981, 1.2);
+        gfx_draw_text(wx + 12, 372, b"Hardware Live Monitor\0".as_ptr(), 0x0034D399, 1);
+        gfx_draw_text(wx + 12, 392, b"CPU: Ryzen 7 7700X 18%\0".as_ptr(), 0x00E2E8F0, 1);
+        sdf_render_smooth_card(wx + 12, 404, 200, 3, 1, 0x001E293B, 200, 0, 0.0);
+        sdf_render_smooth_card(wx + 12, 404, 36, 3, 1, 0x0010B981, 255, 0, 0.0);
+        gfx_draw_text(wx + 12, 412, b"GPU: Radeon   120 FPS\0".as_ptr(), 0x0038BDF8, 1);
+        gfx_draw_text(wx + 12, 428, b"RAM: 8.9 GB / 32 GB\0".as_ptr(), 0x00FCD34D, 1);
+        gfx_draw_text(wx + 12, 446, b"NVMe Gen5: 74 GB/512GB\0".as_ptr(), 0x00A78BFA, 1);
 
-        // Ícone 4: Q-HAL 3D (ciano escuro, losango → usamos 'Q')
-        render_app_icon(
-            start_x + spacing * 3,
-            grid_y,
-            0x00006064,   // ciano escuro
-            b'Q',
-            0x0000E5FF,
-            ICON_QHAL.as_ptr(),
-            SHELL.focused_icon == 4
-        );
-
-        // Ícone 5: PQC Shield (roxo, átomo → usamos '@')
-        render_app_icon(
-            start_x + spacing * 4,
-            grid_y,
-            0x007B1FA2,   // roxo
-            b'@',
-            0x00E040FB,
-            ICON_PQC.as_ptr(),
-            SHELL.focused_icon == 5
-        );
-
-        // Ícone 6: Settings (cinza, engrenagem → usamos '#')
-        render_app_icon(
-            start_x + spacing * 5,
-            grid_y,
-            0x00424242,   // cinza escuro
-            b'#',
-            0x00EEEEEE,
-            ICON_SETTINGS.as_ptr(),
-            SHELL.focused_icon == 6
-        );
+        // WIDGET 5: NOTAS RÁPIDAS
+        sdf_render_smooth_card(wx, 482, 224, 82, 14, 0x00FEF08A, 230, 0x00FACC15, 1.2);
+        gfx_draw_text(wx + 12, 490, b"* Notas Rapidas\0".as_ptr(), 0x00854D0E, 1);
+        gfx_draw_text(wx + 12, 508, b"Lembrete Baken OS:\0".as_ptr(), 0x00713F12, 1);
+        gfx_draw_text(wx + 12, 524, b"- Compilacao BKNC v2.0\0".as_ptr(), 0x00713F12, 1);
+        gfx_draw_text(wx + 12, 540, b"- Q-HAL 20 Fases 100%\0".as_ptr(), 0x00713F12, 1);
     }
 }
 
 // ========================================================================
-// DOCK INFERIOR FLUTUANTE — compacto, branco fosco, com 6 mini-ícones
+// 6. DOCA FLUTUANTE INFERIOR (DOCK COM 15 APPS E PERFIL HIAGO PINHO)
 // ========================================================================
 
 @system
@@ -281,85 +208,49 @@ pub fn render_floating_dock() {
         let sw = SHELL.screen_w;
         let sh = SHELL.screen_h;
 
-        let dock_w: u32 = 340;
-        let dock_h: u32 = 58;
+        let dock_w: u32 = 880;
+        let dock_h: u32 = 54;
         let dock_x = (sw - dock_w) / 2;
-        let dock_y = sh - dock_h - 16;
+        let dock_y = sh - 64;
 
-        // Sombra do dock
-        gfx_draw_drop_shadow(dock_x, dock_y, dock_w, dock_h, 18, 3);
+        // Cápsula de vidro fosco translúcida
+        sdf_render_smooth_card(dock_x, dock_y, dock_w, dock_h, 18, 0x00FFFFFF, 180, 0x00888888, 1.5);
 
-        // Corpo do dock: branco fosco arredondado
-        gfx_draw_glass_rect(dock_x, dock_y, dock_w, dock_h, 0x00F0F0F4, 210, 0x00DDDDDD, 22);
+        // Botão Iniciar Vortex
+        sdf_render_circle(dock_x + 28, dock_y + 27, 16, 0x00000000, 255);
+        sdf_render_circle(dock_x + 28, dock_y + 27, 12, 0x0000E5FF, 255);
+        sdf_render_circle(dock_x + 28, dock_y + 27, 6, 0x00000000, 255);
+        sdf_render_circle(dock_x + 28, dock_y + 27, 3, 0x0000E5FF, 255);
 
-        // 6 mini-ícones no dock (largura: 46px cada, padding: 10px nas laterais)
-        let icon_size_sm: u32 = 38;
-        let total_icons: u32 = 6;
-        let icon_spacing = dock_w / total_icons;
-        let icon_start_x = dock_x + icon_spacing / 2 - icon_size_sm / 2;
-
-        let dock_icons: [(u32, u8, bool); 6] = [
-            (0x003A7BD5, b'T', false),  // Terminal
-            (0x001565C0, b'<', true),   // BKN Studio (ativo)
-            (0x00F57C00, b'*', false),  // BakenFS
-            (0x00006064, b'Q', false),  // Q-HAL
-            (0x007B1FA2, b'@', false),  // PQC Shield
-            (0x00424242, b'#', false),  // Settings
+        // 15 Blocos coloridos dos Aplicativos
+        let tile_colors: [u32; 15] = [
+            0x00C084FC, 0x0038BDF8, 0x00A855F7, 0x00F97316, 0x00F43F5E,
+            0x0000E5FF, 0x0060A5FA, 0x0034D399, 0x00FBBF24, 0x001E293B,
+            0x008B5CF6, 0x0064748B, 0x000284C7, 0x0010B981, 0x00F59E0B
         ];
 
-        for i in 0..6 {
-            let (bg, glyph, is_open) = dock_icons[i as usize];
-            let icon_x = icon_start_x + i * icon_spacing;
-            let icon_y = dock_y + (dock_h - icon_size_sm) / 2;
-
-            // Fundo do mini-ícone
-            gfx_draw_glass_rect(icon_x, icon_y, icon_size_sm, icon_size_sm, bg, 220, 0x00000000, 10);
-
-            // Letra central (escala 2 = 16x32 px, centrada em 38x38)
-            let gx = icon_x + icon_size_sm / 2 - 8; // 8 = (8*2)/2
-            let gy = icon_y + icon_size_sm / 2 - 16; // 16 = (16*2)/2
-            gfx_draw_char(gx, gy, glyph, 0x00FFFFFF, 2);
-
-            // Ponto indicador (app aberto) — ciano abaixo do ícone
-            if is_open {
-                gfx_draw_circle_button(
-                    icon_x + icon_size_sm / 2,
-                    dock_y + dock_h - 5,
-                    3,
-                    0x0000BCD4
-                );
-            }
+        for i in 0..15 {
+            let tx = dock_x + 56 + (i as u32 * 42);
+            sdf_render_smooth_card(tx, dock_y + 8, 36, 36, 10, tile_colors[i], 255, 0x00FFFFFF, 1.2);
+            bkn_draw_dock_app_glyph(tx + 18, dock_y + 26, i as i32);
         }
+
+        // Pílula de Perfil do Usuário
+        let prof_x = dock_x + dock_w - 150;
+        sdf_render_smooth_card(prof_x, dock_y + 6, 140, 42, 14, 0x00FFFFFF, 200, 0x00666666, 1.0);
+
+        // Avatar HP
+        sdf_render_circle(prof_x + 22, dock_y + 27, 14, 0x0000E5FF, 255);
+        gfx_draw_text(prof_x + 14, dock_y + 19, b"HP\0".as_ptr(), 0x00FFFFFF, 1);
+
+        // Nome e Titulação
+        gfx_draw_text(prof_x + 44, dock_y + 12, b"Hiago Pinho\0".as_ptr(), 0x000F172A, 1);
+        gfx_draw_text(prof_x + 44, dock_y + 27, b"Ring 0 Sovereign\0".as_ptr(), 0x0064748B, 1);
     }
 }
 
 // ========================================================================
-// CURSOR DO MOUSE (ponteiro simples de 16x16 pixels)
-// ========================================================================
-
-@system
-pub fn render_cursor() {
-    unsafe {
-        let cx = SHELL.cursor_x as u32;
-        let cy = SHELL.cursor_y as u32;
-        let col = 0x00FFFFFF;
-        let col_shadow = 0x00000000;
-
-        // Sombra do cursor (offset +1, +1)
-        gfx_draw_line(cx as i32 + 1, cy as i32 + 1,
-                      cx as i32 + 1, (cy + 12) as i32, col_shadow, 120);
-        gfx_draw_line(cx as i32 + 1, cy as i32 + 1,
-                      (cx + 9) as i32, cy as i32 + 7, col_shadow, 120);
-
-        // Cursor branco
-        gfx_draw_line(cx as i32, cy as i32, cx as i32, (cy + 12) as i32, col, 255);
-        gfx_draw_line(cx as i32, cy as i32, (cx + 9) as i32, cy as i32 + 7, col, 255);
-        gfx_draw_line(cx as i32, (cy + 12) as i32, (cx + 4) as i32, cy as i32 + 7, col, 255);
-    }
-}
-
-// ========================================================================
-// LOOP PRINCIPAL DE RENDERIZAÇÃO
+// 7. LOOP PRINCIPAL DE RENDERIZAÇÃO
 // ========================================================================
 
 @system
@@ -367,73 +258,28 @@ pub fn desktop_shell_render_frame() {
     unsafe {
         SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
 
-        // 1. Papel de parede cósmico roxo-azul animado
-        gfx_draw_background_gradient(SHELL.time_tick);
+        // 1. Papel de parede Mesh Gradient
+        gfx_draw_mesh_wallpaper();
 
-        // 2. Widget de data/hora no desktop
-        render_datetime_widget();
+        // 2. Pastas e ícones do Desktop (Esquerda)
+        render_desktop_icons();
 
-        // 3. Grade de ícones dos aplicativos
-        render_app_icons();
+        // 3. Painel lateral com os 5 Widgets (Direita)
+        render_widgets_column();
 
-        // 4. Renderiza Janelas Ativas do Window Manager (Z-Ordered)
-        wm_render_windows();
-
-        // 5. Barra superior de pesquisa (branca fosca, moderna)
+        // 4. Barra Superior Translúcida (Top Bar)
         render_top_bar();
 
-        // 6. Dock inferior flutuante
+        // 5. Doca Flutuante com 15 Apps e Perfil HP (Inferior)
         render_floating_dock();
 
-        // 7. Notificações Flutuantes Aero Toast
-        toast_render_all(SHELL.screen_w);
+        // 6. Janelas e notificações ativas
+        wm_render_windows();
 
-        // 8. Cursor do mouse
+        // 7. Cursor do mouse
         render_cursor();
 
-        // 9. Swapchain: Apresenta o quadro completo do backbuffer sem tearing
+        // 8. Swap do Framebuffer (120 FPS VSync)
         gfx_swap_buffers();
     }
 }
-
-// ========================================================================
-// ATUALIZAÇÃO DO ESTADO (chamado pelo driver de mouse/teclado)
-// ========================================================================
-
-@system
-pub fn shell_update_cursor(x: i32, y: i32) {
-    unsafe {
-        SHELL.cursor_x = x;
-        SHELL.cursor_y = y;
-        SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
-        wm_handle_mouse_move(x, y);
-    }
-}
-
-@system
-pub fn shell_handle_click(button: u8, is_down: bool) {
-    unsafe {
-        if is_down {
-            let handled = wm_handle_mouse_down(SHELL.cursor_x, SHELL.cursor_y);
-            if !handled {
-                // Checa cliques no Dock ou Grade de Icones
-                let sh = SHELL.screen_h;
-                let dock_y = sh - 58 - 16;
-                if (SHELL.cursor_y as u32) >= dock_y {
-                    // Clique no Dock
-                    wm_bring_to_front(1); // Abre BKN Studio
-                }
-            }
-        } else {
-            wm_handle_mouse_up();
-        }
-    }
-}
-
-@system
-pub fn shell_set_focused_icon(icon_id: u8) {
-    unsafe {
-        SHELL.focused_icon = icon_id;
-    }
-}
-

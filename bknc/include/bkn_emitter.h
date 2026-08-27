@@ -10,7 +10,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 
-#define BKN_EXEC_MAGIC "\x7fBKNEXEC\x00"
+#define BKN_EXEC_MAGIC "\x7f" "BKNEXEC"
 
 typedef struct __attribute__((packed)) {
     char magic[8];              // \x7fBKNEXEC\0

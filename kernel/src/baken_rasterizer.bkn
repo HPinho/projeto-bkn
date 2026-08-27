@@ -5,6 +5,11 @@ module kernel::baken_rasterizer;
 
 import kernel::graphics_engine::*;
 
+extern "C" {
+    pub fn bkn_draw_sdf_glass_card(x: u32, y: u32, w: u32, h: u32, radius: f32, bg_color: u32, bg_alpha: u8, border_color: u32, border_width: f32);
+    pub fn bkn_draw_sdf_circle(cx: u32, cy: u32, radius: f32, color: u32, alpha: u8);
+}
+
 // Funcao de distancia assinada para retangulo com cantos arredondados contínuos
 @system
 pub fn sdf_box_distance(px: f32, py: f32, rx: f32, ry: f32, rw: f32, rh: f32, radius: f32) -> f32 {
@@ -52,55 +57,16 @@ pub fn sdf_render_smooth_card(
     border_color: u32,
     border_width: f32
 ) {
-    let rx = x as f32;
-    let ry = y as f32;
-    let rw = w as f32;
-    let rh = h as f32;
-    let rad = radius as f32;
-
-    for py in y..(y + h) {
-        for px in x..(x + w) {
-            let dist = sdf_box_distance(px as f32 + 0.5, py as f32 + 0.5, rx, ry, rw, rh, rad);
-
-            // Antialiasing da borda externa
-            let alpha_factor = sdf_coverage(dist, 0.8);
-            if alpha_factor > 0.01 {
-                // Checa se esta na regiao da borda interna
-                if dist > -border_width {
-                    let border_factor = (dist + border_width) / border_width;
-                    let blend_alpha = ((bg_alpha as f32) * (1.0 - border_factor) + 220.0 * border_factor) * alpha_factor;
-                    gfx_put_pixel_alpha(px, py, border_color, blend_alpha as u8);
-                } else {
-                    let final_alpha = (bg_alpha as f32 * alpha_factor) as u8;
-                    gfx_put_pixel_alpha(px, py, bg_color, final_alpha);
-                }
-            }
-        }
+    unsafe {
+        bkn_draw_sdf_glass_card(x, y, w, h, radius as f32, bg_color, bg_alpha, border_color, border_width);
     }
 }
 
 // Renderiza circulo com gradiente radial e borda SDF suave
 @system
 pub fn sdf_render_circle(cx: u32, cy: u32, radius: u32, color: u32, alpha: u8) {
-    let r_f = radius as f32;
-    let r_sq = radius * radius;
-    let min_x = if cx > radius + 1 { cx - radius - 1 } else { 0 };
-    let min_y = if cy > radius + 1 { cy - radius - 1 } else { 0 };
-    let max_x = cx + radius + 1;
-    let max_y = cy + radius + 1;
-
-    for py in min_y..=max_y {
-        for px in min_x..=max_x {
-            let dx = (px as f32) - (cx as f32);
-            let dy = (py as f32) - (cy as f32);
-            let dist = (dx * dx + dy * dy).sqrt() - r_f;
-
-            let coverage = sdf_coverage(dist, 0.75);
-            if coverage > 0.01 {
-                let final_alpha = ((alpha as f32) * coverage) as u8;
-                gfx_put_pixel_alpha(px, py, color, final_alpha);
-            }
-        }
+    unsafe {
+        bkn_draw_sdf_circle(cx, cy, radius as f32, color, alpha);
     }
 }
 
