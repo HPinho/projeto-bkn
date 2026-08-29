@@ -9,6 +9,14 @@ build/
 *.exe
 *.ll
 *.bkn_exec
+*.ppm
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 
 # Toolchains and third-party binaries
 tools/w64devkit/
@@ -19,3 +27,4 @@ tools/bin/
 .idea/
 *.swp
 *.tmp
+.figma-baken-state.json

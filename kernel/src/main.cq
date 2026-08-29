@@ -1,0 +1,52 @@
+// Baken OS - entrada futura do kernel modular em Cq (@system).
+//
+// Esta é a única entrada planejada após o linker Cq resolver o grafo de
+// módulos. Até lá, a ISO usa a ponte documentada em docs/architecture.md;
+// não adicione outra função baken_kernel_main a módulos auxiliares.
+
+module kernel::main;
+
+import kernel::graphics_engine::*;
+import kernel::desktop_compositor::*;
+
+// Estrutura de Informações de Inicialização repassada pelo Bootloader UEFI
+pub struct BakenBootInfo {
+    pub framebuffer_base: *mut u32;
+    pub framebuffer_size: usize;
+    pub screen_width: u32;
+    pub screen_height: u32;
+    pub pixels_per_scanline: u32;
+    pub memory_map_base: *const u8;
+    pub memory_map_size: usize;
+    pub system_table: *mut u8;
+    pub pointer_protocol: *mut u8;
+    pub block_io_protocol: *mut u8;
+    pub install_target_block_io_protocol: *mut u8;
+}
+
+// Entrada inicial do kernel Cq. A primeira meta é iniciar uma sessão gráfica
+// íntegra; drivers e serviços só entram aqui depois de terem testes de I/O e
+// de falha correspondentes.
+@system
+@export
+pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
+    if boot_info == (null as *const BakenBootInfo) {
+        loop {}
+    }
+
+    // O framebuffer GOP é o único recurso de hardware necessário nesta fase.
+    gfx_init(
+        (*boot_info).framebuffer_base,
+        (*boot_info).screen_width,
+        (*boot_info).screen_height,
+        (*boot_info).pixels_per_scanline
+    );
+
+    // A composição é dona do ciclo visual; nenhum aplicativo grava no GOP.
+    desktop_compositor_init((*boot_info).screen_width, (*boot_info).screen_height);
+
+    // Até o escalonador estar integrado, a composição permanece cooperativa.
+    loop {
+        desktop_compositor_render_frame();
+    }
+}

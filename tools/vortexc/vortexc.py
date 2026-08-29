@@ -1,0 +1,4427 @@
+#!/usr/bin/env python3
+"""VortexC: frontend e backend modular inicial da linguagem Cq.
+
+O compilador resolve o grafo Cq, valida sua interface pública e emite uma
+unidade C isolada para cada módulo. A entrada do kernel e a linkedição
+pertencem integralmente ao grafo Cq.
+"""
+import argparse
+import json
+import os
+import re
+import sys
+import hashlib
+from pathlib import Path
+
+MODULE_RE = re.compile(r"^\s*module\s+([A-Za-z_][A-Za-z0-9_:]*)\s*;", re.MULTILINE)
+MODULE_KEYWORD_RE = re.compile(r"^\s*module\b", re.MULTILINE)
+IMPORT_RE = re.compile(
+    r"^\s*(?:pub\s+)?import\s+"
+    r"(?P<module>[A-Za-z_][A-Za-z0-9_]*(?:::[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"::\*\s*;\s*(?://.*)?$",
+    re.MULTILINE,
+)
+IMPORT_LINE_RE = re.compile(r"^\s*(?:pub\s+)?import\b.*$", re.MULTILINE)
+# Somente declarações na margem são exports de módulo. Métodos podem repetir
+# nomes em tipos distintos e serão tratados pelo gerador de tipos, não aqui.
+EXPORT_RE = re.compile(r"^pub\s+(?:fn|struct|class|enum)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
+KERNEL_ENTRY_RE = re.compile(
+    r"^\s*@export\s*\n\s*pub\s+fn\s+baken_kernel_main\s*\(", re.MULTILINE
+)
+# Módulos Cq não podem delegar silenciosamente sua semântica ao
+# pré-processador C. O bootloader e ferramentas de host não declaram `module`
+# e, por isso, ficam fora desta regra deliberadamente.
+C_PREPROCESSOR_RE = re.compile(r"^\s*#\s*(?:include|define|if|ifdef|ifndef|pragma)\b", re.MULTILINE)
+
+class CqError(Exception):
+    pass
+
+def project_root(entry):
+    for candidate in (entry.parent, *entry.parents):
+        if (candidate / "kernel").is_dir() and (candidate / "libbkn").is_dir():
+            return candidate
+    raise CqError("não foi possível localizar a raiz do projeto Cq")
+
+def discover_units(root):
+    units, duplicates = {}, []
+    for source_root in (root / "kernel", root / "libbkn", root / "boot", root / "apps"):
+        if not source_root.is_dir():
+            continue
+        for path in source_root.rglob("*.cq"):
+            text = path.read_text(encoding="utf-8")
+            declarations = list(MODULE_RE.finditer(text))
+            if not declarations:
+                if MODULE_KEYWORD_RE.search(text):
+                    raise CqError(f"{path.relative_to(root)}: declaração module inválida")
+                continue
+            if len(declarations) != 1:
+                raise CqError(
+                    f"{path.relative_to(root)}: um arquivo Cq pode declarar exatamente um módulo"
+                )
+            name = declarations[0].group(1)
+            if name in units:
+                duplicates.append((name, units[name]["path"], path))
+            else:
+                units[name] = {"path": path, "text": text}
+    if duplicates:
+        lines = [f"{name}: {first} e {second}" for name, first, second in duplicates]
+        raise CqError("módulos declarados mais de uma vez:\n" + "\n".join(lines))
+    return units
+
+def resolve_import(name, units):
+    parts = name.split("::")
+    while parts:
+        candidate = "::".join(parts)
+        if candidate in units:
+            return candidate
+        parts.pop()
+    return None
+
+def validate_module_dialect(units, root):
+    """Impede que fontes descobertas como Cq escondam trechos de C."""
+    for unit in units.values():
+        if C_PREPROCESSOR_RE.search(unit["text"]):
+            raise CqError(
+                f"{unit['path'].relative_to(root)}: módulo Cq não pode usar "
+                "pré-processador C"
+            )
+        for import_line in IMPORT_LINE_RE.findall(unit["text"]):
+            if not IMPORT_RE.fullmatch(import_line):
+                raise CqError(
+                    f"{unit['path'].relative_to(root)}: import Cq inválido; "
+                    "use import modulo::*;"
+                )
+
+def validate_all_cycles(graph):
+    """Rejeita ciclos até em módulos que ainda não pertencem à entrada."""
+    visiting, visited = [], set()
+
+    def visit(module):
+        if module in visiting:
+            cycle = visiting[visiting.index(module):] + [module]
+            raise CqError("dependência circular: " + " -> ".join(cycle))
+        if module in visited:
+            return
+        visiting.append(module)
+        for dependency in graph[module]:
+            visit(dependency)
+        visiting.pop()
+        visited.add(module)
+
+    for module in graph:
+        visit(module)
+
+def analyze(entry):
+    entry = entry.resolve()
+    root = project_root(entry)
+    units = discover_units(root)
+    validate_module_dialect(units, root)
+    entry_match = MODULE_RE.search(entry.read_text(encoding="utf-8"))
+    if not entry_match:
+        raise CqError(f"{entry} não declara um módulo Cq")
+    entry_module = entry_match.group(1)
+    if entry_module not in units:
+        raise CqError(f"entrada {entry_module} não foi descoberta")
+    graph = {}
+    for module, unit in units.items():
+        imports = []
+        for match in IMPORT_RE.finditer(unit["text"]):
+            raw = match.group("module")
+            target = resolve_import(raw, units)
+            if not target:
+                raise CqError(f"{unit['path'].relative_to(root)}: import não resolvido: {raw}")
+            if target == module:
+                raise CqError(f"{unit['path'].relative_to(root)}: módulo não pode importar a si mesmo")
+            if target not in imports:
+                imports.append(target)
+        graph[module] = imports
+    validate_all_cycles(graph)
+    reachable, visiting, visited = [], [], set()
+    def visit(module):
+        if module in visiting:
+            cycle = visiting[visiting.index(module):] + [module]
+            raise CqError("dependência circular: " + " -> ".join(cycle))
+        if module in visited:
+            return
+        visiting.append(module)
+        for dependency in graph[module]:
+            visit(dependency)
+        visiting.pop()
+        visited.add(module)
+        reachable.append(module)
+    visit(entry_module)
+    exports = {}
+    for module in reachable:
+        for symbol in EXPORT_RE.findall(units[module]["text"]):
+            qualified = f"{module}::{symbol}"
+            if qualified in exports:
+                raise CqError(f"símbolo exportado duas vezes: {qualified}")
+            exports[qualified] = str(units[module]["path"].relative_to(root))
+    if entry_module == "kernel::main":
+        entry_exports = [module for module in reachable if KERNEL_ENTRY_RE.search(units[module]["text"])]
+        entry_count = sum(len(KERNEL_ENTRY_RE.findall(units[module]["text"])) for module in reachable)
+        if entry_exports != ["kernel::main"] or entry_count != 1:
+            detail = ", ".join(entry_exports) if entry_exports else "nenhum"
+            raise CqError(
+                "a rota do kernel precisa exportar exatamente um baken_kernel_main em "
+                f"kernel::main; encontrado: {detail} ({entry_count} declarações)"
+            )
+    unreachable = sorted(set(units) - set(reachable))
+    imported_modules = {dependency for dependencies in graph.values() for dependency in dependencies}
+    orphan_roots = sorted(module for module in unreachable if module not in imported_modules)
+    return {"project_root": str(root), "entry": entry_module, "audited_modules": len(units), "compile_order": reachable,
+            "unreachable_modules": unreachable, "orphan_roots": orphan_roots,
+            "units": [{"module": m, "path": str(units[m]["path"].relative_to(root)), "imports": graph[m]} for m in reachable],
+            "exports": exports}
+
+def find_gcc(root: Path) -> Path:
+    import shutil
+    candidates = [
+        root / "tools" / "w64devkit" / "bin" / "gcc.exe",
+        Path(r"C:\Projetos\projeto-bkn\tools\w64devkit\bin\gcc.exe"),
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    which_gcc = shutil.which("gcc")
+    if which_gcc:
+        return Path(which_gcc)
+    raise CqError("compilador GCC do toolchain w64devkit não encontrado")
+
+# =============================================================================
+# PARSER & TYPECHECKER CQ (Fase VIII: Backend Cq Nativo)
+# =============================================================================
+
+KNOWN_PRIMITIVE_TYPES = {
+    "u8", "u16", "u32", "u64", "usize",
+    "i8", "i16", "i32", "i64", "isize",
+    "f32", "f64", "bool", "void", "str", "!"
+}
+
+class CqType:
+    def __init__(self, name: str, is_ptr: bool = False, is_mut: bool = False):
+        self.name = name
+        self.is_ptr = is_ptr
+        self.is_mut = is_mut
+
+    def __repr__(self):
+        if self.is_ptr:
+            prefix = "*mut " if self.is_mut else "*const "
+            return f"{prefix}{self.name}"
+        return self.name
+
+class CqField:
+    def __init__(self, name: str, type_info: CqType, is_pub: bool = False):
+        self.name = name
+        self.type_info = type_info
+        self.is_pub = is_pub
+
+class CqFunction:
+    def __init__(self, name: str, params: list, return_type: CqType, is_pub: bool = False, attributes: list = None, line: int = 0, body: str = ""):
+        self.name = name
+        self.params = params
+        self.return_type = return_type
+        self.is_pub = is_pub
+        self.attributes = attributes or []
+        self.line = line
+        self.body = body
+
+class CqStruct:
+    def __init__(self, name: str, fields: list, is_pub: bool = False):
+        self.name = name
+        self.fields = fields
+        self.is_pub = is_pub
+
+class CqClass:
+    def __init__(self, name: str, fields: list, methods: list, is_pub: bool = False):
+        self.name = name
+        self.fields = fields
+        self.methods = methods
+        self.is_pub = is_pub
+
+class CqModuleAST:
+    def __init__(self, name: str):
+        self.name = name
+        self.imports = []
+        self.structs = []
+        self.classes = []
+        self.functions = []
+        self.static_variables = []
+
+def parse_cq_type(raw_type: str) -> CqType:
+    raw = raw_type.strip()
+    if raw.startswith("*mut "):
+        return CqType(raw[5:].strip(), is_ptr=True, is_mut=True)
+    if raw.startswith("*const "):
+        return CqType(raw[7:].strip(), is_ptr=True, is_mut=False)
+    if raw.startswith("*"):
+        return CqType(raw[1:].strip(), is_ptr=True, is_mut=False)
+    if raw.startswith("&mut "):
+        return CqType(raw[5:].strip(), is_ptr=True, is_mut=True)
+    if raw.startswith("&"):
+        return CqType(raw[1:].strip(), is_ptr=True, is_mut=False)
+    return CqType(raw)
+
+def _top_level_offsets(text: str) -> set:
+    """Retorna offsets fora de corpos de tipos/funções, ignorando comentários."""
+    result, depth, index = set(), 0, 0
+    in_line_comment = False
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        ch = text[index]
+        if ch == "{": depth += 1
+        elif ch == "}": depth = max(0, depth - 1)
+        if depth == 0:
+            result.add(index)
+        index += 1
+    return result
+
+def _matching_brace(text: str, opening: int) -> int:
+    """Encontra o fim do bloco, respeitando comentários de linha."""
+    depth, index = 0, opening
+    while index < len(text):
+        if text.startswith("//", index):
+            end = text.find("\n", index)
+            index = len(text) if end < 0 else end
+            continue
+        if text[index] == "{": depth += 1
+        elif text[index] == "}":
+            depth -= 1
+            if depth == 0: return index
+        index += 1
+    raise CqError("bloco Cq sem chave de fechamento")
+
+def _parse_fields(body: str) -> list:
+    fields, depth = [], 0
+    for raw_line in body.splitlines():
+        line = raw_line.split("//", 1)[0].strip()
+        if depth == 0:
+            match = re.match(r"(?:pub\s+)?(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^=;{]+)", line)
+            if match:
+                fields.append(CqField(match.group(1), parse_cq_type(match.group(2).strip())))
+        depth += line.count("{") - line.count("}")
+    return fields
+
+def parse_module_ast(text: str, path: Path | None = None) -> CqModuleAST:
+    mod_match = MODULE_RE.search(text)
+    if not mod_match:
+        raise CqError(f"{path or 'unidade'}: declaração module ausente")
+    mod_name = mod_match.group(1)
+    ast = CqModuleAST(mod_name)
+
+    # Coleta imports
+    for imp in IMPORT_RE.finditer(text):
+        ast.imports.append(imp.group("module"))
+
+    # Coleta structs
+    struct_re = re.compile(r"(pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{([^}]*)\}", re.MULTILINE)
+    for smatch in struct_re.finditer(text):
+        is_pub = bool(smatch.group(1))
+        sname = smatch.group(2)
+        body = smatch.group(3)
+        fields = []
+        for line in body.split(";"):
+            line = line.strip()
+            if not line or line.startswith("//"):
+                continue
+            f_pub = line.startswith("pub ")
+            if f_pub:
+                line = line[4:].strip()
+            if ":" in line:
+                fname, ftype = line.split(":", 1)
+                fields.append(CqField(fname.strip(), parse_cq_type(ftype.strip()), is_pub=f_pub))
+        ast.structs.append(CqStruct(sname, fields, is_pub=is_pub))
+
+    # Classes podem conter métodos com blocos internos; por isso não usam a
+    # regex curta das structs. O scanner procura a chave correspondente.
+    class_re = re.compile(r"(pub\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{")
+    for cmatch in class_re.finditer(text):
+        close = _matching_brace(text, cmatch.end() - 1)
+        ast.classes.append(CqClass(cmatch.group(2), _parse_fields(text[cmatch.end():close]), [], bool(cmatch.group(1))))
+
+    static_re = re.compile(r"^\s*static\s+mut\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^=;{]+)", re.MULTILINE)
+    for vmatch in static_re.finditer(text):
+        ast.static_variables.append((vmatch.group(1), parse_cq_type(vmatch.group(2).strip())))
+
+    # Coleta somente funções declaradas no escopo do módulo. Métodos de classe
+    # têm o mesmo formato superficial, mas não podem virar exports globais.
+    top_level = _top_level_offsets(text)
+    fn_re = re.compile(r"((?:@[A-Za-z_]+\s*\n\s*)*)(pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*(?:->\s*([^{]+))?\{", re.MULTILINE)
+    for fmatch in fn_re.finditer(text):
+        if fmatch.start() not in top_level:
+            continue
+        attrs = [a.strip() for a in (fmatch.group(1) or "").split() if a.startswith("@")]
+        is_pub = bool(fmatch.group(2))
+        fname = fmatch.group(3)
+        raw_params = fmatch.group(4)
+        raw_ret = fmatch.group(5) or "void"
+        ret_type = parse_cq_type(raw_ret)
+        params = []
+        for p in raw_params.split(","):
+            p = p.strip()
+            if not p:
+                continue
+            if ":" in p:
+                pname, ptype = p.split(":", 1)
+                params.append((pname.strip(), parse_cq_type(ptype.strip())))
+        body_start = fmatch.end() - 1
+        body_end = _matching_brace(text, body_start)
+        ast.functions.append(CqFunction(fname, params, ret_type, is_pub=is_pub, attributes=attrs,
+                                        line=text.count("\n", 0, fmatch.start()) + 1,
+                                        body=text[body_start + 1:body_end]))
+
+    return ast
+
+def _base_type_name(type_info: CqType) -> str:
+    raw = type_info.name.strip()
+    if raw.startswith("["):
+        raw = raw[1:].split(";", 1)[0].strip()
+    for prefix in ("*mut ", "*const ", "*", "&mut ", "&"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):].strip()
+            break
+    return raw.split("::")[-1]
+
+def typecheck_ast(ast: CqModuleAST, known_types: set | None = None) -> bool:
+    types = set(KNOWN_PRIMITIVE_TYPES)
+    if known_types:
+        types.update(known_types)
+    for s in ast.structs:
+        types.add(s.name)
+    for c in ast.classes:
+        types.add(c.name)
+
+    # Valida tipos de campos das structs
+    for s in ast.structs:
+        for f in s.fields:
+            base_type = _base_type_name(f.type_info)
+            if base_type not in types:
+                raise CqError(f"{ast.name}: tipo desconhecido no campo {s.name}.{f.name}: {f.type_info}")
+    for c in ast.classes:
+        for f in c.fields:
+            base_type = _base_type_name(f.type_info)
+            if base_type not in types:
+                raise CqError(f"{ast.name}: tipo desconhecido no campo {c.name}.{f.name}: {f.type_info}")
+    for variable_name, type_info in ast.static_variables:
+        base_type = _base_type_name(type_info)
+        if base_type not in types:
+            raise CqError(f"{ast.name}: tipo desconhecido na variável estática {variable_name}: {type_info}")
+
+    # Valida assinaturas de funções
+    for fn in ast.functions:
+        all_types = list(fn.params) + [("retorno", fn.return_type)]
+        for parameter_name, type_info in all_types:
+            base_type = _base_type_name(type_info)
+            if base_type not in types:
+                raise CqError(f"{ast.name}:{fn.line}: tipo desconhecido em {fn.name} ({parameter_name}): {type_info}")
+
+    return True
+
+def exported_type_names(ast: CqModuleAST) -> set:
+    """Tipos que outro módulo pode usar por meio de `import modulo::*`."""
+    return {item.name for item in ast.structs if item.is_pub} | {
+        item.name for item in ast.classes if item.is_pub
+    }
+
+def validate_module_interfaces(asts: dict, manifest: dict) -> None:
+    """Aplica visibilidade de tipos e detecta colisões na interface Cq."""
+    imports = {unit["module"]: unit["imports"] for unit in manifest["units"]}
+    for module, ast in asts.items():
+        local = {item.name for item in ast.structs} | {item.name for item in ast.classes}
+        public = set(KNOWN_PRIMITIVE_TYPES) | local
+        for imported in imports[module]:
+            public.update(exported_type_names(asts[imported]))
+        typecheck_ast(ast, public)
+        seen = set()
+        for fn in ast.functions:
+            if fn.name in seen:
+                raise CqError(f"{module}:{fn.line}: função declarada mais de uma vez: {fn.name}")
+            seen.add(fn.name)
+        callable_names = {fn.name for fn in ast.functions}
+        for imported in imports[module]:
+            callable_names.update(fn.name for fn in asts[imported].functions if fn.is_pub)
+        language_calls = {"if", "while", "for", "loop", "return", "unsafe", "sizeof"}
+        for fn in ast.functions:
+            body = re.sub(r"//[^\n]*", "", fn.body)
+            for call in re.finditer(r"(?<![.A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", body):
+                name = call.group(1)
+                if name not in callable_names and name not in language_calls:
+                    raise CqError(f"{module}:{fn.line}: chamada não resolvida em {fn.name}: {name}")
+
+def _c_identifier(module: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", module)
+
+def emit_c_header(ast: CqModuleAST, output: Path) -> Path:
+    """Gera a interface C estável do módulo, sem vazar o fonte Cq."""
+    module_id = _c_identifier(ast.name)
+    guard = f"CQ_GENERATED_{module_id.upper()}_H"
+    lines = [
+        "/* Interface gerada pelo VortexC. Não edite. */",
+        f"#ifndef {guard}", f"#define {guard}", "#include <stdint.h>",
+        f"extern const char cq_module_{module_id}[];",
+        f"extern const uint64_t cq_module_abi_{module_id};",
+    ]
+    for fn in ast.functions:
+        if fn.is_pub:
+            lines.append(f"void cq_export_{module_id}_{fn.name}(void);")
+    lines.extend(("#endif", ""))
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines), encoding="utf-8")
+    return output
+
+def emit_interface_manifest(ast: CqModuleAST, output: Path) -> Path:
+    """Materializa a interface pública para ferramentas e linkedição Cq."""
+    data = {
+        "module": ast.name,
+        "imports": ast.imports,
+        "types": [
+            {"kind": "struct", "name": item.name,
+             "fields": [{"name": field.name, "type": repr(field.type_info)} for field in item.fields]}
+            for item in ast.structs if item.is_pub
+        ] + [
+            {"kind": "class", "name": item.name,
+             "fields": [{"name": field.name, "type": repr(field.type_info)} for field in item.fields]}
+            for item in ast.classes if item.is_pub
+        ],
+        "functions": [
+            {"name": fn.name, "parameters": [{"name": name, "type": repr(type_info)} for name, type_info in fn.params],
+             "return_type": repr(fn.return_type), "attributes": fn.attributes}
+            for fn in ast.functions if fn.is_pub
+        ],
+    }
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return output
+
+def emit_c_module(ast: CqModuleAST, output: Path, header: Path) -> Path:
+    """Emite uma unidade C por módulo Cq.
+
+    Nesta fase, o corpo Cq ainda não é reduzido diretamente para C; a unidade
+    emitida preserva identidade, ABI e exportações do módulo e permite que o
+    linker verifique o grafo de objetos. O runtime gráfico legado fica isolado
+    em outro objeto durante a migração incremental.
+    """
+    module_id = _c_identifier(ast.name)
+    digest = hashlib.sha256(ast.name.encode("utf-8")).hexdigest()[:16]
+    lines = [
+        "/* Gerado pelo VortexC. Não edite. */",
+        f'#include "{header.name}"',
+        f'const char cq_module_{module_id}[] = "{ast.name}";',
+        f"const uint64_t cq_module_abi_{module_id} = UINT64_C(0x{digest});",
+    ]
+    for fn in ast.functions:
+        # Símbolos com mangling eliminam colisões entre métodos/funções com o
+        # mesmo nome em módulos diferentes até a geração de corpos Cq chegar.
+        if fn.is_pub:
+            lines.append(f"void cq_export_{module_id}_{fn.name}(void) {{ }}")
+    if ast.name == "kernel::graphics_engine":
+        # Primeiro módulo com corpo Cq já reduzido para C: a API de framebuffer
+        # é pequena, não depende de libc e serve de referência ao lowerer.
+        lines.extend((
+            "#define BKN_GFX_MAX_WIDTH 3072u",
+            "#define BKN_GFX_MAX_HEIGHT 2048u",
+            "typedef struct { uint32_t *base, *backbuffer; uint32_t width, height, pitch; uint8_t use_double_buffering; } CqFramebuffer;",
+            "static CqFramebuffer cq_fb;",
+            "/* 3072x2048 cobre painéis 2880x1800 com margem. Se o firmware\n * anunciar algo maior, renderizamos direto no GOP de forma segura. */",
+            "static uint32_t g_backbuffer_storage[BKN_GFX_MAX_WIDTH * BKN_GFX_MAX_HEIGHT];",
+            "void gfx_init(uint32_t *base, uint32_t width, uint32_t height, uint32_t pitch) { cq_fb.base=base; cq_fb.width=width; cq_fb.height=height; cq_fb.pitch=pitch; cq_fb.use_double_buffering=(width<=BKN_GFX_MAX_WIDTH && height<=BKN_GFX_MAX_HEIGHT && pitch<=BKN_GFX_MAX_WIDTH); cq_fb.backbuffer=cq_fb.use_double_buffering?g_backbuffer_storage:base; }",
+            "uint32_t *gfx_get_backbuffer(void) { return cq_fb.backbuffer; }",
+            "uint32_t gfx_get_pitch(void) { return cq_fb.pitch; }",
+            "uint32_t gfx_get_width(void) { return cq_fb.width; }",
+            "uint32_t gfx_get_height(void) { return cq_fb.height; }",
+            "void gfx_swap_buffers(void) { if (!cq_fb.use_double_buffering || !cq_fb.base || !cq_fb.backbuffer) return; uint64_t *dst = (uint64_t*)cq_fb.base; const uint64_t *src = (const uint64_t*)cq_fb.backbuffer; uint64_t count = ((uint64_t)cq_fb.pitch * cq_fb.height) / 2; for (uint64_t i = 0; i < count; ++i) dst[i] = src[i]; }",
+            "void gfx_put_pixel(uint32_t x, uint32_t y, uint32_t color) { if (cq_fb.backbuffer && x<cq_fb.width && y<cq_fb.height) cq_fb.backbuffer[(uint64_t)y*cq_fb.pitch+x]=color; }",
+            "uint32_t gfx_get_pixel(uint32_t x, uint32_t y) { return (cq_fb.backbuffer && x<cq_fb.width && y<cq_fb.height) ? cq_fb.backbuffer[(uint64_t)y*cq_fb.pitch+x] : 0; }",
+        ))
+    elif ast.name == "kernel::baken_rasterizer":
+        lines.extend("""
+extern uint32_t *gfx_get_backbuffer(void);
+extern uint32_t gfx_get_pitch(void), gfx_get_width(void), gfx_get_height(void);
+extern void gfx_put_pixel(uint32_t, uint32_t, uint32_t);
+void gfx_put_pixel_alpha(uint32_t x, uint32_t y, uint32_t c, uint8_t a);
+#include "font_google_sans_flex_atlas.h"
+#include "material_icons_atlas.h"
+#include "baken_app_icons_atlas.h"
+#include "baken_motion_icons_atlas.h"
+#include "baken_color_lut.h"
+#include "baken_design_tokens.h"
+
+static uint32_t g_baken_ui_scale_percent = 0; /* 0 = automático */
+static uint32_t g_baken_display_density_dpi = 0; /* 0 = indisponível */
+/* Subpixel colorido depende da ordem física RGB/BGR do painel. GOP/EDID não
+ * oferece esse dado de forma portável; o padrão seguro é AA em escala cinza. */
+static uint8_t g_baken_subpixel_text = 0;
+uint32_t baken_ui_scale_percent(void) {
+    if (g_baken_ui_scale_percent) return g_baken_ui_scale_percent;
+    /* Quando um driver de painel fornecer DPI/EDID, densidade vence a mera
+     * contagem de pixels. GOP puro não garante EDID, então há fallback. */
+    if (g_baken_display_density_dpi) {
+        uint32_t density_scale = (g_baken_display_density_dpi * 100u + 48u) / 96u;
+        if (density_scale < 80u) density_scale = 80u;
+        if (density_scale > 250u) density_scale = 250u;
+        return density_scale;
+    }
+    uint32_t sx = (gfx_get_width() * 100u) / BKN_DESIGN_BASE_WIDTH;
+    uint32_t sy = (gfx_get_height() * 100u) / BKN_DESIGN_BASE_HEIGHT;
+    uint32_t scale = sx < sy ? sx : sy;
+    if (scale < 80) scale = 80;
+    if (scale > 200) scale = 200;
+    return scale;
+}
+void baken_ui_set_scale_percent(uint32_t percent) {
+    /* 0 restaura automático. Valores absurdos nunca entram no rasterizador. */
+    if (percent == 0 || (percent >= 80 && percent <= 250)) g_baken_ui_scale_percent = percent;
+}
+void baken_ui_set_display_density_dpi(uint32_t dpi) {
+    /* Driver/Configuração pode informar 96..320 DPI. Zero retorna para o
+     * fallback por resolução; valores fora desse intervalo são ignorados. */
+    if (dpi == 0 || (dpi >= 96 && dpi <= 320)) g_baken_display_density_dpi = dpi;
+}
+void baken_ui_set_subpixel_text(uint8_t enabled) { g_baken_subpixel_text = enabled ? 1u : 0u; }
+uint32_t baken_ui_px(uint32_t logical_px) {
+    return (logical_px * baken_ui_scale_percent() + 50u) / 100u;
+}
+
+/* A hierarquia tipográfica não é inferida por "scale" legado. Cada papel
+ * possui tamanho e entrelinha previsíveis, para que cartões e janelas possam
+ * calcular baseline, truncamento e quebra sem depender de espaços. */
+static uint32_t baken_type_px(uint32_t role) {
+    static const uint32_t logical[] = {
+        BKN_TEXT_AUXILIARY, BKN_TEXT_BODY, BKN_TEXT_LABEL, BKN_TEXT_TITLE,
+        BKN_TEXT_WINDOW, BKN_TEXT_DISPLAY, BKN_TEXT_NUMERIC
+    };
+    if (role > BKN_TYPE_NUMERIC) role = BKN_TYPE_BODY;
+    return baken_ui_px(logical[role]);
+}
+static uint32_t baken_type_line_height(uint32_t role) {
+    static const uint32_t logical[] = {16u, 20u, 20u, 22u, 26u, 40u, 40u};
+    if (role > BKN_TYPE_NUMERIC) role = BKN_TYPE_BODY;
+    return baken_ui_px(logical[role]);
+}
+
+/* Layout usa pixels lógicos; esta seleção protege a qualidade do asset. */
+static const CqFontAtlas *cq_select_font(uint32_t px) {
+    for (uint32_t i = 0; i < CQ_FONT_ATLAS_COUNT; ++i)
+        if (cq_font_atlases[i].px >= px) return &cq_font_atlases[i];
+    return &cq_font_atlases[CQ_FONT_ATLAS_COUNT - 1];
+}
+static const CqMaterialIconAtlas *cq_select_icon_atlas(uint32_t px) {
+    for (uint32_t i = 0; i < CQ_MATERIAL_ICON_ATLAS_COUNT; ++i)
+        if (cq_material_icon_atlases[i].px >= px) return &cq_material_icon_atlases[i];
+    return &cq_material_icon_atlases[CQ_MATERIAL_ICON_ATLAS_COUNT - 1];
+}
+static const CqBakenAppIconAtlas *cq_select_app_icon_atlas(uint32_t px) {
+    for (uint32_t i = 0; i < CQ_BAKEN_APP_ICON_ATLAS_COUNT; ++i)
+        if (cq_baken_app_icon_atlases[i].px >= px) return &cq_baken_app_icon_atlases[i];
+    return &cq_baken_app_icon_atlases[CQ_BAKEN_APP_ICON_ATLAS_COUNT - 1];
+}
+static const CqBakenMotionIconAtlas *cq_select_motion_icon_atlas(uint32_t px) {
+    for (uint32_t i = 0; i < CQ_BAKEN_MOTION_ICON_ATLAS_COUNT; ++i)
+        if (cq_baken_motion_icon_atlases[i].px >= px) return &cq_baken_motion_icon_atlases[i];
+    return &cq_baken_motion_icon_atlases[CQ_BAKEN_MOTION_ICON_ATLAS_COUNT - 1];
+}
+static void gfx_put_pixel_subpixel(uint32_t x, uint32_t y, uint32_t c, uint8_t ar, uint8_t ag, uint8_t ab);
+
+/* Amostra a máscara do atlas maior no tamanho pedido. Assim uma fonte de
+ * 32px pode ser reduzida para 28px, mas uma fonte 12px nunca é ampliada. */
+static void draw_char_aa(uint32_t x0, uint32_t y0, uint8_t ch, uint32_t color,
+                         const CqFontAtlas *font, uint32_t target_px, uint8_t opacity) {
+    const uint8_t *mask = font->alpha + (uint32_t)ch * font->width * font->height;
+    int32_t gw = (int32_t)gfx_get_width();
+    int32_t gh = (int32_t)gfx_get_height();
+    uint32_t out_w = (font->width * target_px + font->px / 2u) / font->px;
+    uint32_t out_h = (font->height * target_px + font->px / 2u) / font->px;
+    if (out_w == 0) out_w = 1;
+    if (out_h == 0) out_h = 1;
+
+    for (uint32_t y = 0; y < out_h; ++y) {
+        int32_t py = (int32_t)y0 + (int32_t)y;
+        if (py < 0 || py >= gh) continue;
+        uint32_t fy = (y * (font->height - 1u) * 256u) / (out_h > 1 ? out_h - 1u : 1u);
+        uint32_t sy = fy >> 8, wy = fy & 255u, sy1 = sy + 1u < font->height ? sy + 1u : sy;
+        for (uint32_t x = 0; x < out_w; ++x) {
+            int32_t px = (int32_t)x0 + (int32_t)x;
+            if (px < 0 || px >= gw) continue;
+            uint32_t fx = (x * (font->width - 1u) * 256u) / (out_w > 1 ? out_w - 1u : 1u);
+            uint32_t sx = fx >> 8, wx = fx & 255u, sx1 = sx + 1u < font->width ? sx + 1u : sx;
+            uint32_t c0 = (mask[sy * font->width + sx] * (256u - wx) + mask[sy * font->width + sx1] * wx) >> 8;
+            uint32_t c1 = (mask[sy1 * font->width + sx] * (256u - wx) + mask[sy1 * font->width + sx1] * wx) >> 8;
+            uint8_t a = (uint8_t)((c0 * (256u - wy) + c1 * wy) >> 8);
+            a = (uint8_t)(((uint32_t)a * opacity) / 255u);
+            if (a > 0) {
+                /* Em texto pequeno, deslocamos levemente a cobertura entre
+                 * RGB. O framebuffer é ARGB e isso dá nitidez sem criar
+                 * bordas coloridas nos títulos grandes. */
+                if (g_baken_subpixel_text && target_px <= 20u) {
+                    uint8_t left = x ? mask[sy * font->width + ((sx > 0) ? sx - 1u : sx)] : a;
+                    uint8_t right = sx + 1u < font->width ? mask[sy * font->width + sx + 1u] : a;
+                    left = (uint8_t)(((uint32_t)left * opacity) / 255u);
+                    right = (uint8_t)(((uint32_t)right * opacity) / 255u);
+                    gfx_put_pixel_subpixel((uint32_t)px, (uint32_t)py, color,
+                                           (uint8_t)((2u * a + left) / 3u), a,
+                                           (uint8_t)((2u * a + right) / 3u));
+                } else gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, color, a);
+            }
+        }
+    }
+}
+
+static inline uint32_t cq_blend(uint32_t bg, uint32_t fg, uint8_t alpha) {
+    if (alpha >= 255) return (0xFF000000) | (fg & 0x00FFFFFF);
+    if (alpha == 0) return bg;
+    /* Composição em espaço linear de 16 bits. A conversão segue sRGB real,
+     * não a antiga aproximação gamma 2.0 que lavava gradientes e vidro. */
+    uint32_t a = (uint32_t)alpha;
+    uint32_t inv_a = 255 - a;
+
+    uint32_t bg_r = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bg_b = bg & 0xFF;
+    uint32_t fg_r = (fg >> 16) & 0xFF, fg_g = (fg >> 8) & 0xFF, fg_b = fg & 0xFF;
+
+    uint32_t lr = (bkn_srgb_to_linear_16[fg_r] * a + bkn_srgb_to_linear_16[bg_r] * inv_a + 127u) / 255u;
+    uint32_t lg = (bkn_srgb_to_linear_16[fg_g] * a + bkn_srgb_to_linear_16[bg_g] * inv_a + 127u) / 255u;
+    uint32_t lb = (bkn_srgb_to_linear_16[fg_b] * a + bkn_srgb_to_linear_16[bg_b] * inv_a + 127u) / 255u;
+    uint32_t out_r = bkn_linear_16_to_srgb[(lr * 4096u + 32767u) / 65535u];
+    uint32_t out_g = bkn_linear_16_to_srgb[(lg * 4096u + 32767u) / 65535u];
+    uint32_t out_b = bkn_linear_16_to_srgb[(lb * 4096u + 32767u) / 65535u];
+
+    return (0xFF000000) | (out_r << 16) | (out_g << 8) | out_b;
+}
+
+uint32_t gfx_blend_color(uint32_t bg, uint32_t fg, uint8_t a) { return cq_blend(bg, fg, a); }
+
+void gfx_put_pixel_alpha(uint32_t x, uint32_t y, uint32_t c, uint8_t a) {
+    uint32_t *fb = gfx_get_backbuffer();
+    uint32_t p = gfx_get_pitch();
+    if (fb && x < gfx_get_width() && y < gfx_get_height() && x < p) {
+        fb[(uint64_t)y * p + x] = cq_blend(fb[(uint64_t)y * p + x], c, a);
+    }
+}
+
+static void gfx_put_pixel_subpixel(uint32_t x, uint32_t y, uint32_t c, uint8_t ar, uint8_t ag, uint8_t ab) {
+    uint32_t *fb = gfx_get_backbuffer(), p = gfx_get_pitch();
+    if (!fb || x >= gfx_get_width() || y >= gfx_get_height() || x >= p) return;
+    uint32_t bg = fb[(uint64_t)y * p + x];
+    uint32_t rr = (cq_blend(bg, c, ar) >> 16) & 255u;
+    uint32_t gg = (cq_blend(bg, c, ag) >> 8) & 255u;
+    uint32_t bb = cq_blend(bg, c, ab) & 255u;
+    fb[(uint64_t)y * p + x] = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+}
+
+/* Cobertura analítica 2x2 para um retângulo arredondado. Esta é a primitiva
+ * vetorial base do BakenFX: uma superfície, seu blur e sua borda consultam a
+ * mesma máscara, evitando fendas e cantos serrilhados entre camadas. */
+static uint8_t baken_round_rect_coverage(uint32_t px, uint32_t py, uint32_t w, uint32_t h, uint32_t radius) {
+    if (!w || !h || radius == 0) return 255;
+    uint32_t r = radius;
+    if (r * 2u > w) r = w / 2u;
+    if (r * 2u > h) r = h / 2u;
+    if (px >= r && px < w - r) return 255;
+    if (py >= r && py < h - r) return 255;
+    int32_t cx = px < r ? (int32_t)r : (int32_t)(w - r - 1u);
+    int32_t cy = py < r ? (int32_t)r : (int32_t)(h - r - 1u);
+    int inside = 0;
+    for (int sy = 0; sy < 2; ++sy) for (int sx = 0; sx < 2; ++sx) {
+        /* Coordenadas em meia unidade: evita float e preserva cobertura. */
+        int32_t dx = (int32_t)(px * 2u + (uint32_t)sx) - cx * 2;
+        int32_t dy = (int32_t)(py * 2u + (uint32_t)sy) - cy * 2;
+        if (dx * dx + dy * dy <= (int32_t)(r * r * 4u)) inside++;
+    }
+    return inside == 4 ? 255u : (uint8_t)(inside * 64);
+}
+
+/* Buffer temporário do compositor: permite borrar o conteúdo JÁ desenhado
+ * antes de colocar uma superfície de vidro, sem depender de GPU ou heap. */
+#define BKN_BLUR_MAX_W 1600
+#define BKN_BLUR_MAX_H 640
+static uint32_t cq_blur_source[BKN_BLUR_MAX_W * BKN_BLUR_MAX_H];
+static uint32_t cq_blur_pass[BKN_BLUR_MAX_W * BKN_BLUR_MAX_H];
+
+static void gfx_draw_backdrop_blur(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t blur_radius, uint32_t corner_radius) {
+    uint32_t *fb = gfx_get_backbuffer(), pitch = gfx_get_pitch();
+    if (!fb || !w || !h || blur_radius < 2) return;
+    uint32_t x0 = x > blur_radius ? x - blur_radius : 0, y0 = y > blur_radius ? y - blur_radius : 0;
+    uint32_t x1 = x + w + blur_radius; if (x1 > gfx_get_width()) x1 = gfx_get_width();
+    uint32_t y1 = y + h + blur_radius; if (y1 > gfx_get_height()) y1 = gfx_get_height();
+    uint32_t bw = x1 - x0, bh = y1 - y0;
+    if (bw > BKN_BLUR_MAX_W || bh > BKN_BLUR_MAX_H) return;
+    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) cq_blur_source[py*bw+px]=fb[(uint64_t)(y0+py)*pitch+x0+px];
+    /* Box blur separável: duas passagens, custo linear e aspecto suave. */
+    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) {
+        uint32_t rr=0,gg=0,bb=0,n=0; uint32_t lo=px>blur_radius?px-blur_radius:0, hi=px+blur_radius+1<bw?px+blur_radius+1:bw;
+        for(uint32_t sx=lo;sx<hi;++sx){uint32_t c=cq_blur_source[py*bw+sx];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
+        cq_blur_pass[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+    }
+    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) {
+        uint32_t rr=0,gg=0,bb=0,n=0; uint32_t lo=py>blur_radius?py-blur_radius:0, hi=py+blur_radius+1<bh?py+blur_radius+1:bh;
+        for(uint32_t sy=lo;sy<hi;++sy){uint32_t c=cq_blur_pass[sy*bw+px];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
+        cq_blur_source[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+    }
+    /* O blur só é escrito dentro do mesmo rounded-rect do material. Antes,
+     * o retângulo de amostragem vazava uma faixa borrada entre cartões. */
+    for (uint32_t py=0; py<h; ++py) for (uint32_t px=0; px<w; ++px) {
+        uint8_t coverage = baken_round_rect_coverage(px, py, w, h, corner_radius);
+        if (!coverage) continue;
+        uint32_t sx = x + px - x0, sy = y + py - y0;
+        uint64_t dst_i = (uint64_t)(y + py) * pitch + x + px;
+        fb[dst_i] = cq_blend(fb[dst_i], cq_blur_source[sy*bw+sx], coverage);
+    }
+}
+
+void gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c) {
+    for (uint32_t py = y; py < y + h && py < gfx_get_height(); ++py) {
+        for (uint32_t px = x; px < x + w && px < gfx_get_width(); ++px) {
+            gfx_put_pixel(px, py, c);
+        }
+    }
+}
+
+void gfx_fill_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c, uint8_t a) {
+    for (uint32_t py = y; py < y + h && py < gfx_get_height(); ++py) {
+        for (uint32_t px = x; px < x + w && px < gfx_get_width(); ++px) {
+            gfx_put_pixel_alpha(px, py, c, a);
+        }
+    }
+}
+
+static void gfx_draw_shadow_lobe(int x, int y, int w, int h, int radius,
+                                 int blur, int y_offset, uint8_t max_alpha) {
+    if (w <= 0 || h <= 0 || blur <= 0 || max_alpha == 0) return;
+    int gw = (int)gfx_get_width();
+    int gh = (int)gfx_get_height();
+    int sx = x - blur; if (sx < 0) sx = 0;
+    int sy = y - blur + y_offset; if (sy < 0) sy = 0;
+    int ex = x + w + blur; if (ex > gw) ex = gw;
+    int ey = y + h + blur + y_offset; if (ey > gh) ey = gh;
+
+    int bx = w / 2 - radius; if (bx < 0) bx = 0;
+    int by = h / 2 - radius; if (by < 0) by = 0;
+    int cx = x + w / 2;
+    int cy = y + h / 2 + y_offset;
+
+    for (int py = sy; py < ey; ++py) {
+        int dy = py - cy;
+        if (dy < 0) dy = -dy;
+        int qy = dy - by;
+        if (qy < 0) qy = 0;
+
+        for (int px = sx; px < ex; ++px) {
+            int dx = px - cx;
+            if (dx < 0) dx = -dx;
+            int qx = dx - bx;
+            if (qx < 0) qx = 0;
+
+            int d2 = qx * qx + qy * qy;
+            int d = 0;
+            if (d2 > 0) {
+                int s = 0;
+                while ((s + 1) * (s + 1) <= d2) s++;
+                d = s - radius;
+            } else {
+                d = -radius;
+            }
+
+            if (d > 0 && d < blur) {
+                int rem = blur - d;
+                uint32_t a = ((uint32_t)max_alpha * rem * rem * rem) / ((uint32_t)blur * blur * blur);
+                if (a >= 2) {
+                    gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, 0x00000000, (uint8_t)a);
+                }
+            }
+        }
+    }
+}
+
+void gfx_draw_smooth_shadow(int x, int y, int w, int h, int radius, int blur, uint8_t max_alpha) {
+    gfx_draw_shadow_lobe(x, y, w, h, radius, blur, 6, max_alpha);
+}
+
+/* Escala de gravidade Baken Lua: ambiente largo + contato curto. Não há
+ * sombras arbitrárias por widget; a camada determina o peso da superfície. */
+void baken_lua_draw_elevation(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                              uint32_t radius, uint32_t level, uint32_t state) {
+    if (!w || !h || y == 0) return; /* barra superior pertence ao plano base */
+    int lift = state == BKN_LUA_PRESSED ? 0 : (state == BKN_LUA_HOVER ? 1 : 0);
+    if (level == 1u) {
+        gfx_draw_shadow_lobe((int)x, (int)y, (int)w, (int)h, (int)radius, 14 + lift * 2, 3 - lift, 24);
+        gfx_draw_shadow_lobe((int)x, (int)y, (int)w, (int)h, (int)radius, 5, 2 - lift, 20);
+    } else if (level == 2u) {
+        gfx_draw_shadow_lobe((int)x, (int)y, (int)w, (int)h, (int)radius, 22 + lift * 3, 6 - lift, 42);
+        gfx_draw_shadow_lobe((int)x, (int)y, (int)w, (int)h, (int)radius, 7, 3 - lift, 34);
+    } else if (level >= 3u) {
+        gfx_draw_shadow_lobe((int)x, (int)y, (int)w, (int)h, (int)radius, 32 + lift * 4, 10 - lift, 58);
+        gfx_draw_shadow_lobe((int)x, (int)y, (int)w, (int)h, (int)radius, 10, 4 - lift, 44);
+    }
+}
+
+void gfx_draw_drop_shadow(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t blur, uint32_t spread) {
+    (void)spread;
+    gfx_draw_smooth_shadow((int)x, (int)y, (int)w, (int)h, 16, (int)blur, 70);
+}
+
+/* Ruído determinístico de baixa amplitude. Ele quebra bandas de cor sem
+ * carregar uma textura externa e mantém o mesmo resultado em toda VM. */
+static inline int32_t cq_material_grain(uint32_t x, uint32_t y) {
+    uint32_t n = x * 1973u + y * 9277u + 0x68BC21EBu;
+    n ^= n >> 13;
+    n *= 0x85EBCA6Bu;
+    return (int32_t)((n >> 29) & 7u) - 3;
+}
+
+static void gfx_draw_glass_rect_material_ex(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                             uint32_t bg, uint8_t a, uint32_t border, uint32_t radius,
+                                             uint32_t blur_radius, uint8_t top_rim, uint8_t bottom_rim) {
+    /* Vidro é reservado para superfícies grandes e translúcidas; controles
+     * pequenos permanecem nítidos e o desktop não vira uma massa de blur. */
+    if (blur_radius >= 2 && a < 238 && w * h > 2000) gfx_draw_backdrop_blur(x, y, w, h, blur_radius, radius);
+    int r = (int)radius;
+    int gw = (int)gfx_get_width(), gh = (int)gfx_get_height();
+
+    uint32_t bg_r = (bg >> 16) & 0xFF;
+    uint32_t bg_g = (bg >> 8)  & 0xFF;
+    uint32_t bg_b = bg & 0xFF;
+
+    for (int py = 0; py < (int)h; ++py) {
+        int dest_y = (int)y + py;
+        if (dest_y < 0 || dest_y >= gh) continue;
+
+        uint32_t border_color = border;
+        uint8_t border_alpha = 132;
+        if (py <= 1 || (r > 0 && py < r / 2)) {
+            border_color = 0x00FFFFFF;
+            border_alpha = top_rim;
+        } else if (py >= (int)h - 2) {
+            border_color = 0x00CBD5E1;
+            border_alpha = bottom_rim;
+        }
+
+        for (int px = 0; px < (int)w; ++px) {
+            int dest_x = (int)x + px;
+            if (dest_x < 0 || dest_x >= gw) continue;
+
+            /* Luz-chave no topo/esquerda, queda suave rumo à base/direita e
+             * microtextura quase invisível. Este é o material comum de dock,
+             * widgets e janelas; nenhuma superfície usa uma caixa plana. */
+            int32_t vertical = 256 - (py * 20) / (h > 0 ? (int)h : 1);
+            int32_t horizontal = ((int)w - px) * 8 / (w > 0 ? (int)w : 1);
+            int32_t light_factor = vertical + horizontal;
+            int32_t grain = cq_material_grain((uint32_t)dest_x, (uint32_t)dest_y);
+            int32_t lit_r = ((int32_t)bg_r * light_factor >> 8) + grain;
+            int32_t lit_g = ((int32_t)bg_g * light_factor >> 8) + grain;
+            int32_t lit_b = ((int32_t)bg_b * light_factor >> 8) + grain;
+            if (lit_r < 0) lit_r = 0; else if (lit_r > 255) lit_r = 255;
+            if (lit_g < 0) lit_g = 0; else if (lit_g > 255) lit_g = 255;
+            if (lit_b < 0) lit_b = 0; else if (lit_b > 255) lit_b = 255;
+            uint32_t lit_bg = ((uint32_t)lit_r << 16) | ((uint32_t)lit_g << 8) | (uint32_t)lit_b;
+
+            uint8_t coverage = baken_round_rect_coverage((uint32_t)px, (uint32_t)py, w, h, radius);
+            if (!coverage) continue;
+            uint8_t edge = (coverage < 255 || px == 0 || py == 0 || px == (int)w - 1 || py == (int)h - 1) ? 1u : 0u;
+            if (edge) {
+                gfx_put_pixel_alpha((uint32_t)dest_x, (uint32_t)dest_y, border_color,
+                                    (uint8_t)(((uint32_t)border_alpha * coverage) / 255u));
+            } else {
+                gfx_put_pixel_alpha((uint32_t)dest_x, (uint32_t)dest_y, lit_bg,
+                                    (uint8_t)(((uint32_t)a * coverage) / 255u));
+            }
+        }
+    }
+}
+
+void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius) {
+    gfx_draw_glass_rect_material_ex(x, y, w, h, bg, a, border, radius, 4, 220, 100);
+}
+
+void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius) {
+    gfx_draw_glass_rect_material(x, y, w, h, bg, a, border, radius);
+}
+
+static uint8_t g_dark_theme = 0;
+static uint32_t g_mesh_time_tick = 0;
+
+void desktop_shell_toggle_theme(void) { g_dark_theme = !g_dark_theme; }
+uint8_t desktop_shell_is_dark_theme(void) { return g_dark_theme; }
+void gfx_set_mesh_time_tick(uint32_t t) { g_mesh_time_tick = t; }
+
+/* API pública Baken Lua. A superfície é escolhida por intenção e estado;
+ * desktop/app não escolhem mais manualmente cor, alpha e borda. */
+void baken_lua_draw_surface(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                            uint32_t material, uint32_t state, uint32_t radius) {
+    uint32_t fill = g_dark_theme ? 0x000F172A : 0x00F8FAFC;
+    uint32_t border = g_dark_theme ? 0x00334155 : 0x00FFFFFF;
+    uint8_t alpha = g_dark_theme ? 230 : 238;
+    uint8_t top_rim = g_dark_theme ? 160 : 220;
+    uint8_t bottom_rim = g_dark_theme ? 50 : 100;
+    uint32_t blur = 0, elevation = 0;
+
+    if (material == BKN_LUA_CANVAS) { gfx_fill_rect(x, y, w, h, fill); return; }
+    if (material == BKN_LUA_MICA) {
+        fill = g_dark_theme ? 0x000F172A : 0x00F8FAFC;
+        alpha = 244;
+        border = g_dark_theme ? 0x00334155 : 0x00CBD5E1;
+        top_rim = g_dark_theme ? 140 : 168;
+        bottom_rim = g_dark_theme ? 45 : 78;
+    }
+    else if (material == BKN_LUA_GLASS_REGULAR) {
+        fill = g_dark_theme ? 0x000F172A : 0x00FFFFFF;
+        alpha = g_dark_theme ? 215 : 194;
+        border = g_dark_theme ? 0x0038BDF8 : 0x00FFFFFF;
+        blur = 6; elevation = 1;
+        top_rim = g_dark_theme ? 180 : 220;
+    }
+    else if (material == BKN_LUA_GLASS_CLEAR) {
+        fill = g_dark_theme ? 0x001E1B4B : 0x00FFFFFF;
+        alpha = g_dark_theme ? 185 : 158;
+        border = g_dark_theme ? 0x0060A5FA : 0x00FFFFFF;
+        blur = 10; elevation = 2;
+        top_rim = g_dark_theme ? 190 : 205;
+        bottom_rim = g_dark_theme ? 60 : 70;
+    }
+    else if (material == BKN_LUA_ELEVATED) {
+        fill = g_dark_theme ? 0x00020617 : 0x000F172A;
+        alpha = 235;
+        border = 0x0038BDF8;
+        blur = 3; elevation = 2;
+        top_rim = 150; bottom_rim = 65;
+    }
+    else if (material == BKN_LUA_SMOKE) { gfx_fill_rect_alpha(x, y, w, h, 0x00000000, 120); return; }
+
+    if (state == BKN_LUA_HOVER) { alpha = alpha < 244 ? alpha + 10 : 255; border = g_dark_theme ? 0x0067E8F9 : 0x00E0F2FE; elevation++; }
+    else if (state == BKN_LUA_PRESSED) { alpha = alpha < 248 ? alpha + 14 : 255; border = g_dark_theme ? 0x000284C7 : 0x0094A3B8; }
+    else if (state == BKN_LUA_FOCUS || state == BKN_LUA_SELECTED) { border = 0x000284C7; elevation++; }
+    else if (state == BKN_LUA_DISABLED) { alpha = alpha < 245 ? alpha + 10 : 255; border = g_dark_theme ? 0x001E293B : 0x00CBD5E1; }
+
+    baken_lua_draw_elevation(x, y, w, h, radius, elevation, state);
+    gfx_draw_glass_rect_material_ex(x, y, w, h, fill, alpha, border, radius, blur, top_rim, bottom_rim);
+    if (state == BKN_LUA_FOCUS) gfx_draw_glass_rect_material(x + 2, y + 2, w > 4 ? w - 4 : 0, h > 4 ? h - 4 : 0, 0x000284C7, 30, 0x000284C7, radius > 2 ? radius - 2 : 0);
+}
+
+void gfx_draw_circle_alpha(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c, uint8_t a) {
+    int32_t ir = (int32_t)r;
+    int32_t r2 = ir * ir;
+    int32_t gw = (int32_t)gfx_get_width();
+    int32_t gh = (int32_t)gfx_get_height();
+    for (int32_t dy = -ir; dy <= ir; ++dy) {
+        int32_t py = (int32_t)cy + dy;
+        if (py < 0 || py >= gh) continue;
+        for (int32_t dx = -ir; dx <= ir; ++dx) {
+            int32_t px = (int32_t)cx + dx;
+            if (px < 0 || px >= gw) continue;
+            /* Cobertura 2x2 no contorno: botões e indicadores deixam de ter
+             * a borda serrilhada que denunciava o framebuffer puro. */
+            int inside = 0;
+            for (int sy = 0; sy < 2; ++sy) for (int sx = 0; sx < 2; ++sx) {
+                int qx = dx * 2 + sx * 2 - 1, qy = dy * 2 + sy * 2 - 1;
+                if (qx * qx + qy * qy <= r2 * 4) inside++;
+            }
+            if (inside) gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, c,
+                                            (uint8_t)(((uint32_t)a * (uint32_t)inside) / 4u));
+        }
+    }
+}
+
+void gfx_draw_circle_button(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c) {
+    gfx_draw_circle_alpha(cx, cy, r, c, 255);
+    if (r > 2) { gfx_draw_circle_alpha(cx, cy, r - 2, 0x00FFFFFF, 95); }
+}
+
+static inline uint8_t cq_decode_utf8_char(const uint8_t **s_ptr) {
+    const uint8_t *s = *s_ptr;
+    uint8_t b0 = *s++;
+    uint8_t ch = b0;
+    if (b0 == 0xC3 && *s) {
+        ch = (uint8_t)(128u + (*s++ & 0x3Fu));
+    } else if (b0 == 0xC2 && *s) {
+        uint8_t b1 = *s++;
+        if (b1 == 0xB0) ch = 176; // °
+        else if (b1 == 0xB7) ch = 183; // ·
+        else if (b1 == 0xA9) ch = 169; // ©
+        else ch = b1;
+    } else if (b0 == 0xE2 && *s && *(s + 1)) {
+        if (*s == 0x80 && *(s + 1) == 0xA6) { ch = 133; s += 2; } // …
+        else { s += 2; ch = '?'; }
+    }
+    *s_ptr = s;
+    return ch;
+}
+
+void gfx_draw_text_proportional(uint32_t x, uint32_t y, const char *str, uint32_t color) {
+    if (!str) return;
+    uint32_t target_px = baken_ui_px(BKN_TEXT_BODY);
+    const CqFontAtlas *font = cq_select_font(target_px);
+    const uint8_t *s = (const uint8_t*)str;
+    while (*s) {
+        uint8_t ch = cq_decode_utf8_char(&s);
+        draw_char_aa(x, y, ch, color, font, target_px, 255);
+        uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
+        if (adv == 0) adv = 6;
+        x += adv + 1;
+    }
+}
+
+void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str,
+                        uint32_t color, uint32_t role) {
+    if (!str) return;
+    uint32_t target_px = baken_type_px(role);
+    const CqFontAtlas *font = cq_select_font(target_px);
+    const uint8_t *s = (const uint8_t*)str;
+    while (*s) {
+        uint8_t ch = cq_decode_utf8_char(&s);
+        draw_char_aa(x, y, ch, color, font, target_px, 255);
+        uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
+        x += (adv ? adv : 6u) + 1u;
+    }
+}
+
+void gfx_draw_text(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c) {
+    gfx_draw_text_proportional(x, y, (const char*)s, c);
+}
+
+uint32_t gfx_measure_text(const char *str) {
+    if (!str) return 0;
+    uint32_t target_px = baken_ui_px(BKN_TEXT_BODY);
+    const CqFontAtlas *font = cq_select_font(target_px);
+    uint32_t width = 0;
+    const uint8_t *s = (const uint8_t*)str;
+    while (*s) {
+        uint8_t ch = cq_decode_utf8_char(&s);
+        uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
+        width += (adv ? adv : 6u) + 1u;
+    }
+    return width;
+}
+
+uint32_t gfx_measure_text_role(const char *str, uint32_t role) {
+    if (!str) return 0;
+    uint32_t target_px = baken_type_px(role), width = 0;
+    const CqFontAtlas *font = cq_select_font(target_px);
+    const uint8_t *s = (const uint8_t*)str;
+    while (*s) {
+        uint8_t ch = cq_decode_utf8_char(&s);
+        uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
+        width += (adv ? adv : 6u) + 1u;
+    }
+    return width;
+}
+
+void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width,
+                            const char *str, uint32_t color);
+
+/* Quebra conservadora por palavra: cada linha é truncada de forma explícita
+ * se uma palavra for maior que a área. Retorna a altura realmente usada. */
+uint32_t gfx_draw_text_wrap_role(uint32_t x, uint32_t y, uint32_t max_width,
+                                 uint32_t max_lines, const char *str,
+                                 uint32_t color, uint32_t role) {
+    if (!str || !max_width || !max_lines) return 0;
+    char line[96]; uint32_t used = 0, line_count = 0, line_h = baken_type_line_height(role);
+    const char *word = str;
+    while (*word && line_count < max_lines) {
+        const char *end = word; while (*end && *end != ' ') end++;
+        uint32_t word_len = (uint32_t)(end - word);
+        uint32_t add = word_len + (used ? 1u : 0u);
+        if (used + add >= sizeof(line)) add = sizeof(line) - used - 1u;
+        char candidate[96]; uint32_t n = 0;
+        for (uint32_t i = 0; i < used && n + 1 < sizeof(candidate); ++i) candidate[n++] = line[i];
+        if (used && n + 1 < sizeof(candidate)) candidate[n++] = ' ';
+        for (uint32_t i = 0; i < word_len && n + 1 < sizeof(candidate); ++i) candidate[n++] = word[i];
+        candidate[n] = 0;
+        if (used && gfx_measure_text_role(candidate, role) > max_width) {
+            line[used] = 0; gfx_draw_text_ellipsis(x, y + line_count * line_h, max_width, line, color);
+            line_count++; used = 0; continue;
+        }
+        if (!used && gfx_measure_text_role(candidate, role) > max_width) {
+            gfx_draw_text_ellipsis(x, y + line_count * line_h, max_width, candidate, color);
+            line_count++; used = 0;
+        } else { for (uint32_t i = 0; i < n; ++i) line[i] = candidate[i]; used = n; }
+        word = *end ? end + 1 : end;
+    }
+    if (used && line_count < max_lines) { line[used] = 0; gfx_draw_text_ellipsis(x, y + line_count * line_h, max_width, line, color); line_count++; }
+    return line_count * line_h;
+}
+
+/* Um único contrato de truncamento impede título, rótulo e status de
+ * atravessarem cartões vizinhos em resoluções ou escalas diferentes. */
+void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width,
+                            const char *str, uint32_t color) {
+    if (!str || max_width == 0) return;
+    if (gfx_measure_text(str) <= max_width) { gfx_draw_text_proportional(x, y, str, color); return; }
+    char clipped[96]; uint32_t out = 0, used = 0;
+    uint32_t target_px = baken_ui_px(BKN_TEXT_BODY);
+    const CqFontAtlas *font = cq_select_font(target_px);
+    const uint8_t *s = (const uint8_t*)str;
+    uint32_t dots = ((font->advances[(uint8_t)'.'] * target_px + font->px / 2u) / font->px + 1u) * 3u;
+    while (*s && out + 2u < sizeof(clipped)) {
+        uint8_t b0 = *s; uint8_t ch = b0; uint32_t bytes = 1;
+        if (b0 == 0xC3 && *(s + 1)) { ch = (uint8_t)(128u + (*(s + 1) & 0x3Fu)); bytes = 2; }
+        uint32_t adv = ((font->advances[ch] * target_px + font->px / 2u) / font->px) + 1u;
+        if (used + adv + dots > max_width) break;
+        for (uint32_t i = 0; i < bytes; ++i) clipped[out++] = (char)s[i];
+        used += adv; s += bytes;
+    }
+    if (out == 0) return;
+    clipped[out++]='.'; clipped[out++]='.'; clipped[out++]='.'; clipped[out]=0;
+    gfx_draw_text_proportional(x, y, clipped, color);
+}
+
+void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c, uint32_t scale, uint8_t a) {
+    if (!s) return;
+    if (scale < 1) scale = 1;
+    if (scale > 4) scale = 4;
+    /* O valor legado scale=2 pede 24px lógico. O atlas escolhido é sempre
+     * maior ou igual e é reduzido com cobertura alpha. */
+    uint32_t target_px = (12 * scale * baken_ui_scale_percent() + 50u) / 100u;
+    const CqFontAtlas *font = cq_select_font(target_px);
+    const uint8_t *cursor = s;
+    while (*cursor) {
+        uint8_t ch = *cursor++;
+        /* O caminho com alpha legada mantém a mesma geometria do texto
+         * proporcional, mas aplica opacidade depois da cobertura. */
+        draw_char_aa(x, y, ch, c, font, target_px, a);
+        uint32_t advance = (font->advances[ch] * target_px + font->px / 2u) / font->px;
+        if (!advance) advance = 6;
+        x += advance + 1;
+    }
+}
+
+/* Desenha um símbolo Material previamente rasterizado no host. Escalonar a
+ * máscara alpha evita um parser SVG e mantém o custo previsível no EFI. */
+void gfx_draw_material_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint8_t alpha) {
+    if (size == 0 || icon_id >= MATERIAL_ICON_COUNT) return;
+    const CqMaterialIconAtlas *atlas = cq_select_icon_atlas(size);
+    const uint8_t *mask = atlas->alpha + icon_id * atlas->px * atlas->px;
+    for (uint32_t py = 0; py < size; ++py) {
+        /* Bilinear alpha: só é usado ao reduzir um atlas nativo maior. */
+        uint32_t fy = (py * (atlas->px - 1) * 256u) / (size > 1 ? size - 1 : 1);
+        uint32_t sy = fy >> 8, wy = fy & 255u;
+        uint32_t sy1 = sy + 1 < atlas->px ? sy + 1 : sy;
+        for (uint32_t px = 0; px < size; ++px) {
+            uint32_t fx = (px * (atlas->px - 1) * 256u) / (size > 1 ? size - 1 : 1);
+            uint32_t sx = fx >> 8, wx = fx & 255u;
+            uint32_t sx1 = sx + 1 < atlas->px ? sx + 1 : sx;
+            uint32_t c0 = (mask[sy * atlas->px + sx] * (256u - wx) + mask[sy * atlas->px + sx1] * wx) >> 8;
+            uint32_t c1 = (mask[sy1 * atlas->px + sx] * (256u - wx) + mask[sy1 * atlas->px + sx1] * wx) >> 8;
+            uint8_t coverage = (uint8_t)((c0 * (256u - wy) + c1 * wy) >> 8);
+            if (coverage) {
+                uint8_t out_a = (uint8_t)(((uint32_t)coverage * alpha) / 255);
+                gfx_put_pixel_alpha(x + px, y + py, color, out_a);
+            }
+        }
+    }
+}
+
+/* Estado visual canônico para Ionicons: o símbolo mantém viewport quadrado e
+ * centro óptico, enquanto somente contraste/halo variam. Assim nenhum app
+ * inventa versões outline/sharp ou escala um glyph como se fosse uma imagem. */
+void gfx_draw_material_icon_state(uint32_t x, uint32_t y, uint32_t size,
+                                  uint32_t icon_id, uint32_t color,
+                                  uint32_t state) {
+    uint8_t alpha = 245;
+    if (state == BKN_ICON_DISABLED) { color = 0x0094A3B8; alpha = 105; }
+    else if (state == BKN_ICON_DESTRUCTIVE) color = 0x00DC2626;
+    else if (state == BKN_ICON_SELECTED) {
+        gfx_draw_circle_alpha(x + size / 2u, y + size / 2u, size / 2u + 3u, 0x000284C7, 38);
+    } else if (state == BKN_ICON_HOVER) {
+        gfx_draw_circle_alpha(x + size / 2u, y + size / 2u, size / 2u + 2u, 0x00FFFFFF, 52);
+    } else if (state == BKN_ICON_PRESSED) {
+        alpha = 220; color = 0x000284C7;
+    }
+    gfx_draw_material_icon(x, y, size, icon_id, color, alpha);
+}
+
+/* Estado SVG de um controle animado. mirror_x permite reutilizar skip-back
+ * como skip-forward sem duplicar dados na imagem EFI. A interpolacao alpha
+ * tambem permite crossfade play/pause sem serrilhado durante a transicao. */
+void gfx_draw_motion_icon(uint32_t x, uint32_t y, uint32_t size,
+                          uint32_t icon_id, uint32_t color, uint8_t opacity,
+                          uint8_t mirror_x) {
+    if (size == 0 || icon_id >= BAKEN_MOTION_ICON_COUNT || opacity == 0) return;
+    const CqBakenMotionIconAtlas *atlas = cq_select_motion_icon_atlas(size);
+    const uint8_t *mask = atlas->alpha + icon_id * atlas->px * atlas->px;
+    for (uint32_t py = 0; py < size; ++py) {
+        uint32_t fy = (py * (atlas->px - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
+        uint32_t sy = fy >> 8, wy = fy & 255u;
+        uint32_t sy1 = sy + 1u < atlas->px ? sy + 1u : sy;
+        for (uint32_t px = 0; px < size; ++px) {
+            uint32_t sample_x = mirror_x ? size - 1u - px : px;
+            uint32_t fx = (sample_x * (atlas->px - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
+            uint32_t sx = fx >> 8, wx = fx & 255u;
+            uint32_t sx1 = sx + 1u < atlas->px ? sx + 1u : sx;
+            uint32_t c0 = (mask[sy * atlas->px + sx] * (256u - wx) + mask[sy * atlas->px + sx1] * wx) >> 8;
+            uint32_t c1 = (mask[sy1 * atlas->px + sx] * (256u - wx) + mask[sy1 * atlas->px + sx1] * wx) >> 8;
+            uint8_t coverage = (uint8_t)((c0 * (256u - wy) + c1 * wy) >> 8);
+            if (coverage) gfx_put_pixel_alpha(x + px, y + py, color,
+                (uint8_t)(((uint32_t)coverage * opacity) / 255u));
+        }
+    }
+}
+
+static inline int32_t cq_material_grain(uint32_t x, uint32_t y);
+
+void gfx_draw_mesh_wallpaper(void) {
+    uint32_t w = gfx_get_width(), h = gfx_get_height();
+    if (w == 0 || h == 0) return;
+
+    int32_t t = (int32_t)g_mesh_time_tick;
+    int32_t shift_x1 = (int32_t)(((t % 360) < 180 ? (t % 180) - 90 : 270 - (t % 180)) / 10);
+    int32_t shift_y1 = (int32_t)(((t % 240) < 120 ? (t % 120) - 60 : 180 - (t % 120)) / 10);
+    int32_t shift_x2 = (int32_t)(((t % 300) < 150 ? (t % 150) - 75 : 225 - (t % 150)) / 10);
+    int32_t shift_y2 = (int32_t)(((t % 280) < 140 ? (t % 140) - 70 : 210 - (t % 140)) / 10);
+    int32_t shift_x3 = (int32_t)(((t % 320) < 160 ? (t % 160) - 80 : 240 - (t % 160)) / 10);
+    int32_t shift_y3 = (int32_t)(((t % 260) < 130 ? (t % 130) - 65 : 195 - (t % 130)) / 10);
+
+    for (uint32_t y = 0; y < h; ++y) {
+        uint32_t v = (y * 256) / h;
+        for (uint32_t x = 0; x < w; ++x) {
+            uint32_t u = (x * 256) / w;
+            uint32_t blend = (u + v) / 2;
+
+            int r = 0, g = 0, b = 0;
+            if (g_dark_theme) {
+                r = (int)((15 * (256 - blend) + 30 * blend) >> 8);
+                g = (int)((23 * (256 - blend) + 27 * blend) >> 8);
+                b = (int)((42 * (256 - blend) + 75 * blend) >> 8);
+
+                int32_t dx_b = (int32_t)u - (210 + shift_x1), dy_b = (int32_t)v - (80 + shift_y1);
+                int32_t dx_v = (int32_t)u - (120 + shift_x2), dy_v = (int32_t)v - (200 + shift_y2);
+                int32_t dx_c = (int32_t)u - (60 + shift_x3), dy_c = (int32_t)v - (110 + shift_y3);
+
+                int blue_bloom = 110 - (dx_b * dx_b + dy_b * dy_b) / 140;
+                int violet_bloom = 95 - (dx_v * dx_v + dy_v * dy_v) / 150;
+                int cyan_bloom = 80 - (dx_c * dx_c + dy_c * dy_c) / 160;
+
+                if (blue_bloom < 0) blue_bloom = 0;
+                if (violet_bloom < 0) violet_bloom = 0;
+                if (cyan_bloom < 0) cyan_bloom = 0;
+
+                r += (violet_bloom * 80 + blue_bloom * 15 + cyan_bloom * 5) >> 8;
+                g += (cyan_bloom * 90 + blue_bloom * 40 + violet_bloom * 10) >> 8;
+                b += (blue_bloom * 140 + violet_bloom * 120 + cyan_bloom * 110) >> 8;
+            } else {
+                r = (int)((20 * (256 - blend) + 224 * blend) >> 8);
+                g = (int)((205 * (256 - blend) + 92 * blend) >> 8);
+                b = (int)((246 * (256 - blend) + 224 * blend) >> 8);
+
+                int32_t dx_y = (int32_t)u - (228 + shift_x1), dy_y = (int32_t)v - (92 + shift_y1);
+                int32_t dx_g = (int32_t)u - (242 + shift_x2), dy_g = (int32_t)v - (220 + shift_y2);
+                int32_t dx_p = (int32_t)u - (124 + shift_x3), dy_p = (int32_t)v - (126 + shift_y3);
+
+                int yellow = 150 - (dx_y * dx_y + dy_y * dy_y) / 115;
+                int green = 128 - (dx_g * dx_g + dy_g * dy_g) / 130;
+                int pink = 88 - (dx_p * dx_p + dy_p * dy_p) / 155;
+
+                if (yellow < 0) yellow = 0;
+                if (green < 0) green = 0;
+                if (pink < 0) pink = 0;
+
+                r += yellow * 2 / 3 - green / 4 + pink / 2;
+                g += yellow * 3 / 4 + green / 2 - pink / 7;
+                b -= yellow / 3 + green / 4 - pink / 2;
+            }
+
+            int grain = cq_material_grain(x, y);
+            r += grain;
+            g += grain;
+            b += grain;
+            if (r > 255) { r = 255; }
+            if (r < 0) { r = 0; }
+            if (g > 255) { g = 255; }
+            if (g < 0) { g = 0; }
+            if (b > 255) { b = 255; }
+            if (b < 0) { b = 0; }
+            gfx_put_pixel(x, y, (r << 16) | (g << 8) | b);
+        }
+    }
+}
+
+void sdf_render_liquid_glass_panel(uint32_t *fb, uint32_t pitch, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t radius, uint32_t bg, uint8_t a, uint32_t border, uint8_t glow, uint32_t outline) {
+    (void)fb; (void)pitch; (void)glow; (void)outline;
+    gfx_draw_glass_rect_material(x, y, w, h, bg, a, border, radius);
+}
+
+void gfx_draw_hline(uint32_t x, uint32_t y, uint32_t width, uint32_t color, uint8_t alpha) {
+    gfx_fill_rect_alpha(x, y, width, 1, color, alpha);
+}
+
+static inline float eval_squircle_sdf(float px, float py, float cx, float cy, float radius) {
+    float dx = px - cx; if (dx < 0.0f) dx = -dx;
+    float dy = py - cy; if (dy < 0.0f) dy = -dy;
+    float dx2 = dx * dx;
+    float dy2 = dy * dy;
+    float d4 = dx2 * dx2 + dy2 * dy2;
+    
+    /* Raiz quarta via Newton-Raphson. A versão anterior começava em d4/2;
+     * para um tile 64px isso é centenas de milhares, não ~32, e deixava o
+     * squircle praticamente sem preenchimento. A maior distância é uma
+     * estimativa inicial estável para a quarta raiz. */
+    if (d4 > 0.0f) {
+        float val = d4;
+        float max_axis = dx > dy ? dx : dy;
+        float x = max_axis * 1.12f + 0.001f;
+        for (int i = 0; i < 4; ++i) {
+            float x2 = x * x;
+            float x3 = x2 * x;
+            x = (3.0f * x + val / x3) * 0.25f;
+        }
+        return x - radius;
+    }
+    return -radius;
+}
+
+static void draw_squircle_shadow(uint32_t x0, uint32_t y0, uint32_t size, uint32_t blur, uint32_t y_offset, uint8_t max_alpha) {
+    float cx = (float)x0 + (float)size * 0.5f;
+    float cy = (float)y0 + (float)size * 0.5f + (float)y_offset;
+    float r  = (float)size * 0.46f;
+    int gw = (int)gfx_get_width(), gh = (int)gfx_get_height();
+    int pad = (int)blur + 4;
+    int sx = (int)x0 - pad; if (sx < 0) sx = 0;
+    int ex = (int)x0 + (int)size + pad; if (ex > gw) ex = gw;
+    int sy = (int)y0 + (int)y_offset - pad; if (sy < 0) sy = 0;
+    int ey = (int)y0 + (int)size + (int)y_offset + pad; if (ey > gh) ey = gh;
+    float fblur = (float)blur;
+
+    for (int py = sy; py < ey; ++py) {
+        for (int px = sx; px < ex; ++px) {
+            float d = eval_squircle_sdf((float)px, (float)py, cx, cy, r);
+            if (d < fblur) {
+                float factor = 0.0f;
+                if (d <= 0.0f) {
+                    factor = 1.0f;
+                } else {
+                    float ratio = (fblur - d) / fblur;
+                    factor = ratio * ratio;
+                }
+                uint8_t a = (uint8_t)((float)max_alpha * factor);
+                if (a >= 2) {
+                    gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, 0x00000000, a);
+                }
+            }
+        }
+    }
+}
+
+static void draw_squircle_canvas(uint32_t x0, uint32_t y0, uint32_t size, uint32_t col_top, uint32_t col_bottom) {
+    float cx = (float)x0 + (float)size * 0.5f;
+    float cy = (float)y0 + (float)size * 0.5f;
+    float r  = (float)size * 0.46f;
+    int gw = (int)gfx_get_width(), gh = (int)gfx_get_height();
+
+    uint32_t r_top = (col_top >> 16) & 0xFF, g_top = (col_top >> 8) & 0xFF, b_top = col_top & 0xFF;
+    uint32_t r_bot = (col_bottom >> 16) & 0xFF, g_bot = (col_bottom >> 8) & 0xFF, b_bot = col_bottom & 0xFF;
+
+    for (int y = 0; y < (int)size; ++y) {
+        int py = (int)y0 + y;
+        if (py < 0 || py >= gh) continue;
+        float t_axial = (float)y / (float)size;
+
+        // Interpolação de cor linear vertical
+        /* Os canais precisam ser assinados: `bottom - top` pode ser
+         * negativo. Com uint, essa subtração dava overflow e gerava as
+         * listras amarelas vistas nos ícones preenchidos. */
+        uint32_t cr = (uint32_t)((int32_t)r_top + ((int32_t)r_bot - (int32_t)r_top) * t_axial);
+        uint32_t cg = (uint32_t)((int32_t)g_top + ((int32_t)g_bot - (int32_t)g_top) * t_axial);
+        uint32_t cb = (uint32_t)((int32_t)b_top + ((int32_t)b_bot - (int32_t)b_top) * t_axial);
+
+        for (int x = 0; x < (int)size; ++x) {
+            int px = (int)x0 + x;
+            if (px < 0 || px >= gw) continue;
+
+            float d = eval_squircle_sdf((float)px, (float)py, cx, cy, r);
+
+            if (d <= 0.0f) {
+                // Pixel interno: calcular especularidade de borda superior
+                uint32_t final_r = cr, final_g = cg, final_b = cb;
+                if (y <= 1 || (d > -1.8f && py < (int)cy)) {
+                    // Reflexo de luz do topo (Highlight especular)
+                    final_r = (final_r * 180 + 255 * 75) >> 8;
+                    final_g = (final_g * 180 + 255 * 75) >> 8;
+                    final_b = (final_b * 180 + 255 * 75) >> 8;
+                } else if (y >= (int)size - 2) {
+                    // Sombra da base inferior (Bisel de profundidade)
+                    final_r = (final_r * 200) >> 8;
+                    final_g = (final_g * 200) >> 8;
+                    final_b = (final_b * 200) >> 8;
+                }
+                uint32_t color = (final_r << 16) | (final_g << 8) | final_b;
+                gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, color, 255);
+            } else if (d < 1.0f) {
+                // Anti-aliasing analítico subpixel na borda externa
+                uint8_t alpha = (uint8_t)((1.0f - d) * 255.0f);
+                uint32_t color = (cr << 16) | (cg << 8) | cb;
+                gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, color, alpha);
+            }
+        }
+    }
+}
+
+/* Aplica um Phosphor Duotone compilado no host. A seleção sempre prefere o
+ * menor atlas que seja maior ou igual ao tamanho pedido: reduzimos curvas AA,
+ * mas nunca ampliamos um bitmap pequeno para preencher um tile HiDPI. */
+static uint8_t gfx_draw_baken_app_asset(uint32_t x, uint32_t y, uint32_t size,
+                                        uint32_t app_id, uint32_t color,
+                                        uint8_t opacity) {
+    if (size == 0 || app_id >= BAKEN_APP_ICON_COUNT) return 0;
+    const CqBakenAppIconAtlas *atlas = cq_select_app_icon_atlas(size);
+    const uint8_t *mask = atlas->alpha + app_id * atlas->px * atlas->px;
+    for (uint32_t py = 0; py < size; ++py) {
+        uint32_t fy = (py * (atlas->px - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
+        uint32_t sy = fy >> 8, wy = fy & 255u;
+        uint32_t sy1 = sy + 1u < atlas->px ? sy + 1u : sy;
+        for (uint32_t px = 0; px < size; ++px) {
+            uint32_t fx = (px * (atlas->px - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
+            uint32_t sx = fx >> 8, wx = fx & 255u;
+            uint32_t sx1 = sx + 1u < atlas->px ? sx + 1u : sx;
+            uint32_t c0 = (mask[sy * atlas->px + sx] * (256u - wx) +
+                           mask[sy * atlas->px + sx1] * wx) >> 8;
+            uint32_t c1 = (mask[sy1 * atlas->px + sx] * (256u - wx) +
+                           mask[sy1 * atlas->px + sx1] * wx) >> 8;
+            uint8_t coverage = (uint8_t)((c0 * (256u - wy) + c1 * wy) >> 8);
+            if (coverage) {
+                uint8_t a = (uint8_t)(((uint32_t)coverage * opacity) / 255u);
+                gfx_put_pixel_alpha(x + px, y + py, color, a);
+            }
+        }
+    }
+    return 1;
+}
+
+/* Fallback geométrico para builds antigos cujo header de assets ainda não foi
+ * regenerado. Material Symbols continua reservado às ações do sistema. */
+static void draw_baken_app_glyph(uint32_t x, uint32_t y, uint32_t size, uint32_t id) {
+    uint32_t u = size / 24u; if (u == 0) u = 1;
+    uint32_t white = 0x00FFFFFF;
+    if (id == 0 || id == 11) { /* BakenFS / Pessoal: pasta */
+        gfx_fill_rect_alpha(x + 4*u, y + 7*u, 7*u, 3*u, white, 235);
+        gfx_draw_glass_rect_material(x + 3*u, y + 9*u, 18*u, 10*u, 0x00FFFFFF, 245, white, 2*u);
+        gfx_draw_hline(x + 5*u, y + 12*u, 14*u, 0x000284C7, 90);
+    } else if (id == 1) { /* 3D Studio: cubo isométrico */
+        for (uint32_t i = 0; i < 7*u; ++i) {
+            gfx_fill_rect_alpha(x + 12*u - i, y + 5*u + i/2u, 2*u, 2*u, white, 235);
+            gfx_fill_rect_alpha(x + 12*u + i, y + 5*u + i/2u, 2*u, 2*u, white, 235);
+        }
+        gfx_draw_hline(x + 5*u, y + 13*u, 14*u, white, 235);
+        gfx_fill_rect_alpha(x + 11*u, y + 9*u, 2*u, 9*u, white, 235);
+    } else if (id == 2) { /* Navegador: globo Baken */
+        gfx_draw_circle_alpha(x + 12*u, y + 12*u, 8*u, white, 240);
+        gfx_draw_circle_alpha(x + 12*u, y + 12*u, 6*u, 0x000891B2, 255);
+        gfx_draw_hline(x + 5*u, y + 12*u, 14*u, white, 235);
+        gfx_fill_rect_alpha(x + 11*u, y + 5*u, 2*u, 14*u, white, 235);
+    } else if (id == 3) { /* Paint: paleta com pigmentos */
+        gfx_draw_circle_alpha(x + 11*u, y + 12*u, 8*u, white, 240);
+        gfx_draw_circle_alpha(x + 11*u, y + 12*u, 5*u, 0x00EA580C, 255);
+        gfx_draw_circle_alpha(x + 8*u, y + 9*u, u, 0x00FDE047, 255);
+        gfx_draw_circle_alpha(x + 14*u, y + 9*u, u, 0x0038BDF8, 255);
+        gfx_draw_circle_alpha(x + 8*u, y + 15*u, u, 0x0034D399, 255);
+    } else if (id == 4) { /* Camera */
+        gfx_draw_glass_rect_material(x + 3*u, y + 8*u, 18*u, 11*u, white, 245, white, 3*u);
+        gfx_fill_rect_alpha(x + 8*u, y + 5*u, 7*u, 4*u, white, 235);
+        gfx_draw_circle_alpha(x + 12*u, y + 13*u, 4*u, 0x00BE123C, 255);
+        gfx_draw_circle_alpha(x + 11*u, y + 12*u, u, white, 220);
+    } else if (id == 5) { /* Música */
+        gfx_fill_rect_alpha(x + 15*u, y + 5*u, 2*u, 11*u, white, 245);
+        gfx_fill_rect_alpha(x + 16*u, y + 5*u, 5*u, 2*u, white, 245);
+        gfx_draw_circle_alpha(x + 11*u, y + 17*u, 4*u, white, 245);
+        gfx_draw_circle_alpha(x + 11*u, y + 17*u, 2*u, 0x004C1D95, 255);
+    } else if (id == 6) { /* Notas: página e traço */
+        gfx_draw_glass_rect_material(x + 5*u, y + 4*u, 13*u, 16*u, 0x00FFFFFF, 245, white, 2*u);
+        gfx_draw_hline(x + 8*u, y + 9*u, 7*u, 0x00E11D48, 150);
+        gfx_draw_hline(x + 8*u, y + 13*u, 6*u, 0x00E11D48, 150);
+        for (uint32_t p=0; p<5*u; ++p) gfx_fill_rect_alpha(x + 14*u + p/2u, y + 15*u - p, 2*u, 2*u, 0x00E11D48, 255);
+    } else if (id == 7) { /* Arquivos/terminal */
+        gfx_draw_glass_rect_material(x + 3*u, y + 5*u, 18*u, 14*u, 0x000F172A, 235, white, 2*u);
+        gfx_draw_hline(x + 7*u, y + 10*u, 4*u, white, 240);
+        gfx_draw_hline(x + 9*u, y + 12*u, 4*u, white, 240);
+        gfx_draw_hline(x + 14*u, y + 15*u, 4*u, 0x0038BDF8, 255);
+    } else if (id == 8) { /* Loja */
+        gfx_draw_glass_rect_material(x + 4*u, y + 10*u, 16*u, 10*u, white, 245, white, 2*u);
+        for (uint32_t i=0; i<4; ++i) gfx_fill_rect_alpha(x + (5u+i*4u)*u, y + 6*u, 3*u, 5*u, (i&1u)?0x00059669:white, 240);
+        gfx_draw_hline(x + 8*u, y + 15*u, 8*u, 0x00059669, 120);
+    } else if (id == 9) { /* Console Cq */
+        gfx_draw_glass_rect_material(x + 3*u, y + 5*u, 18*u, 14*u, 0x000F172A, 235, white, 2*u);
+        gfx_draw_hline(x + 7*u, y + 10*u, 4*u, 0x0038BDF8, 255);
+        gfx_draw_hline(x + 9*u, y + 12*u, 4*u, 0x0038BDF8, 255);
+        gfx_draw_hline(x + 14*u, y + 15*u, 4*u, white, 230);
+    } else if (id == 10) { /* Sistema: controles */
+        gfx_draw_hline(x + 5*u, y + 8*u, 14*u, white, 235);
+        gfx_draw_hline(x + 5*u, y + 15*u, 14*u, white, 235);
+        gfx_draw_circle_alpha(x + 9*u, y + 8*u, 2*u, white, 255);
+        gfx_draw_circle_alpha(x + 16*u, y + 15*u, 2*u, white, 255);
+    } else if (id == 12) { /* Calendário */
+        gfx_draw_glass_rect_material(x + 4*u, y + 5*u, 16*u, 15*u, white, 245, white, 2*u);
+        gfx_fill_rect_alpha(x + 4*u, y + 8*u, 16*u, 3*u, 0x00BE185D, 230);
+        gfx_draw_circle_alpha(x + 9*u, y + 14*u, u, 0x00BE185D, 255);
+        gfx_draw_circle_alpha(x + 15*u, y + 14*u, u, 0x00BE185D, 255);
+    } else if (id == 13) { /* Pessoal */
+        gfx_draw_circle_alpha(x + 12*u, y + 9*u, 4*u, white, 245);
+        gfx_draw_circle_alpha(x + 12*u, y + 19*u, 7*u, white, 245);
+        gfx_draw_circle_alpha(x + 12*u, y + 19*u, 4*u, 0x0015803D, 255);
+    } else if (id == 14) { /* Busca */
+        gfx_draw_circle_alpha(x + 10*u, y + 10*u, 6*u, white, 245);
+        gfx_draw_circle_alpha(x + 10*u, y + 10*u, 3*u, 0x00B45309, 255);
+        for (uint32_t i=0; i<6*u; ++i) gfx_fill_rect_alpha(x + 14*u + i/2u, y + 14*u + i/2u, 2*u, 2*u, white, 245);
+    } else { /* Mídia/galeria */
+        gfx_draw_glass_rect_material(x + 4*u, y + 5*u, 16*u, 15*u, white, 245, white, 2*u);
+        gfx_draw_circle_alpha(x + 15*u, y + 10*u, 2*u, 0x000F766E, 255);
+        for (uint32_t p=0; p<8*u; ++p) gfx_fill_rect_alpha(x + 6*u + p, y + 18*u - p/2u, 2*u, 2*u, 0x000F766E, 255);
+    }
+}
+
+void gfx_draw_app_icon_hd(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id) {
+    /* Registro canônico: cada app do desktop/dock recebe uma identidade única. */
+    uint32_t id = app_id % 16;
+    static const uint32_t icon_top[16] = {
+        0x0038BDF8, 0x00818CF8, 0x0022D3EE, 0x00FB923C, 0x00F43F5E, 0x00A78BFA,
+        0x00FB7185, 0x00FDE047, 0x0034D399, 0x00334155, 0x0014B8A6, 0x006366F1,
+        0x00EC4899, 0x0022C55E, 0x00D97706, 0x000F766E
+    };
+    static const uint32_t icon_bottom[16] = {
+        0x000284C7, 0x004338CA, 0x000891B2, 0x00EA580C, 0x00BE123C, 0x004C1D95,
+        0x00E11D48, 0x00CA8A04, 0x00059669, 0x000F172A, 0x000F766E, 0x004F46E5,
+        0x00BE185D, 0x0015803D, 0x00B45309, 0x0011555A
+    };
+    /* Sombra suave com decaimento que acompanha a geometria real do squircle */
+    draw_squircle_shadow(x, y, size, size >= 48u ? 8u : 4u, size >= 48u ? 3u : 2u, 65u);
+    draw_squircle_canvas(x, y, size, icon_top[id], icon_bottom[id]);
+    gfx_draw_circle_alpha(x + size / 2, y + size / 2, (size * 34) / 100, 0x00FFFFFF, 20);
+    /* 74% preenche o tile sem colar nas bordas; o duotone preserva a camada
+     * secundaria com sua opacidade original em vez de virar um contorno solto. */
+    uint32_t glyph_size = (size * 74u + 50u) / 100u;
+    if (glyph_size < 16u) glyph_size = 16u;
+    uint32_t glyph_x = x + (size - glyph_size) / 2u;
+    uint32_t glyph_y = y + (size - glyph_size) / 2u;
+    /* Pequena oclusao sob o glyph o separa de gradientes claros sem contorno. */
+    gfx_draw_baken_app_asset(glyph_x, glyph_y + (size >= 48u ? 1u : 0u),
+                             glyph_size, id, 0x00111A2E, 58);
+    if (!gfx_draw_baken_app_asset(glyph_x, glyph_y, glyph_size, id,
+                                  0x00FFFFFF, 248))
+        draw_baken_app_glyph(x, y, size, id);
+    return;
+
+    // Caminho legado abaixo permanece temporariamente como referência de migração.
+    if (id == 0) { // BakenFS / Arquivos (Pasta Azul)
+        draw_squircle_canvas(x, y, size, 0x0038BDF8, 0x000284C7);
+        gfx_draw_glass_rect_material(x + 8, y + 10, 14, 6, 0x00E0F2FE, 240, 0x00FFFFFF, 2);
+        gfx_draw_glass_rect_material(x + 6, y + 13, 24, 15, 0x00BAE6FD, 255, 0x00FFFFFF, 3);
+        gfx_draw_hline(x + 8, y + 18, 20, 0x000284C7, 90);
+    } else if (id == 1) { // 3D Studio (Roxo/Gradiente)
+        draw_squircle_canvas(x, y, size, 0x00C084FC, 0x007C3AED);
+        for (int f = 0; f < 10; ++f) {
+            gfx_draw_hline(x + 18 - f, y + 10 + f, (uint32_t)(f * 2 + 1), 0x00EDE9FE, 240);
+            gfx_fill_rect_alpha(x + 9 + f, y + 20 + (f/2), 2, 8, 0x00A78BFA, 255);
+            gfx_fill_rect_alpha(x + 19 + f, y + 20 - (f/2), 2, 8, 0x006D28D9, 255);
+        }
+    } else if (id == 2) { // Web Browser (Globo Ciano)
+        draw_squircle_canvas(x, y, size, 0x0022D3EE, 0x000891B2);
+        gfx_draw_circle_alpha(x + 18, y + 18, 9, 0x00FFFFFF, 240);
+        gfx_draw_circle_alpha(x + 18, y + 18, 7, 0x000891B2, 255);
+        gfx_draw_hline(x + 11, y + 18, 15, 0x00FFFFFF, 220);
+        gfx_fill_rect_alpha(x + 18, y + 11, 1, 15, 0x00FFFFFF, 220);
+    } else if (id == 3) { // Paint 2D / Vetor (Laranja)
+        draw_squircle_canvas(x, y, size, 0x00FB923C, 0x00EA580C);
+        gfx_draw_circle_alpha(x + 17, y + 18, 8, 0x00FFFFFF, 240);
+        gfx_draw_circle_alpha(x + 14, y + 15, 2, 0x00EF4444, 255);
+        gfx_draw_circle_alpha(x + 20, y + 15, 2, 0x003B82F6, 255);
+        gfx_draw_circle_alpha(x + 17, y + 21, 2, 0x0010B981, 255);
+    } else if (id == 4) { // System Cam (Lente Escura com Sensor)
+        draw_squircle_canvas(x, y, size, 0x00F43F5E, 0x00BE123C);
+        gfx_draw_circle_alpha(x + 18, y + 18, 8, 0x000F172A, 255);
+        gfx_draw_circle_alpha(x + 18, y + 18, 5, 0x001E293B, 255);
+        gfx_draw_circle_alpha(x + 18, y + 18, 3, 0x0038BDF8, 255);
+        gfx_draw_circle_alpha(x + 16, y + 16, 2, 0x00FFFFFF, 255);
+    } else if (id == 5) { // Hi-Res Mídia / Player (Roxo Índigo)
+        draw_squircle_canvas(x, y, size, 0x00818CF8, 0x004338CA);
+        for (int p = 0; p < 8; ++p) {
+            gfx_fill_rect_alpha(x + 14 + p, y + 14 + p, 2, (uint32_t)(10 - p), 0x00FFFFFF, 250);
+            gfx_fill_rect_alpha(x + 14 + p, y + 14, 2, (uint32_t)(10 - p), 0x00FFFFFF, 250);
+        }
+    } else if (id == 6) { // Spark DAW / Áudio (Vermelho Rubi)
+        draw_squircle_canvas(x, y, size, 0x00FB7185, 0x00E11D48);
+        for (int w = 0; w < 5; ++w) {
+            uint32_t bar_h = (uint32_t)(6 + ((w * 3) % 9));
+            gfx_fill_rect_alpha(x + 11 + (w * 3), y + 22 - bar_h, 2, bar_h, 0x00FFFFFF, 240);
+        }
+    } else if (id == 7) { // Notas / Editor (Amarelo Ouro)
+        draw_squircle_canvas(x, y, size, 0x00FDE047, 0x00CA8A04);
+        gfx_draw_glass_rect_material(x + 9, y + 8, 18, 20, 0x00FFFFFF, 240, 0x00CBD5E1, 3);
+        gfx_draw_hline(x + 12, y + 14, 12, 0x00475569, 200);
+        gfx_draw_hline(x + 12, y + 18, 12, 0x00475569, 200);
+        gfx_draw_hline(x + 12, y + 22, 8,  0x0038BDF8, 240);
+    } else if (id == 8) { // Store / Loja (Esmeralda)
+        draw_squircle_canvas(x, y, size, 0x0034D399, 0x00059669);
+        gfx_draw_glass_rect_material(x + 9, y + 13, 18, 15, 0x00FFFFFF, 240, 0x00A7F3D0, 3);
+        gfx_draw_circle_alpha(x + 18, y + 13, 5, 0x00FFFFFF, 200);
+        gfx_draw_circle_alpha(x + 18, y + 13, 3, 0x00059669, 255);
+    } else if (id == 9) { // Terminal / Console Cq (Grafite Escuro)
+        draw_squircle_canvas(x, y, size, 0x00334155, 0x000F172A);
+        gfx_draw_hline(x + 10, y + 12, 6, 0x0038BDF8, 255);
+        gfx_draw_hline(x + 12, y + 14, 6, 0x0038BDF8, 255);
+        gfx_draw_hline(x + 10, y + 16, 6, 0x0038BDF8, 255);
+        gfx_draw_hline(x + 18, y + 18, 8, 0x0010B981, 255);
+    } else { // Ajustes & Hardware (Cinza Alumínio Metalizado)
+        draw_squircle_canvas(x, y, size, 0x0094A3B8, 0x00475569);
+        gfx_draw_hline(x + 10, y + 15, 16, 0x00FFFFFF, 220);
+        gfx_draw_hline(x + 10, y + 21, 16, 0x00FFFFFF, 220);
+        gfx_draw_circle_alpha(x + 14, y + 15, 3, 0x00FFFFFF, 255);
+        gfx_draw_circle_alpha(x + 22, y + 21, 3, 0x00FFFFFF, 255);
+    }
+}
+
+void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id) {
+    gfx_draw_app_icon_hd(x, y, size, app_id);
+}
+""".strip().splitlines())
+    elif ast.name == "kernel::baken_animation":
+        lines.extend((
+            '#include "baken_design_tokens.h"',
+            "typedef struct { float current_val, target_val, velocity, stiffness, damping; } CqSpringState;",
+            "static int32_t cq_abs_i32(int32_t value) { return value < 0 ? -value : value; }",
+            "float spring_update(CqSpringState *spring, float dt) { if (!spring) return 0.0f; float force=-spring->stiffness*(spring->current_val-spring->target_val); float damping=-spring->damping*spring->velocity; spring->velocity+=(force+damping)*dt; spring->current_val+=spring->velocity*dt; return spring->current_val; }",
+            "void baken_motion_init_spring(CqSpringState *spring) { if (!spring) return; *spring=(CqSpringState){1.0f,1.0f,0.0f,BKN_MOTION_SPRING_STIFFNESS,BKN_MOTION_SPRING_DAMPING}; }",
+            "float calculate_dock_magnify(int32_t cursor_x, int32_t icon_center_x, int32_t max_radius) { int32_t dist=cq_abs_i32(cursor_x-icon_center_x); if (max_radius<=0 || dist>=max_radius) return 1.0f; float ratio=(float)(max_radius-dist)/(float)max_radius; return 1.0f+ratio*ratio*0.45f; }",
+        ))
+    elif ast.name == "kernel::baken_ui_oop":
+        lines.extend("""
+#include "baken_design_tokens.h"
+extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void gfx_draw_text(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c);
+extern void gfx_draw_circle_alpha(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c, uint8_t a);
+extern void baken_lua_draw_surface(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t material, uint32_t state, uint32_t radius);
+extern void gfx_draw_app_icon_hd(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
+extern void gfx_draw_material_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint8_t alpha);
+extern void gfx_draw_material_icon_state(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint32_t state);
+extern void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
+extern uint32_t gfx_get_width(void), gfx_get_height(void);
+extern uint32_t baken_ui_px(uint32_t logical_px);
+typedef struct { float current_val, target_val, velocity, stiffness, damping; } CqSpringState;
+extern float spring_update(CqSpringState *spring, float dt);
+extern float calculate_dock_magnify(int32_t cursor_x, int32_t icon_center_x, int32_t max_radius);
+
+typedef struct {
+    uint32_t y_offset;
+    uint32_t icon_size;
+    uint32_t item_count;
+    const uint8_t *item_labels[16];
+    CqSpringState item_springs[16];
+    CqSpringState bounce_springs[16];
+} DesktopDock;
+
+/* Contrato geométrico único do dock. O shell usa exatamente estes limites
+ * para clique e o componente usa-os para renderização/movimento. */
+typedef struct { uint32_t x, y, width, height, pitch, icon, pad; } BakenDockLayout;
+extern uint8_t wm_app_is_open(uint32_t app_id);
+extern uint8_t desktop_shell_is_dark_theme(void);
+void baken_dock_layout(uint32_t item_count, BakenDockLayout *out) {
+    if (!out) return;
+    uint32_t sw = gfx_get_width(), sh = gfx_get_height();
+    out->pitch = baken_ui_px(50);
+    out->height = baken_ui_px(58);
+    out->icon = baken_ui_px(40);
+    out->pad = baken_ui_px(10);
+    out->width = item_count * out->pitch + out->pad * 2u;
+    if (out->width > sw) out->width = sw;
+    out->x = sw > out->width ? (sw - out->width) / 2u : 0;
+    out->y = sh > out->height + baken_ui_px(14) ? sh - out->height - baken_ui_px(14) : 0;
+}
+
+void dock_init(DesktopDock *dock) {
+    if (!dock) return;
+    dock->y_offset = 14; dock->icon_size = 40; dock->item_count = 0;
+    for (int i = 0; i < 16; ++i) {
+        dock->item_labels[i] = 0;
+        dock->item_springs[i] = (CqSpringState){1.0f, 1.0f, 0.0f, BKN_MOTION_SPRING_STIFFNESS, BKN_MOTION_SPRING_DAMPING};
+        dock->bounce_springs[i] = (CqSpringState){0.0f, 0.0f, 0.0f, 180.0f, 12.0f};
+    }
+}
+void dock_add_item(DesktopDock *dock, const uint8_t *label) {
+    if (!dock || dock->item_count >= 16) return;
+    dock->item_labels[dock->item_count] = label;
+    dock->item_springs[dock->item_count] = (CqSpringState){1.0f, 1.0f, 0.0f, BKN_MOTION_SPRING_STIFFNESS, BKN_MOTION_SPRING_DAMPING};
+    dock->bounce_springs[dock->item_count] = (CqSpringState){0.0f, 0.0f, 0.0f, 180.0f, 12.0f};
+    dock->item_count++;
+}
+void dock_trigger_bounce(DesktopDock *dock, uint32_t index) {
+    if (!dock || index >= dock->item_count) return;
+    dock->bounce_springs[index].current_val = -6.0f;
+    dock->bounce_springs[index].velocity = -50.0f;
+}
+void dock_update(DesktopDock *dock, float dt, int32_t cursor_x, int32_t cursor_y) {
+    if (!dock || dock->item_count == 0) return;
+    BakenDockLayout geo; baken_dock_layout(dock->item_count, &geo);
+    int in_dock = (cursor_x >= (int)geo.x && cursor_x <= (int)(geo.x + geo.width) && cursor_y >= (int)geo.y && cursor_y <= (int)(geo.y + geo.height));
+    for (uint32_t i = 0; i < dock->item_count; ++i) {
+        int icon_center_x = (int)(geo.x + geo.pad + i * geo.pitch + geo.pitch / 2u);
+        dock->item_springs[i].target_val = in_dock ? calculate_dock_magnify(cursor_x, icon_center_x, 68) : 1.0f;
+        spring_update(&dock->item_springs[i], dt);
+        spring_update(&dock->bounce_springs[i], dt);
+    }
+}
+void dock_draw(const DesktopDock *dock) {
+    if (!dock || dock->item_count == 0) return;
+    BakenDockLayout geo; baken_dock_layout(dock->item_count, &geo);
+    baken_lua_draw_surface(geo.x, geo.y, geo.width, geo.height, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, geo.height / 2u);
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+    for (uint32_t i = 0; i < dock->item_count; ++i) {
+        /* Estado hover + bounce vertical da física elástica */
+        float spring = dock->item_springs[i].current_val;
+        float bounce = dock->bounce_springs[i].current_val;
+        uint32_t draw_icon = (uint32_t)((float)geo.icon * spring);
+        uint32_t base_x = geo.x + geo.pad + i * geo.pitch + (geo.pitch - geo.icon) / 2u;
+        uint32_t ix = base_x - (draw_icon - geo.icon) / 2u;
+        uint32_t iy = (uint32_t)((float)(geo.y + (geo.height - geo.icon) / 2u - (draw_icon - geo.icon) / 2u) + bounce);
+        if (spring > 1.02f) {
+            gfx_draw_circle_alpha(ix + draw_icon / 2, iy + draw_icon / 2, draw_icon / 2 + 4, 0x00FFFFFF, 45);
+        }
+        gfx_draw_app_icon_hd(ix, iy, draw_icon, i);
+        if (wm_app_is_open(i)) {
+            uint32_t dot_color = is_dark ? 0x0038BDF8 : 0x000F172A;
+            gfx_draw_circle_alpha(base_x + geo.icon / 2u, geo.y + geo.height - baken_ui_px(4), baken_ui_px(2), dot_color, 240);
+        }
+    }
+}
+""".strip().splitlines())
+    elif ast.name == "kernel::window_manager":
+        lines.extend("""
+#include "baken_design_tokens.h"
+extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void gfx_draw_smooth_shadow(int x, int y, int w, int h, int radius, int blur, uint8_t max_alpha);
+extern void gfx_draw_circle_button(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c);
+extern void gfx_draw_circle_alpha(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c, uint8_t a);
+extern void gfx_draw_app_icon_hd(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
+extern void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
+extern void gfx_draw_text_proportional(uint32_t x, uint32_t y, const char *str, uint32_t color);
+extern void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str, uint32_t color, uint32_t role);
+extern void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width, const char *str, uint32_t color);
+extern uint32_t gfx_draw_text_wrap_role(uint32_t x, uint32_t y, uint32_t max_width, uint32_t max_lines, const char *str, uint32_t color, uint32_t role);
+extern uint32_t gfx_measure_text(const char *str);
+extern void gfx_draw_text(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c);
+extern void baken_lua_draw_surface(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t material, uint32_t state, uint32_t radius);
+extern uint32_t gfx_get_width(void), gfx_get_height(void);
+extern uint8_t sys_has_nvme(void);
+extern uint8_t sys_has_ahci(void);
+extern uint8_t sys_has_nic(void);
+extern const char *cq_notes_get_text(void);
+extern const char *cq_fs_entry_name(uint32_t index);
+extern uint32_t cq_fs_entry_count(void);
+extern uint32_t cq_fs_entry_kind(uint32_t index);
+extern uint32_t cq_fs_entry_size(uint32_t index);
+extern void gfx_fill_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha);
+extern uint32_t desktop_shell_get_time_tick(void);
+extern void desktop_shell_render_terminal(uint32_t px, uint32_t py, uint32_t pw, uint32_t ph, uint8_t is_focused);
+
+#define MAX_WINDOWS 16
+#define TITLE_BAR_HEIGHT 36
+
+typedef struct {
+    uint32_t id; int32_t x; int32_t y; uint32_t width; uint32_t height;
+    uint32_t min_width; uint32_t min_height; uint8_t z_index;
+    uint8_t is_open; uint8_t is_focused; uint8_t is_minimized; uint8_t is_maximized;
+    int32_t saved_x; int32_t saved_y; uint32_t saved_w; uint32_t saved_h;
+    uint8_t title[48]; uint32_t bg_color; uint8_t bg_alpha; uint32_t border_color;
+    uint32_t app_id;
+} Window;
+
+typedef struct {
+    uint8_t is_dragging; uint32_t active_win_id;
+    int32_t drag_start_x; int32_t drag_start_y; int32_t win_start_x; int32_t win_start_y;
+} DragState;
+
+typedef struct {
+    uint8_t is_resizing; uint32_t active_win_id; uint8_t grip_edge;
+    int32_t drag_start_x; int32_t drag_start_y;
+    int32_t win_start_x; int32_t win_start_y; uint32_t win_start_w; uint32_t win_start_h;
+} ResizeState;
+
+static Window g_windows[MAX_WINDOWS];
+static uint32_t g_window_count = 0;
+static DragState g_drag;
+static ResizeState g_resize;
+
+void wm_init(void) {
+    g_window_count = 0;
+    g_drag.is_dragging = 0;
+    g_resize.is_resizing = 0;
+    for (int i = 0; i < MAX_WINDOWS; ++i) g_windows[i].is_open = 0;
+}
+
+uint8_t wm_app_is_open(uint32_t app_id) {
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        if (g_windows[i].is_open && !g_windows[i].is_minimized) {
+            if ((app_id == 0 || app_id == 11) && g_windows[i].id == 1) return 1;
+            if (app_id == 6 && g_windows[i].id == 2) return 1;
+            if ((app_id == 8 || app_id == 10) && g_windows[i].id == 3) return 1;
+            if (app_id == 9 && g_windows[i].id == 4) return 1;
+            if (app_id == 14 && g_windows[i].id == 5) return 1;
+            if (g_windows[i].app_id == app_id + 1) return 1;
+        }
+    }
+    return 0;
+}
+
+void wm_bring_to_front(uint32_t id) {
+    int target = -1;
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        if (g_windows[i].id == id) { target = (int)i; break; }
+    }
+    if (target < 0) return;
+    uint8_t old_z = g_windows[target].z_index;
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        if (g_windows[i].z_index > old_z) g_windows[i].z_index--;
+        g_windows[i].is_focused = 0;
+    }
+    g_windows[target].z_index = (uint8_t)(g_window_count - 1);
+    g_windows[target].is_focused = 1;
+}
+
+int wm_is_window_focused(uint32_t id) {
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        if (g_windows[i].id == id && g_windows[i].is_open && !g_windows[i].is_minimized && g_windows[i].is_focused) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+void wm_unfocus_all(void) {
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        g_windows[i].is_focused = 0;
+    }
+}
+
+void *wm_create_window(uint32_t id, const uint8_t *title, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t alpha, uint32_t border) {
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        if (g_windows[i].id == id) {
+            g_windows[i].is_open = 1;
+            g_windows[i].is_minimized = 0;
+            wm_bring_to_front(id);
+            return &g_windows[i];
+        }
+    }
+    if (g_window_count >= MAX_WINDOWS) return 0;
+    Window *win = &g_windows[g_window_count];
+    win->id = id; win->app_id = id; win->x = x; win->y = y; win->width = w; win->height = h;
+    win->min_width = 320; win->min_height = 200; win->z_index = (uint8_t)g_window_count;
+    win->is_open = 1; win->is_focused = 1; win->is_minimized = 0; win->is_maximized = 0;
+    win->bg_color = bg; win->bg_alpha = alpha; win->border_color = border;
+    int len = 0;
+    while (title && title[len] && len < 47) { win->title[len] = title[len]; len++; }
+    win->title[len] = 0;
+    g_window_count++;
+    wm_bring_to_front(id);
+    return win;
+}
+
+uint8_t wm_get_cursor_type(int32_t mx, int32_t my) {
+    for (int z = (int)g_window_count - 1; z >= 0; --z) {
+        for (uint32_t i = 0; i < g_window_count; ++i) {
+            Window *win = &g_windows[i];
+            if (win->z_index == (uint8_t)z && win->is_open && !win->is_minimized && !win->is_maximized &&
+                mx >= win->x - 4 && mx <= win->x + (int32_t)win->width + 4 &&
+                my >= win->y - 4 && my <= win->y + (int32_t)win->height + 4) {
+                int left = (mx >= win->x - 4 && mx <= win->x + 8);
+                int right = (mx >= win->x + (int32_t)win->width - 8 && mx <= win->x + (int32_t)win->width + 4);
+                int top = (my >= win->y - 4 && my <= win->y + 8);
+                int bottom = (my >= win->y + (int32_t)win->height - 8 && my <= win->y + (int32_t)win->height + 4);
+                if ((left && top) || (right && bottom)) return 1; // Diagonal NW-SE
+                if ((right && top) || (left && bottom)) return 2; // Diagonal NE-SW
+                if (left || right) return 3; // Horizontal
+                if (top || bottom) return 4; // Vertical
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+uint8_t wm_handle_mouse_down(int32_t mx, int32_t my) {
+    int target = -1; int top_z = -1;
+    for (uint32_t i = 0; i < g_window_count; ++i) {
+        Window *win = &g_windows[i];
+        if (win->is_open && !win->is_minimized &&
+            mx >= win->x - 4 && mx <= win->x + (int32_t)win->width + 4 &&
+            my >= win->y - 4 && my <= win->y + (int32_t)win->height + 4) {
+            if ((int)win->z_index > top_z) { top_z = (int)win->z_index; target = (int)i; }
+        }
+    }
+    if (target < 0) return 0;
+    Window *win = &g_windows[target];
+    wm_bring_to_front(win->id);
+
+    // Botões estilo semáforo
+    if (mx >= win->x + 10 && mx <= win->x + 26 && my >= win->y + 10 && my <= win->y + 26) {
+        win->is_open = 0; return 1;
+    }
+    if (mx >= win->x + 28 && mx <= win->x + 44 && my >= win->y + 10 && my <= win->y + 26) {
+        win->is_minimized = 1; return 1;
+    }
+    if (mx >= win->x + 46 && mx <= win->x + 62 && my >= win->y + 10 && my <= win->y + 26) {
+        if (!win->is_maximized) {
+            win->saved_x = win->x; win->saved_y = win->y; win->saved_w = win->width; win->saved_h = win->height;
+            win->x = 0; win->y = 36; win->width = gfx_get_width(); win->height = gfx_get_height() - 36 - 64;
+            win->is_maximized = 1;
+        } else {
+            win->x = win->saved_x; win->y = win->saved_y; win->width = win->saved_w; win->height = win->saved_h;
+            win->is_maximized = 0;
+        }
+        return 1;
+    }
+
+    if (!win->is_maximized) {
+        int left = (mx >= win->x - 4 && mx <= win->x + 8);
+        int right = (mx >= win->x + (int32_t)win->width - 8 && mx <= win->x + (int32_t)win->width + 4);
+        int top = (my >= win->y - 4 && my <= win->y + 8);
+        int bottom = (my >= win->y + (int32_t)win->height - 8 && my <= win->y + (int32_t)win->height + 4);
+        uint8_t edge = 0;
+        if (left) edge |= 1;
+        if (right) edge |= 2;
+        if (top) edge |= 4;
+        if (bottom) edge |= 8;
+        if (edge) {
+            g_resize.is_resizing = 1; g_resize.active_win_id = win->id; g_resize.grip_edge = edge;
+            g_resize.drag_start_x = mx; g_resize.drag_start_y = my;
+            g_resize.win_start_x = win->x; g_resize.win_start_y = win->y;
+            g_resize.win_start_w = win->width; g_resize.win_start_h = win->height;
+            return 1;
+        }
+    }
+
+    // Arraste pela barra de título
+    if (my >= win->y && my <= win->y + TITLE_BAR_HEIGHT) {
+        g_drag.is_dragging = 1; g_drag.active_win_id = win->id;
+        g_drag.drag_start_x = mx; g_drag.drag_start_y = my;
+        g_drag.win_start_x = win->x; g_drag.win_start_y = win->y;
+        return 1;
+    }
+    return 1;
+}
+
+void wm_handle_mouse_move(int32_t mx, int32_t my) {
+    if (g_resize.is_resizing) {
+        for (uint32_t i = 0; i < g_window_count; ++i) {
+            if (g_windows[i].id == g_resize.active_win_id) {
+                Window *win = &g_windows[i];
+                if (g_resize.grip_edge & 2) {
+                    int32_t nw = (int32_t)g_resize.win_start_w + (mx - g_resize.drag_start_x);
+                    win->width = (nw < (int32_t)win->min_width) ? win->min_width : (uint32_t)nw;
+                }
+                if (g_resize.grip_edge & 8) {
+                    int32_t nh = (int32_t)g_resize.win_start_h + (my - g_resize.drag_start_y);
+                    win->height = (nh < (int32_t)win->min_height) ? win->min_height : (uint32_t)nh;
+                }
+                if (g_resize.grip_edge & 1) {
+                    int32_t nw = (int32_t)g_resize.win_start_w - (mx - g_resize.drag_start_x);
+                    if (nw >= (int32_t)win->min_width) {
+                        win->x = g_resize.win_start_x + (mx - g_resize.drag_start_x);
+                        win->width = (uint32_t)nw;
+                    }
+                }
+                if (g_resize.grip_edge & 4) {
+                    int32_t nh = (int32_t)g_resize.win_start_h - (my - g_resize.drag_start_y);
+                    if (nh >= (int32_t)win->min_height) {
+                        win->y = g_resize.win_start_y + (my - g_resize.drag_start_y);
+                        win->height = (uint32_t)nh;
+                    }
+                }
+                return;
+            }
+        }
+    }
+    if (g_drag.is_dragging) {
+        for (uint32_t i = 0; i < g_window_count; ++i) {
+            if (g_windows[i].id == g_drag.active_win_id) {
+                g_windows[i].x = g_drag.win_start_x + mx - g_drag.drag_start_x;
+                g_windows[i].y = g_drag.win_start_y + my - g_drag.drag_start_y;
+                return;
+            }
+        }
+    }
+}
+
+void wm_handle_mouse_up(void) {
+    g_drag.is_dragging = 0;
+    g_resize.is_resizing = 0;
+}
+
+static void wm_render_single_window(const Window *win) {
+    if (!win || win->x + (int32_t)win->width < 0 || win->y + (int32_t)win->height < 0) return;
+    uint32_t x = (win->x < 0) ? 0 : (uint32_t)win->x;
+    uint32_t y = (win->y < 0) ? 0 : (uint32_t)win->y;
+
+    // Sombra suave multicamada sob a janela (elevação adaptativa ao foco)
+    uint32_t blur = win->is_focused ? 28 : 16;
+    uint8_t shadow_a = win->is_focused ? 110 : 60;
+    gfx_draw_smooth_shadow(win->x, win->y, (int)win->width, (int)win->height, 16, blur, shadow_a);
+
+    /* Janela Baken Lua: Mica é a base opaca e legível. O estado de foco
+     * fica no contorno sem mudar a cor do conteúdo do aplicativo. */
+    baken_lua_draw_surface(x, y, win->width, win->height, BKN_LUA_MICA,
+                           win->is_focused ? BKN_LUA_FOCUS : BKN_LUA_REST, 16);
+    gfx_draw_circle_button(win->x + 18, win->y + 18, 6, 0x00EF4444);
+    gfx_draw_circle_button(win->x + 36, win->y + 18, 6, 0x00F59E0B);
+    gfx_draw_circle_button(win->x + 54, win->y + 18, 6, 0x0010B981);
+    gfx_draw_text_ellipsis(win->x + 72, win->y + 11, win->width > 142 ? win->width - 142 : 0, (const char*)win->title, 0x000F172A);
+
+    // Renderiza canvas interno de conteúdo acetinado
+    if (win->height > TITLE_BAR_HEIGHT + 24 && win->width > 48) {
+        uint32_t px = x + 12;
+        uint32_t py = y + TITLE_BAR_HEIGHT + 8;
+        uint32_t pw = win->width - 24;
+        uint32_t ph = win->height - TITLE_BAR_HEIGHT - 20;
+        baken_lua_draw_surface(px, py, pw, ph, BKN_LUA_CANVAS, BKN_LUA_REST, 12);
+
+        if (win->app_id == 1) { // Arquivos / BakenFS
+            baken_lua_draw_surface(px + 12, py + 10, pw - 24, 30, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
+            gfx_draw_text_proportional(px + 24, py + 17, "<   >   ^   |   Local: BakenFS (/home)", 0x000284C7);
+
+            uint32_t count = cq_fs_entry_count();
+            uint32_t cols = pw > 360 ? 3 : (pw > 240 ? 2 : 1);
+            uint32_t card_w = (pw - 24 - (cols - 1) * 8) / cols;
+            uint32_t card_h = 58;
+
+            for (uint32_t i = 0; i < count && i < 9; ++i) {
+                uint32_t col = i % cols;
+                uint32_t row = i / cols;
+                uint32_t cx = px + 12 + col * (card_w + 8);
+                uint32_t cy = py + 48 + row * (card_h + 8);
+                if (cy + card_h > py + ph - 34) break;
+
+                uint32_t kind = cq_fs_entry_kind(i);
+                uint32_t icon_id = (kind == 1) ? 0 : ((kind == 3) ? 10 : 6);
+                baken_lua_draw_surface(cx, cy, card_w, card_h, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_app_icon_hd(cx + 8, cy + 13, 32, icon_id);
+
+                const char *fname = cq_fs_entry_name(i);
+                const char *disp_name = fname;
+                for (int k = 0; fname[k]; ++k) {
+                    if (fname[k] == '/' && fname[k+1]) disp_name = fname + k + 1;
+                }
+                gfx_draw_text_ellipsis(cx + 46, cy + 12, card_w > 50 ? card_w - 50 : 40, disp_name, 0x000F172A);
+
+                if (kind == 1) {
+                    gfx_draw_text_proportional(cx + 46, cy + 32, "Diretorio", 0x000284C7);
+                } else if (kind == 3) {
+                    gfx_draw_text_proportional(cx + 46, cy + 32, "Configuracao", 0x0064748B);
+                } else {
+                    uint32_t sz = cq_fs_entry_size(i);
+                    char sz_str[24];
+                    if (sz >= 1024) {
+                        int kb = (int)(sz / 1024);
+                        sz_str[0] = (char)('0' + (kb / 10) % 10);
+                        sz_str[1] = (char)('0' + kb % 10);
+                        sz_str[2] = ' '; sz_str[3] = 'K'; sz_str[4] = 'B'; sz_str[5] = 0;
+                    } else {
+                        sz_str[0] = (char)('0' + (sz / 100) % 10);
+                        sz_str[1] = (char)('0' + (sz / 10) % 10);
+                        sz_str[2] = (char)('0' + sz % 10);
+                        sz_str[3] = ' '; sz_str[4] = 'B'; sz_str[5] = 0;
+                    }
+                    gfx_draw_text_proportional(cx + 46, cy + 32, sz_str[0] == '0' ? sz_str + 1 : sz_str, 0x00166534);
+                }
+            }
+
+            if (ph > 40) {
+                baken_lua_draw_surface(px + 12, py + ph - 30, pw - 24, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 4);
+                gfx_draw_text_proportional(px + 20, py + ph - 25, "BakenFS montado - Terminal: touch / rm / ls / cat", 0x0064748B);
+            }
+        } else if (win->app_id == 2) { // Notas
+            baken_lua_draw_surface(px + 12, py + 8, pw - 24, 30, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
+            baken_lua_draw_surface(px + 18, py + 12, 68, 22, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 4);
+            gfx_draw_text_proportional(px + 28, py + 15, "Salvar", 0x00166534);
+
+            baken_lua_draw_surface(px + 92, py + 12, 68, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 4);
+            gfx_draw_text_proportional(px + 102, py + 15, "Copiar", 0x000F172A);
+
+            if (pw > 200) {
+                gfx_draw_text_proportional(px + pw - 150, py + 15, "Linha 1, Coluna 1", 0x0064748B);
+            }
+
+            if (ph > 50) {
+                baken_lua_draw_surface(px + 12, py + 44, pw - 24, ph - 54, BKN_LUA_MICA, BKN_LUA_FOCUS, 6);
+                baken_lua_draw_surface(px + 12, py + 44, 36, ph - 54, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 4);
+                gfx_draw_text_proportional(px + 20, py + 56, "01", 0x0094A3B8);
+                gfx_draw_text_proportional(px + 20, py + 78, "02", 0x0094A3B8);
+                gfx_draw_text_proportional(px + 20, py + 100, "03", 0x0094A3B8);
+                gfx_draw_text_proportional(px + 20, py + 122, "04", 0x0094A3B8);
+
+                gfx_draw_text_proportional(px + 56, py + 56, "Notas persistentes — Enter salva no disco", 0x000284C7);
+                const char *nt = cq_notes_get_text();
+                gfx_draw_text_proportional(px + 56, py + 80, nt, 0x001E293B);
+                if (win->is_focused && (desktop_shell_get_time_tick() % 40) < 24) {
+                    uint32_t tw = gfx_measure_text(nt);
+                    gfx_fill_rect_alpha(px + 58 + tw, py + 78, 2, 16, 0x000284C7, 240);
+                }
+            }
+        } else if (win->app_id == 4) { // Terminal Cq - Vortex Core
+            desktop_shell_render_terminal(px, py, pw, ph, win->is_focused);
+        } else if (win->app_id == 3) { // Ajustes & Hardware (Cards Modernos Light Aero)
+            // Header Card com status
+            baken_lua_draw_surface(px + 12, py + 10, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+            gfx_draw_circle_alpha(px + 28, py + 29, 5, 0x0010B981, 255);
+            gfx_draw_text_proportional(px + 40, py + 22, "Baken OS Sovereign v2.0", 0x000F172A);
+            if (pw > 220) {
+                baken_lua_draw_surface(px + pw - 138, py + 16, 114, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 12);
+                gfx_draw_text_proportional(px + pw - 128, py + 21, "x86-64 UEFI", 0x00166534);
+            }
+
+            uint32_t col_w = (pw > 40) ? (pw - 32) / 2 : 120;
+            // Card 1: Monitor e Vídeo (Coluna Esquerda)
+            baken_lua_draw_surface(px + 12, py + 54, col_w, 74, BKN_LUA_MICA, BKN_LUA_REST, 10);
+            gfx_draw_text_proportional(px + 24, py + 64, "Monitor e Video", 0x000284C7);
+            gfx_draw_text_proportional(px + 24, py + 84, "Resolucao 32bpp Linear ARGB", 0x001E293B);
+            baken_lua_draw_surface(px + 24, py + 104, 76, 18, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 9);
+            gfx_draw_text_proportional(px + 30, py + 107, "GOP Nativo", 0x00475569);
+
+            // Card 2: Armazenamento (Coluna Direita)
+            baken_lua_draw_surface(px + 20 + col_w, py + 54, col_w, 74, BKN_LUA_MICA, BKN_LUA_REST, 10);
+            gfx_draw_text_proportional(px + 32 + col_w, py + 64, "Armazenamento", 0x000284C7);
+            if (sys_has_nvme()) {
+                gfx_draw_text_proportional(px + 32 + col_w, py + 84, "Disco NVMe Express PCI", 0x001E293B);
+            } else if (sys_has_ahci()) {
+                gfx_draw_text_proportional(px + 32 + col_w, py + 84, "Disco SATA AHCI Controller", 0x001E293B);
+            } else {
+                gfx_draw_text_proportional(px + 32 + col_w, py + 84, "Midia Live ESP FAT32", 0x001E293B);
+            }
+            baken_lua_draw_surface(px + 32 + col_w, py + 104, 68, 18, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 9);
+            gfx_draw_text_proportional(px + 40 + col_w, py + 107, "Montado", 0x00166534);
+
+            // Card 3: Conectividade (Coluna Esquerda Inferior)
+            baken_lua_draw_surface(px + 12, py + 134, col_w, 74, BKN_LUA_MICA, BKN_LUA_REST, 10);
+            gfx_draw_text_proportional(px + 24, py + 144, "Conectividade", 0x000284C7);
+            if (sys_has_nic()) {
+                gfx_draw_text_proportional(px + 24, py + 164, "Controlador Ethernet (PCI 0x02)", 0x001E293B);
+                baken_lua_draw_surface(px + 24, py + 184, 76, 18, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 9);
+                gfx_draw_text_proportional(px + 32, py + 187, "Conectado", 0x00166534);
+            } else {
+                gfx_draw_text_proportional(px + 24, py + 164, "Sem controlador Ethernet", 0x0064748B);
+                baken_lua_draw_surface(px + 24, py + 184, 64, 18, BKN_LUA_GLASS_CLEAR, BKN_LUA_DISABLED, 9);
+                gfx_draw_text_proportional(px + 32, py + 187, "Inativo", 0x0064748B);
+            }
+
+            // Card 4: Relógio do Sistema (Coluna Direita Inferior)
+            baken_lua_draw_surface(px + 20 + col_w, py + 134, col_w, 74, BKN_LUA_MICA, BKN_LUA_REST, 10);
+            gfx_draw_text_proportional(px + 32 + col_w, py + 144, "Relogio do Sistema", 0x000284C7);
+            gfx_draw_text_proportional(px + 32 + col_w, py + 164, "CMOS RTC 24h (Portas 0x70/0x71)", 0x001E293B);
+            baken_lua_draw_surface(px + 32 + col_w, py + 184, 88, 18, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 9);
+            gfx_draw_text_proportional(px + 38 + col_w, py + 187, "Sincronizado", 0x00166534);
+
+            // Botões de Ação na base da janela
+            if (ph > 40) {
+                baken_lua_draw_surface(px + 12, py + ph - 38, 136, 26, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 13);
+                gfx_draw_text_proportional(px + 24, py + ph - 32, "Modos de Janela", 0x000F172A);
+
+                baken_lua_draw_surface(px + 158, py + ph - 38, 116, 26, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 13);
+                gfx_draw_text_proportional(px + 172, py + ph - 32, "Tema: Claro", 0x00FFFFFF);
+            }
+        } else if (win->app_id == 5) { // Assistente de instalacao (preview seguro)
+            /* Smoke pertence ao modal. A janela em si continua em Mica para
+             * que texto crítico de disco preserve contraste e legibilidade. */
+            baken_lua_draw_surface(px + 12, py + 12, pw - 24, 54, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 10);
+            gfx_draw_text_proportional(px + 26, py + 24, "Preparar Baken OS", 0x000F172A);
+            gfx_draw_text_proportional(px + 26, py + 44, "Assistente seguro de instalacao UEFI", 0x0064748B);
+            if (ph > 126) {
+                baken_lua_draw_surface(px + 12, py + 76, pw - 24, 58, BKN_LUA_MICA, BKN_LUA_REST, 10);
+                gfx_draw_text_proportional(px + 26, py + 88, "Idioma e entrada", 0x000284C7);
+                gfx_draw_text_proportional(px + 26, py + 108, "Portugues (Brasil)  |  Teclado ABNT2", 0x001E293B);
+            }
+            if (ph > 202) {
+                baken_lua_draw_surface(px + 12, py + 144, pw - 24, 58, BKN_LUA_MICA, BKN_LUA_FOCUS, 10);
+                gfx_draw_text_proportional(px + 26, py + 156, "Destino de instalacao", 0x000284C7);
+                gfx_draw_text_proportional(px + 26, py + 176, "Validacao de ESP FAT32 antes de qualquer gravacao", 0x001E293B);
+            }
+            if (ph > 242) {
+                baken_lua_draw_surface(px + 12, py + ph - 42, 132, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 14);
+                gfx_draw_text_proportional(px + 30, py + ph - 35, "Cancelar", 0x00334155);
+                baken_lua_draw_surface(px + pw - 154, py + ph - 42, 142, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 14);
+                gfx_draw_text_proportional(px + pw - 140, py + ph - 35, "Validar disco", 0x00FFFFFF);
+            }
+        } else { // Sobre
+            baken_lua_draw_surface(px + 12, py + 12, pw - 24, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
+            gfx_draw_circle_alpha(px + 44, py + 44, 16, 0x000284C7, 255);
+            gfx_draw_circle_alpha(px + 44, py + 44, 9, 0x00F8FAFC, 255);
+            gfx_draw_circle_alpha(px + 44, py + 44, 3, 0x000284C7, 255);
+            gfx_draw_text_proportional(px + 76, py + 26, "Baken OS Sovereign", 0x000F172A);
+            gfx_draw_text_proportional(px + 76, py + 46, "Versao 2.0.0 (x86-64 UEFI)", 0x000284C7);
+
+            if (ph > 90) {
+                baken_lua_draw_surface(px + 12, py + 84, pw - 24, ph - 94, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(px + 24, py + 96, "Linguagem e Linker: VortexC (Cq Nativo)", 0x001E293B);
+                gfx_draw_text_proportional(px + 24, py + 118, "Motor Grafico: GOP 32bpp Linear com Double Buffer", 0x001E293B);
+                gfx_draw_text_proportional(px + 24, py + 140, "Ponteiro: Protocolos UEFI Absolute e Simple", 0x00166534);
+                gfx_draw_text_proportional(px + 24, py + 162, "Copyright (c) 2026 Baken Project.", 0x0064748B);
+            }
+        }
+    }
+}
+
+void wm_render_windows(void) {
+    for (uint32_t z = 0; z < g_window_count; ++z) {
+        for (uint32_t i = 0; i < g_window_count; ++i) {
+            if (g_windows[i].z_index == (uint8_t)z && g_windows[i].is_open && !g_windows[i].is_minimized) {
+                wm_render_single_window(&g_windows[i]);
+            }
+        }
+    }
+}
+""".strip().splitlines())
+    elif ast.name == "kernel::desktop_shell":
+        lines.extend("""
+#include "material_icons_atlas.h"
+#include "baken_motion_icons_atlas.h"
+#include "baken_design_tokens.h"
+extern void gfx_put_pixel_alpha(uint32_t x, uint32_t y, uint32_t c, uint8_t a);
+extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void baken_lua_draw_surface(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t material, uint32_t state, uint32_t radius);
+extern void gfx_draw_smooth_shadow(int x, int y, int w, int h, int radius, int blur, uint8_t max_alpha);
+extern void gfx_draw_hline(uint32_t x, uint32_t y, uint32_t width, uint32_t color, uint8_t alpha);
+extern void gfx_fill_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c, uint8_t a);
+extern void gfx_draw_app_icon_hd(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
+extern void gfx_draw_material_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint8_t alpha);
+extern void gfx_draw_material_icon_state(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint32_t state);
+extern void gfx_draw_motion_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint8_t alpha, uint8_t mirror_x);
+extern void gfx_draw_circle_alpha(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c, uint8_t a);
+extern void gfx_draw_text_proportional(uint32_t x, uint32_t y, const char *str, uint32_t color);
+extern void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str, uint32_t color, uint32_t role);
+extern void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width, const char *str, uint32_t color);
+extern uint32_t gfx_draw_text_wrap_role(uint32_t x, uint32_t y, uint32_t max_width, uint32_t max_lines, const char *str, uint32_t color, uint32_t role);
+extern uint32_t gfx_measure_text(const char *str);
+extern void gfx_draw_text(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c);
+extern void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c, uint32_t scale, uint8_t a);
+extern void gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c);
+extern void gfx_draw_mesh_wallpaper(void);
+extern void gfx_swap_buffers(void);
+extern uint32_t cq_fs_entry_count(void);
+extern void wm_init(void);
+extern void wm_render_windows(void);
+extern void wm_bring_to_front(uint32_t id);
+extern uint8_t wm_get_cursor_type(int32_t mx, int32_t my);
+extern void *wm_create_window(uint32_t id, const uint8_t *title, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t alpha, uint32_t border);
+extern uint32_t gfx_get_width(void), gfx_get_height(void);
+extern uint32_t baken_ui_px(uint32_t logical_px);
+
+typedef struct {
+    uint8_t has_nvme;
+    uint8_t has_ahci;
+    uint8_t has_nic;
+    uint8_t has_hda;
+} PciStatus;
+
+static PciStatus g_pci_status = {0, 0, 0, 0};
+
+uint8_t sys_has_nvme(void) { return g_pci_status.has_nvme; }
+uint8_t sys_has_ahci(void) { return g_pci_status.has_ahci; }
+uint8_t sys_has_nic(void) { return g_pci_status.has_nic; }
+
+static inline uint8_t inb_port(uint16_t port) {
+    uint8_t ret;
+    __asm__ volatile ("inb %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+static inline void outb_port(uint16_t port, uint8_t val) {
+    __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+static inline uint32_t inl_port(uint16_t port) {
+    uint32_t ret;
+    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+}
+static inline void outl_port(uint16_t port, uint32_t val) {
+    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static uint8_t cmos_read(uint8_t reg) {
+    outb_port(0x70, reg);
+    return inb_port(0x71);
+}
+static uint8_t bcd2bin(uint8_t bcd) {
+    return ((bcd >> 4) * 10) + (bcd & 0x0F);
+}
+
+typedef struct {
+    uint8_t sec, min, hour, day, month, year;
+    uint8_t valid;
+} RtcTime;
+
+static RtcTime rtc_read_time(void) {
+    RtcTime t = {0, 0, 0, 0, 0, 0, 0};
+    for (int retry = 0; retry < 500; ++retry) {
+        if ((cmos_read(0x0A) & 0x80) == 0) break;
+    }
+    uint8_t s = cmos_read(0x00);
+    uint8_t m = cmos_read(0x02);
+    uint8_t h = cmos_read(0x04);
+    uint8_t d = cmos_read(0x07);
+    uint8_t mo = cmos_read(0x08);
+    uint8_t yr = cmos_read(0x09);
+    uint8_t b = cmos_read(0x0B);
+    if ((b & 0x04) == 0) {
+        s = bcd2bin(s);
+        m = bcd2bin(m);
+        h = bcd2bin(h);
+        d = bcd2bin(d);
+        mo = bcd2bin(mo);
+        yr = bcd2bin(yr);
+    }
+    if ((b & 0x02) == 0 && (h & 0x80)) {
+        h = ((h & 0x7F) + 12) % 24;
+    }
+    if (s < 60 && m < 60 && h < 24 && d >= 1 && d <= 31 && mo >= 1 && mo <= 12) {
+        t.sec = s; t.min = m; t.hour = h; t.day = d; t.month = mo; t.year = yr; t.valid = 1;
+    }
+    return t;
+}
+
+static uint32_t pci_read_cfg(uint8_t bus, uint8_t slot, uint8_t func, uint8_t offset) {
+    uint32_t address = (uint32_t)((1U << 31) | ((uint32_t)bus << 16) | ((uint32_t)slot << 11) | ((uint32_t)func << 8) | (offset & 0xFC));
+    outl_port(0xCF8, address);
+    return inl_port(0xCFC);
+}
+
+static void pci_scan_hardware(void) {
+    g_pci_status = (PciStatus){0, 0, 0, 0};
+    for (uint32_t bus = 0; bus < 16; ++bus) {
+        for (uint32_t slot = 0; slot < 32; ++slot) {
+            uint32_t d0 = pci_read_cfg((uint8_t)bus, (uint8_t)slot, 0, 0);
+            if ((d0 & 0xFFFF) == 0xFFFF || (d0 & 0xFFFF) == 0) continue;
+            uint32_t d8 = pci_read_cfg((uint8_t)bus, (uint8_t)slot, 0, 0x08);
+            uint8_t class_code = (uint8_t)(d8 >> 24);
+            uint8_t subclass = (uint8_t)(d8 >> 16);
+            if (class_code == 0x01 && subclass == 0x08) g_pci_status.has_nvme = 1;
+            if (class_code == 0x01 && subclass == 0x06) g_pci_status.has_ahci = 1;
+            if (class_code == 0x02) g_pci_status.has_nic = 1;
+            if (class_code == 0x04 && subclass == 0x03) g_pci_status.has_hda = 1;
+        }
+    }
+}
+
+typedef struct { float current_val, target_val, velocity, stiffness, damping; } CqSpringState;
+typedef struct {
+    uint32_t y_offset, icon_size, item_count;
+    const uint8_t *item_labels[16];
+    CqSpringState item_springs[16];
+    CqSpringState bounce_springs[16];
+} DesktopDock;
+extern void dock_init(DesktopDock *dock);
+extern void dock_add_item(DesktopDock *dock, const uint8_t *label);
+extern void dock_update(DesktopDock *dock, float dt, int32_t cursor_x, int32_t cursor_y);
+extern void dock_draw(const DesktopDock *dock);
+extern void dock_trigger_bounce(DesktopDock *dock, uint32_t index);
+typedef struct { uint32_t x, y, width, height, pitch, icon, pad; } BakenDockLayout;
+extern void baken_dock_layout(uint32_t item_count, BakenDockLayout *out);
+extern uint8_t wm_handle_mouse_down(int32_t mx, int32_t my);
+extern void wm_handle_mouse_move(int32_t mx, int32_t my);
+extern void wm_handle_mouse_up(void);
+extern void desktop_shell_toggle_media(void);
+extern void desktop_shell_toggle_theme(void);
+extern uint8_t desktop_shell_is_dark_theme(void);
+extern void desktop_shell_toggle_control_center(void);
+extern void desktop_shell_toggle_spotlight(void);
+extern void desktop_shell_toggle_context_menu(void);
+extern void gfx_set_mesh_time_tick(uint32_t t);
+extern const char *cq_notes_get_text(void);
+extern uint32_t cq_fs_entry_count(void);
+extern const char *cq_fs_entry_name(uint32_t index);
+extern uint32_t cq_fs_entry_kind(uint32_t index);
+extern uint32_t cq_fs_entry_size(uint32_t index);
+extern int cq_fs_add(const char *name, uint32_t kind, uint32_t size, uint32_t lba);
+extern int cq_fs_remove(const char *name);
+extern int cq_fs_write_file(const char *name, const char *text, uint32_t len);
+extern int cq_fs_read_file(const char *name, char *out_text, uint32_t max_len);
+extern void desktop_config_save(void);
+
+static int str_contains_nocase(const char *haystack, const char *needle) {
+    if (!needle || !*needle) return 1;
+    if (!haystack) return 0;
+    while (*haystack) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n) {
+            char ch_h = (*h >= 'A' && *h <= 'Z') ? (char)(*h + 32) : *h;
+            char ch_n = (*n >= 'A' && *n <= 'Z') ? (char)(*n + 32) : *n;
+            if (ch_h != ch_n) break;
+            h++; n++;
+        }
+        if (!*n) return 1;
+        haystack++;
+    }
+    return 0;
+}
+
+#define TERM_MAX_LINES 12
+#define TERM_LINE_LEN 64
+typedef struct {
+    char lines[TERM_MAX_LINES][TERM_LINE_LEN];
+    uint32_t line_count;
+    char current_cmd[48];
+    uint32_t cmd_len;
+} BakenTerminalState;
+
+static BakenTerminalState g_terminal = {
+    {
+        "Baken OS Sovereign Kernel v2.0 (Cq Native)",
+        "Terminal interativo - Digite 'help' para comandos."
+    },
+    2,
+    "",
+    0
+};
+
+static void terminal_append_line(const char *line) {
+    if (!line) return;
+    if (g_terminal.line_count < TERM_MAX_LINES) {
+        int len = 0;
+        while (line[len] && len < TERM_LINE_LEN - 1) {
+            g_terminal.lines[g_terminal.line_count][len] = line[len];
+            len++;
+        }
+        g_terminal.lines[g_terminal.line_count][len] = 0;
+        g_terminal.line_count++;
+    } else {
+        for (uint32_t i = 1; i < TERM_MAX_LINES; ++i) {
+            for (uint32_t c = 0; c < TERM_LINE_LEN; ++c) {
+                g_terminal.lines[i - 1][c] = g_terminal.lines[i][c];
+            }
+        }
+        int len = 0;
+        while (line[len] && len < TERM_LINE_LEN - 1) {
+            g_terminal.lines[TERM_MAX_LINES - 1][len] = line[len];
+            len++;
+        }
+        g_terminal.lines[TERM_MAX_LINES - 1][len] = 0;
+    }
+}
+
+static void terminal_execute_command(void) {
+    if (g_terminal.cmd_len == 0) return;
+    char prompt_echo[64];
+    prompt_echo[0] = '$'; prompt_echo[1] = ' ';
+    int idx = 0;
+    while (g_terminal.current_cmd[idx] && idx < 50) {
+        prompt_echo[idx + 2] = g_terminal.current_cmd[idx];
+        idx++;
+    }
+    prompt_echo[idx + 2] = 0;
+    terminal_append_line(prompt_echo);
+
+    const char *cmd = g_terminal.current_cmd;
+    if (str_contains_nocase(cmd, "help")) {
+        terminal_append_line("Comandos: ls, cat, touch, mkdir, rm, write, theme, sysinfo, clear");
+    } else if (str_contains_nocase(cmd, "sysinfo")) {
+        terminal_append_line("Arch: x86_64 UEFI | Mem: 512MB / 2048MB | GOP: 1080p");
+        terminal_append_line("Kernel: Baken Modular Cq v2.0 | FS: BakenFS Sovereign v1");
+    } else if (str_contains_nocase(cmd, "stat") || str_contains_nocase(cmd, "df")) {
+        terminal_append_line("BakenFS Estado:");
+        terminal_append_line("  Dispositivo: ESP Blk 86016 | Entradas: 12 max");
+        terminal_append_line("  Status: Montado (Leitura / Gravacao ativas)");
+    } else if (cmd[0] == 'l' && cmd[1] == 's') {
+        uint32_t cnt = cq_fs_entry_count();
+        terminal_append_line("Arquivos no BakenFS:");
+        for (uint32_t i = 0; i < cnt && i < 6; ++i) {
+            char line_buf[64];
+            uint32_t kind = cq_fs_entry_kind(i);
+            const char *prefix = (kind == 1) ? " [DIR] " : ((kind == 3) ? " [CFG] " : " [ARQ] ");
+            const char *fn = cq_fs_entry_name(i);
+            int p = 0;
+            while (prefix[p]) { line_buf[p] = prefix[p]; p++; }
+            int f = 0;
+            while (fn[f] && p < 60) { line_buf[p++] = fn[f++]; }
+            line_buf[p] = 0;
+            terminal_append_line(line_buf);
+        }
+    } else if (cmd[0] == 't' && cmd[1] == 'o' && cmd[2] == 'u' && cmd[3] == 'c' && cmd[4] == 'h' && cmd[5] == ' ') {
+        const char *fn = cmd + 6;
+        while (*fn == ' ') fn++;
+        if (*fn) {
+            if (cq_fs_add(fn, 2, 0, 86020)) {
+                terminal_append_line("Arquivo criado com sucesso no BakenFS.");
+            } else {
+                terminal_append_line("Erro ao criar arquivo (disco cheio ou somente-leitura).");
+            }
+        }
+    } else if (cmd[0] == 'm' && cmd[1] == 'k' && cmd[2] == 'd' && cmd[3] == 'i' && cmd[4] == 'r' && cmd[5] == ' ') {
+        const char *fn = cmd + 6;
+        while (*fn == ' ') fn++;
+        if (*fn) {
+            if (cq_fs_add(fn, 1, 0, 0)) {
+                terminal_append_line("Diretorio criado com sucesso no BakenFS.");
+            } else {
+                terminal_append_line("Erro ao criar diretorio.");
+            }
+        }
+    } else if (cmd[0] == 'r' && cmd[1] == 'm' && cmd[2] == ' ') {
+        const char *fn = cmd + 3;
+        while (*fn == ' ') fn++;
+        if (*fn) {
+            if (cq_fs_remove(fn)) {
+                terminal_append_line("Arquivo removido do BakenFS.");
+            } else {
+                terminal_append_line("Arquivo nao encontrado.");
+            }
+        }
+    } else if (cmd[0] == 'c' && cmd[1] == 'a' && cmd[2] == 't') {
+        const char *fn = cmd + 3;
+        while (*fn == ' ') fn++;
+        if (!*fn) fn = "/home/notas.txt";
+        char read_buf[128];
+        if (cq_fs_read_file(fn, read_buf, sizeof(read_buf))) {
+            terminal_append_line(read_buf);
+        } else {
+            terminal_append_line("(Arquivo vazio ou nao encontrado)");
+        }
+    } else if (cmd[0] == 'w' && cmd[1] == 'r' && cmd[2] == 'i' && cmd[3] == 't' && cmd[4] == 'e' && cmd[5] == ' ') {
+        const char *p = cmd + 6;
+        while (*p == ' ') p++;
+        char fname[32]; int fi = 0;
+        while (*p && *p != ' ' && fi < 31) { fname[fi++] = *p++; }
+        fname[fi] = 0;
+        while (*p == ' ') p++;
+        if (fname[0] && *p) {
+            uint32_t tlen = 0; while (p[tlen]) tlen++;
+            if (cq_fs_write_file(fname, p, tlen)) {
+                terminal_append_line("Gravado com sucesso no BakenFS.");
+            } else {
+                terminal_append_line("Erro ao gravar arquivo.");
+            }
+        } else {
+            terminal_append_line("Uso: write <arquivo> <texto>");
+        }
+    } else if (str_contains_nocase(cmd, "theme dark") || (cmd[0]=='d' && cmd[1]=='a')) {
+        if (!desktop_shell_is_dark_theme()) {
+            desktop_shell_toggle_theme();
+            desktop_config_save();
+        }
+        terminal_append_line("Tema alterado para: Modo Escuro (Dark Mica)");
+    } else if (str_contains_nocase(cmd, "theme light") || (cmd[0]=='l' && cmd[1]=='i')) {
+        if (desktop_shell_is_dark_theme()) {
+            desktop_shell_toggle_theme();
+            desktop_config_save();
+        }
+        terminal_append_line("Tema alterado para: Modo Claro (Light Aero)");
+    } else if (str_contains_nocase(cmd, "theme")) {
+        desktop_shell_toggle_theme();
+        desktop_config_save();
+        terminal_append_line(desktop_shell_is_dark_theme() ? "Tema: Escuro" : "Tema: Claro");
+    } else if (str_contains_nocase(cmd, "clear")) {
+        g_terminal.line_count = 0;
+    } else if (str_contains_nocase(cmd, "cq")) {
+        terminal_append_line("VortexC / Cq 0.1 Self-Hosted Language Engine");
+    } else {
+        terminal_append_line("Comando desconhecido. Digite 'help' para ajuda.");
+    }
+    g_terminal.cmd_len = 0;
+    g_terminal.current_cmd[0] = 0;
+}
+
+typedef struct {
+    uint32_t screen_w, screen_h, time_tick;
+    int32_t cursor_x, cursor_y;
+    int32_t active_menu;
+    uint32_t menu_x, menu_w;
+    uint8_t control_center_open;
+    uint8_t spotlight_open;
+    uint8_t context_menu_open;
+    int32_t ctx_x, ctx_y;
+    char spotlight_query[32];
+    uint32_t spotlight_len;
+    uint32_t spotlight_filtered_apps[4];
+    uint32_t spotlight_filtered_count;
+} DesktopShellState;
+
+static DesktopShellState g_shell = {1920, 1080, 0, 960, 540, -1, 0, 0, 0, 0, 0, 0, 0, {0}, 0, {0, 6, 10, 9}, 4};
+
+typedef struct {
+    const char *label;
+    const char *shortcut;
+    uint32_t action_id;
+    uint8_t is_separator;
+    uint8_t is_disabled;
+} BakenMenuItem;
+
+typedef struct {
+    const char *title;
+    uint32_t item_count;
+    BakenMenuItem items[8];
+} BakenMenu;
+
+static const BakenMenu g_menus[6] = {
+    {
+        "Baken OS", 5, {
+            {"Sobre o Baken OS Sovereign", "", 4, 0, 0},
+            {"Central de Ajustes & Hardware", "", 10, 0, 0},
+            {"Loja de Aplicativos Baken", "", 8, 0, 0},
+            {"---", "", 0, 1, 0},
+            {"Reiniciar Janelas", "Ctrl+R", 100, 0, 0}
+        }
+    },
+    {
+        "Arquivo", 4, {
+            {"Novo Documento", "Ctrl+N", 6, 0, 0},
+            {"Explorador BakenFS", "Ctrl+O", 0, 0, 0},
+            {"---", "", 0, 1, 0},
+            {"Fechar Janela Ativa", "Ctrl+W", 101, 0, 0}
+        }
+    },
+    {
+        "Editar", 6, {
+            {"Desfazer", "Ctrl+Z", 0, 0, 1},
+            {"Refazer", "Ctrl+Y", 0, 0, 1},
+            {"---", "", 0, 1, 0},
+            {"Recortar", "Ctrl+X", 0, 0, 0},
+            {"Copiar", "Ctrl+C", 0, 0, 0},
+            {"Colar", "Ctrl+V", 0, 0, 0}
+        }
+    },
+    {
+        "Exibir", 3, {
+            {"Organizar Grade de Icones", "", 102, 0, 0},
+            {"Alternar Player de Midia", "Espaco", 103, 0, 0},
+            {"---", "", 0, 1, 0}
+        }
+    },
+    {
+        "Janela", 4, {
+            {"Minimizar Janela", "Ctrl+M", 104, 0, 0},
+            {"Trazer Todas para Frente", "", 105, 0, 0},
+            {"---", "", 0, 1, 0},
+            {"Fechar Todas as Janelas", "Ctrl+Q", 106, 0, 0}
+        }
+    },
+    {
+        "Ajuda", 3, {
+            {"Ajuda do Baken OS", "F1", 4, 0, 0},
+            {"Documentacao Cq", "", 4, 0, 0},
+            {"Assistente Q-HAL AI", "Ctrl+H", 4, 0, 0}
+        }
+    }
+};
+
+static DesktopDock g_main_dock;
+/* Estado do player local. O controle é real; saída de áudio só será marcada
+ * disponível quando o driver HDA existir. */
+static uint8_t g_media_playing = 0;
+/* 0 = play visivel, 255 = pause visivel. O valor atravessa os estados para
+ * que a troca tenha continuidade em vez de piscar entre dois bitmaps. */
+static uint16_t g_media_transition = 0;
+
+static void desktop_set_media_playing(uint8_t playing) {
+    g_media_playing = playing ? 1u : 0u;
+    /* O estado semantico deve ficar legivel no primeiro frame, inclusive em
+     * TCG lento. Movimento residual pertence ao halo, nao a dois glyphs sobrepostos. */
+    g_media_transition = g_media_playing ? 255u : 0u;
+}
+
+typedef struct {
+    uint32_t x, y, width, gap;
+    uint32_t weather_h, media_h, calendar_h, monitor_h, notes_h;
+    uint32_t visible_mask;
+} BakenWidgetLayout;
+
+#define BKN_WIDGET_WEATHER  (1u << 0)
+#define BKN_WIDGET_MEDIA    (1u << 1)
+#define BKN_WIDGET_CALENDAR (1u << 2)
+#define BKN_WIDGET_MONITOR  (1u << 3)
+#define BKN_WIDGET_NOTES    (1u << 4)
+
+typedef struct { uint32_t x, y, cell_w, cell_h, icon, columns, rows; } BakenDesktopGrid;
+
+typedef struct {
+    uint32_t app_id;
+    const char *label;
+} DesktopGridItem;
+
+static const DesktopGridItem g_desktop_items[12] = {
+    {0, "BakenFS"},
+    {1, "3D Studio"},
+    {2, "Navegador"},
+    {3, "Paint"},
+    {4, "Camera"},
+    {5, "Midia"},
+    {6, "Notas"},
+    {8, "Loja"},
+    {10, "Ajustes"},
+    {9, "Terminal"},
+    {12, "Calendario"},
+    {11, "Pessoal"}
+};
+
+/* Uma única fonte de geometria para desenho e clique. Antes, o handler
+ * calculava tamanhos por largura e o renderer usava UI scale; em telas altas
+ * ou estreitas os limites visuais e interativos divergiam. */
+static BakenWidgetLayout desktop_widget_layout(void) {
+    BakenWidgetLayout layout;
+    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+    layout.width = baken_ui_px(300);
+    layout.gap = baken_ui_px(10);
+    if (layout.width + layout.gap > sw) layout.width = sw > layout.gap ? sw - layout.gap : sw;
+    layout.x = sw > layout.width + layout.gap ? sw - layout.width - layout.gap : 0;
+    layout.y = baken_ui_px(40);
+    /* Alturas balanceadas com respiro e acabamento glassmorphic */
+    layout.weather_h = baken_ui_px(114);
+    layout.media_h = baken_ui_px(96);
+    layout.calendar_h = baken_ui_px(124);
+    layout.monitor_h = baken_ui_px(104);
+    layout.notes_h = baken_ui_px(100);
+    layout.visible_mask = BKN_WIDGET_WEATHER | BKN_WIDGET_MEDIA | BKN_WIDGET_CALENDAR |
+                          BKN_WIDGET_MONITOR | BKN_WIDGET_NOTES;
+    uint32_t desired = layout.weather_h + layout.media_h + layout.calendar_h + layout.monitor_h + layout.notes_h + layout.gap * 4u;
+    /* Reserva dock e margem inferior */
+    uint32_t reserve = baken_ui_px(96);
+    uint32_t available = sh > layout.y + reserve ? sh - layout.y - reserve : 0;
+    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_NOTES; layout.notes_h = 0; desired -= baken_ui_px(100) + layout.gap; }
+    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_MONITOR; layout.monitor_h = 0; desired -= baken_ui_px(104) + layout.gap; }
+    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_CALENDAR; layout.calendar_h = 0; desired -= baken_ui_px(124) + layout.gap; }
+    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_MEDIA; layout.media_h = 0; desired -= baken_ui_px(96) + layout.gap; }
+    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_WEATHER; layout.weather_h = 0; }
+    return layout;
+}
+
+/* Grade é baseada no espaço realmente livre entre margem segura e widgets.
+ * O mesmo resultado é consumido pelo desenho e pelo handler de clique. */
+static BakenDesktopGrid desktop_grid_layout(void) {
+    BakenDesktopGrid grid;
+    uint32_t sw = g_shell.screen_w;
+    uint32_t margin = baken_ui_px(32);
+    uint32_t available = sw;
+    if (sw >= baken_ui_px(800)) {
+        BakenWidgetLayout widgets = desktop_widget_layout();
+        if (widgets.x > margin) available = widgets.x - margin;
+    }
+    grid.cell_w = baken_ui_px(112); grid.cell_h = baken_ui_px(108);
+    grid.columns = available >= margin + grid.cell_w * 2u ? 2u : 1u;
+    grid.rows = 6u;
+    grid.icon = baken_ui_px(64);
+    if (grid.icon + baken_ui_px(12) > grid.cell_h) grid.icon = grid.cell_h > baken_ui_px(28) ? grid.cell_h - baken_ui_px(28) : grid.cell_h;
+    grid.x = margin; grid.y = baken_ui_px(56);
+    return grid;
+}
+
+void desktop_shell_init(uint32_t w, uint32_t h) {
+    pci_scan_hardware();
+    g_shell.screen_w = w; g_shell.screen_h = h; g_shell.time_tick = 0;
+    g_shell.cursor_x = (int32_t)(w / 2); g_shell.cursor_y = (int32_t)(h / 2);
+    dock_init(&g_main_dock);
+    dock_add_item(&g_main_dock, (const uint8_t*)"Arquivos");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Midia");
+    dock_add_item(&g_main_dock, (const uint8_t*)"3D Studio");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Navegador");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Paint");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Camera");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Notas");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Loja");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Ajustes");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Terminal");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Sistema");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Lancar");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Calendario");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Pessoal");
+    dock_add_item(&g_main_dock, (const uint8_t*)"Busca");
+    wm_init();
+}
+
+void desktop_shell_set_cursor(int32_t x, int32_t y) {
+    g_shell.cursor_x = x; g_shell.cursor_y = y;
+}
+
+static void desktop_open_app(uint32_t app_id) {
+    uint32_t sw = g_shell.screen_w;
+    uint32_t sh = g_shell.screen_h;
+    dock_trigger_bounce(&g_main_dock, app_id);
+    if (app_id == 0 || app_id == 11) {
+        wm_create_window(1, (const uint8_t*)"Arquivos - BakenFS", (int32_t)(sw / 2 - 280), (int32_t)(sh / 2 - 180), 560, 360, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(1);
+    } else if (app_id == 6) {
+        wm_create_window(2, (const uint8_t*)"Notas - /home/notas.txt", (int32_t)(sw / 2 - 220), (int32_t)(sh / 2 - 140), 440, 280, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(2);
+    } else if (app_id == 8) {
+        wm_create_window(3, (const uint8_t*)"Loja de Aplicativos - Baken Store", (int32_t)(sw / 2 - 260), (int32_t)(sh / 2 - 170), 520, 340, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(3);
+    } else if (app_id == 10) {
+        wm_create_window(3, (const uint8_t*)"Central de Ajustes & Hardware", (int32_t)(sw / 2 - 250), (int32_t)(sh / 2 - 150), 500, 300, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(3);
+    } else if (app_id == 9) {
+        wm_create_window(4, (const uint8_t*)"Terminal Cq - Vortex Core", (int32_t)(sw / 2 - 270), (int32_t)(sh / 2 - 170), 540, 340, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(4);
+    } else if (app_id == 14) {
+        wm_create_window(5, (const uint8_t*)"Instalar Baken OS", (int32_t)(sw / 2 - 280), (int32_t)(sh / 2 - 190), 560, 380, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(5);
+    } else {
+        wm_create_window(4, (const uint8_t*)"Baken OS - Aplicativo", (int32_t)(sw / 2 - 200), (int32_t)(sh / 2 - 120), 400, 240, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_bring_to_front(4);
+    }
+}
+
+static void get_top_bar_menu_bounds(int menu_idx, uint32_t *out_x, uint32_t *out_w) {
+    if (menu_idx == 0) {
+        if (out_x) *out_x = baken_ui_px(8);
+        if (out_w) *out_w = baken_ui_px(96);
+        return;
+    }
+    static const char *k_menus[] = {"Arquivo", "Editar", "Exibir", "Janela", "Ajuda"};
+    uint32_t cur_x = baken_ui_px(112);
+    for (int m = 0; m < 5; ++m) {
+        uint32_t item_w = gfx_measure_text(k_menus[m]);
+        if (m + 1 == menu_idx) {
+            if (out_x) *out_x = cur_x - baken_ui_px(6);
+            if (out_w) *out_w = item_w + baken_ui_px(12);
+            return;
+        }
+        cur_x += item_w + baken_ui_px(18);
+    }
+    if (out_x) *out_x = 0;
+    if (out_w) *out_w = 0;
+}
+
+static void render_dropdown_menu(void) {
+    if (g_shell.active_menu < 0 || g_shell.active_menu >= 6) return;
+    int m_idx = g_shell.active_menu;
+    const BakenMenu *menu = &g_menus[m_idx];
+    if (menu->item_count == 0) return;
+
+    uint32_t top_h = baken_ui_px(32);
+    uint32_t menu_x = g_shell.menu_x;
+    uint32_t item_h = baken_ui_px(24);
+    uint32_t pad_v = baken_ui_px(6);
+    uint32_t pad_h = baken_ui_px(12);
+    uint32_t menu_w = baken_ui_px(210);
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+
+    for (uint32_t i = 0; i < menu->item_count; ++i) {
+        if (!menu->items[i].is_separator) {
+            uint32_t lw = gfx_measure_text(menu->items[i].label);
+            uint32_t sw = gfx_measure_text(menu->items[i].shortcut);
+            uint32_t req = lw + sw + baken_ui_px(36);
+            if (req > menu_w) menu_w = req;
+        }
+    }
+
+    uint32_t sw = g_shell.screen_w;
+    if (menu_x + menu_w + baken_ui_px(8) > sw) {
+        menu_x = (sw > menu_w + baken_ui_px(8)) ? sw - menu_w - baken_ui_px(8) : 0;
+    }
+    g_shell.menu_x = menu_x;
+    g_shell.menu_w = menu_w;
+
+    uint32_t menu_h = pad_v * 2u;
+    for (uint32_t i = 0; i < menu->item_count; ++i) {
+        menu_h += menu->items[i].is_separator ? baken_ui_px(8) : item_h;
+    }
+    uint32_t menu_y = top_h + baken_ui_px(2);
+
+    gfx_draw_smooth_shadow(menu_x, menu_y, (int)menu_w, (int)menu_h, 10, 18, 110);
+    baken_lua_draw_surface(menu_x, menu_y, menu_w, menu_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, baken_ui_px(10));
+
+    int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
+    uint32_t cur_y = menu_y + pad_v;
+    for (uint32_t i = 0; i < menu->item_count; ++i) {
+        const BakenMenuItem *item = &menu->items[i];
+        if (item->is_separator) {
+            gfx_draw_hline(menu_x + baken_ui_px(10), cur_y + baken_ui_px(4), menu_w - baken_ui_px(20), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+            cur_y += baken_ui_px(8);
+            continue;
+        }
+
+        int is_hover = (mx >= (int32_t)(menu_x + baken_ui_px(4)) &&
+                        mx < (int32_t)(menu_x + menu_w - baken_ui_px(4)) &&
+                        my >= (int32_t)cur_y && my < (int32_t)(cur_y + item_h));
+
+        if (is_hover && !item->is_disabled) {
+            gfx_draw_glass_rect_material(menu_x + baken_ui_px(4), cur_y, menu_w - baken_ui_px(8), item_h,
+                                         0x000284C7, 220, 0x0038BDF8, baken_ui_px(6));
+        }
+
+        uint32_t text_color = item->is_disabled ? 0x0094A3B8 : (is_hover ? 0x00FFFFFF : (is_dark ? 0x00F8FAFC : 0x000F172A));
+        uint32_t shortcut_color = item->is_disabled ? 0x0094A3B8 : (is_hover ? 0x00E0F2FE : 0x0064748B);
+
+        uint32_t ty = cur_y + (item_h > baken_ui_px(14) ? (item_h - baken_ui_px(14)) / 2u : 0u);
+        gfx_draw_text_proportional(menu_x + pad_h, ty, item->label, text_color);
+
+        if (item->shortcut && item->shortcut[0]) {
+            uint32_t sw_w = gfx_measure_text(item->shortcut);
+            uint32_t sx = menu_x + menu_w - pad_h - sw_w;
+            gfx_draw_text_proportional(sx, ty, item->shortcut, shortcut_color);
+        }
+
+        cur_y += item_h;
+    }
+}
+
+static void render_control_center(void) {
+    if (!g_shell.control_center_open) return;
+    uint32_t sw = g_shell.screen_w;
+    uint32_t cw = baken_ui_px(316);
+    uint32_t ch = baken_ui_px(360);
+    uint32_t cx = sw > cw + baken_ui_px(10) ? sw - cw - baken_ui_px(10) : 0;
+    uint32_t cy = baken_ui_px(38);
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+
+    gfx_draw_smooth_shadow(cx, cy, (int)cw, (int)ch, 14, 24, 130);
+    baken_lua_draw_surface(cx, cy, cw, ch, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, baken_ui_px(14));
+
+    uint32_t header_y = cy + baken_ui_px(12);
+    gfx_draw_circle_alpha(cx + baken_ui_px(18), header_y + baken_ui_px(8), baken_ui_px(4), 0x0000E5FF, 255);
+    gfx_draw_text_role(cx + baken_ui_px(28), header_y, "Central de Controle Q-HAL", is_dark ? 0x00F8FAFC : 0x000F172A, BKN_TYPE_LABEL);
+
+    uint32_t card1_y = cy + baken_ui_px(38);
+    uint32_t card_w = cw - baken_ui_px(24);
+    baken_lua_draw_surface(cx + baken_ui_px(12), card1_y, card_w, baken_ui_px(96), BKN_LUA_MICA, BKN_LUA_REST, baken_ui_px(10));
+    gfx_draw_text_proportional(cx + baken_ui_px(20), card1_y + baken_ui_px(8), "Telemetria do Sistema", 0x000284C7);
+
+    gfx_draw_text_proportional(cx + baken_ui_px(20), card1_y + baken_ui_px(28), "CPU Cortex-Core", is_dark ? 0x00E2E8F0 : 0x00334155);
+    gfx_draw_text_proportional(cx + card_w - baken_ui_px(24), card1_y + baken_ui_px(28), "34%", 0x000284C7);
+    baken_lua_draw_surface(cx + baken_ui_px(20), card1_y + baken_ui_px(44), card_w - baken_ui_px(16), baken_ui_px(6), BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 3);
+    gfx_fill_rect_alpha(cx + baken_ui_px(20), card1_y + baken_ui_px(44), (card_w - baken_ui_px(16)) * 34 / 100, baken_ui_px(6), 0x000284C7, 240);
+
+    gfx_draw_text_proportional(cx + baken_ui_px(20), card1_y + baken_ui_px(58), "Memoria RAM (512MB/2GB)", is_dark ? 0x00E2E8F0 : 0x00334155);
+    gfx_draw_text_proportional(cx + card_w - baken_ui_px(24), card1_y + baken_ui_px(58), "25%", 0x0010B981);
+    baken_lua_draw_surface(cx + baken_ui_px(20), card1_y + baken_ui_px(74), card_w - baken_ui_px(16), baken_ui_px(6), BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 3);
+    gfx_fill_rect_alpha(cx + baken_ui_px(20), card1_y + baken_ui_px(74), (card_w - baken_ui_px(16)) * 25 / 100, baken_ui_px(6), 0x0010B981, 240);
+
+    uint32_t card2_y = card1_y + baken_ui_px(104);
+    baken_lua_draw_surface(cx + baken_ui_px(12), card2_y, card_w, baken_ui_px(72), BKN_LUA_MICA, BKN_LUA_REST, baken_ui_px(10));
+    gfx_draw_text_proportional(cx + baken_ui_px(20), card2_y + baken_ui_px(8), "Volume de Audio (HDA)", is_dark ? 0x00E2E8F0 : 0x00334155);
+    gfx_draw_text_proportional(cx + card_w - baken_ui_px(24), card2_y + baken_ui_px(8), "80%", 0x000284C7);
+    baken_lua_draw_surface(cx + baken_ui_px(20), card2_y + baken_ui_px(22), card_w - baken_ui_px(16), baken_ui_px(8), BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 4);
+    gfx_fill_rect_alpha(cx + baken_ui_px(20), card2_y + baken_ui_px(22), (card_w - baken_ui_px(16)) * 80 / 100, baken_ui_px(8), 0x000284C7, 240);
+
+    gfx_draw_text_proportional(cx + baken_ui_px(20), card2_y + baken_ui_px(38), "Brilho do Monitor (GOP)", is_dark ? 0x00E2E8F0 : 0x00334155);
+    gfx_draw_text_proportional(cx + card_w - baken_ui_px(24), card2_y + baken_ui_px(38), "90%", 0x00F59E0B);
+    baken_lua_draw_surface(cx + baken_ui_px(20), card2_y + baken_ui_px(52), card_w - baken_ui_px(16), baken_ui_px(8), BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 4);
+    gfx_fill_rect_alpha(cx + baken_ui_px(20), card2_y + baken_ui_px(52), (card_w - baken_ui_px(16)) * 90 / 100, baken_ui_px(8), 0x00F59E0B, 240);
+
+    uint32_t card3_y = card2_y + baken_ui_px(80);
+    uint32_t tile_w = (card_w - baken_ui_px(8)) / 2u;
+    uint32_t tile_h = baken_ui_px(38);
+
+    baken_lua_draw_surface(cx + baken_ui_px(12), card3_y, tile_w, tile_h, BKN_LUA_GLASS_REGULAR, is_dark ? BKN_LUA_SELECTED : BKN_LUA_REST, baken_ui_px(8));
+    gfx_draw_circle_alpha(cx + baken_ui_px(24), card3_y + baken_ui_px(19), baken_ui_px(5), is_dark ? 0x0038BDF8 : 0x00F59E0B, 240);
+    gfx_draw_text_proportional(cx + baken_ui_px(34), card3_y + baken_ui_px(12), is_dark ? "Modo Escuro" : "Modo Claro", is_dark ? 0x00FFFFFF : 0x000F172A);
+
+    baken_lua_draw_surface(cx + baken_ui_px(20) + tile_w, card3_y, tile_w, tile_h, BKN_LUA_GLASS_REGULAR, g_pci_status.has_nic ? BKN_LUA_SELECTED : BKN_LUA_REST, baken_ui_px(8));
+    gfx_draw_circle_alpha(cx + baken_ui_px(32) + tile_w, card3_y + baken_ui_px(19), baken_ui_px(5), g_pci_status.has_nic ? 0x0010B981 : 0x0064748B, 240);
+    gfx_draw_text_proportional(cx + baken_ui_px(42) + tile_w, card3_y + baken_ui_px(12), g_pci_status.has_nic ? "Rede PCI" : "Sem Rede", is_dark ? 0x00FFFFFF : 0x000F172A);
+
+    uint32_t row2_y = card3_y + tile_h + baken_ui_px(6);
+    baken_lua_draw_surface(cx + baken_ui_px(12), row2_y, tile_w, tile_h, BKN_LUA_GLASS_REGULAR, g_pci_status.has_hda ? BKN_LUA_SELECTED : BKN_LUA_REST, baken_ui_px(8));
+    gfx_draw_circle_alpha(cx + baken_ui_px(24), row2_y + baken_ui_px(19), baken_ui_px(5), g_pci_status.has_hda ? 0x000284C7 : 0x0064748B, 240);
+    gfx_draw_text_proportional(cx + baken_ui_px(34), row2_y + baken_ui_px(12), "Audio HDA", is_dark ? 0x00FFFFFF : 0x000F172A);
+
+    baken_lua_draw_surface(cx + baken_ui_px(20) + tile_w, row2_y, tile_w, tile_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, baken_ui_px(8));
+    gfx_draw_circle_alpha(cx + baken_ui_px(32) + tile_w, row2_y + baken_ui_px(19), baken_ui_px(5), 0x0000E5FF, 255);
+    gfx_draw_text_proportional(cx + baken_ui_px(42) + tile_w, row2_y + baken_ui_px(12), "Q-HAL IA", is_dark ? 0x00FFFFFF : 0x000F172A);
+}
+
+static void render_spotlight_overlay(void) {
+    if (!g_shell.spotlight_open) return;
+    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+    uint32_t sp_w = baken_ui_px(540);
+    uint32_t sp_h = baken_ui_px(280);
+    uint32_t sp_x = sw > sp_w ? (sw - sp_w) / 2u : 0;
+    uint32_t sp_y = sh > sp_h ? (sh - sp_h) / 3u : 0;
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+
+    gfx_draw_smooth_shadow(sp_x, sp_y, (int)sp_w, (int)sp_h, 16, 28, 140);
+    baken_lua_draw_surface(sp_x, sp_y, sp_w, sp_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, baken_ui_px(16));
+
+    uint32_t field_y = sp_y + baken_ui_px(12);
+    baken_lua_draw_surface(sp_x + baken_ui_px(12), field_y, sp_w - baken_ui_px(24), baken_ui_px(40), BKN_LUA_MICA, BKN_LUA_FOCUS, baken_ui_px(10));
+    gfx_draw_circle_alpha(sp_x + baken_ui_px(28), field_y + baken_ui_px(20), baken_ui_px(6), 0x000284C7, 240);
+    gfx_draw_text_role(sp_x + baken_ui_px(42), field_y + baken_ui_px(12),
+                       g_shell.spotlight_len ? g_shell.spotlight_query : "Buscar no Baken OS, arquivos, apps e Q-HAL...",
+                       g_shell.spotlight_len ? (is_dark ? 0x00FFFFFF : 0x000F172A) : (is_dark ? 0x0064748B : 0x0094A3B8),
+                       BKN_TYPE_LABEL);
+
+    if ((g_shell.time_tick % 40) < 24) {
+        uint32_t tw = g_shell.spotlight_len ? gfx_measure_text(g_shell.spotlight_query) : 0;
+        gfx_fill_rect_alpha(sp_x + baken_ui_px(44) + tw, field_y + baken_ui_px(11), 2, baken_ui_px(18), 0x000284C7, 240);
+    }
+
+    gfx_draw_hline(sp_x + baken_ui_px(14), field_y + baken_ui_px(48), sp_w - baken_ui_px(28), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+
+    typedef struct { const char *title; const char *sub; uint32_t app_id; } SpotlightItem;
+    static const SpotlightItem catalog[6] = {
+        {"Arquivos - BakenFS", "Explorador de Arquivos (/home)", 0},
+        {"Notas Rapidas", "Editor de texto persistente", 6},
+        {"Central de Ajustes", "Configuracoes de Hardware", 10},
+        {"Terminal Cq", "Interpretador de Comandos Vortex", 9},
+        {"Assistente Q-HAL AI", "Inteligencia Artificial Soberana", 4},
+        {"Instalar Baken OS", "Assistente de Instalacao UEFI", 14}
+    };
+
+    SpotlightItem filtered[4];
+    uint32_t match_count = 0;
+    for (int c = 0; c < 6 && match_count < 4; ++c) {
+        if (g_shell.spotlight_len == 0 ||
+            str_contains_nocase(catalog[c].title, g_shell.spotlight_query) ||
+            str_contains_nocase(catalog[c].sub, g_shell.spotlight_query)) {
+            filtered[match_count] = catalog[c];
+            g_shell.spotlight_filtered_apps[match_count] = catalog[c].app_id;
+            match_count++;
+        }
+    }
+    g_shell.spotlight_filtered_count = match_count;
+
+    int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
+    uint32_t res_y = field_y + baken_ui_px(56);
+    if (match_count == 0) {
+        gfx_draw_text_proportional(sp_x + baken_ui_px(24), res_y + baken_ui_px(20),
+                                   "Nenhum aplicativo ou arquivo correspondente encontrado.",
+                                   is_dark ? 0x0094A3B8 : 0x0064748B);
+    } else {
+        for (uint32_t i = 0; i < match_count; ++i) {
+            int is_hover = (mx >= (int32_t)(sp_x + baken_ui_px(12)) && mx < (int32_t)(sp_x + sp_w - baken_ui_px(12)) &&
+                            my >= (int32_t)res_y && my < (int32_t)(res_y + baken_ui_px(38)));
+            if (is_hover || (g_shell.spotlight_len > 0 && i == 0)) {
+                gfx_draw_glass_rect_material(sp_x + baken_ui_px(12), res_y, sp_w - baken_ui_px(24), baken_ui_px(38), 0x000284C7, 220, 0x0038BDF8, baken_ui_px(8));
+            } else {
+                baken_lua_draw_surface(sp_x + baken_ui_px(12), res_y, sp_w - baken_ui_px(24), baken_ui_px(38), BKN_LUA_MICA, BKN_LUA_REST, baken_ui_px(8));
+            }
+            gfx_draw_app_icon_hd(sp_x + baken_ui_px(18), res_y + baken_ui_px(5), baken_ui_px(28), filtered[i].app_id);
+            gfx_draw_text_proportional(sp_x + baken_ui_px(52), res_y + baken_ui_px(6), filtered[i].title, (is_hover || (g_shell.spotlight_len > 0 && i == 0)) ? 0x00FFFFFF : (is_dark ? 0x00F8FAFC : 0x000F172A));
+            gfx_draw_text_proportional(sp_x + baken_ui_px(52), res_y + baken_ui_px(20), filtered[i].sub, (is_hover || (g_shell.spotlight_len > 0 && i == 0)) ? 0x00E0F2FE : (is_dark ? 0x0094A3B8 : 0x0064748B));
+            res_y += baken_ui_px(44);
+        }
+    }
+}
+
+static void render_desktop_context_menu(void) {
+    if (!g_shell.context_menu_open) return;
+    uint32_t cx = (uint32_t)g_shell.ctx_x;
+    uint32_t cy = (uint32_t)g_shell.ctx_y;
+    uint32_t mw = baken_ui_px(200);
+    uint32_t mh = baken_ui_px(120);
+    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+    if (cx + mw > sw) cx = sw > mw ? sw - mw : 0;
+    if (cy + mh > sh) cy = sh > mh ? sh - mh : 0;
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+
+    gfx_draw_smooth_shadow(cx, cy, (int)mw, (int)mh, 10, 18, 110);
+    baken_lua_draw_surface(cx, cy, mw, mh, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, baken_ui_px(10));
+
+    static const char *ctx_items[] = {
+        "Novo Documento",
+        "Organizar Icones",
+        "Alternar Modo Escuro",
+        "Sobre o Baken OS"
+    };
+
+    int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
+    uint32_t cur_y = cy + baken_ui_px(6);
+    for (int i = 0; i < 4; ++i) {
+        int is_hover = (mx >= (int32_t)cx && mx < (int32_t)(cx + mw) &&
+                        my >= (int32_t)cur_y && my < (int32_t)(cur_y + baken_ui_px(24)));
+        if (is_hover) {
+            gfx_draw_glass_rect_material(cx + baken_ui_px(4), cur_y, mw - baken_ui_px(8), baken_ui_px(24), 0x000284C7, 220, 0x0038BDF8, baken_ui_px(6));
+        }
+        gfx_draw_text_proportional(cx + baken_ui_px(16), cur_y + baken_ui_px(4), ctx_items[i], is_hover ? 0x00FFFFFF : (is_dark ? 0x00F8FAFC : 0x000F172A));
+        cur_y += baken_ui_px(26);
+    }
+}
+
+void desktop_shell_toggle_control_center(void) {
+    g_shell.control_center_open = !g_shell.control_center_open;
+    if (g_shell.control_center_open) { g_shell.active_menu = -1; g_shell.spotlight_open = 0; g_shell.context_menu_open = 0; }
+}
+
+void desktop_shell_toggle_spotlight(void) {
+    g_shell.spotlight_open = !g_shell.spotlight_open;
+    if (g_shell.spotlight_open) {
+        g_shell.active_menu = -1;
+        g_shell.control_center_open = 0;
+        g_shell.context_menu_open = 0;
+        g_shell.spotlight_query[0] = 0;
+        g_shell.spotlight_len = 0;
+    }
+}
+
+void desktop_shell_toggle_context_menu(void) {
+    g_shell.context_menu_open = !g_shell.context_menu_open;
+    g_shell.ctx_x = g_shell.cursor_x;
+    g_shell.ctx_y = g_shell.cursor_y;
+    if (g_shell.context_menu_open) { g_shell.active_menu = -1; g_shell.control_center_open = 0; g_shell.spotlight_open = 0; }
+}
+
+void desktop_shell_open_context_menu(int32_t x, int32_t y) {
+    g_shell.context_menu_open = 1;
+    g_shell.ctx_x = x;
+    g_shell.ctx_y = y;
+    g_shell.active_menu = -1;
+    g_shell.control_center_open = 0;
+    g_shell.spotlight_open = 0;
+}
+
+void desktop_shell_handle_click(int32_t mx, int32_t my) {
+    uint32_t top_h = baken_ui_px(32);
+    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+
+    // 1. Central de Controle
+    if (g_shell.control_center_open) {
+        uint32_t cw = baken_ui_px(316), ch = baken_ui_px(360);
+        uint32_t cx = sw > cw + baken_ui_px(10) ? sw - cw - baken_ui_px(10) : 0;
+        uint32_t cy = baken_ui_px(38);
+        if (mx >= (int32_t)cx && mx < (int32_t)(cx + cw) && my >= (int32_t)cy && my < (int32_t)(cy + ch)) {
+            // Clicou no toggle do Modo Escuro?
+            uint32_t card3_y = cy + baken_ui_px(38) + baken_ui_px(104) + baken_ui_px(80);
+            uint32_t tile_w = (cw - baken_ui_px(24) - baken_ui_px(8)) / 2u;
+            uint32_t tile_h = baken_ui_px(38);
+            if (mx >= (int32_t)(cx + baken_ui_px(12)) && mx < (int32_t)(cx + baken_ui_px(12) + tile_w) &&
+                my >= (int32_t)card3_y && my < (int32_t)(card3_y + tile_h)) {
+                desktop_shell_toggle_theme();
+                return;
+            }
+            return;
+        }
+        g_shell.control_center_open = 0;
+    }
+
+    // 2. Spotlight Search
+    if (g_shell.spotlight_open) {
+        uint32_t sp_w = baken_ui_px(540), sp_h = baken_ui_px(280);
+        uint32_t sp_x = sw > sp_w ? (sw - sp_w) / 2u : 0;
+        uint32_t sp_y = sh > sp_h ? (sh - sp_h) / 3u : 0;
+        if (mx >= (int32_t)sp_x && mx < (int32_t)(sp_x + sp_w) && my >= (int32_t)sp_y && my < (int32_t)(sp_y + sp_h)) {
+            uint32_t res_y = sp_y + baken_ui_px(12) + baken_ui_px(56);
+            for (uint32_t i = 0; i < g_shell.spotlight_filtered_count; ++i) {
+                if (my >= (int32_t)res_y && my < (int32_t)(res_y + baken_ui_px(38))) {
+                    desktop_open_app(g_shell.spotlight_filtered_apps[i]);
+                    g_shell.spotlight_open = 0;
+                    return;
+                }
+                res_y += baken_ui_px(44);
+            }
+            return;
+        }
+        g_shell.spotlight_open = 0;
+    }
+
+    // 3. Menu de Contexto
+    if (g_shell.context_menu_open) {
+        uint32_t cx = (uint32_t)g_shell.ctx_x, cy = (uint32_t)g_shell.ctx_y;
+        uint32_t mw = baken_ui_px(200), mh = baken_ui_px(120);
+        if (mx >= (int32_t)cx && mx < (int32_t)(cx + mw) && my >= (int32_t)cy && my < (int32_t)(cy + mh)) {
+            uint32_t cur_y = cy + baken_ui_px(6);
+            for (int i = 0; i < 4; ++i) {
+                if (my >= (int32_t)cur_y && my < (int32_t)(cur_y + baken_ui_px(24))) {
+                    if (i == 0) desktop_open_app(6);
+                    else if (i == 2) desktop_shell_toggle_theme();
+                    else if (i == 3) desktop_open_app(4);
+                    g_shell.context_menu_open = 0;
+                    return;
+                }
+                cur_y += baken_ui_px(26);
+            }
+            g_shell.context_menu_open = 0;
+            return;
+        }
+        g_shell.context_menu_open = 0;
+    }
+
+    // 4. Menu dropdown da Top Bar
+    if (g_shell.active_menu >= 0 && g_shell.active_menu < 6) {
+        int m_idx = g_shell.active_menu;
+        const BakenMenu *menu = &g_menus[m_idx];
+        uint32_t menu_x = g_shell.menu_x;
+        uint32_t menu_w = g_shell.menu_w;
+        uint32_t pad_v = baken_ui_px(6);
+        uint32_t item_h = baken_ui_px(24);
+        uint32_t menu_y = top_h + baken_ui_px(2);
+        uint32_t menu_h = pad_v * 2u;
+        for (uint32_t i = 0; i < menu->item_count; ++i) {
+            menu_h += menu->items[i].is_separator ? baken_ui_px(8) : item_h;
+        }
+
+        if (mx >= (int32_t)menu_x && mx < (int32_t)(menu_x + menu_w) &&
+            my >= (int32_t)menu_y && my < (int32_t)(menu_y + menu_h)) {
+            uint32_t cur_y = menu_y + pad_v;
+            for (uint32_t i = 0; i < menu->item_count; ++i) {
+                const BakenMenuItem *item = &menu->items[i];
+                uint32_t cur_item_h = item->is_separator ? baken_ui_px(8) : item_h;
+                if (!item->is_separator && !item->is_disabled &&
+                    my >= (int32_t)cur_y && my < (int32_t)(cur_y + cur_item_h)) {
+                    if (item->action_id == 100 || item->action_id == 106) {
+                        wm_init();
+                    } else if (item->action_id == 103) {
+                        desktop_shell_toggle_media();
+                    } else if (item->action_id != 0) {
+                        desktop_open_app(item->action_id);
+                    }
+                    g_shell.active_menu = -1;
+                    return;
+                }
+                cur_y += cur_item_h;
+            }
+            g_shell.active_menu = -1;
+            return;
+        }
+
+        if (my >= 0 && my < (int32_t)top_h) {
+            for (int m = 0; m < 6; ++m) {
+                uint32_t tx, tw;
+                get_top_bar_menu_bounds(m, &tx, &tw);
+                if (mx >= (int32_t)tx && mx < (int32_t)(tx + tw)) {
+                    if (g_shell.active_menu == m) g_shell.active_menu = -1;
+                    else { g_shell.active_menu = m; g_shell.menu_x = tx; }
+                    return;
+                }
+            }
+        }
+        g_shell.active_menu = -1;
+    }
+
+    // 5. Clicou na Top Bar (Menus ou System Tray / Q-HAL Capsule)
+    if (my >= 0 && my < (int32_t)top_h) {
+        for (int m = 0; m < 6; ++m) {
+            uint32_t tx, tw;
+            get_top_bar_menu_bounds(m, &tx, &tw);
+            if (mx >= (int32_t)tx && mx < (int32_t)(tx + tw)) {
+                g_shell.active_menu = m;
+                g_shell.menu_x = tx;
+                return;
+            }
+        }
+        // Se clicou na área direita (Q-HAL / Tray / Relógio) -> abre Central de Controle
+        if (mx >= (int32_t)(sw - baken_ui_px(220))) {
+            desktop_shell_toggle_control_center();
+            return;
+        }
+    }
+
+    // 6. Janelas do Sistema (Window Manager)
+    if (wm_handle_mouse_down(mx, my)) return;
+
+    // 7. Doca flutuante
+    BakenDockLayout dock; baken_dock_layout(g_main_dock.item_count, &dock);
+    if (mx >= (int32_t)(dock.x + dock.pad) && mx <= (int32_t)(dock.x + dock.width - dock.pad) &&
+        my >= (int32_t)dock.y && my <= (int32_t)(dock.y + dock.height)) {
+        int item_idx = (mx - (int32_t)(dock.x + dock.pad)) / (int)dock.pitch;
+        if (item_idx >= 0 && item_idx < (int)g_main_dock.item_count) {
+            if (item_idx == 13 || item_idx == 14) { // Busca / Spotlight
+                desktop_shell_toggle_spotlight();
+            } else {
+                desktop_open_app((uint32_t)item_idx);
+            }
+        }
+        return;
+    }
+
+    // 8. Grade de Ícones do Desktop
+    BakenDesktopGrid grid = desktop_grid_layout();
+    if (mx >= (int32_t)grid.x && mx < (int32_t)(grid.x + grid.cell_w * grid.columns) && my >= (int32_t)grid.y && my < (int32_t)(grid.y + grid.cell_h * grid.rows)) {
+        uint32_t col = (uint32_t)(mx - (int32_t)grid.x) / grid.cell_w;
+        uint32_t row = (uint32_t)(my - (int32_t)grid.y) / grid.cell_h;
+        uint32_t idx = col * grid.rows + row;
+        if (col < grid.columns && row < grid.rows && idx < 12) desktop_open_app(g_desktop_items[idx].app_id);
+        return;
+    }
+
+    // 9. Widgets Laterais
+    BakenWidgetLayout widgets = desktop_widget_layout();
+    uint32_t widget_y = widgets.y + widgets.weather_h + widgets.gap;
+    if (mx >= (int32_t)widgets.x && mx < (int32_t)(widgets.x + widgets.width)) {
+        if (my >= (int32_t)widget_y && my < (int32_t)(widget_y + widgets.media_h)) { desktop_set_media_playing((uint8_t)!g_media_playing); return; }
+        widget_y += widgets.media_h + widgets.gap;
+        if (my >= (int32_t)widget_y && my < (int32_t)(widget_y + widgets.calendar_h)) { desktop_open_app(12); return; }
+        widget_y += widgets.calendar_h + widgets.gap;
+        if (my >= (int32_t)widget_y && my < (int32_t)(widget_y + widgets.monitor_h)) { desktop_open_app(10); return; }
+        widget_y += widgets.monitor_h + widgets.gap;
+        if (my >= (int32_t)widget_y && my < (int32_t)(widget_y + widgets.notes_h)) { desktop_open_app(6); return; }
+    }
+}
+
+/* Atalho público usado pelo laço de entrada UEFI e pelos testes QEMU.
+ * Mantém teclado, dock e ícones passando pelo mesmo lançador canônico. */
+void desktop_shell_launch_app(uint32_t app_id) {
+    desktop_open_app(app_id);
+}
+void desktop_shell_toggle_media(void) { desktop_set_media_playing((uint8_t)!g_media_playing); }
+void desktop_shell_open_menu(int32_t menu_idx) {
+    if (g_shell.active_menu == menu_idx) {
+        g_shell.active_menu = -1;
+    } else {
+        g_shell.active_menu = menu_idx;
+        uint32_t tx = 0, tw = 0;
+        get_top_bar_menu_bounds(menu_idx, &tx, &tw);
+        g_shell.menu_x = tx;
+    }
+}
+
+uint32_t desktop_shell_get_time_tick(void) {
+    return g_shell.time_tick;
+}
+
+void desktop_shell_render_terminal(uint32_t px, uint32_t py, uint32_t pw, uint32_t ph, uint8_t is_focused) {
+    baken_lua_draw_surface(px, py, pw, ph, BKN_LUA_CANVAS, BKN_LUA_REST, 10);
+    gfx_fill_rect_alpha(px + 4, py + 4, pw - 8, ph - 8, 0x000B132B, 240);
+
+    // Linhas do terminal
+    uint32_t ty = py + 12;
+    for (uint32_t l = 0; l < g_terminal.line_count && ty + 18 < py + ph - 24; ++l) {
+        uint32_t col = (g_terminal.lines[l][0] == '$') ? 0x0038BDF8 : 0x00E2E8F0;
+        gfx_draw_text_proportional(px + 14, ty, g_terminal.lines[l], col);
+        ty += 18;
+    }
+
+    // Linha de prompt ativa
+    if (ty + 18 < py + ph) {
+        gfx_draw_text_proportional(px + 14, ty, "baken:~$", 0x0010B981);
+        gfx_draw_text_proportional(px + 76, ty, g_terminal.current_cmd, 0x00F8FAFC);
+        if (is_focused && (g_shell.time_tick % 40) < 24) {
+            uint32_t tw = gfx_measure_text(g_terminal.current_cmd);
+            gfx_fill_rect_alpha(px + 78 + tw, ty + 1, 2, 14, 0x0010B981, 255);
+        }
+    }
+}
+
+uint8_t desktop_shell_is_spotlight_open(void) {
+    return g_shell.spotlight_open;
+}
+
+void desktop_shell_close_spotlight(void) {
+    g_shell.spotlight_open = 0;
+}
+
+void desktop_shell_spotlight_key(uint16_t unicode, uint16_t scan) {
+    if (unicode == 27 || scan == 0x17) {
+        g_shell.spotlight_open = 0;
+    } else if (unicode == 13 || unicode == 10) {
+        if (g_shell.spotlight_filtered_count > 0) {
+            desktop_open_app(g_shell.spotlight_filtered_apps[0]);
+        }
+        g_shell.spotlight_open = 0;
+    } else if (unicode == 8 || scan == 0x08) {
+        if (g_shell.spotlight_len > 0) {
+            g_shell.spotlight_query[--g_shell.spotlight_len] = 0;
+        }
+    } else if (unicode >= 32 && unicode <= 126 && g_shell.spotlight_len < 30) {
+        g_shell.spotlight_query[g_shell.spotlight_len++] = (char)unicode;
+        g_shell.spotlight_query[g_shell.spotlight_len] = 0;
+    }
+}
+
+void desktop_shell_terminal_key(uint16_t unicode, uint16_t scan) {
+    if (unicode == 13 || unicode == 10) {
+        terminal_execute_command();
+    } else if (unicode == 8 || scan == 0x08) {
+        if (g_terminal.cmd_len > 0) {
+            g_terminal.current_cmd[--g_terminal.cmd_len] = 0;
+        }
+    } else if (unicode >= 32 && unicode <= 126 && g_terminal.cmd_len < 40) {
+        g_terminal.current_cmd[g_terminal.cmd_len++] = (char)unicode;
+        g_terminal.current_cmd[g_terminal.cmd_len] = 0;
+    }
+}
+
+void desktop_shell_terminal_append(const char *line) {
+    terminal_append_line(line);
+}
+
+static void __attribute__((unused)) draw_network_icon(uint32_t x, uint32_t y, uint8_t active) {
+    uint32_t color = active ? 0x0010B981 : 0x0064748B;
+    for (int b = 0; b < 4; ++b) {
+        uint32_t h = (uint32_t)(4 + b * 3);
+        uint32_t bx = x + (uint32_t)(b * 4);
+        uint32_t by = y + 14 - h;
+        uint32_t bar_col = (active || b == 0) ? color : 0x00CBD5E1;
+        for (uint32_t py = 0; py < h; ++py) {
+            gfx_put_pixel_alpha(bx, by + py, bar_col, 240);
+            gfx_put_pixel_alpha(bx + 1, by + py, bar_col, 240);
+        }
+    }
+}
+
+static void __attribute__((unused)) draw_speaker_icon(uint32_t x, uint32_t y, uint8_t active) {
+    uint32_t color = active ? 0x000284C7 : 0x0094A3B8;
+    for (uint32_t py = 4; py < 12; ++py) {
+        gfx_put_pixel_alpha(x, y + py, color, 240);
+        gfx_put_pixel_alpha(x + 1, y + py, color, 240);
+    }
+    for (uint32_t py = 0; py < 16; ++py) {
+        int spread = (int)py - 8;
+        if (spread < 0) spread = -spread;
+        if (spread <= 6) {
+            uint32_t cx = x + 3 + (uint32_t)(6 - spread);
+            gfx_put_pixel_alpha(cx, y + py, color, 240);
+            gfx_put_pixel_alpha(cx + 1, y + py, color, 240);
+        }
+    }
+    if (active) {
+        gfx_draw_circle_alpha(x + 11, y + 8, 4, color, 200);
+        gfx_draw_circle_alpha(x + 11, y + 8, 2, 0x00FFFFFF, 255);
+    }
+}
+
+void render_top_bar(void) {
+    uint32_t sw = g_shell.screen_w;
+    uint32_t h = baken_ui_px(32);
+    uint32_t text_y = (h > baken_ui_px(14)) ? (h - baken_ui_px(14)) / 2u : 0u;
+    uint32_t icon_y = (h > baken_ui_px(18)) ? (h - baken_ui_px(18)) / 2u : 0u;
+    uint32_t sys_icon = baken_ui_px(18);
+
+    // Fundo Glassmorphism contínuo
+    baken_lua_draw_surface(0, 0, sw, h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 0);
+
+    int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
+
+    // 1. Logo Baken OS / Marca do Sistema (Menu 0)
+    uint32_t logo_x = baken_ui_px(8), logo_w = baken_ui_px(96);
+    int logo_active = (g_shell.active_menu == 0);
+    int logo_hover = (mx >= (int32_t)logo_x && mx < (int32_t)(logo_x + logo_w) && my >= 0 && my < (int32_t)h);
+    if (logo_active) {
+        gfx_draw_glass_rect_material(logo_x, baken_ui_px(4), logo_w, h - baken_ui_px(8), 0x000284C7, 210, 0x0038BDF8, baken_ui_px(6));
+    } else if (logo_hover) {
+        gfx_draw_glass_rect_material(logo_x, baken_ui_px(4), logo_w, h - baken_ui_px(8), 0x00FFFFFF, 140, 0x00E2E8F0, baken_ui_px(6));
+    }
+
+    uint32_t logo_cx = baken_ui_px(18), logo_cy = h / 2u;
+    gfx_draw_circle_alpha(logo_cx, logo_cy, baken_ui_px(8), logo_active ? 0x00FFFFFF : 0x000284C7, 240);
+    gfx_draw_circle_alpha(logo_cx, logo_cy, baken_ui_px(5), 0x0038BDF8, 255);
+    gfx_draw_circle_alpha(logo_cx, logo_cy, baken_ui_px(2), 0x00FFFFFF, 255);
+
+    gfx_draw_text_role(baken_ui_px(32), text_y, "Baken OS", logo_active ? 0x00FFFFFF : 0x000F172A, BKN_TYPE_LABEL);
+
+    // 2. Menus discretos da barra superior com suporte a hover e estado ativo
+    static const char *k_menus[] = {"Arquivo", "Editar", "Exibir", "Janela", "Ajuda"};
+    uint32_t menu_x = baken_ui_px(112);
+    for (int m = 0; m < 5; ++m) {
+        const char *item = k_menus[m];
+        uint32_t item_w = gfx_measure_text(item);
+        if (menu_x + item_w + baken_ui_px(280) > sw) break;
+        int m_menu_idx = m + 1;
+        int is_active = (g_shell.active_menu == m_menu_idx);
+        int is_hover = (mx >= (int32_t)(menu_x - baken_ui_px(6)) && mx < (int32_t)(menu_x + item_w + baken_ui_px(6)) &&
+                        my >= 0 && my < (int32_t)h);
+
+        if (is_active) {
+            gfx_draw_glass_rect_material(menu_x - baken_ui_px(6), baken_ui_px(4),
+                                         item_w + baken_ui_px(12), h - baken_ui_px(8),
+                                         0x000284C7, 210, 0x0038BDF8, baken_ui_px(6));
+        } else if (is_hover) {
+            gfx_draw_glass_rect_material(menu_x - baken_ui_px(6), baken_ui_px(4),
+                                         item_w + baken_ui_px(12), h - baken_ui_px(8),
+                                         0x00FFFFFF, 140, 0x00E2E8F0, baken_ui_px(6));
+        }
+        gfx_draw_text_proportional(menu_x, text_y, item, is_active ? 0x00FFFFFF : 0x00334155);
+        menu_x += item_w + baken_ui_px(18);
+    }
+
+    // 3. System Tray (Lado Direito)
+    // Relógio
+    RtcTime rt = rtc_read_time();
+    char clock_str[24];
+    if (rt.valid) {
+        clock_str[0] = (char)('0' + (rt.hour / 10));
+        clock_str[1] = (char)('0' + (rt.hour % 10));
+        clock_str[2] = ':';
+        clock_str[3] = (char)('0' + (rt.min / 10));
+        clock_str[4] = (char)('0' + (rt.min % 10));
+        clock_str[5] = ':';
+        clock_str[6] = (char)('0' + (rt.sec / 10));
+        clock_str[7] = (char)('0' + (rt.sec % 10));
+        clock_str[8] = 0;
+    } else {
+        const char *nl = "12:00:00";
+        for (int i = 0; nl[i]; ++i) clock_str[i] = nl[i];
+        clock_str[8] = 0;
+    }
+    uint32_t clock_w = gfx_measure_text(clock_str);
+    uint32_t clock_x = sw > clock_w + baken_ui_px(14) ? sw - baken_ui_px(14) - clock_w : 0;
+    gfx_draw_text_proportional(clock_x, text_y, clock_str, 0x000F172A);
+
+    // Ícones do sistema da direita para a esquerda: Volume -> Bateria -> Wi-Fi -> Pílula Q-HAL
+    uint32_t tray_x = clock_x > baken_ui_px(14) ? clock_x - baken_ui_px(14) : 0;
+
+    // Volume / Áudio HDA
+    if (tray_x > sys_icon + baken_ui_px(6)) {
+        tray_x -= sys_icon + baken_ui_px(6);
+        gfx_draw_material_icon_state(tray_x, icon_y, sys_icon, MATERIAL_VOLUME_UP,
+                                     g_pci_status.has_hda ? 0x000284C7 : 0x0094A3B8,
+                                     g_pci_status.has_hda ? BKN_ICON_REST : BKN_ICON_DISABLED);
+    }
+
+    // Bateria
+    if (tray_x > sys_icon + baken_ui_px(6)) {
+        tray_x -= sys_icon + baken_ui_px(6);
+        gfx_draw_material_icon_state(tray_x, icon_y, sys_icon, MATERIAL_BATTERY_HALF,
+                                     0x00334155, BKN_ICON_REST);
+    }
+
+    // Porcentagem Bateria ("86%")
+    uint32_t bat_w = gfx_measure_text("86%");
+    if (sw > baken_ui_px(800) && tray_x > bat_w + baken_ui_px(6)) {
+        tray_x -= bat_w + baken_ui_px(6);
+        gfx_draw_text_proportional(tray_x, text_y, "86%", 0x00475569);
+    }
+
+    // Wi-Fi / Rede PCI
+    if (tray_x > sys_icon + baken_ui_px(10)) {
+        tray_x -= sys_icon + baken_ui_px(10);
+        gfx_draw_material_icon_state(tray_x, icon_y, sys_icon, MATERIAL_WIFI,
+                                     g_pci_status.has_nic ? 0x000284C7 : 0x0064748B,
+                                     g_pci_status.has_nic ? BKN_ICON_REST : BKN_ICON_DISABLED);
+    }
+
+    // Pílula Q-HAL AI Capsule
+    uint32_t qhal_w = baken_ui_px(82), qhal_h = baken_ui_px(22);
+    if (sw > baken_ui_px(760) && tray_x > qhal_w + baken_ui_px(12)) {
+        tray_x -= qhal_w + baken_ui_px(12);
+        uint32_t qy = (h > qhal_h) ? (h - qhal_h) / 2u : 0u;
+        gfx_draw_glass_rect_material(tray_x, qy, qhal_w, qhal_h, 0x00FFFFFF, 200, 0x00BAE6FD, baken_ui_px(11));
+        // Indicador de IA Online (ponto ciano)
+        gfx_draw_circle_alpha(tray_x + baken_ui_px(10), h / 2u, baken_ui_px(3), 0x0000E5FF, 255);
+        gfx_draw_text_proportional(tray_x + baken_ui_px(18), text_y, "Q-HAL", 0x000284C7);
+    }
+}
+
+static void render_desktop_grid(void) {
+    BakenDesktopGrid grid = desktop_grid_layout();
+    for (int i = 0; i < 12; ++i) {
+        uint32_t col = (uint32_t)i / grid.rows;
+        uint32_t row = (uint32_t)i % grid.rows;
+        if (col >= grid.columns) break;
+        uint32_t ix = grid.x + col * grid.cell_w;
+        uint32_t iy = grid.y + row * grid.cell_h;
+        gfx_draw_app_icon_hd(ix + (grid.cell_w - grid.icon) / 2u, iy, grid.icon, g_desktop_items[i].app_id);
+        uint32_t label_w = gfx_measure_text(g_desktop_items[i].label);
+        uint32_t label_x = ix + (grid.cell_w > label_w ? (grid.cell_w - label_w) / 2u : 4u);
+        gfx_draw_text_ellipsis(label_x, iy + grid.icon + baken_ui_px(8), grid.cell_w > baken_ui_px(8) ? grid.cell_w - baken_ui_px(8) : 0, g_desktop_items[i].label, 0x00FFFFFF);
+    }
+}
+
+static void widget_draw_centered_text(uint32_t x, uint32_t width, uint32_t y,
+                                      const char *text, uint32_t color) {
+    uint32_t tw = gfx_measure_text(text);
+    uint32_t tx = x + (width > tw ? (width - tw) / 2u : 0u);
+    gfx_draw_text_proportional(tx, y, text, color);
+}
+
+static void render_widgets_stack(void) {
+    uint32_t sw = g_shell.screen_w;
+    if (sw < baken_ui_px(800)) return;
+#define U(v) baken_ui_px((v))
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+    uint32_t title_color = is_dark ? 0x00F8FAFC : 0x000F172A;
+    uint32_t sub_color = is_dark ? 0x0094A3B8 : 0x0064748B;
+    uint32_t text_color = is_dark ? 0x00E2E8F0 : 0x001E293B;
+
+    BakenWidgetLayout layout = desktop_widget_layout();
+    uint32_t ww = layout.width, gap = layout.gap, wx = layout.x, y = layout.y;
+    uint32_t weather_h = layout.weather_h, media_h = layout.media_h, calendar_h = layout.calendar_h;
+    uint32_t monitor_h = layout.monitor_h, notes_h = layout.notes_h;
+
+    /* 1. Clima (Weather) */
+    if (layout.visible_mask & BKN_WIDGET_WEATHER) {
+        baken_lua_draw_surface(wx, y, ww, weather_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
+        gfx_draw_text_role(wx + U(16), y + U(12), "Teresina, Piaui", title_color, BKN_TYPE_TITLE);
+
+        // Sol com halo quente e ícone nítido
+        gfx_draw_circle_alpha(wx + U(36), y + U(56), U(18), 0x00FBBF24, 35);
+        gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x00F59E0B, 255);
+
+        // Temperatura e rótulo
+        uint32_t temp_x = wx + U(68);
+        gfx_draw_text_role(temp_x, y + U(36), "32", title_color, BKN_TYPE_DISPLAY);
+        gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(3), title_color, 255);
+        gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(1), is_dark ? 0x000F172A : 0x00FFFFFF, 255);
+        gfx_draw_text_role(temp_x + U(52), y + U(44), "Ensolarado", sub_color, BKN_TYPE_LABEL);
+
+        // Divisor suave e rodapé
+        gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+        gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Vento 14 km/h  .  Umidade 62%", sub_color);
+        y += weather_h + gap;
+    }
+
+    /* 2. Mídia (Player) */
+    if (layout.visible_mask & BKN_WIDGET_MEDIA) {
+        baken_lua_draw_surface(wx, y, ww, media_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
+        uint32_t album = U(52);
+        gfx_draw_app_icon_hd(wx + U(14), y + (media_h - album) / 2u, album, 5);
+        uint32_t content_x = wx + U(76), content_w = ww > U(90) ? ww - U(90) : 0;
+        gfx_draw_text_ellipsis(content_x, y + U(14), content_w, "Sovereign Symphonia", title_color);
+        gfx_draw_text_ellipsis(content_x, y + U(34), content_w,
+            g_media_playing ? "Tocando agora" : "Pausado", g_media_playing ? 0x00059669 : sub_color);
+
+        uint32_t control_y = y + media_h - U(34);
+        uint32_t control_size = U(20), play_size = U(26);
+        uint32_t back_x = content_x, play_x = content_x + U(32), next_x = content_x + U(68);
+        gfx_draw_motion_icon(back_x, control_y + U(3), control_size, BAKEN_MOTION_SKIP_BACK, is_dark ? 0x0094A3B8 : 0x00334155, 230, 0);
+
+        // Botão circular de play/pause
+        gfx_draw_circle_alpha(play_x + play_size / 2u, control_y + play_size / 2u,
+                              play_size / 2u + U(2), is_dark ? 0x00334155 : 0x00E2E8F0, 200);
+        gfx_draw_motion_icon(play_x, control_y, play_size, BAKEN_MOTION_PLAY,
+                             0x000284C7, (uint8_t)(255u - g_media_transition), 0);
+        gfx_draw_motion_icon(play_x, control_y, play_size, BAKEN_MOTION_PAUSE,
+                             0x000284C7, (uint8_t)g_media_transition, 0);
+        gfx_draw_motion_icon(next_x, control_y + U(3), control_size, BAKEN_MOTION_SKIP_BACK, is_dark ? 0x0094A3B8 : 0x00334155, 230, 1);
+        y += media_h + gap;
+    }
+
+    /* 3. Calendário */
+    if (layout.visible_mask & BKN_WIDGET_CALENDAR) {
+        baken_lua_draw_surface(wx, y, ww, calendar_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
+        gfx_draw_text_role(wx + U(16), y + U(10), "Agosto 2026", title_color, BKN_TYPE_TITLE);
+        static const char *const weekdays[7] = {"D","S","T","Q","Q","S","S"};
+        static const char *const days[35] = {
+            "","","","","","","1", "2","3","4","5","6","7","8",
+            "9","10","11","12","13","14","15", "16","17","18","19","20","21","22",
+            "23","24","25","26","27","28","29"
+        };
+        uint32_t cal_x = wx + U(12), cal_w = ww - U(24), col_w = cal_w / 7u;
+        for (uint32_t col = 0; col < 7u; ++col)
+            widget_draw_centered_text(cal_x + col * col_w, col_w, y + U(31), weekdays[col], sub_color);
+        for (uint32_t index = 0; index < 35u; ++index) {
+            uint32_t row = index / 7u, col = index % 7u;
+            uint32_t ty = y + U(49) + row * U(15);
+            if (index == 33u) {
+                // Dia ativo (28) destacado em azul suave
+                gfx_draw_circle_alpha(cal_x + col * col_w + col_w / 2u, ty + U(7), U(8), 0x000284C7, 240);
+            }
+            widget_draw_centered_text(cal_x + col * col_w, col_w, ty, days[index], index == 33u ? 0x00FFFFFF : text_color);
+        }
+        y += calendar_h + gap;
+    }
+
+    /* 4. Hardware & Sistema */
+    if (layout.visible_mask & BKN_WIDGET_MONITOR) {
+        baken_lua_draw_surface(wx, y, ww, monitor_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
+        gfx_draw_text_role(wx + U(16), y + U(10), "Hardware & Sistema", title_color, BKN_TYPE_TITLE);
+        gfx_draw_hline(wx + U(16), y + U(28), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+
+        // Item 1: Rede
+        gfx_draw_circle_alpha(wx + U(22), y + U(41), U(3), g_pci_status.has_nic ? 0x0010B981 : 0x00F59E0B, 255);
+        gfx_draw_text_proportional(wx + U(32), y + U(34), g_pci_status.has_nic ? "Rede PCI disponivel" : "Rede PCI ausente", text_color);
+
+        // Item 2: Áudio
+        gfx_draw_circle_alpha(wx + U(22), y + U(61), U(3), g_pci_status.has_hda ? 0x0010B981 : sub_color, 255);
+        gfx_draw_text_proportional(wx + U(32), y + U(54), g_pci_status.has_hda ? "Audio HDA disponivel" : "Audio HDA ausente", sub_color);
+
+        // Item 3: BakenFS
+        char fs_status[24];
+        uint32_t fs_count = cq_fs_entry_count();
+        fs_status[0]='B'; fs_status[1]='a'; fs_status[2]='k'; fs_status[3]='e'; fs_status[4]='n'; fs_status[5]='F'; fs_status[6]='S'; fs_status[7]=':'; fs_status[8]=' ';
+        fs_status[9]=(char)('0'+(fs_count % 10)); fs_status[10]=' '; fs_status[11]='i'; fs_status[12]='t'; fs_status[13]='e'; fs_status[14]='n'; fs_status[15]='s'; fs_status[16]=0;
+        gfx_draw_circle_alpha(wx + U(22), y + U(81), U(3), 0x0010B981, 255);
+        gfx_draw_text_proportional(wx + U(32), y + U(74), fs_status, text_color);
+        y += monitor_h + gap;
+    }
+
+    /* 5. Notas Rápidas */
+    if (layout.visible_mask & BKN_WIDGET_NOTES) {
+        baken_lua_draw_surface(wx, y, ww, notes_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
+        gfx_draw_text_role(wx + U(16), y + U(10), "Notas Rapidas", title_color, BKN_TYPE_TITLE);
+        gfx_draw_hline(wx + U(16), y + U(28), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+
+        gfx_draw_circle_alpha(wx + U(22), y + U(41), U(2), 0x000284C7, 255);
+        gfx_draw_text_proportional(wx + U(30), y + U(34), "Interface Cq ativa", text_color);
+
+        gfx_draw_circle_alpha(wx + U(22), y + U(60), U(2), 0x000284C7, 255);
+        gfx_draw_text_proportional(wx + U(30), y + U(53), "Dados no BakenFS", text_color);
+
+        gfx_draw_circle_alpha(wx + U(22), y + U(79), U(2), 0x000284C7, 255);
+        gfx_draw_text_proportional(wx + U(30), y + U(72), "Clique para abrir Notas", sub_color);
+    }
+#undef U
+}
+
+void render_cursor(void) {
+    int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
+    uint8_t ctype = wm_get_cursor_type(mx, my);
+
+    static const uint8_t mask_arrow[16] = {
+        0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC, 0xFE, 0xFF,
+        0xF8, 0xD8, 0x8C, 0x0C, 0x06, 0x06, 0x00, 0x00
+    };
+    static const uint8_t mask_diag_nwse[16] = {
+        0xE0, 0xF0, 0xF8, 0xDC, 0xCE, 0x07, 0x03, 0x03,
+        0xC0, 0xE0, 0x70, 0x38, 0x1C, 0x0E, 0x07, 0x00
+    };
+    static const uint8_t mask_diag_nesw[16] = {
+        0x07, 0x0F, 0x1F, 0x3B, 0x73, 0xE0, 0xC0, 0xC0,
+        0x03, 0x07, 0x0E, 0x1C, 0x38, 0x70, 0xE0, 0x00
+    };
+    static const uint8_t mask_horiz[16] = {
+        0x00, 0x00, 0x10, 0x38, 0x7C, 0xFE, 0x7C, 0x38,
+        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    };
+    static const uint8_t mask_vert[16] = {
+        0x10, 0x38, 0x7C, 0xFE, 0x10, 0x10, 0x10, 0x10,
+        0xFE, 0x7C, 0x38, 0x10, 0x00, 0x00, 0x00, 0x00
+    };
+
+    const uint8_t *mask = mask_arrow;
+    if (ctype == 1) mask = mask_diag_nwse;
+    else if (ctype == 2) mask = mask_diag_nesw;
+    else if (ctype == 3) mask = mask_horiz;
+    else if (ctype == 4) mask = mask_vert;
+
+    for (int y = 0; y < 16; ++y) {
+        uint8_t row = mask[y];
+        for (int x = 0; x < 8; ++x) {
+            if ((row >> (7 - x)) & 1) {
+                gfx_put_pixel_alpha((uint32_t)(mx + x + 2), (uint32_t)(my + y + 2), 0x00000000, 90);
+                if (x == 0 || y == 0 || x == 7 || ((row >> (6 - x)) & 1) == 0 || y == 15) {
+                    gfx_put_pixel_alpha((uint32_t)(mx + x), (uint32_t)(my + y), 0x00FFFFFF, 255);
+                } else {
+                    gfx_put_pixel_alpha((uint32_t)(mx + x), (uint32_t)(my + y), 0x000F172A, 255);
+                }
+            }
+        }
+    }
+}
+
+void desktop_shell_update(float dt) {
+    dock_update(&g_main_dock, dt, g_shell.cursor_x, g_shell.cursor_y);
+    wm_handle_mouse_move(g_shell.cursor_x, g_shell.cursor_y);
+    if (g_shell.active_menu >= 0 && g_shell.cursor_y >= 0 && g_shell.cursor_y < (int32_t)baken_ui_px(32)) {
+        for (int m = 0; m < 6; ++m) {
+            uint32_t tx, tw;
+            get_top_bar_menu_bounds(m, &tx, &tw);
+            if (g_shell.cursor_x >= (int32_t)tx && g_shell.cursor_x < (int32_t)(tx + tw)) {
+                if (g_shell.active_menu != m) {
+                    g_shell.active_menu = m;
+                    g_shell.menu_x = tx;
+                }
+                break;
+            }
+        }
+    }
+}
+
+void desktop_shell_render_frame(void) {
+    g_shell.time_tick = (g_shell.time_tick + 1) % 3600;
+    gfx_set_mesh_time_tick(g_shell.time_tick);
+    desktop_shell_update(0.016f);
+    gfx_draw_mesh_wallpaper();
+    render_desktop_grid();
+    render_widgets_stack();
+    render_top_bar();
+    wm_render_windows();
+    dock_draw(&g_main_dock);
+    render_dropdown_menu();
+    render_control_center();
+    render_spotlight_overlay();
+    render_desktop_context_menu();
+    render_cursor();
+    gfx_swap_buffers();
+}
+""".strip().splitlines())
+    elif ast.name == "kernel::desktop_compositor":
+        lines.extend("""
+extern void desktop_shell_init(uint32_t screen_w, uint32_t screen_h);
+extern void desktop_shell_render_frame(void);
+
+static uint8_t g_compositor_ready = 0;
+
+void desktop_compositor_init(uint32_t screen_w, uint32_t screen_h) {
+    if (g_compositor_ready) return;
+    desktop_shell_init(screen_w, screen_h);
+    g_compositor_ready = 1;
+}
+
+void desktop_compositor_render_frame(void) {
+    if (!g_compositor_ready) return;
+    desktop_shell_render_frame();
+}
+""".strip().splitlines())
+    elif ast.name == "kernel::main":
+        lines.extend("""
+#include "baken_boot_info.h"
+
+typedef struct {
+    uint32_t Data1; uint16_t Data2; uint16_t Data3; uint8_t Data4[8];
+} EFI_GUID;
+
+typedef struct {
+    int32_t RelativeMovementX; int32_t RelativeMovementY; int32_t RelativeMovementZ;
+    uint8_t LeftButton; uint8_t RightButton;
+} EFI_SIMPLE_POINTER_STATE;
+
+typedef struct _EFI_SIMPLE_POINTER_PROTOCOL {
+    uint64_t (*Reset)(struct _EFI_SIMPLE_POINTER_PROTOCOL *This, uint8_t ExtendedVerification);
+    uint64_t (*GetState)(struct _EFI_SIMPLE_POINTER_PROTOCOL *This, EFI_SIMPLE_POINTER_STATE *State);
+    void *WaitForInput; void *Mode;
+} EFI_SIMPLE_POINTER_PROTOCOL;
+
+typedef struct { uint16_t ScanCode; uint16_t UnicodeChar; } EFI_INPUT_KEY;
+typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+    uint64_t (*Reset)(struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, uint8_t ExtendedVerification);
+    uint64_t (*ReadKeyStroke)(struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
+    void *WaitForKey;
+} EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+
+extern void desktop_shell_toggle_theme(void);
+extern uint8_t desktop_shell_is_dark_theme(void);
+
+typedef struct { uint32_t MediaId; uint8_t RemovableMedia,MediaPresent,LogicalPartition,ReadOnly,WriteCaching; uint32_t BlockSize,IoAlign; uint64_t LastBlock,LowestAlignedLba; uint32_t LogicalBlocksPerPhysicalBlock,OptimalTransferLengthGranularity; } EFI_BLOCK_IO_MEDIA;
+typedef struct _EFI_BLOCK_IO_PROTOCOL { uint64_t Revision; EFI_BLOCK_IO_MEDIA *Media; uint64_t (*Reset)(void*,uint8_t); uint64_t (*ReadBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*WriteBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*FlushBlocks)(void*); } EFI_BLOCK_IO_PROTOCOL;
+typedef struct { char name[32]; uint32_t lba, size, kind; } CqFsEntry;
+typedef struct { uint64_t magic; uint32_t version, entry_count; CqFsEntry entries[12]; uint8_t reserved[20]; } CqFsHeader;
+static EFI_BLOCK_IO_PROTOCOL *cq_fs_io;
+static CqFsHeader cq_fs_header;
+static uint8_t cq_fs_mounted;
+
+static void cq_fs_init_defaults(void) {
+    if (cq_fs_header.entry_count == 0) {
+        cq_fs_header.magic = UINT64_C(0x3153464E454B4142);
+        cq_fs_header.version = 1;
+        cq_fs_header.entry_count = 3;
+
+        const char *e0 = "/config/theme.cfg";
+        for (int i = 0; i < 31 && e0[i]; ++i) cq_fs_header.entries[0].name[i] = e0[i];
+        cq_fs_header.entries[0].kind = 3; cq_fs_header.entries[0].size = 512; cq_fs_header.entries[0].lba = 86017;
+
+        const char *e1 = "/home/notas.txt";
+        for (int i = 0; i < 31 && e1[i]; ++i) cq_fs_header.entries[1].name[i] = e1[i];
+        cq_fs_header.entries[1].kind = 2; cq_fs_header.entries[1].size = 64; cq_fs_header.entries[1].lba = 86018;
+
+        const char *e2 = "/home/documentos";
+        for (int i = 0; i < 31 && e2[i]; ++i) cq_fs_header.entries[2].name[i] = e2[i];
+        cq_fs_header.entries[2].kind = 1; cq_fs_header.entries[2].size = 0; cq_fs_header.entries[2].lba = 0;
+    }
+}
+
+static uint8_t cq_fs_mount(void) {
+    if (!cq_fs_io || !cq_fs_io->Media) {
+        cq_fs_init_defaults();
+        cq_fs_mounted = 1;
+        return 1;
+    }
+    if (cq_fs_io->ReadBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header) == 0 &&
+        cq_fs_header.magic == UINT64_C(0x3153464E454B4142) &&
+        cq_fs_header.version == 1 &&
+        cq_fs_header.entry_count <= 12 &&
+        cq_fs_header.entry_count > 0) {
+        cq_fs_mounted = 1;
+        return 1;
+    }
+    cq_fs_init_defaults();
+    cq_fs_mounted = 1;
+    return 1;
+}
+
+uint32_t cq_fs_entry_count(void) { return cq_fs_mount() ? cq_fs_header.entry_count : 0; }
+
+const char *cq_fs_entry_name(uint32_t index) {
+    if (!cq_fs_mounted) cq_fs_mount();
+    return (cq_fs_mounted && index < cq_fs_header.entry_count) ? cq_fs_header.entries[index].name : "(vazio)";
+}
+
+uint32_t cq_fs_entry_kind(uint32_t index) {
+    if (!cq_fs_mounted) cq_fs_mount();
+    return (cq_fs_mounted && index < cq_fs_header.entry_count) ? cq_fs_header.entries[index].kind : 2;
+}
+
+uint32_t cq_fs_entry_size(uint32_t index) {
+    if (!cq_fs_mounted) cq_fs_mount();
+    return (cq_fs_mounted && index < cq_fs_header.entry_count) ? cq_fs_header.entries[index].size : 0;
+}
+
+static int cq_str_eq(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        if (*a != *b) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
+int cq_fs_find(const char *name) {
+    if (!cq_fs_mount()) return -1;
+    for (uint32_t i = 0; i < cq_fs_header.entry_count; ++i) {
+        if (cq_str_eq(cq_fs_header.entries[i].name, name)) return (int)i;
+    }
+    return -1;
+}
+
+int cq_fs_add(const char *name, uint32_t kind, uint32_t size, uint32_t lba) {
+    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly || cq_fs_header.entry_count >= 12) return 0;
+    int existing = cq_fs_find(name);
+    if (existing >= 0) {
+        cq_fs_header.entries[existing].size = size;
+        cq_fs_header.entries[existing].kind = kind;
+        if (lba) cq_fs_header.entries[existing].lba = lba;
+    } else {
+        CqFsEntry *e = &cq_fs_header.entries[cq_fs_header.entry_count++];
+        for (uint32_t i = 0; i < sizeof(*e); ++i) ((uint8_t*)e)[i] = 0;
+        for (uint32_t i = 0; i < 31 && name[i]; ++i) e->name[i] = name[i];
+        e->kind = kind;
+        e->lba = lba ? lba : (86020 + cq_fs_header.entry_count);
+        e->size = size;
+    }
+    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header)) return 0;
+    return !cq_fs_io->FlushBlocks || cq_fs_io->FlushBlocks(cq_fs_io) == 0;
+}
+
+int cq_fs_remove(const char *name) {
+    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly) return 0;
+    int idx = cq_fs_find(name);
+    if (idx < 0) return 0;
+    for (uint32_t i = (uint32_t)idx; i + 1 < cq_fs_header.entry_count; ++i) {
+        cq_fs_header.entries[i] = cq_fs_header.entries[i + 1];
+    }
+    cq_fs_header.entry_count--;
+    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header)) return 0;
+    return !cq_fs_io->FlushBlocks || cq_fs_io->FlushBlocks(cq_fs_io) == 0;
+}
+
+typedef struct { uint64_t magic; uint32_t version, size; char text[496]; } CqTextFile;
+static char cq_note_text[128] = "Notas";
+static uint32_t cq_note_len = 5;
+static uint8_t cq_note_editing = 0;
+const char *cq_notes_get_text(void){ return cq_note_text; }
+
+int cq_fs_write_file(const char *name, const char *text, uint32_t len) {
+    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly) return 0;
+    int idx = cq_fs_find(name);
+    uint32_t lba = 0;
+    if (idx >= 0) {
+        lba = cq_fs_header.entries[idx].lba;
+    } else {
+        lba = 86020 + cq_fs_header.entry_count;
+        if (!cq_fs_add(name, 2, len, lba)) return 0;
+        idx = cq_fs_find(name);
+    }
+    CqTextFile file;
+    for (uint32_t i = 0; i < sizeof(file); ++i) ((uint8_t*)&file)[i] = 0;
+    file.magic = UINT64_C(0x3158544E454B4142);
+    file.version = 1;
+    file.size = len > 490 ? 490 : len;
+    for (uint32_t i = 0; i < file.size; ++i) file.text[i] = text[i];
+    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, lba, 512, &file)) return 0;
+    if (idx >= 0) {
+        cq_fs_header.entries[idx].size = file.size;
+        cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header);
+    }
+    return !cq_fs_io->FlushBlocks || cq_fs_io->FlushBlocks(cq_fs_io) == 0;
+}
+
+int cq_fs_read_file(const char *name, char *out_text, uint32_t max_len) {
+    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || !out_text || max_len == 0) return 0;
+    int idx = cq_fs_find(name);
+    uint32_t lba = (idx >= 0) ? cq_fs_header.entries[idx].lba : (cq_str_eq(name, "/home/notas.txt") ? 86018 : 0);
+    if (!lba) return 0;
+    CqTextFile file;
+    if (cq_fs_io->ReadBlocks(cq_fs_io, cq_fs_io->Media->MediaId, lba, 512, &file)) return 0;
+    if (file.magic != UINT64_C(0x31544E4E454B4142) && file.magic != UINT64_C(0x3158544E454B4142)) return 0;
+    uint32_t n = 0;
+    while (n < max_len - 1 && n < file.size && file.text[n]) {
+        out_text[n] = file.text[n];
+        n++;
+    }
+    out_text[n] = 0;
+    return 1;
+}
+
+static void cq_notes_load(void){
+    char buf[128];
+    if (cq_fs_read_file("/home/notas.txt", buf, sizeof(buf))) {
+        uint32_t n = 0;
+        while (n < 127 && buf[n]) { cq_note_text[n] = buf[n]; ++n; }
+        cq_note_text[n] = 0;
+        cq_note_len = n;
+    }
+}
+static void cq_notes_append(uint16_t ch){ if(ch>=32 && ch<127 && cq_note_len<127){cq_note_text[cq_note_len++]=(char)ch; cq_note_text[cq_note_len]=0;} }
+static void cq_notes_save(void){
+    cq_fs_write_file("/home/notas.txt", cq_note_text, cq_note_len);
+}
+
+typedef struct {
+    uint64_t magic;
+    uint32_t version;
+    uint8_t dark_theme;
+    uint8_t reserved[503];
+} CqDesktopConfig;
+
+static void desktop_config_load(void) {
+    CqDesktopConfig cfg;
+    if (!cq_fs_io || !cq_fs_io->Media || cq_fs_io->ReadBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86017, 512, &cfg)) return;
+    if (cfg.magic != UINT64_C(0x314643444E4B4142)) return;
+    if (cfg.dark_theme && !desktop_shell_is_dark_theme()) {
+        desktop_shell_toggle_theme();
+    } else if (!cfg.dark_theme && desktop_shell_is_dark_theme()) {
+        desktop_shell_toggle_theme();
+    }
+}
+
+void desktop_config_save(void) {
+    if (!cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly) return;
+    CqDesktopConfig cfg;
+    for (uint32_t i = 0; i < sizeof(cfg); ++i) ((uint8_t*)&cfg)[i] = 0;
+    cfg.magic = UINT64_C(0x314643444E4B4142);
+    cfg.version = 1;
+    cfg.dark_theme = desktop_shell_is_dark_theme();
+    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86017, 512, &cfg) == 0) {
+        if (cq_fs_io->FlushBlocks) cq_fs_io->FlushBlocks(cq_fs_io);
+        cq_fs_add("/config/theme.cfg", 3, 512, 86017);
+    }
+}
+
+typedef struct {
+    uint64_t CurrentX; uint64_t CurrentY; uint64_t CurrentZ; uint32_t ActiveButtons;
+} EFI_ABSOLUTE_POINTER_STATE;
+
+typedef struct {
+    uint64_t AbsoluteMinX, AbsoluteMinY, AbsoluteMinZ;
+    uint64_t AbsoluteMaxX, AbsoluteMaxY, AbsoluteMaxZ;
+    uint32_t Attributes;
+} EFI_ABSOLUTE_POINTER_MODE;
+
+typedef struct _EFI_ABSOLUTE_POINTER_PROTOCOL {
+    uint64_t (*Reset)(struct _EFI_ABSOLUTE_POINTER_PROTOCOL *This, uint8_t ExtendedVerification);
+    uint64_t (*GetState)(struct _EFI_ABSOLUTE_POINTER_PROTOCOL *This, EFI_ABSOLUTE_POINTER_STATE *State);
+    void *WaitForInput; EFI_ABSOLUTE_POINTER_MODE *Mode;
+} EFI_ABSOLUTE_POINTER_PROTOCOL;
+
+static const EFI_GUID ABSOLUTE_POINTER_GUID = {
+    0x8D59D32B, 0xC655, 0x4AE9, {0x9B, 0x15, 0xF2, 0x59, 0x04, 0x99, 0x2A, 0x43}
+};
+static const EFI_GUID SIMPLE_POINTER_GUID = {
+    0x31878C87, 0x0B75, 0x11D5, {0x9A, 0x4F, 0x00, 0x90, 0x27, 0x3F, 0xC1, 0x4D}
+};
+
+typedef struct {
+    uint8_t Hdr[24];
+    void *RaiseTPL, *RestoreTPL, *AllocatePages, *FreePages, *GetMemoryMap, *AllocatePool, *FreePool;
+    void *CreateEvent, *SetTimer, *WaitForEvent, *SignalEvent, *CloseEvent, *CheckEvent;
+    void *InstallProtocolInterface, *ReinstallProtocolInterface, *UninstallProtocolInterface, *HandleProtocol;
+    void *Reserved, *RegisterProtocolNotify, *LocateHandle, *LocateDevicePath, *InstallConfigurationTable;
+    void *LoadImage, *StartImage, *Exit, *UnloadImage, *ExitBootServices, *GetNextMonotonicCount, *Stall;
+    void *SetWatchdogTimer, *ConnectController, *DisconnectController, *OpenProtocol, *CloseProtocol;
+    void *OpenProtocolInformation, *ProtocolsPerHandle, *LocateHandleBuffer;
+    uint64_t (*LocateProtocol)(const EFI_GUID *Protocol, void *Registration, void **Interface);
+} EFI_BOOT_SERVICES;
+
+typedef struct {
+    uint8_t Hdr[24];
+    void *FirmwareVendor; uint32_t FirmwareRevision;
+    void *ConsoleInHandle; void *ConIn;
+    void *ConsoleOutHandle; void *ConOut;
+    void *StandardErrorHandle; void *StdErr;
+    void *RuntimeServices; EFI_BOOT_SERVICES *BootServices;
+} EFI_SYSTEM_TABLE;
+
+extern void gfx_init(uint32_t *base, uint32_t width, uint32_t height, uint32_t pitch);
+extern void desktop_compositor_init(uint32_t screen_w, uint32_t screen_h);
+extern void desktop_compositor_render_frame(void);
+extern void desktop_shell_set_cursor(int32_t x, int32_t y);
+extern void desktop_shell_handle_click(int32_t mx, int32_t my);
+extern void desktop_shell_launch_app(uint32_t app_id);
+extern void desktop_shell_toggle_media(void);
+extern void desktop_shell_open_menu(int32_t menu_idx);
+extern void desktop_shell_toggle_theme(void);
+extern void desktop_shell_toggle_control_center(void);
+extern void desktop_shell_toggle_spotlight(void);
+extern void desktop_shell_toggle_context_menu(void);
+extern void desktop_shell_open_context_menu(int32_t x, int32_t y);
+extern uint8_t wm_handle_mouse_down(int32_t mx, int32_t my);
+extern void wm_handle_mouse_move(int32_t mx, int32_t my);
+extern void wm_handle_mouse_up(void);
+extern int wm_is_window_focused(uint32_t id);
+extern void wm_unfocus_all(void);
+extern uint8_t desktop_shell_is_spotlight_open(void);
+extern void desktop_shell_spotlight_key(uint16_t unicode, uint16_t scan);
+extern void desktop_shell_terminal_key(uint16_t unicode, uint16_t scan);
+extern void desktop_shell_terminal_append(const char *line);
+
+void baken_kernel_main(const BakenBootInfo *boot_info) {
+    if (!boot_info || !boot_info->framebuffer_base || boot_info->screen_width == 0 || boot_info->screen_height == 0) {
+        for (;;) { }
+    }
+    uint32_t width = boot_info->screen_width;
+    uint32_t height = boot_info->screen_height;
+    /* Serviços que o shell consulta no primeiro quadro devem existir antes do
+     * compositor. Isso evita que widgets recebam um estado de montagem vazio. */
+    cq_fs_io = (EFI_BLOCK_IO_PROTOCOL*)boot_info->block_io_protocol;
+    cq_notes_load();
+    desktop_config_load();
+    gfx_init(boot_info->framebuffer_base, width, height, boot_info->pixels_per_scanline);
+    desktop_compositor_init(width, height);
+
+    EFI_SYSTEM_TABLE *st = (EFI_SYSTEM_TABLE*)boot_info->system_table;
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *keyboard = st ? (EFI_SIMPLE_TEXT_INPUT_PROTOCOL*)st->ConIn : NULL;
+    EFI_ABSOLUTE_POINTER_PROTOCOL *abs_pointer = NULL;
+    EFI_SIMPLE_POINTER_PROTOCOL *simple_pointer = (EFI_SIMPLE_POINTER_PROTOCOL*)boot_info->pointer_protocol;
+    if (st && st->BootServices && st->BootServices->LocateProtocol) {
+        st->BootServices->LocateProtocol(&ABSOLUTE_POINTER_GUID, NULL, (void**)&abs_pointer);
+        if (!simple_pointer) {
+            st->BootServices->LocateProtocol(&SIMPLE_POINTER_GUID, NULL, (void**)&simple_pointer);
+        }
+    }
+
+    int32_t mouse_x = (int32_t)(width / 2);
+    int32_t mouse_y = (int32_t)(height / 2);
+    uint8_t left_down = 0;
+
+    for (;;) {
+        if (keyboard && keyboard->ReadKeyStroke) {
+            EFI_INPUT_KEY key;
+            if (keyboard->ReadKeyStroke(keyboard,&key)==0) {
+                if (desktop_shell_is_spotlight_open()) {
+                    desktop_shell_spotlight_key(key.UnicodeChar, key.ScanCode);
+                } else if (wm_is_window_focused(4)) {
+                    if (key.UnicodeChar == 27 || key.ScanCode == 0x17) {
+                        wm_unfocus_all();
+                    } else {
+                        desktop_shell_terminal_key(key.UnicodeChar, key.ScanCode);
+                    }
+                } else if (wm_is_window_focused(2)) {
+                    if (key.UnicodeChar == 27 || key.ScanCode == 0x17) {
+                        wm_unfocus_all();
+                    } else if (key.UnicodeChar == 13 || key.UnicodeChar == 10) {
+                        cq_notes_save();
+                        desktop_shell_terminal_append("Notas salvas no BakenFS.");
+                    } else if (key.UnicodeChar == 8 || key.ScanCode == 0x08) {
+                        if (cq_note_len) { cq_note_text[--cq_note_len] = 0; }
+                    } else if (key.UnicodeChar >= 32 && key.UnicodeChar <= 126) {
+                        cq_notes_append(key.UnicodeChar);
+                    }
+                } else {
+                    if(key.UnicodeChar=='1') desktop_shell_launch_app(0); /* Arquivos */
+                    else if(key.UnicodeChar=='2') { desktop_shell_launch_app(6); cq_note_editing=1; } /* Notas */
+                    else if(key.UnicodeChar=='3') desktop_shell_launch_app(8); /* Ajustes */
+                    else if(key.UnicodeChar=='4') desktop_shell_launch_app(9); /* Terminal */
+                    else if(key.UnicodeChar=='a'||key.UnicodeChar=='A') desktop_shell_open_menu(1); /* Menu Arquivo */
+                    else if(key.UnicodeChar=='b'||key.UnicodeChar=='B') desktop_shell_open_menu(0); /* Menu Baken OS */
+                    else if(key.UnicodeChar=='c'||key.UnicodeChar=='C') desktop_shell_toggle_control_center(); /* Central de Controle */
+                    else if(key.UnicodeChar=='s'||key.UnicodeChar=='S') desktop_shell_toggle_spotlight(); /* Spotlight Search */
+                    else if(key.UnicodeChar=='t'||key.UnicodeChar=='T') desktop_shell_toggle_theme(); /* Modo Escuro/Claro */
+                    else if(key.UnicodeChar=='x'||key.UnicodeChar=='X') desktop_shell_toggle_context_menu(); /* Menu Contexto */
+                    else if(key.UnicodeChar=='i'||key.UnicodeChar=='I') desktop_shell_launch_app(14); /* Instalador: prévia segura */
+                    else if(key.UnicodeChar=='m'||key.UnicodeChar=='M') desktop_shell_toggle_media();
+                    else if(key.UnicodeChar=='d'||key.UnicodeChar=='D') cq_fs_add("/home/documentos", 1, 0, 0);
+                    else if(key.UnicodeChar=='n'||key.UnicodeChar=='N') cq_fs_add("/home/arquivo.txt", 2, 512, 86020);
+                    else if(key.UnicodeChar>='5' && key.UnicodeChar<='9') desktop_shell_launch_app((uint32_t)(key.UnicodeChar-'3'));
+                }
+            }
+        }
+        if (abs_pointer && abs_pointer->GetState && abs_pointer->Mode) {
+            EFI_ABSOLUTE_POINTER_STATE abs_st;
+            if (abs_pointer->GetState(abs_pointer, &abs_st) == 0) {
+                uint64_t min_x = abs_pointer->Mode->AbsoluteMinX;
+                uint64_t max_x = abs_pointer->Mode->AbsoluteMaxX;
+                uint64_t min_y = abs_pointer->Mode->AbsoluteMinY;
+                uint64_t max_y = abs_pointer->Mode->AbsoluteMaxY;
+                if (max_x > min_x && max_y > min_y) {
+                    mouse_x = (int32_t)(((abs_st.CurrentX - min_x) * (uint64_t)width) / (max_x - min_x));
+                    mouse_y = (int32_t)(((abs_st.CurrentY - min_y) * (uint64_t)height) / (max_y - min_y));
+                    if (mouse_x < 0) mouse_x = 0;
+                    if (mouse_x >= (int32_t)width) mouse_x = (int32_t)width - 1;
+                    if (mouse_y < 0) mouse_y = 0;
+                    if (mouse_y >= (int32_t)height) mouse_y = (int32_t)height - 1;
+                    desktop_shell_set_cursor(mouse_x, mouse_y);
+                    uint8_t btn = (abs_st.ActiveButtons & 1) ? 1 : 0;
+                    uint8_t r_btn = (abs_st.ActiveButtons & 2) ? 1 : 0;
+                    if (r_btn) {
+                        desktop_shell_open_context_menu(mouse_x, mouse_y);
+                    } else if (btn && !left_down) {
+                        if (!wm_handle_mouse_down(mouse_x, mouse_y)) {
+                            desktop_shell_handle_click(mouse_x, mouse_y);
+                        }
+                    } else if (btn && left_down) {
+                        wm_handle_mouse_move(mouse_x, mouse_y);
+                    } else if (!btn && left_down) {
+                        wm_handle_mouse_up();
+                    }
+                    left_down = btn;
+                }
+            }
+        } else if (simple_pointer && simple_pointer->GetState) {
+            EFI_SIMPLE_POINTER_STATE simp_st;
+            if (simple_pointer->GetState(simple_pointer, &simp_st) == 0) {
+                int32_t dx = simp_st.RelativeMovementX / 64;
+                int32_t dy = simp_st.RelativeMovementY / 64;
+                if (dx > 25) { dx = 25; }
+                if (dx < -25) { dx = -25; }
+                if (dy > 25) { dy = 25; }
+                if (dy < -25) { dy = -25; }
+                mouse_x += dx;
+                mouse_y += dy;
+                if (mouse_x < 0) mouse_x = 0;
+                if (mouse_x >= (int32_t)width) mouse_x = (int32_t)width - 1;
+                if (mouse_y < 0) mouse_y = 0;
+                if (mouse_y >= (int32_t)height) mouse_y = (int32_t)height - 1;
+                desktop_shell_set_cursor(mouse_x, mouse_y);
+                uint8_t btn = simp_st.LeftButton ? 1 : 0;
+                uint8_t r_btn = simp_st.RightButton ? 1 : 0;
+                if (r_btn) {
+                    desktop_shell_open_context_menu(mouse_x, mouse_y);
+                } else if (btn && !left_down) {
+                    if (!wm_handle_mouse_down(mouse_x, mouse_y)) {
+                        desktop_shell_handle_click(mouse_x, mouse_y);
+                    }
+                } else if (btn && left_down) {
+                    wm_handle_mouse_move(mouse_x, mouse_y);
+                } else if (!btn && left_down) {
+                    wm_handle_mouse_up();
+                }
+                left_down = btn;
+            }
+        }
+
+        desktop_compositor_render_frame();
+        for (volatile int d = 0; d < 40000; ++d);
+    }
+}
+""".strip().splitlines())
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return output
+
+def emit_cq_kernel_entry(output: Path) -> Path:
+    """Entrada EFI canônica gerada a partir de kernel::main."""
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join((
+        "/* Gerado pelo VortexC a partir de kernel::main. */",
+        '#include "baken_boot_info.h"',
+        "extern void baken_kernel_main(const BakenBootInfo *boot_info);",
+        "void cq_kernel_entry(const BakenBootInfo *boot_info) {",
+        "    baken_kernel_main(boot_info);",
+        "}",
+        "",
+    )), encoding="utf-8")
+    return output
+
+def frontend(entry: Path) -> tuple:
+    """Executa todas as fases semânticas antes da geração de objetos."""
+    entry = entry.resolve()
+    root = project_root(entry)
+    manifest = analyze(entry)
+    units = discover_units(root)
+    asts = {
+        mod_name: parse_module_ast(units[mod_name]["text"], units[mod_name]["path"])
+        for mod_name in manifest["compile_order"]
+    }
+    validate_module_interfaces(asts, manifest)
+    return root, manifest, units, asts
+
+def build_modular(entry: Path, output: Path | None = None) -> dict:
+    """Compilação e linkedição modular do kernel Cq / UEFI."""
+    import subprocess
+    entry = entry.resolve()
+    root, manifest, units, asts = frontend(entry)
+    gcc = find_gcc(root)
+
+    obj_dir = root / "build" / "obj" / "cq"
+    generated_dir = root / "build" / "generated" / "cq"
+    obj_dir.mkdir(parents=True, exist_ok=True)
+    include_dir = root / "kernel" / "include"
+
+    env = dict(os.environ)
+    env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
+
+    compiled_objects = []
+    generated_sources = []
+    generated_headers = []
+    generated_interfaces = []
+    common_flags = [
+        "-std=c11", "-Wall", "-Wextra", "-Werror", "-ffreestanding",
+        "-fshort-wchar", "-mno-red-zone", "-fno-stack-protector",
+        "-fno-asynchronous-unwind-tables", "-nostdlib", "-I", str(include_dir), "-c",
+    ]
+
+    # Emite e compila uma unidade C isolada por módulo Cq. Os corpos Cq ainda
+    # migram progressivamente; estes objetos já materializam o grafo no link.
+    for mod_name in manifest["compile_order"]:
+        module_id = _c_identifier(mod_name)
+        header = emit_c_header(asts[mod_name], generated_dir / f"{module_id}.h")
+        interface = emit_interface_manifest(asts[mod_name], generated_dir / f"{module_id}.cqi.json")
+        generated = emit_c_module(asts[mod_name], generated_dir / f"{module_id}.c", header)
+        obj = obj_dir / f"{module_id}.o"
+        res = subprocess.run([str(gcc), *common_flags, str(generated), "-o", str(obj)],
+                             capture_output=True, text=True, env=env)
+        if res.returncode != 0:
+            raise CqError(f"falha ao compilar módulo Cq {mod_name}: {res.stderr}")
+        generated_sources.append(generated)
+        generated_headers.append(header)
+        generated_interfaces.append(interface)
+        compiled_objects.append(obj)
+
+    # Compila o bootloader UEFI.
+    bootloader_src = root / "boot" / "uefi_bootloader.cq"
+    if bootloader_src.exists():
+        bootloader_obj = obj_dir / "uefi_bootloader.o"
+        cmd = [str(gcc), *common_flags, "-x", "c", str(bootloader_src), "-o", str(bootloader_obj)]
+        res = subprocess.run(cmd, capture_output=True, text=True, env=env)
+        if res.returncode != 0:
+            raise CqError(f"falha ao compilar bootloader UEFI: {res.stderr}")
+        compiled_objects.append(bootloader_obj)
+
+    # 3. Executa a linkedição do binário BOOTX64.EFI
+    if output:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        link_cmd = [
+            str(gcc), "-nostdlib", "-shared", "-Wl,--subsystem,10",
+            "-Wl,--image-base,0x10000000", "-Wl,-e,efi_main",
+            "-o", str(output)
+        ] + [str(obj) for obj in compiled_objects]
+
+        res = subprocess.run(link_cmd, capture_output=True, text=True, env=env)
+        if res.returncode != 0:
+            raise CqError(f"falha no link do binário EFI: {res.stderr}")
+
+    return {
+        "manifest": manifest,
+        "compiled_objects": [str(o) for o in compiled_objects],
+        "generated_sources": [str(s) for s in generated_sources],
+        "generated_headers": [str(h) for h in generated_headers],
+        "generated_interfaces": [str(item) for item in generated_interfaces],
+        "output": str(output) if output else None,
+    }
+
+def main():
+    parser = argparse.ArgumentParser(description="VortexC Cq module resolver and compiler")
+    sub = parser.add_subparsers(dest="command", required=True)
+    for command in ("check", "build", "parse"):
+        item = sub.add_parser(command)
+        item.add_argument("input", type=Path)
+        item.add_argument("-m", "--manifest", type=Path)
+        if command == "build":
+            item.add_argument("-o", "--output", required=True, type=Path)
+    # O frontend Cq 0.1 é isolado do caminho de compatibilidade usado pela ISO.
+    # Assim o novo parser pode amadurecer com testes sem aceitar corpos opacos.
+    for command in ("cq01-check", "cq01-emit-c", "cq01-build"):
+        item = sub.add_parser(command, help="frontend procedural estrito Cq 0.1")
+        item.add_argument("input", type=Path)
+        if command in ("cq01-emit-c", "cq01-build"):
+            item.add_argument("-o", "--output", required=True, type=Path)
+    args = parser.parse_args()
+    try:
+        if args.command.startswith("cq01-"):
+            from cq01 import compile_file, compile_project, emit_c_project, parse as cq01_parse, check as cq01_check
+            if args.command == "cq01-build":
+                modules = compile_project(args.input)
+                emit_c_project(args.input, args.output)
+                print(f"[OK] projeto Cq 0.1 emitido: {args.output} ({len(modules)} módulos)")
+                return 0
+            module = cq01_parse(args.input.read_text(encoding="utf-8"))
+            cq01_check(module)
+            if args.command == "cq01-emit-c":
+                compile_file(args.input, args.output)
+                print(f"[OK] Cq 0.1 emitido: {args.output}")
+            else:
+                print(f"[OK] Cq 0.1: {module.name}; {len(module.structs)} structs; {len(module.functions)} funções")
+            return 0
+        root, manifest, units, asts = frontend(args.input)
+        if args.manifest:
+            args.manifest.parent.mkdir(parents=True, exist_ok=True)
+            args.manifest.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+        print(
+            f"[OK] {manifest['entry']}: {len(manifest['compile_order'])} módulos resolvidos; "
+            f"{len(manifest['unreachable_modules'])} fora da rota ativa; "
+            f"{len(manifest['orphan_roots'])} raízes órfãs"
+        )
+        if args.command == "parse":
+            ast = asts[manifest["entry"]]
+            print(f"[OK] AST do módulo {ast.name}: {len(ast.structs)} structs, {len(ast.functions)} funções")
+        elif args.command == "build":
+            result = build_modular(args.input, args.output)
+            print(f"[OK] Build concluído com sucesso: {result['output']} ({len(result['compiled_objects'])} objetos)")
+    except CqError as error:
+        print(f"[ERRO] Cq: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+if __name__ == "__main__":
+    sys.exit(main())

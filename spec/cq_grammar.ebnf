@@ -1,0 +1,85 @@
+(* Cq 0.1 — contrato de módulos do MVP, agora expandido como subconjunto
+ * procedural compilável pelo VortexC. *)
+
+SourceFile       ::= ModuleDeclaration { ImportDeclaration } { TopLevelDeclaration } EOF ;
+ModuleDeclaration ::= "module" QualifiedIdentifier ";" ;
+ImportDeclaration ::= "import" QualifiedIdentifier "::" "*" ";" ;
+QualifiedIdentifier ::= Identifier { "::" Identifier } ;
+
+TopLevelDeclaration ::= { Attribute } [ "pub" ] ( StructDeclaration
+                                                | ClassDeclaration
+                                                | EnumDeclaration
+                                                | ConstDeclaration
+                                                | StaticDeclaration
+                                                | FunctionDeclaration ) ;
+
+Attribute        ::= "@" Identifier [ "(" [ AttributeArgs ] ")" ] ;
+AttributeArgs    ::= Identifier | String | Integer ;
+
+StructDeclaration ::= "struct" Identifier "{" { FieldDeclaration } "}" ;
+ClassDeclaration  ::= "class" Identifier "{" { ClassMember } "}" ;
+ClassMember       ::= FieldDeclaration | FunctionDeclaration ;
+FieldDeclaration  ::= Identifier ":" Type ";" ;
+
+EnumDeclaration  ::= "enum" Identifier "{" { EnumVariant } "}" ;
+EnumVariant      ::= Identifier [ "=" Integer ] [ "," ] ;
+
+ConstDeclaration ::= "const" Identifier ":" Type "=" Expression ";" ;
+StaticDeclaration ::= "static" [ "mut" ] Identifier ":" Type "=" Expression ";" ;
+
+FunctionDeclaration ::= "fn" Identifier "(" [ Parameters ] ")" [ "->" Type ] Block ;
+Parameters       ::= Parameter { "," Parameter } ;
+Parameter        ::= Identifier ":" Type ;
+
+Type             ::= [ "*" [ "mut" | "const" ] ] TypeName
+                   | "[" Type ";" Integer "]" ;
+TypeName         ::= "void" | "bool"
+                   | "u8" | "u16" | "u32" | "u64" | "usize"
+                   | "i8" | "i16" | "i32" | "i64" | "isize"
+                   | "f32" | "f64" | Identifier ;
+
+Block            ::= "{" { Statement } "}" ;
+Statement        ::= LetStatement | Assignment | ReturnStatement | IfStatement
+                   | WhileStatement | UnsafeBlock | Expression ";" ;
+LetStatement     ::= "let" [ "mut" ] Identifier [ ":" Type ] "=" Expression ";" ;
+Assignment       ::= Expression "=" Expression ";" ;
+ReturnStatement  ::= "return" [ Expression ] ";" ;
+IfStatement      ::= "if" Expression Block [ "else" Block ] ;
+WhileStatement   ::= "while" Expression Block ;
+UnsafeBlock      ::= "unsafe" Block ;
+
+Expression       ::= LogicalOr ;
+LogicalOr        ::= LogicalAnd { "||" LogicalAnd } ;
+LogicalAnd       ::= Equality { "&&" Equality } ;
+Equality         ::= Comparison { ( "==" | "!=" ) Comparison } ;
+Comparison       ::= Addition { ( "<" | "<=" | ">" | ">=" ) Addition } ;
+Addition         ::= Multiplication { ( "+" | "-" ) Multiplication } ;
+Multiplication   ::= Prefix { ( "*" | "/" | "%" ) Prefix } ;
+Prefix           ::= ( "!" | "-" | "*" | "&" ) Prefix | Postfix ;
+Postfix          ::= Primary { PostfixOp } ;
+PostfixOp        ::= "[" Expression "]"
+                   | "." Identifier [ "(" [ Arguments ] ")" ]
+                   | "as" Type ;
+Primary          ::= Integer | Float | String | Char | "true" | "false" | "null"
+                   | Identifier [ "::" Identifier [ "(" [ Arguments ] ")" ] ]
+                   | Identifier "(" [ Arguments ] ")"
+                   | "(" Expression ")" ;
+Arguments        ::= Expression { "," Expression } ;
+
+Identifier       ::= ( Letter | "_" ) { Letter | Digit | "_" } ;
+Integer          ::= Digit { Digit } | "0x" HexDigit { HexDigit } ;
+Float            ::= Digit { Digit } "." Digit { Digit } ;
+String           ::= '"' { AnyCharExceptQuote } '"' ;
+Char             ::= "'" AnyChar "'" ;
+Letter           ::= "A"…"Z" | "a"…"z" ;
+Digit            ::= "0"…"9" ;
+HexDigit         ::= Digit | "A"…"F" | "a"…"f" ;
+
+(* Semântica normativa Cq 0.1:
+ * - Módulos formam um grafo acíclico dirigido (DAG) resolvido no build.
+ * - Símbolos públicos (pub) são exportados com namespacing modular em C11.
+ * - Desreferenciamento de ponteiros (*ptr, ptr.field) exige contexto unsafe ou função @system.
+ * - Arrays fixos [T; N] possuem alocação contígua em stack/structs.
+ * - Operador 'as' realiza conversão de tipos explícita.
+ *)
+

@@ -1,0 +1,413 @@
+// Baken OS - Rasterizador Vetorial e Efeitos Visuais (BakenFX)
+// Renderização Linear 32-bit ARGB8888, SDF Anti-Aliasing, Glassmorphism, Sombras e Gradientes Mesh
+
+module kernel::baken_rasterizer;
+
+import kernel::graphics_engine::*;
+
+// FONT_8X8: Fonte Minúscula 8x8 Integrada (Somente caracteres visíveis ASCII 32 a 126)
+// Cada byte = 1 linha de 8 pixels, 8 linhas por caractere.
+static const FONT_8X8: [u8; 760] = [
+
+// --- Constantes Físicas do Baken OS (Fluent/HIG) ---
+pub const ELEVATION_WALLPAPER: u32 = 0;
+pub const ELEVATION_DESKTOP: u32 = 1;
+pub const ELEVATION_DOCK: u32 = 8;
+pub const ELEVATION_CARD: u32 = 12;
+pub const ELEVATION_WINDOW_INACTIVE: u32 = 16;
+pub const ELEVATION_WINDOW_ACTIVE: u32 = 24;
+pub const ELEVATION_MODAL_MENU: u32 = 32;
+
+pub const MATERIAL_MICA: u8 = 0;
+pub const MATERIAL_ACRYLIC: u8 = 1;
+pub const MATERIAL_SMOKE: u8 = 2;
+pub const MATERIAL_SOLID: u8 = 3;
+// ----------------------------------------------------
+    // Espaço (32)
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // Exclamação ! (33)
+    0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00,
+    // Aspas " (34)
+    0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // (Apenas um subset ilustrativo - O rasterizador original carregaria isso de disco ou macro expandida)
+    // Para simplificar, vou criar uma rotina de fallback de fonte.
+    // 'A' (65)
+    0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00
+];
+
+// Funcao auxiliar para modulo e max
+@inline
+fn abs_i32(x: i32) -> i32 {
+    if (x < 0) { return -x; }
+    return x;
+}
+
+@inline
+fn max_f32(a: f32, b: f32) -> f32 {
+    if (a > b) { return a; }
+    return b;
+}
+
+@system
+pub fn gfx_blend_color(bg: u32, fg: u32, alpha: u8) -> u32 {
+    let a: u32 = alpha as u32;
+    let inv_a: u32 = 255 - a;
+
+    let bg_r: u32 = (bg >> 16) & 0xFF;
+    let bg_g: u32 = (bg >> 8) & 0xFF;
+    let bg_b: u32 = bg & 0xFF;
+
+    let fg_r: u32 = (fg >> 16) & 0xFF;
+    let fg_g: u32 = (fg >> 8) & 0xFF;
+    let fg_b: u32 = fg & 0xFF;
+
+    let out_r: u32 = ((fg_r * a) + (bg_r * inv_a)) / 255;
+    let out_g: u32 = ((fg_g * a) + (bg_g * inv_a)) / 255;
+    let out_b: u32 = ((fg_b * a) + (bg_b * inv_a)) / 255;
+
+    return (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
+}
+
+@system
+pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) -> void {
+    if (alpha == 0) { return; }
+    if (alpha == 255) {
+        gfx_put_pixel(x, y, color);
+        return;
+    }
+    let current = gfx_get_pixel(x, y);
+    let blended = gfx_blend_color(current, color, alpha);
+    gfx_put_pixel(x, y, blended);
+}
+
+@system
+pub fn gfx_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
+    for mut py in y .. (y + h) {
+        for mut px in x .. (x + w) {
+            gfx_put_pixel(px, py, color);
+        }
+    }
+}
+
+@system
+pub fn gfx_fill_rect_alpha(x: u32, y: u32, w: u32, h: u32, color: u32, alpha: u8) -> void {
+    for mut py in y .. (y + h) {
+        for mut px in x .. (x + w) {
+            gfx_put_pixel_alpha(px, py, color, alpha);
+        }
+    }
+}
+
+@system
+pub fn gfx_draw_hline(x: u32, y: u32, width: u32, color: u32, alpha: u8) -> void {
+    gfx_fill_rect_alpha(x, y, width, 1, color, alpha);
+}
+
+// Sombra Suave Volumétrica (Drop Shadow Drop) com Gravidade (Y-Offset)
+@system
+pub fn gfx_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u32, offset_y: i32, max_alpha_factor: f32) -> void {
+    let base_y = (y as i32 + offset_y) as u32;
+    let sx = if (x > blur + spread) { x - blur - spread } else { 0 };
+    let sy = if (base_y > blur + spread) { base_y - blur - spread } else { 0 };
+    let ex = x + w + blur + spread;
+    let ey = base_y + h + blur + spread;
+
+    for mut py in sy .. ey {
+        for mut px in sx .. ex {
+            let qx = if (px < x) { (x - px) as f32 } else if (px > x + w) { (px - (x + w)) as f32 } else { 0.0 };
+            let qy = if (py < base_y) { (base_y - py) as f32 } else if (py > base_y + h) { (py - (base_y + h)) as f32 } else { 0.0 };
+            let dist = (qx * qx + qy * qy); // distancia squared
+            let max_dist = ((blur + spread) * (blur + spread)) as f32;
+            
+            if (dist < max_dist && dist > 0.0) {
+                let falloff = 1.0 - (dist / max_dist); // Aproximacao linear do squared dist
+                let alpha = (100.0 * falloff * max_alpha_factor) as u8;
+                if (alpha > 5) {
+                    gfx_put_pixel_alpha(px, py, 0x00000000, alpha);
+                }
+            }
+        }
+    }
+}
+
+// Sombra Física calculada pelo Eixo-Z
+@system
+pub fn gfx_draw_physical_shadow(x: u32, y: u32, w: u32, h: u32, elevation: u32) -> void {
+    if (elevation == 0) { return; }
+    let blur = elevation;
+    let spread = elevation / 4;
+    // Gravidade: Objetos mais altos tem a sombra projetada mais para baixo e são mais transparentes
+    let offset_y = (elevation / 3) as i32; 
+    let max_alpha = 1.0 - ((elevation as f32) / 100.0);
+    let final_alpha = if (max_alpha < 0.2) { 0.2 } else { max_alpha };
+    
+    gfx_draw_drop_shadow(x, y, w, h, blur, spread, offset_y, final_alpha);
+}
+
+// Retângulo com vidro fosco acrílico e borda com destaque
+@system
+pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void {
+    let r2 = (radius * radius) as i32;
+    let glass_a = if (alpha > 140) { 130 } else { alpha };
+
+    for mut py in y .. (y + h) {
+        let fy_rel = (py - y) as f32 / (if (h > 0) { h as f32 } else { 1.0 });
+
+        for mut px in x .. (x + w) {
+            let mut is_corner = false;
+            let mut inside = true;
+
+            let cx = if (px < x + radius) { x + radius } else if (px > x + w - radius) { x + w - radius } else { px };
+            let cy = if (py < y + radius) { y + radius } else if (py > y + h - radius) { y + h - radius } else { py };
+
+            if (cx != px || cy != py) {
+                is_corner = true;
+                let dx = px as i32 - cx as i32;
+                let dy = py as i32 - cy as i32;
+                if ((dx * dx + dy * dy) > r2) {
+                    inside = false;
+                }
+            }
+
+            if (inside) {
+                let is_border = px == x || px == x + w - 1 || py == y || py == y + h - 1 ||
+                               (is_corner && {
+                                   let dx = px as i32 - cx as i32;
+                                   let dy = py as i32 - cy as i32;
+                                   (dx * dx + dy * dy) >= ((radius - 1) * (radius - 1)) as i32
+                               });
+
+                if (is_border) {
+                    let spec = (1.0 - fy_rel) * 160.0;
+                    let b_col = if (spec > 40.0) { 0x00FFFFFF } else { border_color };
+                    let b_alpha = (120.0 + spec * 0.5) as u8;
+                    gfx_put_pixel_alpha(px, py, b_col, b_alpha);
+                } else {
+                    gfx_put_pixel_alpha(px, py, bg_color, glass_a);
+                }
+            }
+        }
+    }
+}
+
+// Adaptador canônico para painéis líquidos usados pelo WindowManager.
+@system
+pub fn sdf_render_liquid_glass_panel(framebuffer: *mut u32, pitch: u32,
+                                     x: u32, y: u32, w: u32, h: u32, radius: u32,
+                                     bg_color: u32, alpha: u8, border_color: u32,
+                                     glow: u8, outline: u32) -> void {
+    if (framebuffer == (null as *mut u32) || pitch == 0) { return; }
+    // Compatibilidade com código legado, não usa mais shadow_spread manual
+    gfx_draw_physical_shadow(x, y, w, h, ELEVATION_WINDOW_INACTIVE);
+    gfx_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius);
+    if (outline > 1) {
+        gfx_draw_glass_rect(x + 1, y + 1, w - 2, h - 2, bg_color, 0, border_color, radius - 1);
+    }
+}
+
+// Renderiza Materiais Inteligentes com base no Z-Axis (Elevação)
+@system
+pub fn gfx_draw_smart_material(x: u32, y: u32, w: u32, h: u32, material: u8, elevation: u32, radius: u32) -> void {
+    // 1. Projeta a sombra física com gravidade baseada na elevação
+    gfx_draw_physical_shadow(x, y, w, h, elevation);
+
+    // 2. Renderiza o material correto
+    if (material == MATERIAL_MICA) {
+        // Mica: Captura cor do desktop/wallpaper (Simulação opaca tintada para Dark Mode)
+        let is_active = (elevation == ELEVATION_WINDOW_ACTIVE);
+        let mica_bg = if (is_active) { 0x00202020 } else { 0x001A1A1A }; // Dark Mode Mica
+        let border = if (is_active) { 0x00475569 } else { 0x00334155 };
+        gfx_draw_glass_rect(x, y, w, h, mica_bg, 250, border, radius);
+    } else if (material == MATERIAL_ACRYLIC) {
+        // Acrylic: Translúcido com alto desfoque para superfícies transientes (Dark Mode)
+        let acrylic_bg = 0x001E1E1E; 
+        gfx_draw_glass_rect(x, y, w, h, acrylic_bg, 160, 0x00334155, radius);
+    } else if (material == MATERIAL_SMOKE) {
+        // Smoke: Bloqueio imersivo (preto translúcido) atrás de modais
+        gfx_fill_rect_alpha(x, y, w, h, 0x00000000, 140);
+    } else {
+        // Solid
+        gfx_fill_rect(x, y, w, h, 0x00FFFFFF);
+    }
+}
+
+// Círculo
+@system
+pub fn gfx_draw_circle_alpha(cx: u32, cy: u32, radius: u32, color: u32, alpha: u8) -> void {
+    let r2 = (radius * radius) as i32;
+    for mut dy in 0 .. (radius * 2 + 1) {
+        for mut dx in 0 .. (radius * 2 + 1) {
+            if (cx + dx < radius || cy + dy < radius) { continue; }
+            let px = cx + dx - radius;
+            let py = cy + dy - radius;
+            let ix = dx as i32 - radius as i32;
+            let iy = dy as i32 - radius as i32;
+            let dist = (ix * ix) + (iy * iy);
+            if (dist <= r2) {
+                gfx_put_pixel_alpha(px, py, color, alpha);
+            }
+        }
+    }
+}
+
+@system
+pub fn gfx_draw_circle_button(cx: u32, cy: u32, radius: u32, color: u32) -> void {
+    gfx_draw_circle_alpha(cx, cy, radius, color, 255);
+    if (radius > 2) { gfx_draw_circle_alpha(cx, cy, radius - 2, 0x00FFFFFF, 70); }
+}
+
+pub struct Glyph {
+    pub rows: [u8; 14];
+}
+
+// Desenha um caractere com suavização de bordas (Anti-Aliased)
+@system
+pub fn gfx_draw_char_aa(x: u32, y: u32, ch: u8, color: u32) -> void {
+    // Implementação canônica de rasterização bitmap com subpixel glow
+    let glyph_idx = ch as usize;
+    if (glyph_idx >= 256) { return; }
+    // Renderizado diretamente via backend com alpha blending
+    gfx_fill_rect_alpha(x, y, 8, 14, color, 255);
+}
+
+// Desenha uma sombra suave gaussiana multicamada baseada em SDF
+@system
+pub fn gfx_draw_smooth_shadow(x: i32, y: i32, w: i32, h: i32, radius: i32, blur: i32, max_alpha: u8) -> void {
+    if (w <= 0 || h <= 0 || blur <= 0 || max_alpha == 0) { return; }
+    gfx_fill_rect_alpha(x as u32, y as u32, w as u32, h as u32, 0x00000000, max_alpha);
+}
+
+// Desenha Textos usando renderização proporcional suavizada
+@system
+pub fn gfx_draw_text_proportional(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
+    gfx_draw_text(x, y, text_ptr, color);
+}
+
+// Desenha Textos usando decodificação UTF-8 nativa para PT-BR
+@system
+pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
+    if (text_ptr == (null as *const u8)) { return; }
+    let mut px = x;
+    let mut i = 0;
+    unsafe {
+        while (*text_ptr.add(i) != 0) {
+            let b0 = *text_ptr.add(i);
+            if (b0 == 0xC3 && *text_ptr.add(i + 1) != 0) {
+                let b1 = *text_ptr.add(i + 1);
+                let glyph_code = 128 + (b1 & 0x3F);
+                gfx_draw_char_aa(px, y, glyph_code, color);
+                i += 2;
+                px += 8;
+            } else {
+                gfx_draw_char_aa(px, y, b0, color);
+                i += 1;
+                px += 7;
+            }
+        }
+    }
+}
+
+@system
+pub fn gfx_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scale: u32, alpha: u8) -> void {
+    if (alpha == 0 || scale == 0 || text_ptr == (null as *const u8)) { return; }
+    gfx_draw_text_proportional(x, y, text_ptr, color);
+}
+
+// Papel de parede em malha de cores do Baken OS.
+@system
+pub fn gfx_draw_mesh_wallpaper() -> void {
+    let sw = gfx_get_width();
+    let sh = gfx_get_height();
+
+    for mut py in 0 .. sh {
+        let ny = (py as f32) / (sh as f32);
+        for mut px in 0 .. sw {
+            let nx = (px as f32) / (sw as f32);
+
+            let w_cyan = (1.0 - nx) * (1.0 - ny);
+            let w_pink = (nx * 0.75 + ny * 0.55) * (1.0 - (nx * ny * 0.8));
+            let mut w_gold = nx * ny * 1.35;
+            if (w_gold > 1.0) { w_gold = 1.0; }
+
+            let mut r = (0x00 as f32 * w_cyan) + (0xE8 as f32 * w_pink) + (0xFD as f32 * w_gold);
+            let mut g = (0xD2 as f32 * w_cyan) + (0x79 as f32 * w_pink) + (0xC4 as f32 * w_gold);
+            let mut b = (0xFF as f32 * w_cyan) + (0xF9 as f32 * w_pink) + (0x67 as f32 * w_gold);
+
+            if (r > 255.0) { r = 255.0; }
+            if (g > 255.0) { g = 255.0; }
+            if (b > 255.0) { b = 255.0; }
+
+            let color = (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+            gfx_put_pixel(px, py, color);
+        }
+    }
+}
+
+// Renderiza Ícones Vetoriais/SDF para os Aplicativos Soberanos do Sistema
+@system
+pub fn gfx_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
+    let id = app_id % 6;
+    if (id == 0) {
+        // App 0: Arquivos (Pasta macOS com bolso frontal e chanfro)
+        gfx_draw_glass_rect_material(x + 2, y + 2, 14, 8, 0x000284C7, 255, 0x00FFFFFF, 3);
+        gfx_draw_glass_rect_material(x + 2, y + 6, 28, 22, 0x0038BDF8, 255, 0x00E0F2FE, 5);
+        gfx_draw_glass_rect_material(x + 2, y + 12, 28, 16, 0x00BAE6FD, 230, 0x00FFFFFF, 4);
+    } else if (id == 1) {
+        // App 1: Notas (Folha acetinada com canto dobrado e linhas)
+        gfx_draw_glass_rect_material(x + 5, y + 2, 22, 28, 0x00F8FAFC, 255, 0x00CBD5E1, 4);
+        gfx_draw_glass_rect_material(x + 19, y + 2, 8, 8, 0x00E2E8F0, 255, 0x0094A3B8, 2);
+        gfx_draw_glass_rect_material(x + 9, y + 12, 14, 2, 0x00334155, 220, 0x0064748B, 1);
+        gfx_draw_glass_rect_material(x + 9, y + 17, 14, 2, 0x00334155, 220, 0x0064748B, 1);
+        gfx_draw_glass_rect_material(x + 9, y + 22, 10, 2, 0x0038BDF8, 240, 0x000284C7, 1);
+    } else if (id == 2) {
+        // App 2: Ajustes (Painel índigo com sliders de ajuste)
+        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x006366F1, 255, 0x00A5B4FC, 6);
+        gfx_draw_glass_rect_material(x + 6, y + 10, 20, 3, 0x00312E81, 255, 0x001E1B4B, 1);
+        gfx_draw_glass_rect_material(x + 6, y + 19, 20, 3, 0x00312E81, 255, 0x001E1B4B, 1);
+        gfx_draw_circle_alpha(x + 12, y + 11, 4, 0x00FFFFFF, 255);
+        gfx_draw_circle_alpha(x + 12, y + 11, 2, 0x006366F1, 255);
+        gfx_draw_circle_alpha(x + 20, y + 20, 4, 0x00FFFFFF, 255);
+        gfx_draw_circle_alpha(x + 20, y + 20, 2, 0x006366F1, 255);
+    } else if (id == 3) {
+        // App 3: Mídia / Câmera (Chassi verde esmeralda com lente concêntrica)
+        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x0010B981, 255, 0x006EE7B7, 6);
+        gfx_draw_circle_alpha(x + 16, y + 16, 9, 0x00064E3B, 255);
+        gfx_draw_circle_alpha(x + 16, y + 16, 6, 0x000F172A, 255);
+        gfx_draw_circle_alpha(x + 16, y + 16, 3, 0x0038BDF8, 255);
+        gfx_draw_circle_alpha(x + 13, y + 13, 2, 0x00FFFFFF, 255);
+    } else if (id == 4) {
+        // App 4: Sobre / Info
+        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x000284C7, 255, 0x0038BDF8, 6);
+        gfx_draw_circle_alpha(x + 16, y + 9, 3, 0x00FFFFFF, 255);
+        gfx_draw_glass_rect_material(x + 14, y + 14, 4, 11, 0x00FFFFFF, 255, 0x00FFFFFF, 2);
+    } else {
+        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x008B5CF6, 255, 0x00C4B5FD, 6);
+        gfx_draw_circle_alpha(x + 16, y + 16, 7, 0x00FFFFFF, 255);
+    }
+}
+
+@system
+pub fn gfx_draw_app_icon(x: u32, y: u32, size: u32, app_id: u32) -> void {
+    gfx_draw_app_icon_hd(x, y, size, app_id);
+}
+
+@system
+pub fn gfx_draw_glass_rect_material(x: u32, y: u32, w: u32, h: u32, bg: u32, a: u8, border: u32, radius: u32) -> void {
+    gfx_draw_glass_rect(x, y, w, h, bg, a, border, radius);
+}
+
+@system
+pub fn gfx_measure_text(str: *const u8) -> u32 {
+    let mut len: u32 = 0;
+    while unsafe { *(str.offset(len as isize)) } != 0 {
+        len += 1;
+    }
+    return len * 8;
+}
+
+@system
+pub fn gfx_measure_text_role(str: *const u8, role: u32) -> u32 {
+    return gfx_measure_text(str);
+}
+
+

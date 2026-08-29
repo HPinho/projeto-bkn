@@ -1,5 +1,7 @@
-# Baken OS - Launcher Oficial para Inicialização via Imagem ISO Bootável UEFI
-# Compatível com QEMU, VirtualBox, VMware e Gravação em Pendrive USB (Rufus / Ventoy / BalenaEtcher)
+# Baken OS - Launcher da ISO óptica UEFI de teste.
+# A ISO é El Torito para VM; não é uma imagem híbrida para pendrive.
+
+$ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
 $gcc_bin = "$root\tools\w64devkit\bin"
@@ -8,7 +10,6 @@ $env:PATH = "$gcc_bin;" + $env:PATH
 $qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $ovmf = "$root\build\ovmf.fd"
 $iso = "$root\build\baken_os.iso"
-$efi_src = "$root\boot\src\uefi_main.c"
 $efi_out = "$root\build\iso_root\EFI\BOOT\BOOTX64.EFI"
 
 Write-Host "=================================================================" -ForegroundColor Cyan
@@ -21,36 +22,23 @@ New-Item -ItemType Directory -Force -Path "$root\build\iso_root\EFI\BOOT" | Out-
 New-Item -ItemType Directory -Force -Path "$root\build" | Out-Null
 Write-Host "      OK: $root\build\iso_root\EFI\BOOT" -ForegroundColor Green
 
-# 1. Compilação do Bootloader UEFI com GCC
+# 1. Compilação do bootloader e do desktop nativo no mesmo EFI
 Write-Host "`n[1/3] Compilando UEFI Bootloader (GCC)..." -ForegroundColor Yellow
-$gcc_args = @(
-    "-Wall", "-Wextra", "-nostdlib", "-shared",
-    "-Wl,--subsystem,10",
-    "-Wl,--image-base,0x10000000",
-    "-Wl,-e,efi_main",
-    "-o", $efi_out,
-    $efi_src
-)
-& "$gcc_bin\gcc.exe" @gcc_args
+& "$root\tools\build_uefi_desktop.ps1" -OutputPath $efi_out
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "      ERRO: Falha na compilação do bootloader EFI." -ForegroundColor Red
-    exit 1
-}
-Write-Host "      OK: $efi_out gerado." -ForegroundColor Green
-
-# 2. Empacota o Baken UI (Flutter) e gera a Imagem ISO & Disco ESP
-Write-Host "`n[2/3] Empacotando Baken UI (Flutter) e gerando ISO & Disco ESP..." -ForegroundColor Yellow
-$py_builder = "$root\tools\scripts\build_flutter_iso.py"
+# 2. Empacota o Sistema em ISO óptica UEFI
+Write-Host "`n[2/3] Gerando ISO óptica UEFI pela rota nativa..." -ForegroundColor Yellow
+$py_builder = "$root\tools\scripts\create_uefi_iso.py"
 python $py_builder
 
-$disk = "$root\build\baken_disk.img"
-if (-not (Test-Path $disk)) {
-    Write-Host "      ERRO: Falha ao gerar imagem de disco." -ForegroundColor Red
+$iso = "$root\build\baken_os.iso"
+if (-not (Test-Path $iso)) {
+    Write-Host "      ERRO: Falha ao gerar ISO óptica." -ForegroundColor Red
     exit 1
 }
 $iso_size_mb = [math]::Round(((Get-Item $iso).Length / 1MB), 2)
-Write-Host "      OK: $iso ($iso_size_mb MB) e $disk gerados com sucesso." -ForegroundColor Green
+Write-Host "      OK: $iso ($iso_size_mb MB) gerada com sucesso." -ForegroundColor Green
 
 # 3. Garante firmware UEFI (OVMF)
 Write-Host "`n[3/3] Verificando firmware UEFI (OVMF)..." -ForegroundColor Yellow
@@ -76,15 +64,15 @@ $qemu_args = @(
     "-accel", "tcg,thread=multi",
     "-cpu", "max",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf",
-    "-drive", "format=raw,file=$disk",
+    "-drive", "media=cdrom,readonly=on,file=$iso",
     "-device", "usb-ehci,id=ehci",
     "-device", "usb-tablet,bus=ehci.0",
     "-device", "usb-kbd,bus=ehci.0",
     "-m", "4G",
-    "-smp", "4",
+    "-smp", "1",
     "-vga", "std",
     "-global", "VGA.vgamem_mb=64",
-    "-name", "Baken OS - Sovereign Quantum Desktop"
+    "-name", "Baken OS MVP Desktop"
 )
 
 & $qemu @qemu_args

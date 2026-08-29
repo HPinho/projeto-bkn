@@ -1,16 +1,22 @@
-# Baken OS - Compilador e Launcher Oficial para Oracle VirtualBox (UEFI Native)
+# Baken OS - Launcher isolado para Oracle VirtualBox (UEFI Native).
+# Ele nunca procura, desliga ou reutiliza uma VM pessoal chamada "BakenOS".
+
+param(
+    [string]$VmName = "BakenOS-MVP-Test"
+)
+
+$ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
 $gcc_bin = "$root\tools\w64devkit\bin"
 $env:PATH = "$gcc_bin;" + $env:PATH
 
 $vbox = "C:\Program Files\Oracle\VirtualBox\VBoxManage.exe"
-$efi_src = "$root\boot\src\uefi_main.c"
 $efi_out = "$root\build\iso_root\EFI\BOOT\BOOTX64.EFI"
 $disk_img = "$root\build\baken_disk.img"
 $disk_vdi = "$root\build\baken_disk.vdi"
 $iso = "$root\build\baken_os.iso"
-$vm_name = "BakenOS"
+$vm_name = $VmName
 
 Write-Host "=================================================================" -ForegroundColor Cyan
 Write-Host "      BAKEN OS - VIRTUALBOX EFI BUILD & LAUNCH PIPELINE          " -ForegroundColor Cyan
@@ -22,35 +28,23 @@ New-Item -ItemType Directory -Force -Path "$root\build\iso_root\EFI\BOOT" | Out-
 New-Item -ItemType Directory -Force -Path "$root\build" | Out-Null
 Write-Host "      OK: $root\build\iso_root\EFI\BOOT" -ForegroundColor Green
 
-# 1. Compilação do Bootloader UEFI com GCC
+# 1. Compilação do bootloader e do desktop nativo no mesmo EFI
 Write-Host "`n[1/4] Compilando UEFI Bootloader (GCC)..." -ForegroundColor Yellow
-if (-not (Test-Path $efi_src)) {
-    Write-Host "      ERRO: $efi_src nao encontrado!" -ForegroundColor Red
-    exit 1
-}
+& "$root\tools\build_uefi_desktop.ps1" -OutputPath $efi_out
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
-$gcc_args = @(
-    "-Wall", "-Wextra", "-nostdlib", "-shared",
-    "-Wl,--subsystem,10",
-    "-Wl,--image-base,0x10000000",
-    "-Wl,-e,efi_main",
-    "-o", $efi_out,
-    $efi_src
-)
-& "$gcc_bin\gcc.exe" @gcc_args
-
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "      ERRO: Falha na compilacao GCC (codigo $LASTEXITCODE)" -ForegroundColor Red
-    exit 1
-}
-Write-Host "      OK: $efi_out gerado." -ForegroundColor Green
-
-# 2. Empacota o Baken UI (Flutter) e gera a Imagem ISO & Disco ESP
-Write-Host "`n[2/4] Empacotando Baken UI (Flutter) e gerando ISO & Disco ESP..." -ForegroundColor Yellow
-$py_builder = "$root\tools\scripts\build_flutter_iso.py"
+# 2. Empacota o mesmo EFI e cria o disco ESP gravável usado pelo VirtualBox
+Write-Host "`n[2/4] Gerando ISO e Disco ESP do desktop nativo..." -ForegroundColor Yellow
+$py_builder = "$root\tools\scripts\create_uefi_iso.py"
 python $py_builder
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "      ERRO: Falha ao empacotar Baken UI e criar imagem de disco." -ForegroundColor Red
+    Write-Host "      ERRO: Falha ao empacotar ISO UEFI." -ForegroundColor Red
+    exit 1
+}
+$disk_builder = "$root\tools\scripts\create_fat32_img.py"
+python $disk_builder
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "      ERRO: Falha ao criar disco ESP de teste." -ForegroundColor Red
     exit 1
 }
 Write-Host "      OK: $disk_img e $iso gerados com sucesso." -ForegroundColor Green
@@ -62,19 +56,26 @@ if (-not (Test-Path $vbox)) {
     exit 1
 }
 
-# Detecta se ha VM existente chamada 'BakenOS' ou 'BakenOS '
+# Usa somente a VM de teste escolhida explicitamente.
 $vms_list = & $vbox list vms
-if ($vms_list -match '"(BakenOS\s*)"') {
-    $vm_name = $matches[1]
-    Write-Host "      OK: VM existente detectada: '$vm_name'" -ForegroundColor Green
+if ($vms_list -match ('"' + [regex]::Escape($vm_name) + '"')) {
+    Write-Host "      OK: VM de teste existente detectada: '$vm_name'" -ForegroundColor Green
 } else {
-    Write-Host "      Criando nova VM '$vm_name'..." -ForegroundColor Yellow
+    Write-Host "      Criando VM de teste isolada '$vm_name'..." -ForegroundColor Yellow
     & $vbox createvm --name $vm_name --ostype "Linux_64" --register
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "      ERRO: Falha ao criar VM de teste." -ForegroundColor Red
+        exit 1
+    }
+    & $vbox storagectl $vm_name --name "SATA" --add sata --controller IntelAhci
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "      ERRO: Falha ao criar controladora SATA da VM de teste." -ForegroundColor Red
+        exit 1
+    }
 }
 
-# Encerra instancias anteriores presas em segundo plano
+# Encerra somente a VM de teste, se ela estiver em execução.
 & $vbox controlvm $vm_name poweroff 2>$null
-Get-Process *virtualboxvm* -ErrorAction SilentlyContinue | Stop-Process -Force 2>$null
 Start-Sleep -Milliseconds 500
 
 # Desanexa e recria o VDI para evitar conflito de UUID
@@ -96,7 +97,7 @@ Write-Host "      OK: $disk_vdi gerado com sucesso." -ForegroundColor Green
 
 # 4. Configura VM e Inicializa em Alta Resolução EFI
 Write-Host "`n[4/4] Configurando VM '$vm_name' (Firmware EFI + Alta Definicao)..." -ForegroundColor Yellow
-& $vbox modifyvm $vm_name --firmware efi --boot1 disk --boot2 none --memory 4096 --cpus 4 --vram 128 --graphicscontroller vboxsvga --mouse usbtablet
+& $vbox modifyvm $vm_name --firmware efi --boot1 disk --boot2 none --memory 4096 --cpus 1 --vram 128 --graphicscontroller vboxsvga --mouse usbtablet
 & $vbox setextradata $vm_name "VBoxInternal2/EfiGraphicsResolution" "1280x800" 2>$null
 & $vbox storageattach $vm_name --storagectl "SATA" --port 0 --device 0 --type hdd --medium $disk_vdi
 

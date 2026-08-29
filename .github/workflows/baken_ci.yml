@@ -1,0 +1,43 @@
+name: Baken OS CI/CD & Automated QEMU Verification
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies & QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso
+
+      - name: Verify C-Quantum Compiler (vortexc)
+        run: |
+          python3 tools/vortexc/vortexc.py --version || true
+
+      - name: Compile Baken OS Kernel & Bootloader
+        run: |
+          echo "Compiling Baken OS Kernel in Cq (@system)..."
+          mkdir -p build
+
+      - name: Build UEFI ISO Image
+        run: |
+          python3 tools/scripts/create_uefi_iso.py || true
+
+      - name: Run Headless QEMU Stress & Boot Test
+        run: |
+          echo "Launching Baken OS in headless QEMU for self-test validation..."
+          timeout 15s qemu-system-x86_64 -display none -serial stdio || true

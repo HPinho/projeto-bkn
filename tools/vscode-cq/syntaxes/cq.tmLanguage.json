@@ -1,0 +1,103 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Baken Cq",
+  "patterns": [
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#attributes"
+    },
+    {
+      "include": "#numbers"
+    }
+  ],
+  "repository": {
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.cq",
+          "match": "\\b(if|else|for|while|return|break|continue|in)\\b"
+        },
+        {
+          "name": "keyword.other.cq",
+          "match": "\\b(module|import|pub|priv|internal|fn|struct|enum|class|extends|implements|where|mut|const|static|let|unsafe|as|override|virtual|abstract|sealed)\\b"
+        },
+        {
+          "name": "constant.language.cq",
+          "match": "\\b(null|true|false)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.cq",
+          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|usize|isize|bool|void)\\b"
+        },
+        {
+          "name": "entity.name.type.cq",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "entity.name.function.decorator.cq",
+          "match": "@[a-zA-Z0-9_]+"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.cq",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.cq",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.cq",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.cq",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.cq",
+          "match": "\\b0x[0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.cq",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.cq",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    }
+  },
+  "scopeName": "source.cq"
+}

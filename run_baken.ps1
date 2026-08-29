@@ -1,4 +1,6 @@
-# Baken OS - Compilador e Launcher Oficial com Janela Adaptativa e Audio Intel HDA
+# Baken OS - Launcher do disco UEFI de teste.
+
+$ErrorActionPreference = "Stop"
 
 $root = $PSScriptRoot
 $gcc_bin = "$root\tools\w64devkit\bin"
@@ -7,11 +9,10 @@ $env:PATH = "$gcc_bin;" + $env:PATH
 $qemu = "C:\Program Files\qemu\qemu-system-x86_64.exe"
 $ovmf = "$root\build\ovmf.fd"
 $disk = "$root\build\baken_disk.img"
-$efi_src = "$root\boot\src\uefi_main.c"
 $efi_out = "$root\build\iso_root\EFI\BOOT\BOOTX64.EFI"
 
 Write-Host "=================================================================" -ForegroundColor Cyan
-Write-Host "      BAKEN OS - SOBERANO BUILD PIPELINE                         " -ForegroundColor Cyan
+Write-Host "      BAKEN OS - PIPELINE DO DISCO UEFI DE TESTE                 " -ForegroundColor Cyan
 Write-Host "=================================================================" -ForegroundColor Cyan
 
 # 0. Garante que os diretorios de build existem
@@ -20,35 +21,17 @@ New-Item -ItemType Directory -Force -Path "$root\build\iso_root\EFI\BOOT" | Out-
 New-Item -ItemType Directory -Force -Path "$root\build" | Out-Null
 Write-Host "      OK: $root\build\iso_root\EFI\BOOT" -ForegroundColor Green
 
-# 1. Compilacao com GCC Nativo para Subsystem 10 (EFI Application)
+# 1. Compilacao do bootloader e do desktop nativo (um unico artefato EFI)
 Write-Host "`n[1/3] Compilando UEFI Bootloader (GCC)..." -ForegroundColor Yellow
+& "$root\tools\build_uefi_desktop.ps1" -OutputPath $efi_out
+if ($LASTEXITCODE -ne 0) { exit 1 }
 
-if (-not (Test-Path $efi_src)) {
-    Write-Host "      AVISO: $efi_src nao encontrado - pulando compilacao GCC." -ForegroundColor DarkYellow
-} else {
-    $gcc_args = @(
-        "-Wall", "-Wextra", "-nostdlib", "-shared",
-        "-Wl,--subsystem,10",
-        "-Wl,--image-base,0x10000000",
-        "-Wl,-e,efi_main",
-        "-o", $efi_out,
-        $efi_src
-    )
-    & "$gcc_bin\gcc.exe" @gcc_args
-
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "      ERRO: Falha na compilacao GCC (codigo $LASTEXITCODE)" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "      OK: $efi_out gerado." -ForegroundColor Green
-}
-
-# 2. Empacota a imagem de disco FAT32
-Write-Host "`n[2/3] Criando imagem de disco FAT32..." -ForegroundColor Yellow
+# 2. Empacota a imagem de disco FAT16 de teste.
+Write-Host "`n[2/3] Criando imagem de disco FAT16 de teste..." -ForegroundColor Yellow
 $py_script = "$root\tools\scripts\create_fat32_img.py"
 
 if (-not (Test-Path $py_script)) {
-    Write-Host "      AVISO: create_fat32_img.py nao encontrado - pulando." -ForegroundColor DarkYellow
+    throw "Empacotador do disco UEFI ausente: $py_script"
 } else {
     python $py_script
     if ($LASTEXITCODE -ne 0) {
@@ -94,13 +77,11 @@ $qemu_args = @(
     "-device", "usb-ehci,id=ehci",
     "-device", "usb-tablet,bus=ehci.0",
     "-device", "usb-kbd,bus=ehci.0",
-    "-netdev", "user,id=net0",
-    "-device", "virtio-net-pci,netdev=net0",
     "-m", "4G",
-    "-smp", "4",
+    "-smp", "1",
     "-vga", "std",
     "-global", "VGA.vgamem_mb=64",
-    "-name", "Baken OS - Sovereign Quantum Desktop"
+    "-name", "Baken OS MVP Desktop"
 )
 
 & $qemu @qemu_args

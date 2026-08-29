@@ -1,0 +1,183 @@
+// Baken OS - Desktop Shell em Cq (@system).
+// Interface nativa da rota gráfica modular.
+
+module kernel::desktop_shell;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+import kernel::baken_animation::*;
+import kernel::baken_ui_oop::*;
+import kernel::window_manager::*;
+
+pub struct DesktopShellState {
+    pub screen_w: u32;
+    pub screen_h: u32;
+    pub time_tick: u32;
+    pub cursor_x: i32;
+    pub cursor_y: i32;
+}
+
+static mut SHELL: DesktopShellState = DesktopShellState {
+    screen_w: 1920,
+    screen_h: 1080,
+    time_tick: 0,
+    cursor_x: 960,
+    cursor_y: 540
+};
+
+static mut MAIN_DOCK: DesktopDock = DesktopDock {
+    y_offset: 20,
+    icon_size: 48,
+    item_count: 0,
+    item_labels: [null as *const u8; 10],
+    item_springs: [SpringState {
+        current_val: 1.0, target_val: 1.0, velocity: 0.0, stiffness: 150.0, damping: 10.0
+    }; 10]
+};
+
+@system
+pub fn desktop_shell_init(w: u32, h: u32) -> void {
+    unsafe {
+        SHELL.screen_w = w;
+        SHELL.screen_h = h;
+        SHELL.time_tick = 0;
+        SHELL.cursor_x = (w / 2) as i32;
+        SHELL.cursor_y = (h / 2) as i32;
+        MAIN_DOCK.item_count = 0;
+
+        // Os itens são apenas o layout do dock nesta fase; o lançador de
+        // aplicativos ainda não foi conectado e não deve simular abertura.
+        MAIN_DOCK.add_item("Arquivos");
+        MAIN_DOCK.add_item("Notas");
+        MAIN_DOCK.add_item("Ajustes");
+        MAIN_DOCK.add_item("Sobre");
+
+        // O shell não fabrica janelas. Toda janela que vier a ser aberta
+        // pertence ao gerente canônico e recebe conteúdo por serviços reais.
+        wm_init();
+    }
+}
+
+@system
+pub fn render_top_bar() -> void {
+    unsafe {
+        let sw = SHELL.screen_w;
+        // Fundo translúcido (Glassmorphism)
+        gfx_draw_glass_rect(0, 0, sw, 36, 0xAAFFFFFF, 200, 0x44FFFFFF, 0);
+
+        // Logo Vortex (Círculos azuis concentricos)
+        gfx_draw_circle_alpha(22, 17, 10, 0x00000000, 255);
+        gfx_draw_circle_alpha(22, 17, 7, 0x0000E5FF, 255);
+        gfx_draw_circle_alpha(22, 17, 4, 0x00000000, 255);
+        gfx_draw_circle_alpha(22, 17, 2, 0x0000E5FF, 255);
+
+        // Texto do menu da Top Bar
+        gfx_draw_text(40, 10, "Baken OS", 0x000F172A);
+        gfx_draw_text(118, 10, "Arquivo", 0x00334155);
+        gfx_draw_text(184, 10, "Editar", 0x00334155);
+
+        // Estado honesto da sessão: serviços não integrados não aparecem
+        // como disponíveis no shell.
+        gfx_draw_glass_rect(sw - 300, 5, 88, 25, 0xAA8B5CF6, 200, 0xFF00E5FF, 12);
+        gfx_draw_text(sw - 290, 9, "Sessao", 0x00FFFFFF);
+
+        gfx_draw_text(sw - 140, 10, "Modo visual", 0x000F172A);
+    }
+}
+
+@system
+pub fn render_cursor() -> void {
+    unsafe {
+        let mx = SHELL.cursor_x as u32;
+        let my = SHELL.cursor_y as u32;
+        // Máscara bitmap 16x8 de alta definição com contorno branco e sombra
+        static const CURSOR_MASK: [u8; 16] = [
+            0x80, 0xC0, 0xE0, 0xF0,
+            0xF8, 0xFC, 0xFE, 0xFF,
+            0xF8, 0xD8, 0x8C, 0x0C,
+            0x06, 0x06, 0x00, 0x00
+        ];
+        for mut y in 0 .. 16 {
+            let row = CURSOR_MASK[y as usize];
+            for mut x in 0 .. 8 {
+                if ((row >> (7 - x)) & 1) != 0 {
+                    gfx_put_pixel_alpha(mx + x + 2, my + y + 2, 0x00000000, 90);
+                    if (x == 0 || y == 0 || x == 7 || ((row >> (6 - x)) & 1) == 0 || y == 15) {
+                        gfx_put_pixel_alpha(mx + x, my + y, 0x00FFFFFF, 255);
+                    } else {
+                        gfx_put_pixel_alpha(mx + x, my + y, 0x000F172A, 255);
+                    }
+                }
+            }
+        }
+    }
+}
+
+@system
+pub fn desktop_shell_set_cursor(x: i32, y: i32) -> void {
+    unsafe {
+        SHELL.cursor_x = x;
+        SHELL.cursor_y = y;
+    }
+}
+
+@system
+pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
+    unsafe {
+        let sw = SHELL.screen_w;
+        let sh = SHELL.screen_h;
+        let dock_w = MAIN_DOCK.item_count * 56 + 20;
+        let dock_x = if sw > dock_w { (sw - dock_w) / 2 } else { 0 };
+        let dock_y = if sh > 64 { sh - 64 } else { 0 };
+
+        if mx >= dock_x as i32 && mx <= (dock_x + dock_w) as i32 &&
+           my >= dock_y as i32 && my <= (dock_y + 54) as i32 {
+            let item_idx = ((mx - dock_x as i32 - 10) / 56) as u32;
+            if item_idx < MAIN_DOCK.item_count {
+                let win_id = item_idx + 1;
+                if win_id == 1 {
+                    wm_create_window(1, "Arquivos — BakenFS", (sw / 2 - 240) as i32, (sh / 2 - 160) as i32, 480, 320, 0x000F172A, 240, 0x0038BDF8);
+                } else if win_id == 2 {
+                    wm_create_window(2, "Notas — /home/notas.txt", (sw / 2 - 220) as i32, (sh / 2 - 140) as i32, 440, 280, 0x000F172A, 240, 0x0038BDF8);
+                } else if win_id == 3 {
+                    wm_create_window(3, "Central de Ajustes & Hardware", (sw / 2 - 250) as i32, (sh / 2 - 150) as i32, 500, 300, 0x000F172A, 240, 0x0038BDF8);
+                } else if win_id == 4 {
+                    wm_create_window(4, "Sobre o Baken OS Sovereign", (sw / 2 - 200) as i32, (sh / 2 - 120) as i32, 400, 240, 0x000F172A, 240, 0x0038BDF8);
+                }
+                wm_bring_to_front(win_id);
+            }
+        }
+    }
+}
+
+@system
+pub fn desktop_shell_update(dt: f32) -> void {
+    unsafe {
+        MAIN_DOCK.update(dt, SHELL.cursor_x, SHELL.cursor_y);
+    }
+}
+
+@system
+pub fn desktop_shell_render_frame() -> void {
+    unsafe {
+        SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
+
+        // 1. Papel de parede com gradiente de malha colorido.
+        gfx_draw_mesh_wallpaper();
+
+        // 2. Barra Superior (Top Bar)
+        render_top_bar();
+
+        // 3. Janelas do sistema, somente por window_manager.
+        wm_render_windows();
+
+        // 4. Doca flutuante.
+        MAIN_DOCK.draw();
+
+        // 5. Cursor
+        render_cursor();
+
+        // 6. Swap Buffers
+        gfx_swap_buffers();
+    }
+}

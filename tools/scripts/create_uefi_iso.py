@@ -1,29 +1,42 @@
 #!/usr/bin/env python3
-"""
-Criador de ISO Bootável Híbrida UEFI x86_64 (El-Torito EFI Specification) para Baken OS
-Compatível com Oracle VirtualBox, VMware, QEMU e gravação direta em Pen Drive USB.
+"""Cria uma ISO óptica UEFI (El Torito) de teste para Baken OS.
+
+Ela é apropriada para boot por CD/DVD virtual em QEMU, VirtualBox ou VMware.
+Não é uma imagem híbrida GPT/USB e não deve ser gravada diretamente em pendrive.
 """
 
 import os
 import struct
 
 def create_fat_efi_img(efi_bin_bytes: bytes) -> bytes:
-    """Cria uma imagem FAT12/16 ESP de 2.88MB contendo /EFI/BOOT/BOOTX64.EFI"""
+    """Cria uma ESP FAT12 de 12MB contendo /EFI/BOOT/BOOTX64.EFI.
+
+    Os atlas multi-DPI são parte do executável UEFI; a antiga ESP de 2.88MB
+    não comporta uma interface de alta definição. 12MB ainda é uma mídia
+    óptica pequena e mantém o layout El-Torito simples para as VMs.
+    """
     SECTOR_SIZE = 512
-    TOTAL_SECTORS = 5760 # 2.88 MB
+    TOTAL_SECTORS = 24576 # 12 MB
+    SECTORS_PER_CLUSTER = 8 # 4 KB; mantém a contagem no limite FAT12
+    RESERVED_SECTORS = 1
+    FAT_COUNT = 2
+    SECTORS_PER_FAT = 9
+    ROOT_ENTRIES = 224
     fat_disk = bytearray(TOTAL_SECTORS * SECTOR_SIZE)
+    if not efi_bin_bytes:
+        raise ValueError("BOOTX64.EFI não pode estar vazio")
     
     # 1. FAT12/16 VBR no Setor 0
     fat_disk[0:3] = b"\xeb\x3c\x90"
     fat_disk[3:11] = b"MSWIN4.1"
     struct.pack_into("<H", fat_disk, 11, SECTOR_SIZE) # Bytes/Sector
-    fat_disk[13] = 2 # Sectors/Cluster (1024 bytes)
-    struct.pack_into("<H", fat_disk, 14, 1) # Reserved sectors
-    fat_disk[16] = 2 # Num FATs
-    struct.pack_into("<H", fat_disk, 17, 224) # Root Entries
+    fat_disk[13] = SECTORS_PER_CLUSTER # Sectors/Cluster (1024 bytes)
+    struct.pack_into("<H", fat_disk, 14, RESERVED_SECTORS) # Reserved sectors
+    fat_disk[16] = FAT_COUNT # Num FATs
+    struct.pack_into("<H", fat_disk, 17, ROOT_ENTRIES) # Root Entries
     struct.pack_into("<H", fat_disk, 19, TOTAL_SECTORS) # Total sectors
     fat_disk[21] = 0xF8 # Media descriptor
-    struct.pack_into("<H", fat_disk, 22, 9) # Sectors/FAT
+    struct.pack_into("<H", fat_disk, 22, SECTORS_PER_FAT) # Sectors/FAT
     struct.pack_into("<H", fat_disk, 24, 18) # Sectors/Track
     struct.pack_into("<H", fat_disk, 26, 2) # Heads
     struct.pack_into("<I", fat_disk, 28, 0) # Hidden sectors
@@ -35,10 +48,10 @@ def create_fat_efi_img(efi_bin_bytes: bytes) -> bytes:
     fat_disk[510:512] = b"\x55\xaa"
     
     # 2. Inicializa FAT1 e FAT2
-    fat1_off = 1 * SECTOR_SIZE
-    fat2_off = (1 + 9) * SECTOR_SIZE
-    root_off = (1 + 9 * 2) * SECTOR_SIZE
-    data_off = root_off + (224 * 32)
+    fat1_off = RESERVED_SECTORS * SECTOR_SIZE
+    fat2_off = (RESERVED_SECTORS + SECTORS_PER_FAT) * SECTOR_SIZE
+    root_off = (RESERVED_SECTORS + SECTORS_PER_FAT * FAT_COUNT) * SECTOR_SIZE
+    data_off = root_off + (ROOT_ENTRIES * 32)
     
     fat_disk[fat1_off:fat1_off+3] = b"\xf8\xff\xff"
     fat_disk[fat2_off:fat2_off+3] = b"\xf8\xff\xff"
@@ -46,9 +59,13 @@ def create_fat_efi_img(efi_bin_bytes: bytes) -> bytes:
     current_cluster = 2
     
     # Grava BOOTX64.EFI
-    cluster_size = 2 * SECTOR_SIZE
+    cluster_size = SECTORS_PER_CLUSTER * SECTOR_SIZE
     num_clusters = (len(efi_bin_bytes) + cluster_size - 1) // cluster_size
-    if num_clusters == 0: num_clusters = 1
+    data_clusters = (TOTAL_SECTORS * SECTOR_SIZE - data_off) // cluster_size
+    # /EFI e /EFI/BOOT ocupam um cluster cada. Não cresça o buffer caso o
+    # executável não caiba: a mídia precisa falhar fechada.
+    if num_clusters + 2 > data_clusters:
+        raise ValueError("BOOTX64.EFI excede a capacidade da ESP óptica")
     
     start_cluster = current_cluster
     offset = data_off + (start_cluster - 2) * cluster_size
@@ -110,6 +127,8 @@ def create_fat_efi_img(efi_bin_bytes: bytes) -> bytes:
 def build_uefi_iso(output_iso: str, efi_bin_path: str):
     ISO_SECTOR = 2048
     
+    if not os.path.isfile(efi_bin_path):
+        raise FileNotFoundError(f"BOOTX64.EFI obrigatório não encontrado: {efi_bin_path}")
     with open(efi_bin_path, "rb") as f:
         efi_bytes = f.read()
         
@@ -200,13 +219,20 @@ def build_uefi_iso(output_iso: str, efi_bin_path: str):
     # Validation Entry (32 bytes)
     catalog[0] = 0x01 # Header ID
     catalog[1] = 0x00 # Platform ID (x86)
-    catalog[28:30] = b"\x55\xaa" # Signature
     catalog[30] = 0x55
     catalog[31] = 0xAA
+    # Checksum exato El-Torito: soma de palavras de 16-bits nos primeiros 32 bytes deve ser zero
+    words_sum = sum(struct.unpack("<14H", bytes(catalog[0:28]))) + 0xAA55
+    checksum = (-words_sum) & 0xFFFF
+    struct.pack_into("<H", catalog, 28, checksum)
     
-    # Initial / Default Entry (32 bytes - offset 32) -> Not bootable placeholder
-    catalog[32] = 0x00 # Not bootable
+    # Initial / Default Entry (32 bytes - offset 32) -> Bootable EFI
+    catalog[32] = 0x88 # Bootable
     catalog[33] = 0x00 # No emulation
+    struct.pack_into("<H", catalog, 34, 0) # Load segment
+    catalog[36] = 0xEF # System Type (EFI)
+    struct.pack_into("<H", catalog, 38, 1) # Sector count
+    struct.pack_into("<I", catalog, 40, efi_img_lba) # Load RBA / LBA
     
     # Section Header for EFI (offset 64)
     catalog[64] = 0x91 # Final section header
@@ -218,7 +244,7 @@ def build_uefi_iso(output_iso: str, efi_bin_path: str):
     catalog[97] = 0x00 # No emulation
     struct.pack_into("<H", catalog, 98, 0) # Load segment
     catalog[100] = 0xEF # System Type (EFI)
-    struct.pack_into("<H", catalog, 102, fat_sectors_iso * (ISO_SECTOR // 512)) # Sector count
+    struct.pack_into("<H", catalog, 102, 1) # Sector count
     struct.pack_into("<I", catalog, 104, efi_img_lba) # Load RBA / LBA
     
     # 6. Grava imagem FAT ESP no Setor efi_img_lba
@@ -228,7 +254,7 @@ def build_uefi_iso(output_iso: str, efi_bin_path: str):
     with open(output_iso, "wb") as f:
         f.write(iso_buf)
         
-    print(f"[OK] ISO Bootavel UEFI Oficial criada com sucesso: {output_iso} ({len(iso_buf)/(1024*1024):.2f} MB)")
+    print(f"[OK] ISO óptica UEFI de teste criada: {output_iso} ({len(iso_buf)/(1024*1024):.2f} MB)")
 
 if __name__ == "__main__":
     root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))

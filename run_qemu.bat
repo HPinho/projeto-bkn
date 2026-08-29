@@ -1,0 +1,3 @@
+@echo off
+echo Iniciando o Baken OS no QEMU...
+"C:\Program Files\qemu\qemu-system-x86_64.exe" -accel tcg -m 512M -smp 1 -vga std -device qemu-xhci -device usb-kbd -device usb-tablet -drive if=pflash,format=raw,unit=0,readonly=on,file=build\ovmf.fd -drive format=raw,file=build\baken_disk.img
