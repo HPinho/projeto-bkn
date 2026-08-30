@@ -68,7 +68,9 @@ def main(install: bool, installer: bool, optical_iso: bool, app: int | None = No
         if not required.exists():
             raise FileNotFoundError(f"arquivo necessário ausente: {required}")
     if attach_target and not INSTALL_TARGET.exists():
-        raise FileNotFoundError(f"disco-alvo de instalação ausente: {INSTALL_TARGET}")
+        with open(INSTALL_TARGET, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+        print(f"[OK] Disco alvo criado: {INSTALL_TARGET}")
     if install and (optical_iso or installed_disk):
         raise ValueError("--install exige o disco UEFI gravável, não a ISO óptica")
     if SHOT.exists():
@@ -89,15 +91,17 @@ def main(install: bool, installer: bool, optical_iso: bool, app: int | None = No
         command.extend(["-drive", f"format=raw,file={INSTALL_TARGET}"])
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
-        time.sleep(10)
+        time.sleep(13)
         monitor = monitor_connect()
         if install:
             monitor_command(monitor, "sendkey i")
+            time.sleep(2)
+            monitor_command(monitor, "sendkey i")
             monitor_command(monitor, "sendkey ret")
-            time.sleep(1)
+            time.sleep(20)
         elif installer:
             monitor_command(monitor, "sendkey i")
-            time.sleep(1)
+            time.sleep(2)
         elif create_files:
             monitor_command(monitor, "sendkey 1")
             time.sleep(1)

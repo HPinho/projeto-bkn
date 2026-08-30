@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Contratos do BakenFS persistente na imagem instalada."""
+"""Contratos do BakenFS persistente e instalador/particionador UEFI."""
 
 import re
 import unittest
@@ -28,6 +28,20 @@ class StorageInstallerTests(unittest.TestCase):
         self.assertIn("/config/theme.cfg", bridge_c)
         self.assertIn("/home/notas.txt", bridge_c)
 
+    def test_vortexc_contains_advanced_partitioner_and_real_installer(self):
+        vortexc_py = (ROOT / "tools/vortexc/vortexc.py").read_text(encoding="utf-8")
+        self.assertIn("BakenPartition", vortexc_py)
+        self.assertIn("BakenInstallerState", vortexc_py)
+        self.assertIn("installer_apply_default", vortexc_py)
+        self.assertIn("installer_add_partition", vortexc_py)
+        self.assertIn("installer_delete_partition", vortexc_py)
+        self.assertIn("installer_format_partition", vortexc_py)
+        self.assertIn("find_boot_file", vortexc_py)
+        self.assertIn("installer_execute_installation", vortexc_py)
+        self.assertIn("installer_handle_click", vortexc_py)
+        self.assertIn("Instalador e Particionador Baken OS", vortexc_py)
+        self.assertIn("Particao / Volume", vortexc_py)
+
     def test_bootloader_recognizes_installed_gpt_as_its_own_boot_media(self):
         bootloader = (ROOT / "boot/uefi_bootloader.cq").read_text(encoding="utf-8")
         self.assertIn("GUID de tipo Baken Data", bootloader)
@@ -37,3 +51,4 @@ class StorageInstallerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

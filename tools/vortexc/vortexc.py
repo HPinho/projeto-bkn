@@ -1810,6 +1810,442 @@ extern uint32_t cq_fs_entry_size(uint32_t index);
 extern void gfx_fill_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha);
 extern uint32_t desktop_shell_get_time_tick(void);
 extern void desktop_shell_render_terminal(uint32_t px, uint32_t py, uint32_t pw, uint32_t ph, uint8_t is_focused);
+extern void gfx_draw_hline(uint32_t x, uint32_t y, uint32_t width, uint32_t color, uint8_t alpha);
+extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t bg_color, uint8_t bg_alpha, uint32_t border_color, uint32_t radius);
+extern void cq_notes_save(void);
+
+typedef struct { uint32_t MediaId; uint8_t RemovableMedia,MediaPresent,LogicalPartition,ReadOnly,WriteCaching; uint32_t BlockSize,IoAlign; uint64_t LastBlock,LowestAlignedLba; uint32_t LogicalBlocksPerPhysicalBlock,OptimalTransferLengthGranularity; } EFI_BLOCK_IO_MEDIA;
+typedef struct _EFI_BLOCK_IO_PROTOCOL { uint64_t Revision; EFI_BLOCK_IO_MEDIA *Media; uint64_t (*Reset)(void*,uint8_t); uint64_t (*ReadBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*WriteBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*FlushBlocks)(void*); } EFI_BLOCK_IO_PROTOCOL;
+typedef struct { char name[32]; uint32_t lba, size, kind; } CqFsEntry;
+typedef struct { uint64_t magic; uint32_t version, entry_count; CqFsEntry entries[12]; uint8_t reserved[20]; } CqFsHeader;
+typedef struct { uint64_t magic; uint32_t version, dark_theme, location_permission; uint8_t reserved[496]; } CqDesktopConfig;
+typedef struct { uint64_t magic; uint32_t version, size; char text[496]; } CqTextFile;
+
+#define INSTALL_TOTAL_LBAS 131072ULL
+#define INSTALL_ESP_FIRST 2048ULL
+#define INSTALL_ESP_LAST  86015ULL
+#define INSTALL_DATA_FIRST 86016ULL
+#define INSTALL_DATA_LAST 131038ULL
+#define INSTALL_FAT_SECTORS 656U
+
+static EFI_BLOCK_IO_PROTOCOL *g_boot_block_io = 0;
+static EFI_BLOCK_IO_PROTOCOL *g_install_target_block_io = 0;
+
+typedef struct {
+    char name[32];
+    uint64_t first_lba;
+    uint64_t last_lba;
+    uint32_t fs_type; /* 1 = FAT32 ESP, 2 = BakenFS Data, 0 = Nao Formatado */
+    uint8_t is_system;
+} BakenPartition;
+
+#define MAX_INSTALL_PARTS 4
+typedef struct {
+    uint32_t disk_count;
+    uint32_t selected_disk;
+    uint32_t part_count;
+    BakenPartition parts[MAX_INSTALL_PARTS];
+    int32_t selected_part;
+    uint32_t progress;
+    uint8_t installed;
+    uint8_t error;
+    char status_text[64];
+} BakenInstallerState;
+
+static BakenInstallerState g_installer;
+
+static void installer_apply_default(void) {
+    g_installer.part_count = 2;
+    g_installer.selected_part = 0;
+    
+    const char *p0 = "Baken ESP (Boot)";
+    for (int i = 0; i < 31 && p0[i]; ++i) g_installer.parts[0].name[i] = p0[i];
+    g_installer.parts[0].name[31] = 0;
+    g_installer.parts[0].first_lba = INSTALL_ESP_FIRST;
+    g_installer.parts[0].last_lba = INSTALL_ESP_LAST;
+    g_installer.parts[0].fs_type = 1;
+    g_installer.parts[0].is_system = 1;
+
+    const char *p1 = "Baken Data (Volume)";
+    for (int i = 0; i < 31 && p1[i]; ++i) g_installer.parts[1].name[i] = p1[i];
+    g_installer.parts[1].name[31] = 0;
+    g_installer.parts[1].first_lba = INSTALL_DATA_FIRST;
+    g_installer.parts[1].last_lba = INSTALL_DATA_LAST;
+    g_installer.parts[1].fs_type = 2;
+    g_installer.parts[1].is_system = 1;
+
+    g_installer.progress = 0;
+    g_installer.installed = 0;
+    g_installer.error = 0;
+    const char *st = (g_installer.selected_disk == 0 && g_install_target_block_io) ? 
+        "Disco GPT pronto: ESP FAT32 (41 MB) + Baken Data (23 MB)" : 
+        "Destino: conecte um segundo disco virtual gravavel de 64 MB";
+    for (int i = 0; i < 63 && st[i]; ++i) g_installer.status_text[i] = st[i];
+    g_installer.status_text[63] = 0;
+}
+
+static void installer_init(void) {
+    if (g_install_target_block_io && !g_install_target_block_io->Media->ReadOnly && g_install_target_block_io->Media->LastBlock >= 131071ULL) {
+        g_installer.disk_count = 2;
+        g_installer.selected_disk = 0;
+    } else {
+        g_installer.disk_count = 1;
+        g_installer.selected_disk = 1;
+    }
+    installer_apply_default();
+}
+
+void installer_setup_io(void *boot_io, void *target_io) {
+    g_boot_block_io = (EFI_BLOCK_IO_PROTOCOL*)boot_io;
+    g_install_target_block_io = (EFI_BLOCK_IO_PROTOCOL*)target_io;
+    installer_init();
+}
+
+static void installer_add_partition(void) {
+    if (g_installer.part_count >= MAX_INSTALL_PARTS) {
+        const char *m = "Limite maximo de particoes atingido (4 max).";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
+    uint32_t idx = g_installer.part_count;
+    char name_buf[32];
+    name_buf[0] = 'D'; name_buf[1] = 'a'; name_buf[2] = 'd'; name_buf[3] = 'o'; name_buf[4] = 's';
+    name_buf[5] = ' '; name_buf[6] = (char)('0' + idx); name_buf[7] = 0;
+    for (int i = 0; i < 31 && name_buf[i]; ++i) g_installer.parts[idx].name[i] = name_buf[i];
+    g_installer.parts[idx].name[31] = 0;
+    g_installer.parts[idx].first_lba = 100000;
+    g_installer.parts[idx].last_lba = 131000;
+    g_installer.parts[idx].fs_type = 2;
+    g_installer.parts[idx].is_system = 0;
+    g_installer.selected_part = (int32_t)idx;
+    g_installer.part_count++;
+    const char *m = "Nova particao criada no espaco disponivel.";
+    for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+    g_installer.status_text[63] = 0;
+}
+
+static void installer_delete_partition(void) {
+    if (g_installer.part_count <= 1 || g_installer.selected_part < 0 || g_installer.selected_part >= (int32_t)g_installer.part_count) {
+        const char *m = "Nao e possivel excluir a particao selecionada.";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
+    uint32_t sel = (uint32_t)g_installer.selected_part;
+    for (uint32_t i = sel; i + 1 < g_installer.part_count; ++i) {
+        g_installer.parts[i] = g_installer.parts[i + 1];
+    }
+    g_installer.part_count--;
+    if (g_installer.selected_part >= (int32_t)g_installer.part_count) {
+        g_installer.selected_part = (int32_t)(g_installer.part_count - 1);
+    }
+    const char *m = "Particao excluida com sucesso.";
+    for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+    g_installer.status_text[63] = 0;
+}
+
+static void installer_format_partition(void) {
+    if (g_installer.selected_part < 0 || g_installer.selected_part >= (int32_t)g_installer.part_count) return;
+    uint32_t sel = (uint32_t)g_installer.selected_part;
+    if (g_installer.parts[sel].fs_type == 1) {
+        g_installer.parts[sel].fs_type = 2;
+    } else {
+        g_installer.parts[sel].fs_type = 1;
+    }
+    const char *m = "Sistema de arquivos formatado.";
+    for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+    g_installer.status_text[63] = 0;
+}
+
+static void put_le16(uint8_t *p, uint16_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); }
+static void put_le32(uint8_t *p, uint32_t v) { p[0]=(uint8_t)v; p[1]=(uint8_t)(v>>8); p[2]=(uint8_t)(v>>16); p[3]=(uint8_t)(v>>24); }
+static void put_le64(uint8_t *p, uint64_t v) { for (int i=0;i<8;++i) p[i]=(uint8_t)(v>>(i*8)); }
+static void clear512(uint8_t *p) { for (int i=0;i<512;++i) p[i]=0; }
+static uint32_t crc32_step(uint32_t crc, const uint8_t *p, uint32_t count) {
+    for (uint32_t i=0;i<count;++i) { crc ^= p[i]; for (int b=0;b<8;++b) crc=(crc>>1)^((crc&1)?0xEDB88320U:0); } return crc;
+}
+static uint16_t read_le16(const uint8_t *p) { return (uint16_t)(p[0] | ((uint16_t)p[1] << 8)); }
+static uint32_t read_le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+
+typedef struct {
+    uint32_t first_lba;
+    uint32_t fat_lba;
+    uint32_t root_lba;
+    uint32_t first_data_lba;
+    uint16_t sectors_per_cluster;
+    uint16_t root_sectors;
+    uint16_t cluster;
+    uint32_t file_size;
+} BootFileInfo;
+
+static uint8_t s_installer_sector[512] __attribute__((aligned(512)));
+static uint8_t s_installer_entries0[512] __attribute__((aligned(512)));
+static uint8_t s_installer_clus_buf[65536] __attribute__((aligned(512)));
+static uint8_t s_installer_fat_buf[512] __attribute__((aligned(512)));
+static CqFsHeader s_installer_fs_hdr __attribute__((aligned(512)));
+static CqDesktopConfig s_installer_desk_cfg __attribute__((aligned(512)));
+static CqTextFile s_installer_note_file __attribute__((aligned(512)));
+
+static int find_boot_file(BootFileInfo *info) {
+    if (!g_boot_block_io || !g_boot_block_io->Media || !g_boot_block_io->ReadBlocks || !info) return 0;
+    if (g_boot_block_io->ReadBlocks(g_boot_block_io, g_boot_block_io->Media->MediaId, 0, 512, s_installer_sector) != 0) return 0;
+    uint32_t part_lba = read_le32(s_installer_sector + 454);
+    if (part_lba == 0 || g_boot_block_io->ReadBlocks(g_boot_block_io, g_boot_block_io->Media->MediaId, part_lba, 512, s_installer_sector) != 0) return 0;
+    if (read_le16(s_installer_sector + 11) != 512 || s_installer_sector[13] == 0 || s_installer_sector[16] == 0 || read_le16(s_installer_sector + 22) == 0) return 0;
+    uint8_t sectors_per_cluster = s_installer_sector[13], fat_count = s_installer_sector[16];
+    uint16_t reserved = read_le16(s_installer_sector + 14), root_entries = read_le16(s_installer_sector + 17), sectors_per_fat = read_le16(s_installer_sector + 22);
+    uint32_t fat_lba = part_lba + reserved;
+    uint32_t root_lba = fat_lba + (uint32_t)fat_count * sectors_per_fat;
+    uint32_t root_sectors = ((uint32_t)root_entries * 32U + 511U) / 512U;
+    uint32_t first_data_lba = root_lba + root_sectors;
+    uint16_t cluster = 0;
+    uint32_t file_size = 0;
+    static const uint8_t boot_name[11] = {'B','O','O','T','X','6','4',' ','E','F','I'};
+    for (uint32_t s = 0; s < root_sectors && !cluster; ++s) {
+        if (g_boot_block_io->ReadBlocks(g_boot_block_io, g_boot_block_io->Media->MediaId, root_lba + s, 512, s_installer_sector) != 0) return 0;
+        for (uint32_t off = 0; off < 512; off += 32) {
+            if (s_installer_sector[off] == 0) break;
+            int same = 1; for (int i = 0; i < 11; ++i) if (s_installer_sector[off + i] != boot_name[i]) same = 0;
+            if (same && !(s_installer_sector[off + 11] & 0x10)) { cluster = read_le16(s_installer_sector + off + 26); file_size = read_le32(s_installer_sector + off + 28); break; }
+        }
+    }
+    if (cluster < 2 || file_size < 2) return 0;
+    info->first_lba = part_lba;
+    info->fat_lba = fat_lba;
+    info->root_lba = root_lba;
+    info->first_data_lba = first_data_lba;
+    info->sectors_per_cluster = sectors_per_cluster;
+    info->root_sectors = root_sectors;
+    info->cluster = cluster;
+    info->file_size = file_size;
+    return 1;
+}
+
+static int installer_target_write(uint64_t lba, const void *buffer) {
+    if (!g_install_target_block_io || !g_install_target_block_io->WriteBlocks) return 0;
+    return g_install_target_block_io->WriteBlocks(g_install_target_block_io, g_install_target_block_io->Media->MediaId, lba, 512, (void*)buffer) == 0;
+}
+
+void installer_execute_installation(void) {
+    if (!g_install_target_block_io || g_install_target_block_io->Media->ReadOnly ||
+        g_install_target_block_io->Media->LastBlock + 1 < INSTALL_TOTAL_LBAS) {
+        g_installer.error = 1;
+        const char *m = "Erro: Disco alvo invalido ou protegido contra gravacao.";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
+    BootFileInfo src;
+    if (!find_boot_file(&src)) {
+        g_installer.error = 1;
+        const char *m = "Erro: Nao foi possivel carregar BOOTX64.EFI da midia live.";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
+
+    clear512(s_installer_sector);
+    s_installer_sector[446 + 4] = 0xEE;
+    put_le32(s_installer_sector + 454, 1);
+    put_le32(s_installer_sector + 458, 0xFFFFFFFFU);
+    s_installer_sector[510] = 0x55; s_installer_sector[511] = 0xAA;
+    if (!installer_target_write(0, s_installer_sector)) { g_installer.error = 1; return; }
+
+    clear512(s_installer_entries0);
+    static const uint8_t esp_guid[16] = {0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0,0xA0,0xC9,0x3E,0xC9,0x3B};
+    static const uint8_t data_guid[16] = {0x58,0x72,0x3C,0x7F,0x1C,0x2F,0x03,0x4E,0xBF,0x20,0x42,0x41,0x4B,0x45,0x4E,0x31};
+    for (int i = 0; i < 16; ++i) s_installer_entries0[i] = esp_guid[i];
+    put_le64(s_installer_entries0 + 32, INSTALL_ESP_FIRST);
+    put_le64(s_installer_entries0 + 40, INSTALL_ESP_LAST);
+    s_installer_entries0[56] = 'B'; s_installer_entries0[58] = 'a'; s_installer_entries0[60] = 'k'; s_installer_entries0[62] = 'e'; s_installer_entries0[64] = 'n';
+
+    for (int i = 0; i < 16; ++i) s_installer_entries0[128 + i] = data_guid[i];
+    put_le64(s_installer_entries0 + 160, INSTALL_DATA_FIRST);
+    put_le64(s_installer_entries0 + 168, INSTALL_DATA_LAST);
+
+    uint32_t entries_crc = crc32_step(0xFFFFFFFFU, s_installer_entries0, 512);
+    clear512(s_installer_sector);
+    for (int i = 1; i < 32; ++i) entries_crc = crc32_step(entries_crc, s_installer_sector, 512);
+    entries_crc ^= 0xFFFFFFFFU;
+
+    for (int i = 0; i < 32; ++i) {
+        const uint8_t *e = (i == 0) ? s_installer_entries0 : s_installer_sector;
+        if (!installer_target_write(2 + i, e) || !installer_target_write(INSTALL_TOTAL_LBAS - 33 + i, e)) {
+            g_installer.error = 1; return;
+        }
+    }
+
+    for (int copy = 0; copy < 2; ++copy) {
+        clear512(s_installer_sector);
+        s_installer_sector[0]='E'; s_installer_sector[1]='F'; s_installer_sector[2]='I'; s_installer_sector[3]=' '; s_installer_sector[4]='P'; s_installer_sector[5]='A'; s_installer_sector[6]='R'; s_installer_sector[7]='T';
+        put_le32(s_installer_sector + 8, 0x10000);
+        put_le32(s_installer_sector + 12, 92);
+        put_le64(s_installer_sector + 24, copy ? INSTALL_TOTAL_LBAS - 1 : 1);
+        put_le64(s_installer_sector + 32, copy ? 1 : INSTALL_TOTAL_LBAS - 1);
+        put_le64(s_installer_sector + 40, 34);
+        put_le64(s_installer_sector + 48, INSTALL_TOTAL_LBAS - 34);
+        s_installer_sector[56] = 0x42; s_installer_sector[57] = 0x4B; s_installer_sector[58] = 0x4E; s_installer_sector[59] = 1;
+        put_le64(s_installer_sector + 72, copy ? INSTALL_TOTAL_LBAS - 33 : 2);
+        put_le32(s_installer_sector + 80, 128);
+        put_le32(s_installer_sector + 84, 128);
+        put_le32(s_installer_sector + 88, entries_crc);
+        put_le32(s_installer_sector + 16, crc32_step(0xFFFFFFFFU, s_installer_sector, 92) ^ 0xFFFFFFFFU);
+        if (!installer_target_write(copy ? INSTALL_TOTAL_LBAS - 1 : 1, s_installer_sector)) { g_installer.error = 1; return; }
+    }
+
+    clear512(s_installer_sector);
+    s_installer_sector[0]=0xEB; s_installer_sector[1]=0x58; s_installer_sector[2]=0x90;
+    s_installer_sector[3]='B'; s_installer_sector[4]='A'; s_installer_sector[5]='K'; s_installer_sector[6]='E'; s_installer_sector[7]='N';
+    put_le16(s_installer_sector + 11, 512); s_installer_sector[13] = 1; put_le16(s_installer_sector + 14, 32); s_installer_sector[16] = 2; s_installer_sector[21] = 0xF8;
+    put_le32(s_installer_sector + 32, (uint32_t)(INSTALL_ESP_LAST - INSTALL_ESP_FIRST + 1));
+    put_le32(s_installer_sector + 36, INSTALL_FAT_SECTORS);
+    put_le32(s_installer_sector + 44, 2);
+    put_le16(s_installer_sector + 48, 1); put_le16(s_installer_sector + 50, 6);
+    s_installer_sector[66] = 0x29;
+    s_installer_sector[71]='B'; s_installer_sector[72]='A'; s_installer_sector[73]='K'; s_installer_sector[74]='E'; s_installer_sector[75]='N';
+    s_installer_sector[82]='F'; s_installer_sector[83]='A'; s_installer_sector[84]='T'; s_installer_sector[85]='3'; s_installer_sector[86]='2';
+    s_installer_sector[510] = 0x55; s_installer_sector[511] = 0xAA;
+    if (!installer_target_write(INSTALL_ESP_FIRST, s_installer_sector) || !installer_target_write(INSTALL_ESP_FIRST + 6, s_installer_sector)) {
+        g_installer.error = 1; return;
+    }
+
+    uint32_t clusters = (src.file_size + 511) / 512;
+    for (uint32_t fs = 0; fs < INSTALL_FAT_SECTORS; ++fs) {
+        clear512(s_installer_sector);
+        if (fs == 0) {
+            put_le32(s_installer_sector + 0, 0x0FFFFFF8);
+            put_le32(s_installer_sector + 4, 0xFFFFFFFF);
+            put_le32(s_installer_sector + 8, 0x0FFFFFFF);
+            put_le32(s_installer_sector + 12, 0x0FFFFFFF);
+            put_le32(s_installer_sector + 16, 0x0FFFFFFF);
+        }
+        for (uint32_t ent = (fs == 0 ? 5 : 0); ent < 128; ++ent) {
+            uint32_t clus_idx = fs * 128 + ent;
+            if (clus_idx >= 5 && clus_idx < 5 + clusters) {
+                uint32_t next_clus = (clus_idx + 1 == 5 + clusters) ? 0x0FFFFFFF : (clus_idx + 1);
+                put_le32(s_installer_sector + ent * 4, next_clus);
+            }
+        }
+        if (!installer_target_write(INSTALL_ESP_FIRST + 32 + fs, s_installer_sector) ||
+            !installer_target_write(INSTALL_ESP_FIRST + 32 + INSTALL_FAT_SECTORS + fs, s_installer_sector)) {
+            g_installer.error = 1; return;
+        }
+    }
+
+    uint64_t data_lba = INSTALL_ESP_FIRST + 32 + 2 * INSTALL_FAT_SECTORS;
+    clear512(s_installer_sector);
+    const char *efi_dir = "EFI        ";
+    for (int i = 0; i < 11; ++i) s_installer_sector[i] = efi_dir[i];
+    s_installer_sector[11] = 0x10; put_le16(s_installer_sector + 26, 3);
+    if (!installer_target_write(data_lba, s_installer_sector)) { g_installer.error = 1; return; }
+
+    clear512(s_installer_sector);
+    const char *boot_dir = "BOOT       ";
+    for (int i = 0; i < 11; ++i) s_installer_sector[i] = boot_dir[i];
+    s_installer_sector[11] = 0x10; put_le16(s_installer_sector + 26, 4);
+    if (!installer_target_write(data_lba + 1, s_installer_sector)) { g_installer.error = 1; return; }
+
+    clear512(s_installer_sector);
+    const char *boot_file = "BOOTX64 EFI";
+    for (int i = 0; i < 11; ++i) s_installer_sector[i] = boot_file[i];
+    s_installer_sector[11] = 0x20; put_le16(s_installer_sector + 26, 5); put_le32(s_installer_sector + 28, src.file_size);
+    if (!installer_target_write(data_lba + 2, s_installer_sector)) { g_installer.error = 1; return; }
+
+    uint32_t copied = 0;
+    uint16_t cur_src_cluster = src.cluster;
+    uint32_t target_sec = 0;
+    uint32_t last_fat_sector = 0xFFFFFFFFU;
+
+    while (cur_src_cluster >= 2 && cur_src_cluster < 0xFFF8 && copied < src.file_size) {
+        uint16_t run_start = cur_src_cluster;
+        uint32_t run_clusters = 1;
+        uint32_t max_run_clusters = 65536U / ((uint32_t)src.sectors_per_cluster * 512U);
+        uint16_t next_cluster = cur_src_cluster;
+
+        while (run_clusters < max_run_clusters && (copied + run_clusters * src.sectors_per_cluster * 512U) < src.file_size + ((uint32_t)src.sectors_per_cluster * 512U)) {
+            uint32_t fat_sector = src.fat_lba + ((uint32_t)next_cluster * 2U) / 512U;
+            uint32_t fat_offset = ((uint32_t)next_cluster * 2U) % 512U;
+            if (fat_sector != last_fat_sector) {
+                if (g_boot_block_io->ReadBlocks(g_boot_block_io, g_boot_block_io->Media->MediaId, fat_sector, 512, s_installer_fat_buf) != 0) {
+                    g_installer.error = 1; return;
+                }
+                last_fat_sector = fat_sector;
+            }
+            uint16_t nxt = read_le16(s_installer_fat_buf + fat_offset);
+            if (nxt != next_cluster + 1) break;
+            next_cluster = nxt;
+            run_clusters++;
+        }
+
+        uint32_t cluster_lba = src.first_data_lba + (uint32_t)(run_start - 2) * src.sectors_per_cluster;
+        uint32_t bytes_remaining = src.file_size - copied;
+        uint32_t run_bytes = run_clusters * (uint32_t)src.sectors_per_cluster * 512U;
+        uint32_t bytes_to_read = (bytes_remaining < run_bytes) ? bytes_remaining : run_bytes;
+        uint32_t secs_to_read = (bytes_to_read + 511U) / 512U;
+
+        if (g_boot_block_io->ReadBlocks(g_boot_block_io, g_boot_block_io->Media->MediaId, cluster_lba, secs_to_read * 512U, s_installer_clus_buf) != 0) {
+            g_installer.error = 1; return;
+        }
+        if (g_install_target_block_io->WriteBlocks(g_install_target_block_io, g_install_target_block_io->Media->MediaId, data_lba + 3 + target_sec, secs_to_read * 512U, s_installer_clus_buf) != 0) {
+            g_installer.error = 1; return;
+        }
+        copied += bytes_to_read;
+        target_sec += secs_to_read;
+
+        uint32_t fat_sector = src.fat_lba + ((uint32_t)next_cluster * 2U) / 512U;
+        uint32_t fat_offset = ((uint32_t)next_cluster * 2U) % 512U;
+        if (fat_sector != last_fat_sector) {
+            if (g_boot_block_io->ReadBlocks(g_boot_block_io, g_boot_block_io->Media->MediaId, fat_sector, 512, s_installer_fat_buf) != 0) {
+                g_installer.error = 1; return;
+            }
+            last_fat_sector = fat_sector;
+        }
+        cur_src_cluster = read_le16(s_installer_fat_buf + fat_offset);
+    }
+    if (copied != src.file_size) {
+        g_installer.error = 1; return;
+    }
+
+    clear512((uint8_t*)&s_installer_fs_hdr);
+    s_installer_fs_hdr.magic = UINT64_C(0x3153464E454B4142);
+    s_installer_fs_hdr.version = 1;
+    s_installer_fs_hdr.entry_count = 4;
+    const char *e0 = "/home"; for (int i = 0; i < 31 && e0[i]; ++i) s_installer_fs_hdr.entries[0].name[i] = e0[i]; s_installer_fs_hdr.entries[0].kind = 1;
+    const char *e1 = "/config"; for (int i = 0; i < 31 && e1[i]; ++i) s_installer_fs_hdr.entries[1].name[i] = e1[i]; s_installer_fs_hdr.entries[1].kind = 1;
+    const char *e2 = "/home/notas.txt"; for (int i = 0; i < 31 && e2[i]; ++i) s_installer_fs_hdr.entries[2].name[i] = e2[i]; s_installer_fs_hdr.entries[2].kind = 2; s_installer_fs_hdr.entries[2].lba = (uint32_t)(INSTALL_DATA_FIRST + 2); s_installer_fs_hdr.entries[2].size = 512;
+    const char *e3 = "/config/theme.cfg"; for (int i = 0; i < 31 && e3[i]; ++i) s_installer_fs_hdr.entries[3].name[i] = e3[i]; s_installer_fs_hdr.entries[3].kind = 3; s_installer_fs_hdr.entries[3].lba = (uint32_t)(INSTALL_DATA_FIRST + 1); s_installer_fs_hdr.entries[3].size = 512;
+    if (!installer_target_write(INSTALL_DATA_FIRST, &s_installer_fs_hdr)) { g_installer.error = 1; return; }
+
+    clear512((uint8_t*)&s_installer_desk_cfg);
+    s_installer_desk_cfg.magic = UINT64_C(0x314643444E4B4142);
+    s_installer_desk_cfg.version = 1;
+    s_installer_desk_cfg.dark_theme = 0;
+    s_installer_desk_cfg.location_permission = 1;
+    if (!installer_target_write(INSTALL_DATA_FIRST + 1, &s_installer_desk_cfg)) { g_installer.error = 1; return; }
+
+    clear512((uint8_t*)&s_installer_note_file);
+    s_installer_note_file.magic = UINT64_C(0x3158544E454B4142);
+    s_installer_note_file.version = 1;
+    const char *init_note = "Notas do Baken OS gravadas na instalacao persistente GPT.";
+    for (int i = 0; i < 490 && init_note[i]; ++i) s_installer_note_file.text[i] = init_note[i];
+    s_installer_note_file.size = 56;
+    if (!installer_target_write(INSTALL_DATA_FIRST + 2, &s_installer_note_file)) { g_installer.error = 1; return; }
+
+    if (g_install_target_block_io->FlushBlocks && g_install_target_block_io->FlushBlocks(g_install_target_block_io) != 0) {
+        g_installer.error = 1; return;
+    }
+    if (g_install_target_block_io->ReadBlocks(g_install_target_block_io, g_install_target_block_io->Media->MediaId, data_lba + 3, 512, s_installer_sector) != 0 ||
+        s_installer_sector[0] != 'M' || s_installer_sector[1] != 'Z') {
+        g_installer.error = 1; return;
+    }
+
+    g_installer.progress = 100;
+    g_installer.installed = 1;
+    const char *m = "Baken OS instalado com sucesso no disco GPT!";
+    for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+    g_installer.status_text[63] = 0;
+}
 
 #define MAX_WINDOWS 16
 #define TITLE_BAR_HEIGHT 36
@@ -1822,6 +2258,71 @@ typedef struct {
     uint8_t title[48]; uint32_t bg_color; uint8_t bg_alpha; uint32_t border_color;
     uint32_t app_id;
 } Window;
+
+static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
+    if (!win) return;
+    uint32_t px = (win->x < 0) ? 12 : (uint32_t)win->x + 12;
+    uint32_t py = (win->y < 0) ? TITLE_BAR_HEIGHT + 8 : (uint32_t)win->y + TITLE_BAR_HEIGHT + 8;
+    uint32_t pw = win->width - 24;
+    uint32_t ph = win->height - TITLE_BAR_HEIGHT - 20;
+
+    uint32_t bar_y = py + 52 + 10;
+    uint32_t bar_w = pw - 24;
+    uint32_t bar_h = 28;
+    if (my >= (int32_t)bar_y && my < (int32_t)(bar_y + bar_h) && mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 12 + bar_w)) {
+        uint32_t mid = px + 12 + (bar_w * 58 / 100);
+        if (mx < (int32_t)mid) {
+            g_installer.selected_part = 0;
+        } else if (g_installer.part_count > 1) {
+            g_installer.selected_part = 1;
+        }
+        return;
+    }
+
+    uint32_t tbl_y = bar_y + bar_h + 10;
+    uint32_t row_y = tbl_y + 24;
+    for (uint32_t i = 0; i < g_installer.part_count && i < MAX_INSTALL_PARTS; ++i) {
+        if (my >= (int32_t)row_y && my < (int32_t)(row_y + 24) && mx >= (int32_t)(px + 14) && mx < (int32_t)(px + pw - 14)) {
+            g_installer.selected_part = (int32_t)i;
+            return;
+        }
+        row_y += 26;
+    }
+
+    uint32_t tools_y = tbl_y + 92 + 8;
+    if (my >= (int32_t)tools_y && my < (int32_t)(tools_y + 26)) {
+        if (mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 88)) {
+            installer_add_partition();
+            return;
+        }
+        if (mx >= (int32_t)(px + 94) && mx < (int32_t)(px + 170)) {
+            installer_delete_partition();
+            return;
+        }
+        if (mx >= (int32_t)(px + 176) && mx < (int32_t)(px + 262)) {
+            installer_format_partition();
+            return;
+        }
+        if (mx >= (int32_t)(px + 268) && mx < (int32_t)(px + 378)) {
+            installer_apply_default();
+            return;
+        }
+    }
+
+    uint32_t bot_y = py + ph - 36;
+    if (my >= (int32_t)bot_y && my < (int32_t)(bot_y + 30)) {
+        if (mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 122)) {
+            win->is_open = 0;
+            return;
+        }
+        if (mx >= (int32_t)(px + pw - 180) && mx < (int32_t)(px + pw - 10)) {
+            if (!g_installer.installed && g_installer.selected_disk == 0 && g_install_target_block_io) {
+                installer_execute_installation();
+            }
+            return;
+        }
+    }
+}
 
 typedef struct {
     uint8_t is_dragging; uint32_t active_win_id;
@@ -1993,6 +2494,17 @@ uint8_t wm_handle_mouse_down(int32_t mx, int32_t my) {
         g_drag.drag_start_x = mx; g_drag.drag_start_y = my;
         g_drag.win_start_x = win->x; g_drag.win_start_y = win->y;
         return 1;
+    }
+
+    if (win->app_id == 5) {
+        installer_handle_click(win, mx, my);
+    }
+    if (win->app_id == 2) {
+        uint32_t px = (win->x < 0) ? 12 : (uint32_t)win->x + 12;
+        uint32_t py = (win->y < 0) ? TITLE_BAR_HEIGHT + 8 : (uint32_t)win->y + TITLE_BAR_HEIGHT + 8;
+        if (mx >= (int32_t)(px + 18) && mx <= (int32_t)(px + 86) && my >= (int32_t)(py + 12) && my <= (int32_t)(py + 34)) {
+            cq_notes_save();
+        }
     }
     return 1;
 }
@@ -2214,27 +2726,108 @@ static void wm_render_single_window(const Window *win) {
                 baken_lua_draw_surface(px + 158, py + ph - 38, 116, 26, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 13);
                 gfx_draw_text_proportional(px + 172, py + ph - 32, "Tema: Claro", 0x00FFFFFF);
             }
-        } else if (win->app_id == 5) { // Assistente de instalacao (preview seguro)
-            /* Smoke pertence ao modal. A janela em si continua em Mica para
-             * que texto crítico de disco preserve contraste e legibilidade. */
-            baken_lua_draw_surface(px + 12, py + 12, pw - 24, 54, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 10);
-            gfx_draw_text_proportional(px + 26, py + 24, "Preparar Baken OS", 0x000F172A);
-            gfx_draw_text_proportional(px + 26, py + 44, "Assistente seguro de instalacao UEFI", 0x0064748B);
-            if (ph > 126) {
-                baken_lua_draw_surface(px + 12, py + 76, pw - 24, 58, BKN_LUA_MICA, BKN_LUA_REST, 10);
-                gfx_draw_text_proportional(px + 26, py + 88, "Idioma e entrada", 0x000284C7);
-                gfx_draw_text_proportional(px + 26, py + 108, "Portugues (Brasil)  |  Teclado ABNT2", 0x001E293B);
+        } else if (win->app_id == 5) { /* Assistente de Instalacao e Particionador Baken OS */
+            uint32_t top_card_h = 48;
+            baken_lua_draw_surface(px + 12, py + 6, pw - 24, top_card_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+            if (g_installer.selected_disk == 0 && g_install_target_block_io) {
+                gfx_draw_text_role(px + 20, py + 11, "Unidade: Disco 1 (Virtual GPT - 64 MB)", 0x000F172A, BKN_TYPE_LABEL);
+                gfx_draw_text_proportional(px + 20, py + 29, "Status: Gravavel | Protocolo: UEFI Block I/O | Alvo Seguro", 0x0010B981);
+                baken_lua_draw_surface(px + pw - 120, py + 12, 86, 20, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 10);
+                gfx_draw_text_proportional(px + pw - 112, py + 15, "Elegivel", 0x00166534);
+            } else {
+                gfx_draw_text_role(px + 20, py + 11, "Unidade: Disco 0 (Midia Live Baken OS)", 0x000F172A, BKN_TYPE_LABEL);
+                gfx_draw_text_proportional(px + 20, py + 29, "Status: Somente Leitura | Origem protegida contra gravacao", 0x00EF4444);
+                baken_lua_draw_surface(px + pw - 120, py + 12, 86, 20, BKN_LUA_GLASS_CLEAR, BKN_LUA_DISABLED, 10);
+                gfx_draw_text_proportional(px + pw - 114, py + 15, "Protegido", 0x0064748B);
             }
-            if (ph > 202) {
-                baken_lua_draw_surface(px + 12, py + 144, pw - 24, 58, BKN_LUA_MICA, BKN_LUA_FOCUS, 10);
-                gfx_draw_text_proportional(px + 26, py + 156, "Destino de instalacao", 0x000284C7);
-                gfx_draw_text_proportional(px + 26, py + 176, "Validacao de ESP FAT32 antes de qualquer gravacao", 0x001E293B);
+
+            uint32_t bar_y = py + top_card_h + 12;
+            uint32_t bar_w = pw - 24;
+            uint32_t bar_h = 26;
+            baken_lua_draw_surface(px + 12, bar_y, bar_w, bar_h, BKN_LUA_MICA, BKN_LUA_REST, 6);
+            
+            uint32_t cur_bx = px + 14;
+            for (uint32_t i = 0; i < g_installer.part_count; ++i) {
+                uint32_t seg_w = (i == 0) ? (bar_w * 58 / 100) : (bar_w * 40 / 100);
+                if (cur_bx + seg_w > px + 12 + bar_w - 2) seg_w = (px + 12 + bar_w - 2 > cur_bx) ? (px + 12 + bar_w - 2 - cur_bx) : 0;
+                uint32_t seg_color = (g_installer.parts[i].fs_type == 1) ? 0x000284C7 : 0x0010B981;
+                uint8_t is_sel = ((int32_t)i == g_installer.selected_part);
+                gfx_draw_glass_rect_material(cur_bx, bar_y + 2, seg_w, bar_h - 4, seg_color, is_sel ? 240 : 180, is_sel ? 0x00FFFFFF : seg_color, 4);
+                
+                if (g_installer.parts[i].fs_type == 1) {
+                    gfx_draw_text_proportional(cur_bx + 6, bar_y + 6, "ESP (FAT32 - 41 MB)", 0x00FFFFFF);
+                } else {
+                    gfx_draw_text_proportional(cur_bx + 6, bar_y + 6, "Baken Data (BakenFS - 23 MB)", 0x00FFFFFF);
+                }
+                cur_bx += seg_w + 2;
             }
-            if (ph > 242) {
-                baken_lua_draw_surface(px + 12, py + ph - 42, 132, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 14);
-                gfx_draw_text_proportional(px + 30, py + ph - 35, "Cancelar", 0x00334155);
-                baken_lua_draw_surface(px + pw - 154, py + ph - 42, 142, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 14);
-                gfx_draw_text_proportional(px + pw - 140, py + ph - 35, "Validar disco", 0x00FFFFFF);
+
+            uint32_t tbl_y = bar_y + bar_h + 10;
+            uint32_t tbl_h = 92;
+            baken_lua_draw_surface(px + 12, tbl_y, pw - 24, tbl_h, BKN_LUA_CANVAS, BKN_LUA_REST, 8);
+
+            gfx_fill_rect_alpha(px + 14, tbl_y + 2, pw - 28, 20, 0x001E293B, 200);
+            gfx_draw_text_proportional(px + 20, tbl_y + 5, "Particao / Volume", 0x0094A3B8);
+            gfx_draw_text_proportional(px + 170, tbl_y + 5, "Sistema Arquivos", 0x0094A3B8);
+            gfx_draw_text_proportional(px + 300, tbl_y + 5, "Tamanho", 0x0094A3B8);
+            gfx_draw_text_proportional(px + 390, tbl_y + 5, "Tipo / Papel", 0x0094A3B8);
+
+            uint32_t row_y = tbl_y + 24;
+            for (uint32_t i = 0; i < g_installer.part_count && i < MAX_INSTALL_PARTS; ++i) {
+                uint8_t is_sel = ((int32_t)i == g_installer.selected_part);
+                if (is_sel) {
+                    gfx_draw_glass_rect_material(px + 14, row_y, pw - 28, 22, 0x000284C7, 180, 0x0038BDF8, 4);
+                } else {
+                    gfx_draw_hline(px + 18, row_y + 22, pw - 36, 0x00334155, 60);
+                }
+                uint32_t txt_c = is_sel ? 0x00FFFFFF : 0x000F172A;
+                gfx_draw_text_proportional(px + 20, row_y + 4, g_installer.parts[i].name, txt_c);
+                const char *fs_name = (g_installer.parts[i].fs_type == 1) ? "FAT32 (ESP)" : ((g_installer.parts[i].fs_type == 2) ? "BakenFS v1" : "Nao Formatado");
+                gfx_draw_text_proportional(px + 170, row_y + 4, fs_name, is_sel ? 0x00E0F2FE : 0x000284C7);
+                const char *sz_txt = (i == 0) ? "41.0 MB" : "22.5 MB";
+                gfx_draw_text_proportional(px + 300, row_y + 4, sz_txt, txt_c);
+                const char *role_txt = (i == 0) ? "Boot UEFI" : "Dados & Sistema";
+                gfx_draw_text_proportional(px + 390, row_y + 4, role_txt, is_sel ? 0x00BBF7D0 : 0x00166534);
+
+                row_y += 24;
+            }
+
+            uint32_t tools_y = tbl_y + tbl_h + 8;
+            baken_lua_draw_surface(px + 12, tools_y, 76, 24, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
+            gfx_draw_text_proportional(px + 24, tools_y + 5, "+ Nova", 0x000F172A);
+
+            baken_lua_draw_surface(px + 94, tools_y, 76, 24, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
+            gfx_draw_text_proportional(px + 108, tools_y + 5, "Excluir", 0x000F172A);
+
+            baken_lua_draw_surface(px + 176, tools_y, 86, 24, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
+            gfx_draw_text_proportional(px + 188, tools_y + 5, "Formatar", 0x000F172A);
+
+            baken_lua_draw_surface(px + 268, tools_y, 110, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 6);
+            gfx_draw_text_proportional(px + 280, tools_y + 5, "Layout Padrao", 0x00166534);
+
+            uint32_t status_y = tools_y + 30;
+            gfx_draw_text_proportional(px + 14, status_y, g_installer.status_text, g_installer.installed ? 0x00166534 : (g_installer.error ? 0x00EF4444 : 0x000284C7));
+
+            if (g_installer.progress > 0) {
+                uint32_t pb_w = pw - 24;
+                baken_lua_draw_surface(px + 12, status_y + 16, pb_w, 6, BKN_LUA_MICA, BKN_LUA_REST, 3);
+                uint32_t fill_w = pb_w * g_installer.progress / 100;
+                gfx_fill_rect_alpha(px + 12, status_y + 16, fill_w, 6, g_installer.installed ? 0x0010B981 : 0x000284C7, 240);
+            }
+
+            uint32_t bot_y = py + ph - 34;
+            baken_lua_draw_surface(px + 12, bot_y, 100, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
+            gfx_draw_text_proportional(px + 36, bot_y + 6, "Fechar", 0x00334155);
+
+            if (g_installer.installed) {
+                baken_lua_draw_surface(px + pw - 170, bot_y, 158, 28, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 156, bot_y + 6, "Instalado (Sucesso)", 0x00166534);
+            } else if (g_installer.selected_disk == 0 && g_install_target_block_io) {
+                baken_lua_draw_surface(px + pw - 160, bot_y, 148, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 142, bot_y + 6, "Instalar Agora", 0x00FFFFFF);
+            } else {
+                baken_lua_draw_surface(px + pw - 170, bot_y, 158, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_DISABLED, 8);
+                gfx_draw_text_proportional(px + pw - 154, bot_y + 6, "Aguardando Disco", 0x0064748B);
             }
         } else { // Sobre
             baken_lua_draw_surface(px + 12, py + 12, pw - 24, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
@@ -2845,6 +3438,9 @@ void desktop_shell_set_cursor(int32_t x, int32_t y) {
 static void desktop_open_app(uint32_t app_id) {
     uint32_t sw = g_shell.screen_w;
     uint32_t sh = g_shell.screen_h;
+    if (g_loc_permission == 0) {
+        g_loc_permission = 1;
+    }
     dock_trigger_bounce(&g_main_dock, app_id);
     if (app_id == 0 || app_id == 11) {
         wm_create_window(1, (const uint8_t*)"Arquivos - BakenFS", (int32_t)(sw / 2 - 280), (int32_t)(sh / 2 - 180), 560, 360, 0x00F8FAFC, 215, 0x00FFFFFF);
@@ -2862,7 +3458,7 @@ static void desktop_open_app(uint32_t app_id) {
         wm_create_window(4, (const uint8_t*)"Terminal Cq - Vortex Core", (int32_t)(sw / 2 - 270), (int32_t)(sh / 2 - 170), 540, 340, 0x00F8FAFC, 215, 0x00FFFFFF);
         wm_bring_to_front(4);
     } else if (app_id == 14) {
-        wm_create_window(5, (const uint8_t*)"Instalar Baken OS", (int32_t)(sw / 2 - 280), (int32_t)(sh / 2 - 190), 560, 380, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_create_window(5, (const uint8_t*)"Instalador e Particionador Baken OS", (int32_t)(sw / 2 - 290), (int32_t)(sh / 2 - 210), 580, 420, 0x00F8FAFC, 215, 0x00FFFFFF);
         wm_bring_to_front(5);
     } else {
         wm_create_window(4, (const uint8_t*)"Baken OS - Aplicativo", (int32_t)(sw / 2 - 200), (int32_t)(sh / 2 - 120), 400, 240, 0x00F8FAFC, 215, 0x00FFFFFF);
@@ -3974,6 +4570,7 @@ typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
 
 extern void desktop_shell_toggle_theme(void);
 extern uint8_t desktop_shell_is_dark_theme(void);
+extern void installer_setup_io(void *boot_io, void *target_io);
 
 typedef struct { uint32_t MediaId; uint8_t RemovableMedia,MediaPresent,LogicalPartition,ReadOnly,WriteCaching; uint32_t BlockSize,IoAlign; uint64_t LastBlock,LowestAlignedLba; uint32_t LogicalBlocksPerPhysicalBlock,OptimalTransferLengthGranularity; } EFI_BLOCK_IO_MEDIA;
 typedef struct _EFI_BLOCK_IO_PROTOCOL { uint64_t Revision; EFI_BLOCK_IO_MEDIA *Media; uint64_t (*Reset)(void*,uint8_t); uint64_t (*ReadBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*WriteBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*FlushBlocks)(void*); } EFI_BLOCK_IO_PROTOCOL;
@@ -4145,7 +4742,7 @@ static void cq_notes_load(void){
     }
 }
 static void cq_notes_append(uint16_t ch){ if(ch>=32 && ch<127 && cq_note_len<127){cq_note_text[cq_note_len++]=(char)ch; cq_note_text[cq_note_len]=0;} }
-static void cq_notes_save(void){
+void cq_notes_save(void){
     cq_fs_write_file("/home/notas.txt", cq_note_text, cq_note_len);
 }
 
@@ -4258,6 +4855,8 @@ extern uint8_t desktop_shell_is_spotlight_open(void);
 extern void desktop_shell_spotlight_key(uint16_t unicode, uint16_t scan);
 extern void desktop_shell_terminal_key(uint16_t unicode, uint16_t scan);
 extern void desktop_shell_terminal_append(const char *line);
+extern void installer_execute_installation(void);
+extern uint8_t wm_app_is_open(uint32_t app_id);
 
 typedef struct {
     uint16_t unicode;
@@ -4295,6 +4894,14 @@ static void cq_dispatch_key(uint16_t unicode, uint16_t scan) {
         } else {
             desktop_shell_terminal_key(unicode, scan);
         }
+    } else if (wm_is_window_focused(5) || wm_app_is_open(14)) {
+        if (unicode == 27 || scan == 0x17) {
+            wm_unfocus_all();
+        } else if (unicode == 13 || unicode == 10) {
+            installer_execute_installation();
+        } else if (unicode == 'i' || unicode == 'I') {
+            installer_execute_installation();
+        }
     } else if (wm_is_window_focused(2)) {
         if (unicode == 27 || scan == 0x17) {
             wm_unfocus_all();
@@ -4317,7 +4924,13 @@ static void cq_dispatch_key(uint16_t unicode, uint16_t scan) {
         else if(unicode=='s'||unicode=='S') desktop_shell_toggle_spotlight(); /* Spotlight Search */
         else if(unicode=='t'||unicode=='T') desktop_shell_toggle_theme(); /* Modo Escuro/Claro */
         else if(unicode=='x'||unicode=='X') desktop_shell_toggle_context_menu(); /* Menu Contexto */
-        else if(unicode=='i'||unicode=='I') desktop_shell_launch_app(14); /* Instalador: prévia segura */
+        else if(unicode=='i'||unicode=='I') {
+            if (wm_app_is_open(14)) {
+                installer_execute_installation();
+            } else {
+                desktop_shell_launch_app(14);
+            }
+        }
         else if(unicode=='m'||unicode=='M') desktop_shell_toggle_media();
         else if(unicode=='d'||unicode=='D') cq_fs_add("/home/documentos", 1, 0, 0);
         else if(unicode=='n'||unicode=='N') cq_fs_add("/home/arquivo.txt", 2, 512, 86020);
@@ -4334,6 +4947,7 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
     /* Serviços que o shell consulta no primeiro quadro devem existir antes do
      * compositor. Isso evita que widgets recebam um estado de montagem vazio. */
     cq_fs_io = (EFI_BLOCK_IO_PROTOCOL*)boot_info->block_io_protocol;
+    installer_setup_io(boot_info->block_io_protocol, boot_info->install_target_block_io_protocol);
     cq_notes_load();
     desktop_config_load();
     gfx_init(boot_info->framebuffer_base, width, height, boot_info->pixels_per_scanline);

@@ -132,8 +132,10 @@ def create_esp_disk_image(output_img: str, efi_bin_path: str, startup_nsh_path: 
         cluster = 2 + (sector_in_partition - first_data_sector) // 4
         if cluster >= 0xFFF7:
             raise ValueError("LBA de registro fora da FAT16")
-        struct.pack_into("<H", disk, fat1_offset + cluster * 2, 0xFFFF)
-        struct.pack_into("<H", disk, fat2_offset + cluster * 2, 0xFFFF)
+        curr_fat = struct.unpack_from("<H", disk, fat1_offset + cluster * 2)[0]
+        if curr_fat == 0:
+            struct.pack_into("<H", disk, fat1_offset + cluster * 2, 0xFFFF)
+            struct.pack_into("<H", disk, fat2_offset + cluster * 2, 0xFFFF)
         
     c_bootx64, sz_bootx64 = write_file(b"BOOTX64 EFI", efi_data)
     
@@ -195,3 +197,8 @@ if __name__ == "__main__":
     kernel = os.path.join(root, "build", "iso_root", "KERNEL.BKN_EXEC")
     
     create_esp_disk_image(out_img, efi, startup, kernel)
+    target_img = os.path.join(root, "build", "baken_install_target.img")
+    if not os.path.exists(target_img):
+        with open(target_img, "wb") as f:
+            f.truncate(64 * 1024 * 1024)
+        print(f"[OK] Disco alvo de instalacao GPT de 64MB criado em: {target_img}")
