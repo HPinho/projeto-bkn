@@ -26,7 +26,7 @@
       "patterns": [
         {
           "name": "keyword.control.cq",
-          "match": "\\b(if|else|for|while|return|break|continue|in)\\b"
+          "match": "\\b(if|else|for|while|return|break|continue|in|defer)\\b"
         },
         {
           "name": "keyword.other.cq",

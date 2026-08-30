@@ -40,13 +40,14 @@ TypeName         ::= "void" | "bool"
 
 Block            ::= "{" { Statement } "}" ;
 Statement        ::= LetStatement | Assignment | ReturnStatement | IfStatement
-                   | WhileStatement | UnsafeBlock | Expression ";" ;
+                   | WhileStatement | UnsafeBlock | DeferStatement | Expression ";" ;
 LetStatement     ::= "let" [ "mut" ] Identifier [ ":" Type ] "=" Expression ";" ;
 Assignment       ::= Expression "=" Expression ";" ;
 ReturnStatement  ::= "return" [ Expression ] ";" ;
 IfStatement      ::= "if" Expression Block [ "else" Block ] ;
 WhileStatement   ::= "while" Expression Block ;
 UnsafeBlock      ::= "unsafe" Block ;
+DeferStatement   ::= "defer" Expression ";" ;
 
 Expression       ::= LogicalOr ;
 LogicalOr        ::= LogicalAnd { "||" LogicalAnd } ;

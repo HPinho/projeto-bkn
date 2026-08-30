@@ -40,7 +40,7 @@ class Token:
 
 KEYWORDS = {"module", "import", "pub", "struct", "class", "enum", "fn", "let", "mut",
             "const", "static", "return", "break", "continue", "if", "else", "while", "unsafe",
-            "true", "false", "as", "null"}
+            "true", "false", "as", "null", "defer"}
 MULTI = ("::", "->", "==", "!=", "<=", ">=", "&&", "||", "<<", ">>")
 SINGLE = set(";,:{}()[]=+-*/%!<>&|^~.")
 PRIMITIVES = {"void", "bool", "u8", "u16", "u32", "u64", "usize",
@@ -199,6 +199,8 @@ class While(Stmt): condition: Expr; body: list[Stmt]
 class Unsafe(Stmt): body: list[Stmt]
 @dataclass
 class Expression(Stmt): value: Expr
+@dataclass
+class Defer(Stmt): value: Expr
 
 @dataclass
 class FieldDef: name: str; type: Type
@@ -451,6 +453,14 @@ class Parser:
             return If(token, condition, then_body, else_body)
         if self.accept("while"): return While(token, self.expression(), self.block())
         if self.accept("unsafe"): return Unsafe(token, self.block())
+        if self.accept("defer"):
+            expr = self.expression()
+            if self.accept("="):
+                value = self.expression()
+                self.expect(";")
+                return Defer(token, Assign(token, expr, value))
+            self.expect(";")
+            return Defer(token, expr)
 
         # Expressão ou Atribuição (pode ser atribuição a identificador ou membro/índice)
         expr = self.expression()
@@ -782,6 +792,19 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 statements(item.body, scope, expected_return, in_unsafe=True, is_system_fn=is_system_fn)
             elif isinstance(item, Expression):
                 expr_type(item.value, scope, in_unsafe, is_system_fn)
+            elif isinstance(item, Defer):
+                if isinstance(item.value, Assign):
+                    if isinstance(item.value.target, Name):
+                        if item.value.target.value not in scope and item.value.target.value not in global_map:
+                            raise Cq01Error(f"atribuição a símbolo desconhecido: {item.value.target.value}", item.token.line, item.token.column, filename, source)
+                        target_t = scope[item.value.target.value] if item.value.target.value in scope else global_map[item.value.target.value].type
+                    else:
+                        target_t = expr_type(item.value.target, scope, in_unsafe, is_system_fn)
+                    val_t = expr_type(item.value.value, scope, in_unsafe, is_system_fn)
+                    if not assignable(val_t, target_t):
+                        raise Cq01Error("atribuição incompatível", item.token.line, item.token.column, filename, source)
+                else:
+                    expr_type(item.value, scope, in_unsafe, is_system_fn)
 
     # 3. Validação dos Corpos de Função
     for function in module.functions:
@@ -889,11 +912,27 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
     # Globals / Consts
     for g in module.globals:
         specifier = "static const" if g.is_const else "static"
-        lines.append(f"{specifier} {g.type.c_decl(g.name)} = {_emit_expr(g.value, prefix)};")
+        if g.type.is_array and not g.type.pointer and isinstance(g.value, Number) and g.value.value == "0":
+            lines.append(f"{specifier} {g.type.c_decl(g.name)} = {{0}};")
+        else:
+            lines.append(f"{specifier} {g.type.c_decl(g.name)} = {_emit_expr(g.value, prefix)};")
     if module.globals: lines.append("")
 
-    def emit_statements(items: list[Stmt], depth: int) -> list[str]:
+    def _emit_defer_action(d: Defer, pad: str) -> str:
+        if isinstance(d.value, Assign):
+            target_str = _emit_expr(d.value.target, prefix) if isinstance(d.value.target, Expr) else str(d.value.target)
+            return f"{pad}{target_str} = {_emit_expr(d.value.value, prefix)};"
+        return f"{pad}{_emit_expr(d.value, prefix)};"
+
+    def emit_statements(
+        items: list[Stmt],
+        depth: int,
+        defer_scopes: list[list[Defer]],
+        loop_scope_depth: int | None = None,
+        ret_type: Type | None = None,
+    ) -> list[str]:
         pad = "    " * depth; out: list[str] = []
+        defer_scopes.append([])
         for item in items:
             if isinstance(item, Let):
                 typ = item.type or Type("i64")
@@ -904,28 +943,55 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
             elif isinstance(item, Assign):
                 target_str = _emit_expr(item.target, prefix) if isinstance(item.target, Expr) else str(item.target)
                 out.append(f"{pad}{target_str} = {_emit_expr(item.value, prefix)};")
+            elif isinstance(item, Defer):
+                defer_scopes[-1].append(item)
             elif isinstance(item, Return):
-                out.append(f"{pad}return" + (f" {_emit_expr(item.value, prefix)}" if item.value else "") + ";")
+                all_defers = [d for scope in reversed(defer_scopes) for d in reversed(scope)]
+                if item.value:
+                    val_str = _emit_expr(item.value, prefix)
+                    if all_defers:
+                        c_ret_type = ret_type.c() if ret_type else "int64_t"
+                        out.append(f"{pad}{c_ret_type} _cq_ret = {val_str};")
+                        for d in all_defers:
+                            out.append(_emit_defer_action(d, pad))
+                        out.append(f"{pad}return _cq_ret;")
+                    else:
+                        out.append(f"{pad}return {val_str};")
+                else:
+                    for d in all_defers:
+                        out.append(_emit_defer_action(d, pad))
+                    out.append(f"{pad}return;")
             elif isinstance(item, Break):
+                if loop_scope_depth is not None:
+                    loop_defers = [d for scope in reversed(defer_scopes[loop_scope_depth:]) for d in reversed(scope)]
+                    for d in loop_defers:
+                        out.append(_emit_defer_action(d, pad))
                 out.append(f"{pad}break;")
             elif isinstance(item, Continue):
+                if loop_scope_depth is not None:
+                    loop_defers = [d for scope in reversed(defer_scopes[loop_scope_depth:]) for d in reversed(scope)]
+                    for d in loop_defers:
+                        out.append(_emit_defer_action(d, pad))
                 out.append(f"{pad}continue;")
             elif isinstance(item, Expression):
                 out.append(f"{pad}{_emit_expr(item.value, prefix)};")
             elif isinstance(item, Unsafe):
-                out.extend(emit_statements(item.body, depth))
+                out.extend(emit_statements(item.body, depth, defer_scopes, loop_scope_depth, ret_type))
             elif isinstance(item, While):
                 out.append(f"{pad}while ({_emit_expr(item.condition, prefix)}) {{")
-                out.extend(emit_statements(item.body, depth + 1))
+                out.extend(emit_statements(item.body, depth + 1, defer_scopes, loop_scope_depth=len(defer_scopes), ret_type=ret_type))
                 out.append(f"{pad}}}")
             elif isinstance(item, If):
                 out.append(f"{pad}if ({_emit_expr(item.condition, prefix)}) {{")
-                out.extend(emit_statements(item.then_body, depth + 1))
+                out.extend(emit_statements(item.then_body, depth + 1, defer_scopes, loop_scope_depth, ret_type))
                 out.append(f"{pad}}}")
                 if item.else_body:
                     out.append(f"{pad}else {{")
-                    out.extend(emit_statements(item.else_body, depth + 1))
+                    out.extend(emit_statements(item.else_body, depth + 1, defer_scopes, loop_scope_depth, ret_type))
                     out.append(f"{pad}}}")
+        current_defers = defer_scopes.pop()
+        for d in reversed(current_defers):
+            out.append(_emit_defer_action(d, pad))
         return out
 
     # Forward declarations das funções
@@ -941,7 +1007,7 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
         fname = function.name if (is_export or not mangle) else f"{prefix}{function.name}"
         parameters = ", ".join(f"{typ.c()} {name}" for name, typ in function.params) or "void"
         lines.append(f"{function.result.c()} {fname}({parameters}) {{")
-        lines.extend(emit_statements(function.body, 1))
+        lines.extend(emit_statements(function.body, 1, defer_scopes=[], loop_scope_depth=None, ret_type=function.result))
         lines.append("}\n")
     return "\n".join(lines)
 

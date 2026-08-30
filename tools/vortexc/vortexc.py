@@ -38,7 +38,7 @@ class CqError(Exception):
 
 def project_root(entry):
     for candidate in (entry.parent, *entry.parents):
-        if (candidate / "kernel").is_dir() and (candidate / "libbkn").is_dir():
+        if (candidate / "kernel").is_dir():
             return candidate
     raise CqError("não foi possível localizar a raiz do projeto Cq")
 
@@ -2449,11 +2449,12 @@ static int str_contains_nocase(const char *haystack, const char *needle) {
     return 0;
 }
 
-#define TERM_MAX_LINES 12
+#define TERM_MAX_LINES 32
 #define TERM_LINE_LEN 64
 typedef struct {
     char lines[TERM_MAX_LINES][TERM_LINE_LEN];
     uint32_t line_count;
+    int32_t scroll_offset;
     char current_cmd[48];
     uint32_t cmd_len;
 } BakenTerminalState;
@@ -2464,12 +2465,25 @@ static BakenTerminalState g_terminal = {
         "Terminal interativo - Digite 'help' para comandos."
     },
     2,
+    0,
     "",
     0
 };
 
+static void desktop_shell_terminal_scroll(int32_t delta) {
+    g_terminal.scroll_offset += delta;
+    if (g_terminal.scroll_offset < 0) g_terminal.scroll_offset = 0;
+    if (g_terminal.line_count > 6) {
+        int32_t max_scroll = (int32_t)g_terminal.line_count - 6;
+        if (g_terminal.scroll_offset > max_scroll) g_terminal.scroll_offset = max_scroll;
+    } else {
+        g_terminal.scroll_offset = 0;
+    }
+}
+
 static void terminal_append_line(const char *line) {
     if (!line) return;
+    g_terminal.scroll_offset = 0;
     if (g_terminal.line_count < TERM_MAX_LINES) {
         int len = 0;
         while (line[len] && len < TERM_LINE_LEN - 1) {
@@ -2630,6 +2644,10 @@ typedef struct {
 } DesktopShellState;
 
 static DesktopShellState g_shell = {1920, 1080, 0, 960, 540, -1, 0, 0, 0, 0, 0, 0, 0, {0}, 0, {0, 6, 10, 9}, 4};
+static uint8_t g_loc_permission = 0; /* 0 = PENDING, 1 = GRANTED, 2 = DENIED */
+
+uint8_t desktop_shell_get_location_permission(void) { return g_loc_permission; }
+void desktop_shell_set_location_permission(uint8_t perm) { g_loc_permission = perm; }
 
 typedef struct {
     const char *label;
@@ -3151,9 +3169,79 @@ void desktop_shell_open_context_menu(int32_t x, int32_t y) {
     g_shell.spotlight_open = 0;
 }
 
+static void render_permission_dialog(void) {
+    if (g_loc_permission != 0) return;
+    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+    uint32_t dw = baken_ui_px(440);
+    uint32_t dh = baken_ui_px(180);
+    uint32_t dx = sw > dw ? (sw - dw) / 2u : 0;
+    uint32_t dy = sh > dh ? (sh - dh) / 2u : 0;
+    uint8_t is_dark = desktop_shell_is_dark_theme();
+
+    gfx_draw_smooth_shadow(dx, dy, (int)dw, (int)dh, 16, 28, 140);
+    baken_lua_draw_surface(dx, dy, dw, dh, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, baken_ui_px(14));
+
+    uint32_t header_y = dy + baken_ui_px(14);
+    gfx_draw_circle_alpha(dx + baken_ui_px(22), header_y + baken_ui_px(8), baken_ui_px(6), 0x000284C7, 240);
+    gfx_draw_text_role(dx + baken_ui_px(34), header_y, "Permissao de Localizacao", is_dark ? 0x00FFFFFF : 0x000F172A, BKN_TYPE_TITLE);
+
+    uint32_t msg_y = dy + baken_ui_px(46);
+    gfx_draw_text_proportional(dx + baken_ui_px(20), msg_y, "O Baken OS solicita autorizacao para acessar sua", is_dark ? 0x00E2E8F0 : 0x00334155);
+    gfx_draw_text_proportional(dx + baken_ui_px(20), msg_y + baken_ui_px(18), "localizacao (via IP/Rede ou GPS) para exibir previsao", is_dark ? 0x00E2E8F0 : 0x00334155);
+    gfx_draw_text_proportional(dx + baken_ui_px(20), msg_y + baken_ui_px(36), "do tempo e fuso horario dinamicos no desktop.", is_dark ? 0x0094A3B8 : 0x0064748B);
+
+    uint32_t btn_y = dy + dh - baken_ui_px(48);
+    uint32_t btn_w = baken_ui_px(190);
+    uint32_t btn_h = baken_ui_px(34);
+    int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
+
+    /* Botão 1: Permitir Acesso */
+    uint32_t btn1_x = dx + baken_ui_px(20);
+    int hover1 = (mx >= (int32_t)btn1_x && mx < (int32_t)(btn1_x + btn_w) && my >= (int32_t)btn_y && my < (int32_t)(btn_y + btn_h));
+    if (hover1) {
+        gfx_draw_glass_rect_material(btn1_x, btn_y, btn_w, btn_h, 0x000284C7, 240, 0x0038BDF8, baken_ui_px(8));
+    } else {
+        baken_lua_draw_surface(btn1_x, btn_y, btn_w, btn_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, baken_ui_px(8));
+    }
+    gfx_draw_text_proportional(btn1_x + baken_ui_px(44), btn_y + baken_ui_px(8), "Permitir Acesso", 0x00FFFFFF);
+
+    /* Botão 2: Recusar */
+    uint32_t btn2_x = dx + dw - btn_w - baken_ui_px(20);
+    int hover2 = (mx >= (int32_t)btn2_x && mx < (int32_t)(btn2_x + btn_w) && my >= (int32_t)btn_y && my < (int32_t)(btn_y + btn_h));
+    if (hover2) {
+        gfx_draw_glass_rect_material(btn2_x, btn_y, btn_w, btn_h, 0x00334155, 200, 0x0064748B, baken_ui_px(8));
+    } else {
+        baken_lua_draw_surface(btn2_x, btn_y, btn_w, btn_h, BKN_LUA_MICA, BKN_LUA_REST, baken_ui_px(8));
+    }
+    gfx_draw_text_proportional(btn2_x + baken_ui_px(68), btn_y + baken_ui_px(8), "Recusar", is_dark ? 0x0094A3B8 : 0x0064748B);
+}
+
 void desktop_shell_handle_click(int32_t mx, int32_t my) {
     uint32_t top_h = baken_ui_px(32);
     uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+
+    // 0. Diálogo de Permissão de Localização
+    if (g_loc_permission == 0) {
+        uint32_t dw = baken_ui_px(440), dh = baken_ui_px(180);
+        uint32_t dx = sw > dw ? (sw - dw) / 2u : 0;
+        uint32_t dy = sh > dh ? (sh - dh) / 2u : 0;
+        uint32_t btn_y = dy + dh - baken_ui_px(48);
+        uint32_t btn_w = baken_ui_px(190), btn_h = baken_ui_px(34);
+        uint32_t btn1_x = dx + baken_ui_px(20);
+        uint32_t btn2_x = dx + dw - btn_w - baken_ui_px(20);
+
+        if (mx >= (int32_t)btn1_x && mx < (int32_t)(btn1_x + btn_w) && my >= (int32_t)btn_y && my < (int32_t)(btn_y + btn_h)) {
+            g_loc_permission = 1;
+            desktop_config_save();
+            return;
+        }
+        if (mx >= (int32_t)btn2_x && mx < (int32_t)(btn2_x + btn_w) && my >= (int32_t)btn_y && my < (int32_t)(btn_y + btn_h)) {
+            g_loc_permission = 2;
+            desktop_config_save();
+            return;
+        }
+        return;
+    }
 
     // 1. Central de Controle
     if (g_shell.control_center_open) {
@@ -3354,9 +3442,20 @@ void desktop_shell_render_terminal(uint32_t px, uint32_t py, uint32_t pw, uint32
     baken_lua_draw_surface(px, py, pw, ph, BKN_LUA_CANVAS, BKN_LUA_REST, 10);
     gfx_fill_rect_alpha(px + 4, py + 4, pw - 8, ph - 8, 0x000B132B, 240);
 
-    // Linhas do terminal
+    /* Capacidade visível de linhas */
+    uint32_t vis_lines = (ph > 48) ? (ph - 48) / 18 : 1;
+    uint32_t total = g_terminal.line_count;
+    int32_t start_l = 0;
+    if (total > vis_lines) {
+        start_l = (int32_t)(total - vis_lines) - g_terminal.scroll_offset;
+        if (start_l < 0) start_l = 0;
+    }
+    uint32_t end_l = (uint32_t)start_l + vis_lines;
+    if (end_l > total) end_l = total;
+
+    // Linhas visíveis do terminal
     uint32_t ty = py + 12;
-    for (uint32_t l = 0; l < g_terminal.line_count && ty + 18 < py + ph - 24; ++l) {
+    for (uint32_t l = (uint32_t)start_l; l < end_l && ty + 18 < py + ph - 24; ++l) {
         uint32_t col = (g_terminal.lines[l][0] == '$') ? 0x0038BDF8 : 0x00E2E8F0;
         gfx_draw_text_proportional(px + 14, ty, g_terminal.lines[l], col);
         ty += 18;
@@ -3400,7 +3499,11 @@ void desktop_shell_spotlight_key(uint16_t unicode, uint16_t scan) {
 }
 
 void desktop_shell_terminal_key(uint16_t unicode, uint16_t scan) {
-    if (unicode == 13 || unicode == 10) {
+    if (scan == 0x09 || scan == 9) {
+        desktop_shell_terminal_scroll(3); /* Page Up: sobe 3 linhas */
+    } else if (scan == 0x0A || scan == 10) {
+        desktop_shell_terminal_scroll(-3); /* Page Down: desce 3 linhas */
+    } else if (unicode == 13 || unicode == 10) {
         terminal_execute_command();
     } else if (unicode == 8 || scan == 0x08) {
         if (g_terminal.cmd_len > 0) {
@@ -3609,25 +3712,43 @@ static void render_widgets_stack(void) {
     uint32_t weather_h = layout.weather_h, media_h = layout.media_h, calendar_h = layout.calendar_h;
     uint32_t monitor_h = layout.monitor_h, notes_h = layout.notes_h;
 
-    /* 1. Clima (Weather) */
+    /* 1. Clima (Weather) Dinâmico */
     if (layout.visible_mask & BKN_WIDGET_WEATHER) {
         baken_lua_draw_surface(wx, y, ww, weather_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
-        gfx_draw_text_role(wx + U(16), y + U(12), "Teresina, Piaui", title_color, BKN_TYPE_TITLE);
+        if (g_loc_permission == 1) {
+            gfx_draw_text_role(wx + U(16), y + U(12), "Teresina, Piaui", title_color, BKN_TYPE_TITLE);
 
-        // Sol com halo quente e ícone nítido
-        gfx_draw_circle_alpha(wx + U(36), y + U(56), U(18), 0x00FBBF24, 35);
-        gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x00F59E0B, 255);
+            // Sol com halo quente e ícone nítido
+            gfx_draw_circle_alpha(wx + U(36), y + U(56), U(18), 0x00FBBF24, 35);
+            gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x00F59E0B, 255);
 
-        // Temperatura e rótulo
-        uint32_t temp_x = wx + U(68);
-        gfx_draw_text_role(temp_x, y + U(36), "32", title_color, BKN_TYPE_DISPLAY);
-        gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(3), title_color, 255);
-        gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(1), is_dark ? 0x000F172A : 0x00FFFFFF, 255);
-        gfx_draw_text_role(temp_x + U(52), y + U(44), "Ensolarado", sub_color, BKN_TYPE_LABEL);
+            // Temperatura e rótulo
+            uint32_t temp_x = wx + U(68);
+            gfx_draw_text_role(temp_x, y + U(36), "32", title_color, BKN_TYPE_DISPLAY);
+            gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(3), title_color, 255);
+            gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(1), is_dark ? 0x000F172A : 0x00FFFFFF, 255);
+            gfx_draw_text_role(temp_x + U(52), y + U(44), "Ensolarado", sub_color, BKN_TYPE_LABEL);
 
-        // Divisor suave e rodapé
-        gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
-        gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Vento 14 km/h  .  Umidade 62%", sub_color);
+            // Divisor suave e rodapé
+            gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+            gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Vento 14 km/h  .  Umidade 62%", sub_color);
+        } else if (g_loc_permission == 2) {
+            gfx_draw_text_role(wx + U(16), y + U(12), "Modo Privado (Local)", title_color, BKN_TYPE_TITLE);
+            gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x0064748B, 200);
+            uint32_t temp_x = wx + U(68);
+            gfx_draw_text_role(temp_x, y + U(36), "--", sub_color, BKN_TYPE_DISPLAY);
+            gfx_draw_text_role(temp_x + U(52), y + U(44), "Protegido", 0x000284C7, BKN_TYPE_LABEL);
+            gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+            gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Localizacao Desativada", sub_color);
+        } else {
+            gfx_draw_text_role(wx + U(16), y + U(12), "Permissao Pendente", 0x00D97706, BKN_TYPE_TITLE);
+            gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x00D97706, 200);
+            uint32_t temp_x = wx + U(68);
+            gfx_draw_text_role(temp_x, y + U(36), "--", sub_color, BKN_TYPE_DISPLAY);
+            gfx_draw_text_role(temp_x + U(52), y + U(44), "Aguardando", 0x00D97706, BKN_TYPE_LABEL);
+            gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+            gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Clique para autorizar IP/GPS", 0x00D97706);
+        }
         y += weather_h + gap;
     }
 
@@ -3802,6 +3923,7 @@ void desktop_shell_render_frame(void) {
     render_control_center();
     render_spotlight_overlay();
     render_desktop_context_menu();
+    render_permission_dialog();
     render_cursor();
     gfx_swap_buffers();
 }
@@ -4027,11 +4149,17 @@ static void cq_notes_save(void){
     cq_fs_write_file("/home/notas.txt", cq_note_text, cq_note_len);
 }
 
+extern void desktop_shell_toggle_theme(void);
+extern uint8_t desktop_shell_is_dark_theme(void);
+extern uint8_t desktop_shell_get_location_permission(void);
+extern void desktop_shell_set_location_permission(uint8_t perm);
+
 typedef struct {
     uint64_t magic;
     uint32_t version;
     uint8_t dark_theme;
-    uint8_t reserved[503];
+    uint8_t location_permission;
+    uint8_t reserved[502];
 } CqDesktopConfig;
 
 static void desktop_config_load(void) {
@@ -4043,6 +4171,9 @@ static void desktop_config_load(void) {
     } else if (!cfg.dark_theme && desktop_shell_is_dark_theme()) {
         desktop_shell_toggle_theme();
     }
+    if (cfg.location_permission <= 2) {
+        desktop_shell_set_location_permission(cfg.location_permission);
+    }
 }
 
 void desktop_config_save(void) {
@@ -4052,6 +4183,7 @@ void desktop_config_save(void) {
     cfg.magic = UINT64_C(0x314643444E4B4142);
     cfg.version = 1;
     cfg.dark_theme = desktop_shell_is_dark_theme();
+    cfg.location_permission = desktop_shell_get_location_permission();
     if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86017, 512, &cfg) == 0) {
         if (cq_fs_io->FlushBlocks) cq_fs_io->FlushBlocks(cq_fs_io);
         cq_fs_add("/config/theme.cfg", 3, 512, 86017);
@@ -4115,6 +4247,8 @@ extern void desktop_shell_toggle_control_center(void);
 extern void desktop_shell_toggle_spotlight(void);
 extern void desktop_shell_toggle_context_menu(void);
 extern void desktop_shell_open_context_menu(int32_t x, int32_t y);
+extern uint8_t desktop_shell_get_location_permission(void);
+extern void desktop_shell_set_location_permission(uint8_t perm);
 extern uint8_t wm_handle_mouse_down(int32_t mx, int32_t my);
 extern void wm_handle_mouse_move(int32_t mx, int32_t my);
 extern void wm_handle_mouse_up(void);
@@ -4124,6 +4258,72 @@ extern uint8_t desktop_shell_is_spotlight_open(void);
 extern void desktop_shell_spotlight_key(uint16_t unicode, uint16_t scan);
 extern void desktop_shell_terminal_key(uint16_t unicode, uint16_t scan);
 extern void desktop_shell_terminal_append(const char *line);
+
+typedef struct {
+    uint16_t unicode;
+    uint16_t scan;
+} CqInputEvent;
+
+#define CQ_INPUT_QUEUE_SIZE 32
+static CqInputEvent g_cq_input_queue[CQ_INPUT_QUEUE_SIZE];
+static uint32_t g_cq_input_head = 0;
+static uint32_t g_cq_input_tail = 0;
+static uint32_t g_cq_input_count = 0;
+
+static void cq_input_push_key(uint16_t unicode, uint16_t scan) {
+    if (g_cq_input_count >= CQ_INPUT_QUEUE_SIZE) return;
+    g_cq_input_queue[g_cq_input_tail].unicode = unicode;
+    g_cq_input_queue[g_cq_input_tail].scan = scan;
+    g_cq_input_tail = (g_cq_input_tail + 1) % CQ_INPUT_QUEUE_SIZE;
+    g_cq_input_count++;
+}
+
+static int cq_input_pop(CqInputEvent *out_evt) {
+    if (g_cq_input_count == 0 || !out_evt) return 0;
+    *out_evt = g_cq_input_queue[g_cq_input_head];
+    g_cq_input_head = (g_cq_input_head + 1) % CQ_INPUT_QUEUE_SIZE;
+    g_cq_input_count--;
+    return 1;
+}
+
+static void cq_dispatch_key(uint16_t unicode, uint16_t scan) {
+    if (desktop_shell_is_spotlight_open()) {
+        desktop_shell_spotlight_key(unicode, scan);
+    } else if (wm_is_window_focused(4)) {
+        if (unicode == 27 || scan == 0x17) {
+            wm_unfocus_all();
+        } else {
+            desktop_shell_terminal_key(unicode, scan);
+        }
+    } else if (wm_is_window_focused(2)) {
+        if (unicode == 27 || scan == 0x17) {
+            wm_unfocus_all();
+        } else if (unicode == 13 || unicode == 10) {
+            cq_notes_save();
+            desktop_shell_terminal_append("Notas salvas no BakenFS.");
+        } else if (unicode == 8 || scan == 0x08) {
+            if (cq_note_len) { cq_note_text[--cq_note_len] = 0; }
+        } else if (unicode >= 32 && unicode <= 126) {
+            cq_notes_append(unicode);
+        }
+    } else {
+        if(unicode=='1') desktop_shell_launch_app(0); /* Arquivos */
+        else if(unicode=='2') { desktop_shell_launch_app(6); cq_note_editing=1; } /* Notas */
+        else if(unicode=='3') desktop_shell_launch_app(8); /* Ajustes */
+        else if(unicode=='4') desktop_shell_launch_app(9); /* Terminal */
+        else if(unicode=='a'||unicode=='A') desktop_shell_open_menu(1); /* Menu Arquivo */
+        else if(unicode=='b'||unicode=='B') desktop_shell_open_menu(0); /* Menu Baken OS */
+        else if(unicode=='c'||unicode=='C') desktop_shell_toggle_control_center(); /* Central de Controle */
+        else if(unicode=='s'||unicode=='S') desktop_shell_toggle_spotlight(); /* Spotlight Search */
+        else if(unicode=='t'||unicode=='T') desktop_shell_toggle_theme(); /* Modo Escuro/Claro */
+        else if(unicode=='x'||unicode=='X') desktop_shell_toggle_context_menu(); /* Menu Contexto */
+        else if(unicode=='i'||unicode=='I') desktop_shell_launch_app(14); /* Instalador: prévia segura */
+        else if(unicode=='m'||unicode=='M') desktop_shell_toggle_media();
+        else if(unicode=='d'||unicode=='D') cq_fs_add("/home/documentos", 1, 0, 0);
+        else if(unicode=='n'||unicode=='N') cq_fs_add("/home/arquivo.txt", 2, 512, 86020);
+        else if(unicode>='5' && unicode<='9') desktop_shell_launch_app((uint32_t)(unicode-'3'));
+    }
+}
 
 void baken_kernel_main(const BakenBootInfo *boot_info) {
     if (!boot_info || !boot_info->framebuffer_base || boot_info->screen_width == 0 || boot_info->screen_height == 0) {
@@ -4157,44 +4357,13 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
     for (;;) {
         if (keyboard && keyboard->ReadKeyStroke) {
             EFI_INPUT_KEY key;
-            if (keyboard->ReadKeyStroke(keyboard,&key)==0) {
-                if (desktop_shell_is_spotlight_open()) {
-                    desktop_shell_spotlight_key(key.UnicodeChar, key.ScanCode);
-                } else if (wm_is_window_focused(4)) {
-                    if (key.UnicodeChar == 27 || key.ScanCode == 0x17) {
-                        wm_unfocus_all();
-                    } else {
-                        desktop_shell_terminal_key(key.UnicodeChar, key.ScanCode);
-                    }
-                } else if (wm_is_window_focused(2)) {
-                    if (key.UnicodeChar == 27 || key.ScanCode == 0x17) {
-                        wm_unfocus_all();
-                    } else if (key.UnicodeChar == 13 || key.UnicodeChar == 10) {
-                        cq_notes_save();
-                        desktop_shell_terminal_append("Notas salvas no BakenFS.");
-                    } else if (key.UnicodeChar == 8 || key.ScanCode == 0x08) {
-                        if (cq_note_len) { cq_note_text[--cq_note_len] = 0; }
-                    } else if (key.UnicodeChar >= 32 && key.UnicodeChar <= 126) {
-                        cq_notes_append(key.UnicodeChar);
-                    }
-                } else {
-                    if(key.UnicodeChar=='1') desktop_shell_launch_app(0); /* Arquivos */
-                    else if(key.UnicodeChar=='2') { desktop_shell_launch_app(6); cq_note_editing=1; } /* Notas */
-                    else if(key.UnicodeChar=='3') desktop_shell_launch_app(8); /* Ajustes */
-                    else if(key.UnicodeChar=='4') desktop_shell_launch_app(9); /* Terminal */
-                    else if(key.UnicodeChar=='a'||key.UnicodeChar=='A') desktop_shell_open_menu(1); /* Menu Arquivo */
-                    else if(key.UnicodeChar=='b'||key.UnicodeChar=='B') desktop_shell_open_menu(0); /* Menu Baken OS */
-                    else if(key.UnicodeChar=='c'||key.UnicodeChar=='C') desktop_shell_toggle_control_center(); /* Central de Controle */
-                    else if(key.UnicodeChar=='s'||key.UnicodeChar=='S') desktop_shell_toggle_spotlight(); /* Spotlight Search */
-                    else if(key.UnicodeChar=='t'||key.UnicodeChar=='T') desktop_shell_toggle_theme(); /* Modo Escuro/Claro */
-                    else if(key.UnicodeChar=='x'||key.UnicodeChar=='X') desktop_shell_toggle_context_menu(); /* Menu Contexto */
-                    else if(key.UnicodeChar=='i'||key.UnicodeChar=='I') desktop_shell_launch_app(14); /* Instalador: prévia segura */
-                    else if(key.UnicodeChar=='m'||key.UnicodeChar=='M') desktop_shell_toggle_media();
-                    else if(key.UnicodeChar=='d'||key.UnicodeChar=='D') cq_fs_add("/home/documentos", 1, 0, 0);
-                    else if(key.UnicodeChar=='n'||key.UnicodeChar=='N') cq_fs_add("/home/arquivo.txt", 2, 512, 86020);
-                    else if(key.UnicodeChar>='5' && key.UnicodeChar<='9') desktop_shell_launch_app((uint32_t)(key.UnicodeChar-'3'));
-                }
+            while (keyboard->ReadKeyStroke(keyboard, &key) == 0) {
+                cq_input_push_key(key.UnicodeChar, key.ScanCode);
             }
+        }
+        CqInputEvent evt;
+        while (cq_input_pop(&evt)) {
+            cq_dispatch_key(evt.unicode, evt.scan);
         }
         if (abs_pointer && abs_pointer->GetState && abs_pointer->Mode) {
             EFI_ABSOLUTE_POINTER_STATE abs_st;
@@ -4230,12 +4399,27 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
         } else if (simple_pointer && simple_pointer->GetState) {
             EFI_SIMPLE_POINTER_STATE simp_st;
             if (simple_pointer->GetState(simple_pointer, &simp_st) == 0) {
-                int32_t dx = simp_st.RelativeMovementX / 64;
-                int32_t dy = simp_st.RelativeMovementY / 64;
-                if (dx > 25) { dx = 25; }
-                if (dx < -25) { dx = -25; }
-                if (dy > 25) { dy = 25; }
-                if (dy < -25) { dy = -25; }
+                int32_t raw_dx = simp_st.RelativeMovementX;
+                int32_t raw_dy = simp_st.RelativeMovementY;
+                int32_t dx = 0, dy = 0;
+                if (raw_dx != 0) {
+                    int32_t abs_x = raw_dx < 0 ? -raw_dx : raw_dx;
+                    int32_t scaled_x = abs_x / 48;
+                    if (scaled_x < 1) scaled_x = 1;
+                    if (abs_x > 256) scaled_x = (scaled_x * 3) / 2;
+                    dx = (raw_dx < 0) ? -scaled_x : scaled_x;
+                    if (dx > 25) dx = 25;
+                    if (dx < -25) dx = -25;
+                }
+                if (raw_dy != 0) {
+                    int32_t abs_y = raw_dy < 0 ? -raw_dy : raw_dy;
+                    int32_t scaled_y = abs_y / 48;
+                    if (scaled_y < 1) scaled_y = 1;
+                    if (abs_y > 256) scaled_y = (scaled_y * 3) / 2;
+                    dy = (raw_dy < 0) ? -scaled_y : scaled_y;
+                    if (dy > 25) dy = 25;
+                    if (dy < -25) dy = -25;
+                }
                 mouse_x += dx;
                 mouse_y += dy;
                 if (mouse_x < 0) mouse_x = 0;

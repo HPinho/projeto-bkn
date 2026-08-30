@@ -255,6 +255,120 @@ class Cq01FrontendTests(unittest.TestCase):
         obj.unlink(missing_ok=True)
 
 
+    def test_defer_statement_parsing_and_typecheck(self):
+        source = """
+        module core::defer_test;
+        pub fn test_defer() -> i64 {
+            let mut x: i64 = 10;
+            defer x = x + 5;
+            defer x = x * 2;
+            return x;
+        }
+        """
+        module = cq01.parse(source)
+        cq01.check(module)
+        emitted = cq01.emit_c(module)
+        self.assertIn("int64_t _cq_ret = x;", emitted)
+        self.assertIn("x = (x * 2);", emitted)
+        self.assertIn("x = (x + 5);", emitted)
+        self.assertIn("return _cq_ret;", emitted)
+
+    def test_defer_lifo_normal_and_nested_scope(self):
+        source = """
+        module core::defer_scope;
+        pub fn test_scope() {
+            let mut a: i64 = 1;
+            defer a = 100;
+            if a > 0 {
+                let mut b: i64 = 2;
+                defer b = 200;
+                defer b = 300;
+            }
+        }
+        """
+        module = cq01.parse(source)
+        cq01.check(module)
+        emitted = cq01.emit_c(module)
+        self.assertIn("b = 300;", emitted)
+        self.assertIn("b = 200;", emitted)
+        self.assertIn("a = 100;", emitted)
+
+    def test_defer_in_loop_break_and_continue(self):
+        source = """
+        module core::defer_loop;
+        pub fn test_loop() {
+            let mut i: i64 = 0;
+            while i < 10 {
+                defer i = i + 1;
+                if i == 5 {
+                    defer i = i + 2;
+                    break;
+                }
+            }
+        }
+        """
+        module = cq01.parse(source)
+        cq01.check(module)
+        emitted = cq01.emit_c(module)
+        self.assertIn("break;", emitted)
+        self.assertIn("i = (i + 1);", emitted)
+
+    def test_defer_executable_c11_validation(self):
+        source = """
+        module core::defer_exec;
+        pub static mut g_order: [i64; 8] = 0;
+        pub static mut g_idx: usize = 0;
+
+        pub fn push_step(val: i64) {
+            g_order[g_idx] = val;
+            g_idx = g_idx + 1;
+        }
+
+        pub fn run_test(flag: bool) -> i64 {
+            defer push_step(1);
+            defer push_step(2);
+            if flag {
+                defer push_step(3);
+                return 42;
+            }
+            defer push_step(4);
+            return 99;
+        }
+        """
+        module = cq01.parse(source)
+        cq01.check(module)
+        emitted = cq01.emit_c(module)
+        main_c = """
+        #include <assert.h>
+        int main(void) {
+            int64_t r = run_test(true);
+            assert(r == 42);
+            assert(g_idx == 3);
+            assert(g_order[0] == 3);
+            assert(g_order[1] == 2);
+            assert(g_order[2] == 1);
+            return 0;
+        }
+        """
+        full_code = emitted + "\n" + main_c
+        temp_c = ROOT / "build" / "test_defer_exec.c"
+        temp_exe = ROOT / "build" / "test_defer_exec.exe"
+        temp_c.parent.mkdir(parents=True, exist_ok=True)
+        temp_c.write_text(full_code, encoding="utf-8")
+
+        import os
+        gcc = vortexc.find_gcc(ROOT)
+        env = dict(os.environ)
+        env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
+        compile_res = subprocess.run([str(gcc), "-std=c11", str(temp_c), "-o", str(temp_exe)],
+                                     capture_output=True, text=True, env=env)
+        self.assertEqual(compile_res.returncode, 0, f"Falha na compilação GCC de defer: {compile_res.stderr}")
+        run_res = subprocess.run([str(temp_exe)], capture_output=True, text=True, env=env)
+        self.assertEqual(run_res.returncode, 0, f"Falha na execução do teste defer LIFO: {run_res.stderr}")
+        temp_c.unlink(missing_ok=True)
+        temp_exe.unlink(missing_ok=True)
+
+
 if __name__ == "__main__":
     unittest.main()
 
