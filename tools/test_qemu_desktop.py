@@ -94,11 +94,13 @@ def main(install: bool, installer: bool, optical_iso: bool, app: int | None = No
         time.sleep(13)
         monitor = monitor_connect()
         if install:
-            monitor_command(monitor, "sendkey i")
             time.sleep(2)
-            monitor_command(monitor, "sendkey i")
-            monitor_command(monitor, "sendkey ret")
-            time.sleep(20)
+            monitor_command(monitor, "sendkey 1")
+            time.sleep(1)
+            for _ in range(7):
+                monitor_command(monitor, "sendkey ret")
+                time.sleep(1.5)
+            time.sleep(12)
         elif installer:
             monitor_command(monitor, "sendkey i")
             time.sleep(2)

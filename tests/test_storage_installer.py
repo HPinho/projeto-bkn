@@ -39,8 +39,34 @@ class StorageInstallerTests(unittest.TestCase):
         self.assertIn("find_boot_file", vortexc_py)
         self.assertIn("installer_execute_installation", vortexc_py)
         self.assertIn("installer_handle_click", vortexc_py)
-        self.assertIn("Instalador e Particionador Baken OS", vortexc_py)
-        self.assertIn("Particao / Volume", vortexc_py)
+        self.assertIn("Instalador e Setup - Baken OS Sovereign", vortexc_py)
+        self.assertIn("Volume", vortexc_py)
+
+    def test_vortexc_contains_complete_setup_wizard_stages(self):
+        vortexc_py = (ROOT / "tools/vortexc/vortexc.py").read_text(encoding="utf-8")
+        self.assertIn("INSTALLER_STAGE_WELCOME", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_LANGUAGE", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_LICENSE", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_HARDWARE", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_PROFILE", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_ACCOUNT", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_DISK", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_INSTALLING", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_COMPLETE", vortexc_py)
+        self.assertIn("INSTALLER_STAGE_REPAIR", vortexc_py)
+        self.assertIn("installer_next_stage", vortexc_py)
+        self.assertIn("installer_prev_stage", vortexc_py)
+        self.assertIn("installer_select_option", vortexc_py)
+        self.assertIn("installer_execute_repair", vortexc_py)
+
+    def test_bakenfs_contains_profile_user_and_snapshot_structures(self):
+        vortexc_py = (ROOT / "tools/vortexc/vortexc.py").read_text(encoding="utf-8")
+        self.assertIn("CqProfileConfig", vortexc_py)
+        self.assertIn("CqUserConfig", vortexc_py)
+        self.assertIn("CqSnapshotMeta", vortexc_py)
+        self.assertIn("/config/profile.cfg", vortexc_py)
+        self.assertIn("/config/user.cfg", vortexc_py)
+        self.assertIn("/config/snapshot.meta", vortexc_py)
 
     def test_bootloader_recognizes_installed_gpt_as_its_own_boot_media(self):
         bootloader = (ROOT / "boot/uefi_bootloader.cq").read_text(encoding="utf-8")
