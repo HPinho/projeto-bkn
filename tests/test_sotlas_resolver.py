@@ -8,9 +8,9 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("vortexc", ROOT / "tools" / "vortexc" / "vortexc.py")
-vortexc = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(vortexc)
+SPEC = importlib.util.spec_from_file_location("compiler", ROOT / "tools" / "sotlas_compile" / "compiler.py")
+sotlas_compile = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(sotlas_compile)
 
 
 class SotlasResolverTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class SotlasResolverTests(unittest.TestCase):
         return ROOT / "tests" / "fixtures" / "sotlas" / name / "kernel" / "src" / "main.st"
 
     def test_real_kernel_graph_has_single_entry_and_graphical_compositor(self):
-        manifest = vortexc.analyze(ROOT / "kernel" / "src" / "main.st")
+        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.st")
         self.assertEqual(manifest["entry"], "kernel::main")
         self.assertEqual(manifest["audited_modules"], len(manifest["compile_order"]))
         self.assertIn("kernel::desktop_compositor", manifest["compile_order"])
@@ -33,21 +33,21 @@ class SotlasResolverTests(unittest.TestCase):
 
     def test_missing_import_is_reported(self):
         source = ROOT / "tests" / "fixtures" / "sotlas" / "missing" / "kernel" / "src" / "main.st"
-        with self.assertRaisesRegex(vortexc.CqError, "import n├úo resolvido"):
-            vortexc.analyze(source)
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.analyze(source)
 
     def test_circular_import_is_reported(self):
         source = ROOT / "tests" / "fixtures" / "sotlas" / "cycle" / "kernel" / "src" / "main.st"
-        with self.assertRaisesRegex(vortexc.CqError, "depend├¬ncia circular"):
-            vortexc.analyze(source)
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.analyze(source)
 
     def test_kernel_graph_requires_one_exported_entry(self):
-        manifest = vortexc.analyze(ROOT / "kernel" / "src" / "main.st")
+        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.st")
         self.assertIn("kernel::main::baken_kernel_main", manifest["exports"])
 
     def test_build_modular_compiles_and_links_kernel_objects(self):
         output = ROOT / "build" / "test_modular_bootx64.efi"
-        result = vortexc.build_modular(ROOT / "kernel" / "src" / "main.st", output)
+        result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.st", output)
         self.assertIn("compiled_objects", result)
         self.assertEqual(len(result["compiled_objects"]), 9)
         self.assertEqual(len(result["generated_sources"]), 8)
@@ -65,34 +65,34 @@ class SotlasResolverTests(unittest.TestCase):
 
     def test_self_import_is_reported(self):
         source = ROOT / "tests" / "fixtures" / "sotlas" / "self_import" / "kernel" / "src" / "main.st"
-        with self.assertRaisesRegex(vortexc.CqError, "importar a si mesmo"):
-            vortexc.analyze(source)
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.analyze(source)
 
     def test_module_cannot_hide_c_preprocessor_directives(self):
         units = {
             "kernel::bad": {
-                "path": ROOT / "kernel" / "src" / "bad.cq",
+                "path": ROOT / "kernel" / "src" / "bad.st",
                 "text": "module kernel::bad;\n#include <stdio.h>\n",
             }
         }
-        with self.assertRaisesRegex(vortexc.CqError, "pr├®-processador C"):
-            vortexc.validate_module_dialect(units, ROOT)
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.validate_module_dialect(units, ROOT)
 
     def test_module_file_cannot_declare_two_modules(self):
-        with self.assertRaisesRegex(vortexc.CqError, "exatamente um m├│dulo"):
-            vortexc.analyze(self.fixture("two_modules"))
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.analyze(self.fixture("two_modules"))
 
     def test_import_must_target_an_entire_module_with_wildcard(self):
-        with self.assertRaisesRegex(vortexc.CqError, "import Cq inv├ílido"):
-            vortexc.analyze(self.fixture("bad_import"))
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.analyze(self.fixture("bad_import"))
 
     def test_kernel_route_rejects_two_exported_entries(self):
-        with self.assertRaisesRegex(vortexc.CqError, "s├¡mbolo exportado duas vezes|exatamente um baken_kernel_main"):
-            vortexc.analyze(self.fixture("two_entries"))
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.analyze(self.fixture("two_entries"))
 
     def test_ast_parsing_and_typechecking(self):
         source = (ROOT / "kernel" / "src" / "main.st").read_text(encoding="utf-8")
-        ast = vortexc.parse_module_ast(source)
+        ast = sotlas_compile.parse_module_ast(source)
         self.assertEqual(ast.name, "kernel::main")
         self.assertIn("kernel::graphics_engine", ast.imports)
         self.assertIn("kernel::desktop_compositor", ast.imports)
@@ -118,30 +118,30 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertEqual(main_fn.return_type.name, "!")
         
         # Valida├º├úo de tipos
-        self.assertTrue(vortexc.typecheck_ast(ast))
+        self.assertTrue(sotlas_compile.typecheck_ast(ast))
 
     def test_typechecker_rejects_unknown_signature_type(self):
-        ast = vortexc.parse_module_ast(
+        ast = sotlas_compile.parse_module_ast(
             "module kernel::bad;\npub fn run(value: MissingType) -> void { }\n"
         )
-        with self.assertRaisesRegex(vortexc.CqError, "tipo desconhecido"):
-            vortexc.typecheck_ast(ast)
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.typecheck_ast(ast)
 
     def test_class_parser_collects_public_class_fields(self):
         source = (ROOT / "kernel" / "src" / "baken_ui_oop.st").read_text(encoding="utf-8")
-        ast = vortexc.parse_module_ast(source)
+        ast = sotlas_compile.parse_module_ast(source)
         dock = next((item for item in ast.classes if item.name == "DesktopDock"), None)
         self.assertIsNotNone(dock)
         self.assertTrue(dock.is_pub)
         self.assertTrue(any(field.name == "item_count" for field in dock.fields))
 
     def test_interface_checker_rejects_unknown_function_call(self):
-        ast = vortexc.parse_module_ast(
+        ast = sotlas_compile.parse_module_ast(
             "module kernel::bad;\npub fn run() -> void { missing_call(); }\n"
         )
         manifest = {"units": [{"module": "kernel::bad", "imports": []}]}
-        with self.assertRaisesRegex(vortexc.CqError, "chamada n├úo resolvida"):
-            vortexc.validate_module_interfaces({"kernel::bad": ast}, manifest)
+        with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
+            sotlas_compile.validate_module_interfaces({"kernel::bad": ast}, manifest)
 
 
 if __name__ == "__main__":

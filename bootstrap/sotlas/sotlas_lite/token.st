@@ -1,4 +1,4 @@
-module vortexc::token;
+module sotlas_compile::token;
 
 pub enum TokenKind {
     Eof = 0,

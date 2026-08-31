@@ -6,12 +6,12 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools" / "vortexc"))
-import cq01
-import vortexc
+sys.path.insert(0, str(ROOT / "tools" / "sotlas_compile"))
+import bootstrap
+import compiler as sotlas_compile
 
 
-class CqClassesAndArcTests(unittest.TestCase):
+class SotlasClassesAndArcTests(unittest.TestCase):
     def setUp(self):
         self.output_c = ROOT / "build" / "test_classes_arc.c"
         self.output_o = ROOT / "build" / "test_classes_arc.o"
@@ -55,9 +55,9 @@ class CqClassesAndArcTests(unittest.TestCase):
             return p.get_x();
         }
         """
-        mod = cq01.parse(source)
-        cq01.check(mod)
-        emitted = cq01.emit_c(mod)
+        mod = bootstrap.parse(source)
+        bootstrap.check(mod)
+        emitted = bootstrap.emit_c(mod)
         self.assertIn("typedef struct Point", emitted)
         self.assertIn("Point_new(10, 20)", emitted)
         self.assertIn("Point_translate(&(p), 5, (-5))", emitted)
@@ -65,10 +65,10 @@ class CqClassesAndArcTests(unittest.TestCase):
 
     def test_core_arc_compiles_and_links_cleanly(self):
         entry = ROOT / "bootstrap" / "sotlas" / "core" / "arc.st"
-        cq01.emit_c_project(entry, self.output_c)
+        bootstrap.emit_c_project(entry, self.output_c)
         self.assertTrue(self.output_c.exists())
 
-        gcc = vortexc.find_gcc(ROOT)
+        gcc = sotlas_compile.find_gcc(ROOT)
         env = dict(os.environ)
         env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
         cmd = [str(gcc), "-std=c11", "-Wall", "-Wextra", "-Werror", "-c", str(self.output_c), "-o", str(self.output_o)]
@@ -78,8 +78,8 @@ class CqClassesAndArcTests(unittest.TestCase):
     def test_core_option_and_result_compile_cleanly(self):
         for subpath in ["option.st", "result.st"]:
             entry = ROOT / "bootstrap" / "sotlas" / "core" / subpath
-            cq01.emit_c_project(entry, self.output_c)
-            gcc = vortexc.find_gcc(ROOT)
+            bootstrap.emit_c_project(entry, self.output_c)
+            gcc = sotlas_compile.find_gcc(ROOT)
             env = dict(os.environ)
             env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
             cmd = [str(gcc), "-std=c11", "-Wall", "-Wextra", "-Werror", "-c", str(self.output_c), "-o", str(self.output_o)]
@@ -112,7 +112,7 @@ class CqClassesAndArcTests(unittest.TestCase):
         }
         """, encoding="utf-8")
 
-        cq01.emit_c_project(test_source, self.output_c)
+        bootstrap.emit_c_project(test_source, self.output_c)
         driver_c = ROOT / "build" / "test_driver_main.c"
         driver_exe = ROOT / "build" / "test_driver_main.exe"
         driver_c.write_text("""
@@ -133,7 +133,7 @@ int main(void) {
 }
 """, encoding="utf-8")
 
-        gcc = vortexc.find_gcc(ROOT)
+        gcc = sotlas_compile.find_gcc(ROOT)
         env = dict(os.environ)
         env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
         cmd = [str(gcc), "-std=c11", str(self.output_c), str(driver_c), "-o", str(driver_exe)]

@@ -1,22 +1,22 @@
-module vortexc::emitter;
+module sotlas_compile::emitter;
 import core::mem::*;
 import core::fmt::*;
-import vortexc::token::*;
+import sotlas_compile::token::*;
 
-pub fn type_to_c(cq_type: *const u8, dest: *mut u8, max_len: usize) -> usize {
-    if str_eq(cq_type, "u8") { return str_copy(dest, "uint8_t", max_len); }
-    if str_eq(cq_type, "u16") { return str_copy(dest, "uint16_t", max_len); }
-    if str_eq(cq_type, "u32") { return str_copy(dest, "uint32_t", max_len); }
-    if str_eq(cq_type, "u64") { return str_copy(dest, "uint64_t", max_len); }
-    if str_eq(cq_type, "usize") { return str_copy(dest, "size_t", max_len); }
-    if str_eq(cq_type, "i8") { return str_copy(dest, "int8_t", max_len); }
-    if str_eq(cq_type, "i16") { return str_copy(dest, "int16_t", max_len); }
-    if str_eq(cq_type, "i32") { return str_copy(dest, "int32_t", max_len); }
-    if str_eq(cq_type, "i64") { return str_copy(dest, "int64_t", max_len); }
-    if str_eq(cq_type, "isize") { return str_copy(dest, "intptr_t", max_len); }
-    if str_eq(cq_type, "bool") { return str_copy(dest, "_Bool", max_len); }
-    if str_eq(cq_type, "void") { return str_copy(dest, "void", max_len); }
-    return str_copy(dest, cq_type, max_len);
+pub fn type_to_c(st_type: *const u8, dest: *mut u8, max_len: usize) -> usize {
+    if str_eq(st_type, "u8") { return str_copy(dest, "uint8_t", max_len); }
+    if str_eq(st_type, "u16") { return str_copy(dest, "uint16_t", max_len); }
+    if str_eq(st_type, "u32") { return str_copy(dest, "uint32_t", max_len); }
+    if str_eq(st_type, "u64") { return str_copy(dest, "uint64_t", max_len); }
+    if str_eq(st_type, "usize") { return str_copy(dest, "size_t", max_len); }
+    if str_eq(st_type, "i8") { return str_copy(dest, "int8_t", max_len); }
+    if str_eq(st_type, "i16") { return str_copy(dest, "int16_t", max_len); }
+    if str_eq(st_type, "i32") { return str_copy(dest, "int32_t", max_len); }
+    if str_eq(st_type, "i64") { return str_copy(dest, "int64_t", max_len); }
+    if str_eq(st_type, "isize") { return str_copy(dest, "intptr_t", max_len); }
+    if str_eq(st_type, "bool") { return str_copy(dest, "_Bool", max_len); }
+    if str_eq(st_type, "void") { return str_copy(dest, "void", max_len); }
+    return str_copy(dest, st_type, max_len);
 }
 
 @system
@@ -24,7 +24,7 @@ pub fn emit_c_from_tokens(tokens: *const Token, tok_count: usize, out_buf: *mut 
     if tokens == null || out_buf == null || max_len == 0 {
         return 0;
     }
-    str_copy(out_buf, "/* Gerado pelo VortexC-lite em Cq 0.1 */\n#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n\n", max_len);
+    str_copy(out_buf, "/* Gerado pelo Sotlas Compile-lite em Sotlas Bootstrap */\n#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n\n", max_len);
 
     let mut i: usize = 0;
     unsafe {

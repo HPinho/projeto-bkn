@@ -9,7 +9,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 enable_testing()
 
 add_custom_target(sotlas_check
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/vortexc/vortexc.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sotlas_compile/compiler.py
             check ${CMAKE_SOURCE_DIR}/kernel/src/main.st
             --manifest ${CMAKE_BINARY_DIR}/sotlas-main.manifest.json
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
@@ -17,17 +17,13 @@ add_custom_target(sotlas_check
 )
 
 add_custom_target(sotlas_build
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/vortexc/vortexc.py
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sotlas_compile/compiler.py
             build ${CMAKE_SOURCE_DIR}/kernel/src/main.st
             -o ${CMAKE_SOURCE_DIR}/build/cmake-sotlas/BOOTX64.EFI
             --manifest ${CMAKE_BINARY_DIR}/sotlas-main.manifest.json
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Gerando e vinculando o EFI modular Sotlas"
 )
-
-# Targets legados mantidos como aliases para compatibilidade
-add_custom_target(cq_check DEPENDS sotlas_check)
-add_custom_target(cq_build DEPENDS sotlas_build)
 
 add_test(
     NAME sotlas_resolver

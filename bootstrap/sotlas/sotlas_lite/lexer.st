@@ -1,7 +1,7 @@
-module vortexc::lexer;
+module sotlas_compile::lexer;
 import core::mem::*;
 import core::fmt::*;
-import vortexc::token::*;
+import sotlas_compile::token::*;
 
 @system
 pub fn lex_source(src: *const u8, tokens: *mut Token, max_tokens: usize) -> usize {

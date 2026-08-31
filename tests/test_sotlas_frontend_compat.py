@@ -1,4 +1,4 @@
-"""Contrato executável do compilador procedural Cq 0.1."""
+"""Contrato executável do compilador procedural Sotlas Bootstrap."""
 import importlib.util
 from pathlib import Path
 import subprocess
@@ -6,14 +6,14 @@ import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SPEC = importlib.util.spec_from_file_location("cq01", ROOT / "tools" / "vortexc" / "cq01.py")
-cq01 = importlib.util.module_from_spec(SPEC)
-sys.modules["cq01"] = cq01
-SPEC.loader.exec_module(cq01)
+SPEC = importlib.util.spec_from_file_location("bootstrap", ROOT / "tools" / "sotlas_compile" / "bootstrap.py")
+bootstrap = importlib.util.module_from_spec(SPEC)
+sys.modules["bootstrap"] = bootstrap
+SPEC.loader.exec_module(bootstrap)
 
-SPEC_VORTEXC = importlib.util.spec_from_file_location("vortexc", ROOT / "tools" / "vortexc" / "vortexc.py")
-vortexc = importlib.util.module_from_spec(SPEC_VORTEXC)
-SPEC_VORTEXC.loader.exec_module(vortexc)
+SPEC_COMPILER = importlib.util.spec_from_file_location("compiler", ROOT / "tools" / "sotlas_compile" / "compiler.py")
+sotlas_compile = importlib.util.module_from_spec(SPEC_COMPILER)
+SPEC_COMPILER.loader.exec_module(sotlas_compile)
 
 
 SOURCE = """
@@ -36,32 +36,32 @@ pub fn sum(limit: i64) -> i64 {
 
 class SotlasFrontendCompatTests(unittest.TestCase):
     def test_lex_parse_check_and_emit(self):
-        module = cq01.parse(SOURCE)
+        module = bootstrap.parse(SOURCE)
         self.assertEqual(module.name, "core::counter")
         self.assertEqual(module.imports, ["core::mem"])
         self.assertEqual(module.structs[0].fields[0].type.name, "i64")
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("int64_t sum(int64_t limit)", emitted)
         self.assertIn("while ((index < limit))", emitted)
 
     def test_reports_lexical_error_with_location(self):
-        with self.assertRaisesRegex(cq01.Cq01Error, "1:28: caractere léxico inválido"):
-            cq01.parse("module core::bad; fn x() { @; }")
+        with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "1:28: caractere léxico inválido"):
+            bootstrap.parse("module core::bad; fn x() { @; }")
 
     def test_reports_type_error(self):
         source = "module core::bad; fn x() -> bool { let n: i64 = 1; return n; }"
-        with self.assertRaisesRegex(cq01.Cq01Error, "retorno incompatível"):
-            cq01.check(cq01.parse(source))
+        with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "retorno incompatível"):
+            bootstrap.check(bootstrap.parse(source))
 
     def test_reports_unknown_symbol(self):
         source = "module core::bad; fn x() -> i64 { return missing; }"
-        with self.assertRaisesRegex(cq01.Cq01Error, "símbolo não declarado"):
-            cq01.check(cq01.parse(source))
+        with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "símbolo não declarado"):
+            bootstrap.check(bootstrap.parse(source))
 
     def test_reports_syntax_error(self):
-        with self.assertRaisesRegex(cq01.Cq01Error, "esperado ;"):
-            cq01.parse("module core::bad fn x() { return; }")
+        with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "esperado ;"):
+            bootstrap.parse("module core::bad fn x() { return; }")
 
     def test_enum_declaration_and_variant_usage(self):
         source = """
@@ -76,12 +76,12 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return s;
         }
         """
-        module = cq01.parse(source)
+        module = bootstrap.parse(source)
         self.assertEqual(len(module.enums), 1)
         self.assertEqual(module.enums[0].name, "StatusCode")
         self.assertEqual(module.enums[0].variants[1].value, 404)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("typedef enum StatusCode {", emitted)
         self.assertIn("StatusCode_NotFound = 404,", emitted)
         self.assertIn("StatusCode get_status(void) {", emitted)
@@ -101,12 +101,12 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return first as usize;
         }
         """
-        module = cq01.parse(source)
+        module = bootstrap.parse(source)
         self.assertEqual(len(module.structs), 1)
         self.assertTrue(module.structs[0].fields[0].type.is_array)
         self.assertEqual(module.structs[0].fields[0].type.array_size, 16)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("uint8_t header[16];", emitted)
         self.assertIn("uint32_t arr[8] = {0};", emitted)
         self.assertIn("arr[0] = 42;", emitted)
@@ -121,12 +121,12 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return G_TICKS;
         }
         """
-        module = cq01.parse(source)
+        module = bootstrap.parse(source)
         self.assertEqual(len(module.globals), 2)
         self.assertTrue(module.globals[0].is_const)
         self.assertTrue(module.globals[1].is_mut)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("static const size_t MAX_CAPACITY = 4096;", emitted)
         self.assertIn("static uint64_t G_TICKS = 0;", emitted)
 
@@ -144,11 +144,11 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return 0x1234;
         }
         """
-        module = cq01.parse(source)
+        module = bootstrap.parse(source)
         self.assertEqual(module.structs[0].attributes, ["@repr(C)", "@packed"])
         self.assertEqual(module.functions[0].attributes, ["@export"])
-        cq01.check(module)
-        emitted = cq01.emit_c(module, mangle=True)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module, mangle=True)
         self.assertIn("typedef struct __attribute__((packed)) EfiTable {", emitted)
         # @export preserves unmangled name
         self.assertIn("uint64_t efi_entry(void) {", emitted)
@@ -161,8 +161,8 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return *ptr;
         }
         """
-        with self.assertRaisesRegex(cq01.Cq01Error, "desreferenciamento de ponteiro exige bloco unsafe ou função @system"):
-            cq01.check(cq01.parse(safe_bad))
+        with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "desreferenciamento de ponteiro exige bloco unsafe ou função @system"):
+            bootstrap.check(bootstrap.parse(safe_bad))
 
         # 2. Dereferenciamento dentro de unsafe { ... } deve passar
         safe_good = """
@@ -175,7 +175,7 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return val;
         }
         """
-        cq01.check(cq01.parse(safe_good))
+        bootstrap.check(bootstrap.parse(safe_good))
 
         # 3. Função @system pode manipular ponteiros diretamente
         system_fn = """
@@ -185,7 +185,7 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             *ptr = val;
         }
         """
-        cq01.check(cq01.parse(system_fn))
+        bootstrap.check(bootstrap.parse(system_fn))
 
     def test_null_literal_and_type_casts(self):
         source = """
@@ -199,53 +199,53 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return p;
         }
         """
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("uint8_t * p = NULL;", emitted)
         self.assertIn("((uint8_t *)(addr))", emitted)
 
     def test_core_fmt_module_compiles_cleanly(self):
-        source = (ROOT / "bootstrap" / "sotlas" / "core" / "fmt.cq").read_text(encoding="utf-8")
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        source = (ROOT / "bootstrap" / "sotlas" / "core" / "fmt.st").read_text(encoding="utf-8")
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("size_t u64_to_hex", emitted)
         self.assertIn("size_t u64_to_dec", emitted)
 
     def test_core_serial_module_compiles_cleanly(self):
-        source = (ROOT / "bootstrap" / "sotlas" / "core" / "serial.cq").read_text(encoding="utf-8")
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        source = (ROOT / "bootstrap" / "sotlas" / "core" / "serial.st").read_text(encoding="utf-8")
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("_Bool serial_init", emitted)
         self.assertIn("void serial_write_byte", emitted)
         self.assertIn("void serial_write_line", emitted)
 
     def test_core_vga_module_compiles_cleanly(self):
-        source = (ROOT / "bootstrap" / "sotlas" / "core" / "vga.cq").read_text(encoding="utf-8")
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        source = (ROOT / "bootstrap" / "sotlas" / "core" / "vga.st").read_text(encoding="utf-8")
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("uint32_t rgb(uint8_t r, uint8_t g, uint8_t b)", emitted)
         self.assertIn("void clear(Framebuffer * fb, uint32_t color)", emitted)
         self.assertIn("void fill_rect(Framebuffer * fb", emitted)
 
     def test_compiles_bootstrap_project_in_dependency_order(self):
         entry = ROOT / "bootstrap" / "sotlas" / "kernel" / "main.st"
-        modules = cq01.compile_project(entry)
+        modules = bootstrap.compile_project(entry)
         module_names = [item.name for item in modules]
         self.assertEqual(module_names, ["core::mem", "core::fmt", "core::serial", "core::vga", "kernel::minimal"])
-        generated = ROOT / "build" / "test_cq01_project.c"
-        cq01.emit_c_project(entry, generated)
+        generated = ROOT / "build" / "test_bootstrap_project.c"
+        bootstrap.emit_c_project(entry, generated)
         self.assertIn("size_t remaining", generated.read_text(encoding="utf-8"))
         self.assertIn("serial_init", generated.read_text(encoding="utf-8"))
         self.assertIn("fill_rect", generated.read_text(encoding="utf-8"))
 
         # Validação real de compilação via GCC
         import os
-        gcc = vortexc.find_gcc(ROOT)
-        obj = ROOT / "build" / "test_cq01_project.o"
+        gcc = sotlas_compile.find_gcc(ROOT)
+        obj = ROOT / "build" / "test_bootstrap_project.o"
         env = dict(os.environ)
         env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
         cmd = [str(gcc), "-std=c11", "-Wall", "-Wextra", "-Werror", "-c", str(generated), "-o", str(obj)]
@@ -265,13 +265,13 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return x;
         }
         """
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
-        self.assertIn("int64_t _cq_ret = x;", emitted)
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
+        self.assertIn("int64_t _st_ret = x;", emitted)
         self.assertIn("x = (x * 2);", emitted)
         self.assertIn("x = (x + 5);", emitted)
-        self.assertIn("return _cq_ret;", emitted)
+        self.assertIn("return _st_ret;", emitted)
 
     def test_defer_lifo_normal_and_nested_scope(self):
         source = """
@@ -286,9 +286,9 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             }
         }
         """
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("b = 300;", emitted)
         self.assertIn("b = 200;", emitted)
         self.assertIn("a = 100;", emitted)
@@ -307,9 +307,9 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             }
         }
         """
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         self.assertIn("break;", emitted)
         self.assertIn("i = (i + 1);", emitted)
 
@@ -335,9 +335,9 @@ class SotlasFrontendCompatTests(unittest.TestCase):
             return 99;
         }
         """
-        module = cq01.parse(source)
-        cq01.check(module)
-        emitted = cq01.emit_c(module)
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
         main_c = """
         #include <assert.h>
         int main(void) {
@@ -357,7 +357,7 @@ class SotlasFrontendCompatTests(unittest.TestCase):
         temp_c.write_text(full_code, encoding="utf-8")
 
         import os
-        gcc = vortexc.find_gcc(ROOT)
+        gcc = sotlas_compile.find_gcc(ROOT)
         env = dict(os.environ)
         env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
         compile_res = subprocess.run([str(gcc), "-std=c11", str(temp_c), "-o", str(temp_exe)],
@@ -371,5 +371,4 @@ class SotlasFrontendCompatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
 

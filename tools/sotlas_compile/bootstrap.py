@@ -1,7 +1,7 @@
-"""Frontend Cq 0.1: lexer, parser recursivo, tipagem, verificação unsafe e emissor C11.
+"""Frontend Sotlas Bootstrap: lexer, parser recursivo, tipagem, verificação unsafe e emissor C11.
 
 Este módulo é deliberadamente independente do shell legado do Baken OS. Ele é
-o contrato executável do subconjunto procedural da linguagem Cq:
+o contrato executável do subconjunto procedural da linguagem Sotlas:
 módulos, structs com atributos, enums, globais/constantes, funções, tipos fixos,
 arrays fixos [T; N], ponteiros unsafe, casts ('as'), expressões, fluxo e mangling.
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 import re
 
 
-class Cq01Error(Exception):
+class SotlasBootstrapError(Exception):
     def __init__(self, message: str, line: int, column: int, file: str | None = None, source: str | None = None):
         self.message = message
         self.line = line
@@ -68,7 +68,7 @@ def lex(source: str, filename: str | None = None) -> list[Token]:
         if source.startswith("/*", i):
             end = source.find("*/", i)
             if end < 0:
-                raise Cq01Error("comentário de bloco não finalizado", line + 1, column, filename, source)
+                raise SotlasBootstrapError("comentário de bloco não finalizado", line + 1, column, filename, source)
             # Conta quebras de linha dentro do comentário de bloco
             block_text = source[i:end + 2]
             nl_count = block_text.count("\n")
@@ -91,7 +91,7 @@ def lex(source: str, filename: str | None = None) -> list[Token]:
         if ch == '"':
             end = source.find('"', i + 1)
             if end < 0:
-                raise Cq01Error("string literal não terminada", line + 1, start_col, filename, source)
+                raise SotlasBootstrapError("string literal não terminada", line + 1, start_col, filename, source)
             text = source[i:end + 1]
             tokens.append(Token("STRING", text, line + 1, start_col))
             i = end + 1; column += len(text); continue
@@ -99,7 +99,7 @@ def lex(source: str, filename: str | None = None) -> list[Token]:
         if ch == "'":
             end = source.find("'", i + 1)
             if end < 0:
-                raise Cq01Error("caractere literal não terminado", line + 1, start_col, filename, source)
+                raise SotlasBootstrapError("caractere literal não terminado", line + 1, start_col, filename, source)
             text = source[i:end + 1]
             tokens.append(Token("CHAR", text, line + 1, start_col))
             i = end + 1; column += len(text); continue
@@ -116,7 +116,7 @@ def lex(source: str, filename: str | None = None) -> list[Token]:
             match = re.match(r"[A-Za-z_][A-Za-z0-9_]*", source[i:])
             assert match
             text = match.group(0); tokens.append(Token(text if text in KEYWORDS else "IDENT", text, line + 1, start_col)); i += len(text); column += len(text); continue
-        raise Cq01Error(f"caractere léxico inválido: {ch!r}", line + 1, column, filename, source)
+        raise SotlasBootstrapError(f"caractere léxico inválido: {ch!r}", line + 1, column, filename, source)
     tokens.append(Token("EOF", "", line + 1, column))
     return tokens
 
@@ -279,7 +279,7 @@ class Parser:
     def expect(self, kind: str) -> Token:
         token = self.accept(kind)
         if token: return token
-        raise Cq01Error(f"esperado {kind}, encontrado {self.current.kind}",
+        raise SotlasBootstrapError(f"esperado {kind}, encontrado {self.current.kind}",
                         self.current.line, self.current.column, self.filename, self.source)
 
     def ident(self) -> str: return self.expect("IDENT").text
@@ -403,7 +403,7 @@ class Parser:
                 module.functions.append(self.function(public, attributes))
                 continue
 
-            raise Cq01Error("declaração de topo Cq 0.1 inválida", self.current.line, self.current.column, self.filename, self.source)
+            raise SotlasBootstrapError("declaração de topo Sotlas Bootstrap inválida", self.current.line, self.current.column, self.filename, self.source)
         return module
 
     def _field_type(self) -> Type: self.expect(":"); return self.type()
@@ -516,7 +516,7 @@ class Parser:
             else:
                 expr = Name(token, name)
         else:
-            raise Cq01Error(f"expressão inválida: {self.current.text!r}", token.line, token.column, self.filename, self.source)
+            raise SotlasBootstrapError(f"expressão inválida: {self.current.text!r}", token.line, token.column, self.filename, self.source)
 
         # Postfix parsing: chamadas adicionais, índices, membros/métodos, casts
         while True:
@@ -563,7 +563,7 @@ def same_type(left: Type, right: Type) -> bool:
 
 
 def assignable(actual: Type, expected: Type) -> bool:
-    """Literais inteiros são polimórficos entre os inteiros fixos em Cq 0.1."""
+    """Literais inteiros são polimórficos entre os inteiros fixos em Sotlas Bootstrap."""
     integers = {"u8", "u16", "u32", "u64", "usize", "i8", "i16", "i32", "i64", "isize"}
     if same_type(actual, expected):
         return True
@@ -603,7 +603,7 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
     for struct in module.structs:
         for fld in struct.fields:
             if fld.type.name not in known_types:
-                raise Cq01Error(f"tipo desconhecido: {fld.type.name}", 1, 1, filename, source)
+                raise SotlasBootstrapError(f"tipo desconhecido: {fld.type.name}", 1, 1, filename, source)
 
 BUILTIN_FUNCTIONS: dict[str, Function] = {
     "__outb": Function("__outb", [("port", Type("u16")), ("val", Type("u8"))], Type("void"), [], public=True, attributes=["@system"]),
@@ -636,13 +636,13 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
     for struct in module.structs:
         for fld in struct.fields:
             if fld.type.name not in known_types:
-                raise Cq01Error(f"tipo desconhecido: {fld.type.name}", 1, 1, filename, source)
+                raise SotlasBootstrapError(f"tipo desconhecido: {fld.type.name}", 1, 1, filename, source)
 
     # 2. Validação de Funções
     functions = dict(BUILTIN_FUNCTIONS)
     user_funcs = {item.name: item for item in module.functions}
     if len(user_funcs) != len(module.functions):
-        raise Cq01Error("função duplicada no módulo", 1, 1, filename, source)
+        raise SotlasBootstrapError("função duplicada no módulo", 1, 1, filename, source)
     functions.update(user_funcs)
     if imported_fns: functions.update(imported_fns)
 
@@ -662,72 +662,72 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 return scope[expr.value]
             if expr.value in global_map:
                 return global_map[expr.value].type
-            raise Cq01Error(f"símbolo não declarado: {expr.value}", expr.token.line, expr.token.column, filename, source)
+            raise SotlasBootstrapError(f"símbolo não declarado: {expr.value}", expr.token.line, expr.token.column, filename, source)
         if isinstance(expr, EnumAccess):
             enum_obj = enum_map.get(expr.enum_name)
             if not enum_obj:
-                raise Cq01Error(f"enum não declarado: {expr.enum_name}", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"enum não declarado: {expr.enum_name}", expr.token.line, expr.token.column, filename, source)
             variant = next((v for v in enum_obj.variants if v.name == expr.variant), None)
             if not variant:
-                raise Cq01Error(f"variante '{expr.variant}' não existe no enum '{expr.enum_name}'", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"variante '{expr.variant}' não existe no enum '{expr.enum_name}'", expr.token.line, expr.token.column, filename, source)
             return Type(expr.enum_name)
         if isinstance(expr, Unary):
             inner = expr_type(expr.value, scope, in_unsafe, is_system_fn)
             if expr.op == "*":
                 # Dereferenciamento de ponteiro exige contexto unsafe ou função @system
                 if not (in_unsafe or is_system_fn):
-                    raise Cq01Error("desreferenciamento de ponteiro exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
+                    raise SotlasBootstrapError("desreferenciamento de ponteiro exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
                 if not inner.pointer:
-                    raise Cq01Error("operador '*' exige tipo ponteiro", expr.token.line, expr.token.column, filename, source)
+                    raise SotlasBootstrapError("operador '*' exige tipo ponteiro", expr.token.line, expr.token.column, filename, source)
                 return Type(inner.name, pointer=False, mutable=inner.mutable)
             if expr.op == "&":
                 return Type(inner.name, pointer=True, mutable=inner.mutable)
             if expr.op == "!":
                 if inner.name != "bool":
-                    raise Cq01Error("operador '!' exige bool", expr.token.line, expr.token.column, filename, source)
+                    raise SotlasBootstrapError("operador '!' exige bool", expr.token.line, expr.token.column, filename, source)
                 return Type("bool")
             return inner
         if isinstance(expr, Binary):
             left = expr_type(expr.left, scope, in_unsafe, is_system_fn)
             right = expr_type(expr.right, scope, in_unsafe, is_system_fn)
             if not (assignable(left, right) or assignable(right, left)):
-                raise Cq01Error(f"operandos com tipos incompatíveis ({left.name} e {right.name})", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"operandos com tipos incompatíveis ({left.name} e {right.name})", expr.token.line, expr.token.column, filename, source)
             return Type("bool") if expr.op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||") else left
         if isinstance(expr, Call):
             function = functions.get(expr.callee)
             if not function:
-                raise Cq01Error(f"função não declarada: {expr.callee}", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"função não declarada: {expr.callee}", expr.token.line, expr.token.column, filename, source)
             if len(expr.args) != len(function.params):
-                raise Cq01Error(f"aridade inválida em {expr.callee} (esperados {len(function.params)}, recebidos {len(expr.args)})", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"aridade inválida em {expr.callee} (esperados {len(function.params)}, recebidos {len(expr.args)})", expr.token.line, expr.token.column, filename, source)
             for argument, (_, expected) in zip(expr.args, function.params):
                 actual = expr_type(argument, scope, in_unsafe, is_system_fn)
                 if not assignable(actual, expected):
-                    raise Cq01Error(f"argumento incompatível em {expr.callee} (esperado {expected.c()}, recebido {actual.c()})", expr.token.line, expr.token.column, filename, source)
+                    raise SotlasBootstrapError(f"argumento incompatível em {expr.callee} (esperado {expected.c()}, recebido {actual.c()})", expr.token.line, expr.token.column, filename, source)
             return function.result
         if isinstance(expr, Index):
             target_t = expr_type(expr.target, scope, in_unsafe, is_system_fn)
             idx_t = expr_type(expr.index, scope, in_unsafe, is_system_fn)
             if idx_t.name not in ("u8", "u16", "u32", "u64", "usize", "i8", "i16", "i32", "i64", "isize"):
-                raise Cq01Error("índice de array deve ser inteiro", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError("índice de array deve ser inteiro", expr.token.line, expr.token.column, filename, source)
             if target_t.is_array:
                 return Type(target_t.name, pointer=target_t.pointer, mutable=target_t.mutable)
             if target_t.pointer:
                 if not (in_unsafe or is_system_fn):
-                    raise Cq01Error("indexação de ponteiro bruto exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
+                    raise SotlasBootstrapError("indexação de ponteiro bruto exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
                 return Type(target_t.name, pointer=False, mutable=target_t.mutable)
-            raise Cq01Error(f"tipo {target_t.name} não suporta indexação", expr.token.line, expr.token.column, filename, source)
+            raise SotlasBootstrapError(f"tipo {target_t.name} não suporta indexação", expr.token.line, expr.token.column, filename, source)
         if isinstance(expr, Member):
             target_t = expr_type(expr.target, scope, in_unsafe, is_system_fn)
             expr.is_pointer_target = target_t.pointer
             struct_name = target_t.name
             if target_t.pointer and not (in_unsafe or is_system_fn):
-                raise Cq01Error("acesso a campo de ponteiro exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError("acesso a campo de ponteiro exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
             struct_def = struct_map.get(struct_name)
             if not struct_def:
-                raise Cq01Error(f"tipo '{struct_name}' não é uma struct", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"tipo '{struct_name}' não é uma struct", expr.token.line, expr.token.column, filename, source)
             fld = next((f for f in struct_def.fields if f.name == expr.field), None)
             if not fld:
-                raise Cq01Error(f"campo '{expr.field}' não existe na struct '{struct_name}'", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"campo '{expr.field}' não existe na struct '{struct_name}'", expr.token.line, expr.token.column, filename, source)
             return fld.type
         if isinstance(expr, MethodCall):
             target_t = expr_type(expr.target, scope, in_unsafe, is_system_fn)
@@ -735,25 +735,25 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
             method_fn_name = f"{struct_name}_{expr.method}"
             function = functions.get(method_fn_name)
             if not function:
-                raise Cq01Error(f"método '{expr.method}' não existe no tipo '{struct_name}'", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"método '{expr.method}' não existe no tipo '{struct_name}'", expr.token.line, expr.token.column, filename, source)
             expr.target_type = target_t
             first_param = function.params[0] if function.params else None
             if first_param and first_param[1].pointer and not target_t.pointer:
                 expr.pass_by_ref = True
             expected_args = function.params[1:] if first_param else []
             if len(expr.args) != len(expected_args):
-                raise Cq01Error(f"aridade inválida no método {expr.method} (esperados {len(expected_args)}, recebidos {len(expr.args)})", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"aridade inválida no método {expr.method} (esperados {len(expected_args)}, recebidos {len(expr.args)})", expr.token.line, expr.token.column, filename, source)
             for argument, (_, expected) in zip(expr.args, expected_args):
                 actual = expr_type(argument, scope, in_unsafe, is_system_fn)
                 if not assignable(actual, expected):
-                    raise Cq01Error(f"argumento incompatível no método {expr.method} (esperado {expected.c()}, recebido {actual.c()})", expr.token.line, expr.token.column, filename, source)
+                    raise SotlasBootstrapError(f"argumento incompatível no método {expr.method} (esperado {expected.c()}, recebido {actual.c()})", expr.token.line, expr.token.column, filename, source)
             return function.result
         if isinstance(expr, Cast):
             inner = expr_type(expr.expr, scope, in_unsafe, is_system_fn)
             if expr.target_type.name not in known_types:
-                raise Cq01Error(f"tipo de cast desconhecido: {expr.target_type.name}", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError(f"tipo de cast desconhecido: {expr.target_type.name}", expr.token.line, expr.token.column, filename, source)
             if expr.target_type.pointer and not (in_unsafe or is_system_fn):
-                raise Cq01Error("conversão explícita para ponteiro exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
+                raise SotlasBootstrapError("conversão explícita para ponteiro exige bloco unsafe ou função @system", expr.token.line, expr.token.column, filename, source)
             return expr.target_type
         raise AssertionError(type(expr))
 
@@ -763,28 +763,28 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 actual = expr_type(item.value, scope, in_unsafe, is_system_fn)
                 declared = item.type or actual
                 if not assignable(actual, declared):
-                    raise Cq01Error(f"inicialização incompatível de '{item.name}'", item.token.line, item.token.column, filename, source)
+                    raise SotlasBootstrapError(f"inicialização incompatível de '{item.name}'", item.token.line, item.token.column, filename, source)
                 scope[item.name] = declared
             elif isinstance(item, Assign):
                 if isinstance(item.target, Name):
                     if item.target.value not in scope and item.target.value not in global_map:
-                        raise Cq01Error(f"atribuição a símbolo desconhecido: {item.target.value}", item.token.line, item.token.column, filename, source)
+                        raise SotlasBootstrapError(f"atribuição a símbolo desconhecido: {item.target.value}", item.token.line, item.token.column, filename, source)
                     target_t = scope[item.target.value] if item.target.value in scope else global_map[item.target.value].type
                 else:
                     target_t = expr_type(item.target, scope, in_unsafe, is_system_fn)
                 val_t = expr_type(item.value, scope, in_unsafe, is_system_fn)
                 if not assignable(val_t, target_t):
-                    raise Cq01Error("atribuição incompatível", item.token.line, item.token.column, filename, source)
+                    raise SotlasBootstrapError("atribuição incompatível", item.token.line, item.token.column, filename, source)
             elif isinstance(item, Return):
                 actual = Type("void") if item.value is None else expr_type(item.value, scope, in_unsafe, is_system_fn)
                 if not assignable(actual, expected_return):
-                    raise Cq01Error("retorno incompatível", item.token.line, item.token.column, filename, source)
+                    raise SotlasBootstrapError("retorno incompatível", item.token.line, item.token.column, filename, source)
             elif isinstance(item, (Break, Continue)):
                 continue
             elif isinstance(item, (If, While)):
                 cond_t = expr_type(item.condition, scope, in_unsafe, is_system_fn)
                 if cond_t.name != "bool":
-                    raise Cq01Error("condição deve ser bool", item.token.line, item.token.column, filename, source)
+                    raise SotlasBootstrapError("condição deve ser bool", item.token.line, item.token.column, filename, source)
                 statements(item.then_body if isinstance(item, If) else item.body, dict(scope), expected_return, in_unsafe, is_system_fn)
                 if isinstance(item, If) and item.else_body:
                     statements(item.else_body, dict(scope), expected_return, in_unsafe, is_system_fn)
@@ -796,13 +796,13 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 if isinstance(item.value, Assign):
                     if isinstance(item.value.target, Name):
                         if item.value.target.value not in scope and item.value.target.value not in global_map:
-                            raise Cq01Error(f"atribuição a símbolo desconhecido: {item.value.target.value}", item.token.line, item.token.column, filename, source)
+                            raise SotlasBootstrapError(f"atribuição a símbolo desconhecido: {item.value.target.value}", item.token.line, item.token.column, filename, source)
                         target_t = scope[item.value.target.value] if item.value.target.value in scope else global_map[item.value.target.value].type
                     else:
                         target_t = expr_type(item.value.target, scope, in_unsafe, is_system_fn)
                     val_t = expr_type(item.value.value, scope, in_unsafe, is_system_fn)
                     if not assignable(val_t, target_t):
-                        raise Cq01Error("atribuição incompatível", item.token.line, item.token.column, filename, source)
+                        raise SotlasBootstrapError("atribuição incompatível", item.token.line, item.token.column, filename, source)
                 else:
                     expr_type(item.value, scope, in_unsafe, is_system_fn)
 
@@ -846,7 +846,7 @@ def _emit_expr(expr: Expr, mod_prefix: str = "") -> str:
     raise AssertionError(type(expr))
 
 
-PREAMBLE = """/* Gerado pelo frontend Cq 0.1. */
+PREAMBLE = """/* Gerado pelo frontend Sotlas Bootstrap. */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -951,10 +951,10 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
                     val_str = _emit_expr(item.value, prefix)
                     if all_defers:
                         c_ret_type = ret_type.c() if ret_type else "int64_t"
-                        out.append(f"{pad}{c_ret_type} _cq_ret = {val_str};")
+                        out.append(f"{pad}{c_ret_type} _st_ret = {val_str};")
                         for d in all_defers:
                             out.append(_emit_defer_action(d, pad))
-                        out.append(f"{pad}return _cq_ret;")
+                        out.append(f"{pad}return _st_ret;")
                     else:
                         out.append(f"{pad}return {val_str};")
                 else:
@@ -1025,21 +1025,21 @@ def compile_file(source: Path, output: Path) -> None:
 
 
 def compile_project(entry: Path) -> list[Module]:
-    """Resolve um projeto Cq 0.1 multi-módulo sem depender do Baken OS legado."""
+    """Resolve um projeto Sotlas Bootstrap multi-módulo sem depender do Baken OS legado."""
     root = entry.parent
     while root.parent != root and not (root / "core").is_dir():
         root = root.parent
     units: dict[str, Module] = {}
-    for path in list(root.rglob("*.st")) + list(root.rglob("*.cq")):
+    for path in list(root.rglob("*.st")) + list(root.rglob("*.st")):
         if "tests" in path.parts or "fixtures" in path.parts or ".git" in path.parts:
             continue
         try:
             text = path.read_text(encoding="utf-8")
             unit = parse(text, filename=str(path))
             if unit.name in units and units[unit.name].filename != str(path):
-                raise Cq01Error(f"módulo duplicado: {unit.name}", 1, 1, str(path), text)
+                raise SotlasBootstrapError(f"módulo duplicado: {unit.name}", 1, 1, str(path), text)
             units[unit.name] = unit
-        except Cq01Error as e:
+        except SotlasBootstrapError as e:
             if "módulo duplicado" in e.message:
                 raise
             continue
@@ -1052,11 +1052,11 @@ def compile_project(entry: Path) -> list[Module]:
 
     def visit(name: str) -> None:
         if name in visiting:
-            raise Cq01Error("import circular: " + " -> ".join(visiting + [name]), 1, 1)
+            raise SotlasBootstrapError("import circular: " + " -> ".join(visiting + [name]), 1, 1)
         if name in visited: return
         unit = units.get(name)
         if not unit:
-            raise Cq01Error(f"import não resolvido: {name}", 1, 1)
+            raise SotlasBootstrapError(f"import não resolvido: {name}", 1, 1)
         visiting.append(name)
         for dependency in unit.imports:
             visit(dependency)

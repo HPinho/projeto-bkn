@@ -1,8 +1,8 @@
 /*
  * BKNC - prototipo hospedeiro do frontend da linguagem Baken.
  *
- * Este arquivo e C de ferramenta, mantido com extensao .cq pela migracao
- * historica. Ele NAO e um modulo Cq do kernel e ainda nao e o compilador
+ * Este arquivo e C de ferramenta, mantido com extensao .st pela migracao
+ * historica. Ele NAO e um modulo Sotlas do kernel e ainda nao e o compilador
  * oficial: reconhece funcoes de forma limitada e emite apenas LLVM IR textual.
  */
 
@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
-#include "../include/bknc_ast.cqh"
+#include "../include/bknc_ast.sth"
 
 typedef enum {
     TOK_EOF,
@@ -327,7 +327,7 @@ int main(int argc, char** argv) {
     printf("BKNC experimental: analisador parcial e emissor LLVM textual\n\n");
 
     if (argc < 2) {
-        printf("Uso: bknc <arquivo.cq> [--emit-llvm]\n");
+        printf("Uso: bknc <arquivo.st> [--emit-llvm]\n");
         return 2;
     }
     if (argc > 3 || (argc == 3 && strcmp(argv[2], "--emit-llvm") != 0)) {

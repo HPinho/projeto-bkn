@@ -4,6 +4,7 @@
   "publisher": "bakenos",
   "description": "Realce de sintaxe para a linguagem de sistemas Sotlas do Baken OS (.st, .sth)",
   "version": "0.2.0",
+  "icon": "./icons/sotlas-icon.svg",
   "engines": {
     "vscode": "^1.60.0"
   },
@@ -23,7 +24,11 @@
           ".st",
           ".sth"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/sotlas-icon.svg",
+          "dark": "./icons/sotlas-logo.svg"
+        }
       }
     ],
     "grammars": [

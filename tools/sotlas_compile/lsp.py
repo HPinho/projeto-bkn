@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Servidor LSP Cq 0.1: autocompletion, go-to-definition, hover e document symbols.
+"""Servidor LSP Sotlas Bootstrap: autocompletion, go-to-definition, hover e document symbols.
 
 Sem dependências externas além da biblioteca padrão do Python. Compartilha
-o parser e sistema de tipos do compilador Cq 0.1 (cq01.py).
+o parser e sistema de tipos do compilador Sotlas Bootstrap (bootstrap.py).
 """
 from __future__ import annotations
 
@@ -12,14 +12,14 @@ import re
 import sys
 from urllib.parse import unquote, urlparse
 
-_VORTEXC_DIR = str(Path(__file__).resolve().parent)
-if _VORTEXC_DIR not in sys.path:
-    sys.path.insert(0, _VORTEXC_DIR)
+_SOTLAS_COMPILE_DIR = str(Path(__file__).resolve().parent)
+if _SOTLAS_COMPILE_DIR not in sys.path:
+    sys.path.insert(0, _SOTLAS_COMPILE_DIR)
 
-from cq01 import (
+from bootstrap import (
     KEYWORDS,
     PRIMITIVES,
-    Cq01Error,
+    SotlasBootstrapError,
     Enum,
     EnumVariant,
     FieldDef,
@@ -51,7 +51,7 @@ def path_to_uri(path: Path) -> str:
     return path.resolve().as_uri()
 
 
-class CqLanguageServer:
+class SotlasLanguageServer:
     def __init__(self):
         self.documents: dict[str, str] = {}
         self.parsed_modules: dict[str, Module] = {}
@@ -149,14 +149,14 @@ class CqLanguageServer:
         )
 
     def find_project_modules(self, current_file: Path | None) -> dict[str, tuple[Module, Path]]:
-        """Descobre todos os módulos .cq no projeto a partir do arquivo atual."""
+        """Descobre todos os módulos .st no projeto a partir do arquivo atual."""
         project_modules: dict[str, tuple[Module, Path]] = {}
         if not current_file or not current_file.exists():
             return project_modules
         root = current_file.parent
         while root.parent != root and not (root / "core").is_dir():
             root = root.parent
-        for path in root.rglob("*.cq"):
+        for path in root.rglob("*.st"):
             try:
                 text = path.read_text(encoding="utf-8")
                 try:
@@ -191,7 +191,7 @@ class CqLanguageServer:
                         imported_enums.update({e.name: e for e in dep_mod.enums if e.public})
                         imported_globals.update({g.name: g for g in dep_mod.globals if g.public})
             check(mod, imported_fns, imported_types, imported_enums, imported_globals)
-        except Cq01Error as error:
+        except SotlasBootstrapError as error:
             # Fallback para extração heurística para não perder símbolos
             self.parsed_modules[uri] = self.last_valid_modules.get(uri) or self._extract_heuristic(source, uri)
             diagnostics.append({
@@ -200,7 +200,7 @@ class CqLanguageServer:
                     "end": {"line": max(0, error.line - 1), "character": max(0, error.column + 5)},
                 },
                 "severity": 1,
-                "source": "cq01",
+                "source": "bootstrap",
                 "message": error.message,
             })
         except Exception:
@@ -239,7 +239,7 @@ class CqLanguageServer:
                 items.append({
                     "label": attr,
                     "kind": 15,  # Snippet
-                    "detail": "Atributo Cq 0.1",
+                    "detail": "Atributo Sotlas Bootstrap",
                     "documentation": doc,
                     "insertText": attr[1:] if prefix_line.endswith("@") else attr,
                 })
@@ -295,7 +295,7 @@ class CqLanguageServer:
             items.append({
                 "label": kw,
                 "kind": 14,  # Keyword
-                "detail": "Palavra-chave Cq 0.1",
+                "detail": "Palavra-chave Sotlas Bootstrap",
             })
 
         # 5. Tipos Primitivos
@@ -303,7 +303,7 @@ class CqLanguageServer:
             items.append({
                 "label": prim,
                 "kind": 7,  # Class / Type
-                "detail": "Tipo Primitivo Cq 0.1",
+                "detail": "Tipo Primitivo Sotlas Bootstrap",
             })
 
         # 6. Símbolos do Módulo Atual e Módulos Importados
@@ -385,7 +385,7 @@ class CqLanguageServer:
                                 for v in en.variants:
                                     if v.name == var_name:
                                         val_str = f" = {v.value}" if v.value is not None else ""
-                                        return {"contents": {"kind": "markdown", "value": f"```cq\n{enum_name}::{var_name}{val_str}\n```\n*Variante do enum `{enum_name}`*"}}
+                                        return {"contents": {"kind": "markdown", "value": f"```st\n{enum_name}::{var_name}{val_str}\n```\n*Variante do enum `{enum_name}`*"}}
 
         # Procura funções, structs, enums ou variáveis
         file_path = uri_to_path(uri)
@@ -404,7 +404,7 @@ class CqLanguageServer:
                     attrs_str = " ".join(fn.attributes) + " " if fn.attributes else ""
                     params_str = ", ".join(f"{pname}: {ptype.name}" for pname, ptype in fn.params)
                     ret_str = f" -> {fn.result.name}" if fn.result.name != "void" else ""
-                    sig = f"```cq\n{attrs_str}{pub_str}fn {fn.name}({params_str}){ret_str}\n```\n*Módulo: `{mod.name}`*"
+                    sig = f"```st\n{attrs_str}{pub_str}fn {fn.name}({params_str}){ret_str}\n```\n*Módulo: `{mod.name}`*"
                     return {"contents": {"kind": "markdown", "value": sig}}
 
             # Structs
@@ -413,7 +413,7 @@ class CqLanguageServer:
                     pub_str = "pub " if st.public else ""
                     attrs_str = " ".join(st.attributes) + " " if st.attributes else ""
                     fields_str = "\n".join(f"    {f.name}: {f.type.name};" for f in st.fields)
-                    sig = f"```cq\n{attrs_str}{pub_str}struct {st.name} {{\n{fields_str}\n}}\n```\n*Módulo: `{mod.name}`*"
+                    sig = f"```st\n{attrs_str}{pub_str}struct {st.name} {{\n{fields_str}\n}}\n```\n*Módulo: `{mod.name}`*"
                     return {"contents": {"kind": "markdown", "value": sig}}
 
             # Enums
@@ -421,7 +421,7 @@ class CqLanguageServer:
                 if en.name == word:
                     pub_str = "pub " if en.public else ""
                     vars_str = "\n".join(f"    {v.name}" + (f" = {v.value}" if v.value is not None else "") + "," for v in en.variants)
-                    sig = f"```cq\n{pub_str}enum {en.name} {{\n{vars_str}\n}}\n```\n*Módulo: `{mod.name}`*"
+                    sig = f"```st\n{pub_str}enum {en.name} {{\n{vars_str}\n}}\n```\n*Módulo: `{mod.name}`*"
                     return {"contents": {"kind": "markdown", "value": sig}}
 
             # Globals
@@ -429,16 +429,16 @@ class CqLanguageServer:
                 if gl.name == word:
                     pub_str = "pub " if gl.public else ""
                     kind_str = "const" if gl.is_const else ("static mut" if gl.is_mut else "static")
-                    sig = f"```cq\n{pub_str}{kind_str} {gl.name}: {gl.type.name}\n```\n*Módulo: `{mod.name}`*"
+                    sig = f"```st\n{pub_str}{kind_str} {gl.name}: {gl.type.name}\n```\n*Módulo: `{mod.name}`*"
                     return {"contents": {"kind": "markdown", "value": sig}}
 
         # Tipos primitivos
         if word in PRIMITIVES:
-            return {"contents": {"kind": "markdown", "value": f"```cq\ntype {word}\n```\n*Tipo primitivo escalar Cq 0.1*"}}
+            return {"contents": {"kind": "markdown", "value": f"```st\ntype {word}\n```\n*Tipo primitivo escalar Sotlas Bootstrap*"}}
 
         # Palavras-chave
         if word in KEYWORDS:
-            return {"contents": {"kind": "markdown", "value": f"```cq\nkeyword {word}\n```\n*Palavra-chave normativa Cq 0.1*"}}
+            return {"contents": {"kind": "markdown", "value": f"```st\nkeyword {word}\n```\n*Palavra-chave normativa Sotlas Bootstrap*"}}
 
         return None
 
@@ -630,7 +630,7 @@ def read_message() -> dict | None:
 
 
 def main() -> int:
-    server = CqLanguageServer()
+    server = SotlasLanguageServer()
     while message := read_message():
         method = message.get("method")
         params = message.get("params", {})
@@ -693,4 +693,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

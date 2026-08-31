@@ -44,14 +44,14 @@ def main():
     stage_font()
     lines = ['#pragma once', '#include <stdint.h>', '',
         '/* Generated from Google Sans Flex (SIL Open Font License 1.1). Do not edit. */',
-        'typedef struct { uint8_t px, width, height; const uint8_t *advances, *alpha; } CqFontAtlas;', '']
+        'typedef struct { uint8_t px, width, height; const uint8_t *advances, *alpha; } SotlasFontAtlas;', '']
     for size, width, height, baseline in SIZES:
         advances, pixels = render(size, width, height, baseline)
         lines += [f'static const uint8_t google_sans_flex_{size}_advances[256] = {{' + ','.join(map(str, advances)) + '};',
                   f'static const uint8_t google_sans_flex_{size}_alpha[{len(pixels)}] = {{' + ','.join(map(str, pixels)) + '};', '']
-    lines += ['static const CqFontAtlas cq_font_atlases[] = {']
+    lines += ['static const SotlasFontAtlas sotlas_font_atlases[] = {']
     lines += [f'    {{{size}, {width}, {height}, google_sans_flex_{size}_advances, google_sans_flex_{size}_alpha}},' for size, width, height, _ in SIZES]
-    lines += ['};', f'#define CQ_FONT_ATLAS_COUNT {len(SIZES)}', '']
+    lines += ['};', f'#define SOTLAS_FONT_ATLAS_COUNT {len(SIZES)}', '']
     OUTPUT.parent.mkdir(parents=True, exist_ok=True); OUTPUT.write_text('\n'.join(lines), encoding='ascii')
     print(f'[OK] atlas Google Sans Flex multi-resolucao: {OUTPUT} ({len(SIZES)} tamanhos)')
 

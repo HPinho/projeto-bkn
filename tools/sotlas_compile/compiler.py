@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""VortexC: frontend e backend modular da linguagem Sotlas (anteriormente Cq).
+"""Sotlas Compile: frontend e backend modular da linguagem Sotlas.
 
 O compilador resolve o grafo Sotlas, valida sua interface pública e emite uma
 unidade C isolada para cada módulo. A entrada do kernel e a linkedição
 pertencem integralmente ao grafo Sotlas.
 
 Extensões suportadas: .st (Sotlas source) / .sth (Sotlas headers)
-Alias legado: .cq (ainda suportado por compatibilidade retroativa)
 """
 import argparse
 import json
@@ -31,53 +30,46 @@ EXPORT_RE = re.compile(r"^pub\s+(?:fn|struct|class|enum)\s+([A-Za-z_][A-Za-z0-9_
 KERNEL_ENTRY_RE = re.compile(
     r"^\s*@export\s*\n\s*pub\s+fn\s+baken_kernel_main\s*\(", re.MULTILINE
 )
-# Módulos Cq não podem delegar silenciosamente sua semântica ao
+# Módulos Sotlas não podem delegar silenciosamente sua semântica ao
 # pré-processador C. O bootloader e ferramentas de host não declaram `module`
 # e, por isso, ficam fora desta regra deliberadamente.
 C_PREPROCESSOR_RE = re.compile(r"^\s*#\s*(?:include|define|if|ifdef|ifndef|pragma)\b", re.MULTILINE)
 
-class CqError(Exception):
+class SotlasError(Exception):
     pass
 
 def project_root(entry):
     for candidate in (entry.parent, *entry.parents):
         if (candidate / "kernel").is_dir():
             return candidate
-    raise CqError("não foi possível localizar a raiz do projeto Cq")
+    raise SotlasError("não foi possível localizar a raiz do projeto Sotlas")
 
 def discover_units(root):
     units, duplicates = {}, []
     for source_root in (root / "kernel", root / "libbkn", root / "boot", root / "apps"):
         if not source_root.is_dir():
             continue
-        # Aceita .st (Sotlas) e .cq (legado Cq) — .st tem precedência
-        for ext in ("*.st", "*.cq"):
+        for ext in ("*.st",):
             for path in source_root.rglob(ext):
                 text = path.read_text(encoding="utf-8")
                 declarations = list(MODULE_RE.finditer(text))
                 if not declarations:
                     if MODULE_KEYWORD_RE.search(text):
-                        raise CqError(f"{path.relative_to(root)}: declaração module inválida")
+                        raise SotlasError(f"{path.relative_to(root)}: declaração module inválida")
                     continue
                 if len(declarations) != 1:
-                    raise CqError(
+                    raise SotlasError(
                         f"{path.relative_to(root)}: um arquivo Sotlas pode declarar exatamente um módulo"
                     )
                 name = declarations[0].group(1)
                 if name in units:
-                    # .st tem precedência sobre .cq do mesmo módulo
                     existing_path = units[name]["path"]
-                    if path.suffix == ".st" and existing_path.suffix == ".cq":
-                        units[name] = {"path": path, "text": text}  # sobrescreve com .st
-                    elif path.suffix == ".cq" and existing_path.suffix == ".st":
-                        pass  # mantém o .st já registrado
-                    else:
-                        duplicates.append((name, existing_path, path))
+                    duplicates.append((name, existing_path, path))
                 else:
                     units[name] = {"path": path, "text": text}
     if duplicates:
         lines = [f"{name}: {first} e {second}" for name, first, second in duplicates]
-        raise CqError("módulos declarados mais de uma vez:\n" + "\n".join(lines))
+        raise SotlasError("módulos declarados mais de uma vez:\n" + "\n".join(lines))
     return units
 
 def resolve_import(name, units):
@@ -90,16 +82,16 @@ def resolve_import(name, units):
     return None
 
 def validate_module_dialect(units, root):
-    """Impede que fontes descobertas como Cq escondam trechos de C."""
+    """Impede que fontes descobertas como Sotlas escondam trechos de C."""
     for unit in units.values():
         if C_PREPROCESSOR_RE.search(unit["text"]):
-            raise CqError(
+            raise SotlasError(
                 f"{unit['path'].relative_to(root)}: módulo Sotlas não pode usar "
                 "pré-processador C"
             )
         for import_line in IMPORT_LINE_RE.findall(unit["text"]):
             if not IMPORT_RE.fullmatch(import_line):
-                raise CqError(
+                raise SotlasError(
                     f"{unit['path'].relative_to(root)}: import Sotlas inválido; "
                     "use import modulo::*;"
                 )
@@ -111,7 +103,7 @@ def validate_all_cycles(graph):
     def visit(module):
         if module in visiting:
             cycle = visiting[visiting.index(module):] + [module]
-            raise CqError("dependência circular: " + " -> ".join(cycle))
+            raise SotlasError("dependência circular: " + " -> ".join(cycle))
         if module in visited:
             return
         visiting.append(module)
@@ -130,10 +122,10 @@ def analyze(entry):
     validate_module_dialect(units, root)
     entry_match = MODULE_RE.search(entry.read_text(encoding="utf-8"))
     if not entry_match:
-        raise CqError(f"{entry} não declara um módulo Cq")
+        raise SotlasError(f"{entry} não declara um módulo Sotlas")
     entry_module = entry_match.group(1)
     if entry_module not in units:
-        raise CqError(f"entrada {entry_module} não foi descoberta")
+        raise SotlasError(f"entrada {entry_module} não foi descoberta")
     graph = {}
     for module, unit in units.items():
         imports = []
@@ -141,9 +133,9 @@ def analyze(entry):
             raw = match.group("module")
             target = resolve_import(raw, units)
             if not target:
-                raise CqError(f"{unit['path'].relative_to(root)}: import não resolvido: {raw}")
+                raise SotlasError(f"{unit['path'].relative_to(root)}: import não resolvido: {raw}")
             if target == module:
-                raise CqError(f"{unit['path'].relative_to(root)}: módulo não pode importar a si mesmo")
+                raise SotlasError(f"{unit['path'].relative_to(root)}: módulo não pode importar a si mesmo")
             if target not in imports:
                 imports.append(target)
         graph[module] = imports
@@ -152,7 +144,7 @@ def analyze(entry):
     def visit(module):
         if module in visiting:
             cycle = visiting[visiting.index(module):] + [module]
-            raise CqError("dependência circular: " + " -> ".join(cycle))
+            raise SotlasError("dependência circular: " + " -> ".join(cycle))
         if module in visited:
             return
         visiting.append(module)
@@ -167,14 +159,14 @@ def analyze(entry):
         for symbol in EXPORT_RE.findall(units[module]["text"]):
             qualified = f"{module}::{symbol}"
             if qualified in exports:
-                raise CqError(f"símbolo exportado duas vezes: {qualified}")
+                raise SotlasError(f"símbolo exportado duas vezes: {qualified}")
             exports[qualified] = str(units[module]["path"].relative_to(root))
     if entry_module == "kernel::main":
         entry_exports = [module for module in reachable if KERNEL_ENTRY_RE.search(units[module]["text"])]
         entry_count = sum(len(KERNEL_ENTRY_RE.findall(units[module]["text"])) for module in reachable)
         if entry_exports != ["kernel::main"] or entry_count != 1:
             detail = ", ".join(entry_exports) if entry_exports else "nenhum"
-            raise CqError(
+            raise SotlasError(
                 "a rota do kernel precisa exportar exatamente um baken_kernel_main em "
                 f"kernel::main; encontrado: {detail} ({entry_count} declarações)"
             )
@@ -198,10 +190,10 @@ def find_gcc(root: Path) -> Path:
     which_gcc = shutil.which("gcc")
     if which_gcc:
         return Path(which_gcc)
-    raise CqError("compilador GCC do toolchain w64devkit não encontrado")
+    raise SotlasError("compilador GCC do toolchain w64devkit não encontrado")
 
 # =============================================================================
-# PARSER & TYPECHECKER CQ (Fase VIII: Backend Cq Nativo)
+# PARSER & TYPECHECKER SOTLAS (Fase VIII: Backend Sotlas Nativo)
 # =============================================================================
 
 KNOWN_PRIMITIVE_TYPES = {
@@ -210,7 +202,7 @@ KNOWN_PRIMITIVE_TYPES = {
     "f32", "f64", "bool", "void", "str", "!"
 }
 
-class CqType:
+class SotlasType:
     def __init__(self, name: str, is_ptr: bool = False, is_mut: bool = False):
         self.name = name
         self.is_ptr = is_ptr
@@ -222,14 +214,14 @@ class CqType:
             return f"{prefix}{self.name}"
         return self.name
 
-class CqField:
-    def __init__(self, name: str, type_info: CqType, is_pub: bool = False):
+class SotlasField:
+    def __init__(self, name: str, type_info: SotlasType, is_pub: bool = False):
         self.name = name
         self.type_info = type_info
         self.is_pub = is_pub
 
-class CqFunction:
-    def __init__(self, name: str, params: list, return_type: CqType, is_pub: bool = False, attributes: list = None, line: int = 0, body: str = ""):
+class SotlasFunction:
+    def __init__(self, name: str, params: list, return_type: SotlasType, is_pub: bool = False, attributes: list = None, line: int = 0, body: str = ""):
         self.name = name
         self.params = params
         self.return_type = return_type
@@ -238,20 +230,20 @@ class CqFunction:
         self.line = line
         self.body = body
 
-class CqStruct:
+class SotlasStruct:
     def __init__(self, name: str, fields: list, is_pub: bool = False):
         self.name = name
         self.fields = fields
         self.is_pub = is_pub
 
-class CqClass:
+class SotlasClass:
     def __init__(self, name: str, fields: list, methods: list, is_pub: bool = False):
         self.name = name
         self.fields = fields
         self.methods = methods
         self.is_pub = is_pub
 
-class CqModuleAST:
+class SotlasModuleAst:
     def __init__(self, name: str):
         self.name = name
         self.imports = []
@@ -260,19 +252,19 @@ class CqModuleAST:
         self.functions = []
         self.static_variables = []
 
-def parse_cq_type(raw_type: str) -> CqType:
+def parse_st_type(raw_type: str) -> SotlasType:
     raw = raw_type.strip()
     if raw.startswith("*mut "):
-        return CqType(raw[5:].strip(), is_ptr=True, is_mut=True)
+        return SotlasType(raw[5:].strip(), is_ptr=True, is_mut=True)
     if raw.startswith("*const "):
-        return CqType(raw[7:].strip(), is_ptr=True, is_mut=False)
+        return SotlasType(raw[7:].strip(), is_ptr=True, is_mut=False)
     if raw.startswith("*"):
-        return CqType(raw[1:].strip(), is_ptr=True, is_mut=False)
+        return SotlasType(raw[1:].strip(), is_ptr=True, is_mut=False)
     if raw.startswith("&mut "):
-        return CqType(raw[5:].strip(), is_ptr=True, is_mut=True)
+        return SotlasType(raw[5:].strip(), is_ptr=True, is_mut=True)
     if raw.startswith("&"):
-        return CqType(raw[1:].strip(), is_ptr=True, is_mut=False)
-    return CqType(raw)
+        return SotlasType(raw[1:].strip(), is_ptr=True, is_mut=False)
+    return SotlasType(raw)
 
 def _top_level_offsets(text: str) -> set:
     """Retorna offsets fora de corpos de tipos/funções, ignorando comentários."""
@@ -304,7 +296,7 @@ def _matching_brace(text: str, opening: int) -> int:
             depth -= 1
             if depth == 0: return index
         index += 1
-    raise CqError("bloco Cq sem chave de fechamento")
+    raise SotlasError("bloco Sotlas sem chave de fechamento")
 
 def _parse_fields(body: str) -> list:
     fields, depth = [], 0
@@ -313,16 +305,16 @@ def _parse_fields(body: str) -> list:
         if depth == 0:
             match = re.match(r"(?:pub\s+)?(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^=;{]+)", line)
             if match:
-                fields.append(CqField(match.group(1), parse_cq_type(match.group(2).strip())))
+                fields.append(SotlasField(match.group(1), parse_st_type(match.group(2).strip())))
         depth += line.count("{") - line.count("}")
     return fields
 
-def parse_module_ast(text: str, path: Path | None = None) -> CqModuleAST:
+def parse_module_ast(text: str, path: Path | None = None) -> SotlasModuleAst:
     mod_match = MODULE_RE.search(text)
     if not mod_match:
-        raise CqError(f"{path or 'unidade'}: declaração module ausente")
+        raise SotlasError(f"{path or 'unidade'}: declaração module ausente")
     mod_name = mod_match.group(1)
-    ast = CqModuleAST(mod_name)
+    ast = SotlasModuleAst(mod_name)
 
     # Coleta imports
     for imp in IMPORT_RE.finditer(text):
@@ -344,19 +336,19 @@ def parse_module_ast(text: str, path: Path | None = None) -> CqModuleAST:
                 line = line[4:].strip()
             if ":" in line:
                 fname, ftype = line.split(":", 1)
-                fields.append(CqField(fname.strip(), parse_cq_type(ftype.strip()), is_pub=f_pub))
-        ast.structs.append(CqStruct(sname, fields, is_pub=is_pub))
+                fields.append(SotlasField(fname.strip(), parse_st_type(ftype.strip()), is_pub=f_pub))
+        ast.structs.append(SotlasStruct(sname, fields, is_pub=is_pub))
 
     # Classes podem conter métodos com blocos internos; por isso não usam a
     # regex curta das structs. O scanner procura a chave correspondente.
     class_re = re.compile(r"(pub\s+)?class\s+([A-Za-z_][A-Za-z0-9_]*)(?:\s+extends\s+[A-Za-z_][A-Za-z0-9_]*)?\s*\{")
     for cmatch in class_re.finditer(text):
         close = _matching_brace(text, cmatch.end() - 1)
-        ast.classes.append(CqClass(cmatch.group(2), _parse_fields(text[cmatch.end():close]), [], bool(cmatch.group(1))))
+        ast.classes.append(SotlasClass(cmatch.group(2), _parse_fields(text[cmatch.end():close]), [], bool(cmatch.group(1))))
 
     static_re = re.compile(r"^\s*static\s+mut\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^=;{]+)", re.MULTILINE)
     for vmatch in static_re.finditer(text):
-        ast.static_variables.append((vmatch.group(1), parse_cq_type(vmatch.group(2).strip())))
+        ast.static_variables.append((vmatch.group(1), parse_st_type(vmatch.group(2).strip())))
 
     # Coleta somente funções declaradas no escopo do módulo. Métodos de classe
     # têm o mesmo formato superficial, mas não podem virar exports globais.
@@ -370,7 +362,7 @@ def parse_module_ast(text: str, path: Path | None = None) -> CqModuleAST:
         fname = fmatch.group(3)
         raw_params = fmatch.group(4)
         raw_ret = fmatch.group(5) or "void"
-        ret_type = parse_cq_type(raw_ret)
+        ret_type = parse_st_type(raw_ret)
         params = []
         for p in raw_params.split(","):
             p = p.strip()
@@ -378,16 +370,16 @@ def parse_module_ast(text: str, path: Path | None = None) -> CqModuleAST:
                 continue
             if ":" in p:
                 pname, ptype = p.split(":", 1)
-                params.append((pname.strip(), parse_cq_type(ptype.strip())))
+                params.append((pname.strip(), parse_st_type(ptype.strip())))
         body_start = fmatch.end() - 1
         body_end = _matching_brace(text, body_start)
-        ast.functions.append(CqFunction(fname, params, ret_type, is_pub=is_pub, attributes=attrs,
+        ast.functions.append(SotlasFunction(fname, params, ret_type, is_pub=is_pub, attributes=attrs,
                                         line=text.count("\n", 0, fmatch.start()) + 1,
                                         body=text[body_start + 1:body_end]))
 
     return ast
 
-def _base_type_name(type_info: CqType) -> str:
+def _base_type_name(type_info: SotlasType) -> str:
     raw = type_info.name.strip()
     if raw.startswith("["):
         raw = raw[1:].split(";", 1)[0].strip()
@@ -397,7 +389,7 @@ def _base_type_name(type_info: CqType) -> str:
             break
     return raw.split("::")[-1]
 
-def typecheck_ast(ast: CqModuleAST, known_types: set | None = None) -> bool:
+def typecheck_ast(ast: SotlasModuleAst, known_types: set | None = None) -> bool:
     types = set(KNOWN_PRIMITIVE_TYPES)
     if known_types:
         types.update(known_types)
@@ -411,16 +403,16 @@ def typecheck_ast(ast: CqModuleAST, known_types: set | None = None) -> bool:
         for f in s.fields:
             base_type = _base_type_name(f.type_info)
             if base_type not in types:
-                raise CqError(f"{ast.name}: tipo desconhecido no campo {s.name}.{f.name}: {f.type_info}")
+                raise SotlasError(f"{ast.name}: tipo desconhecido no campo {s.name}.{f.name}: {f.type_info}")
     for c in ast.classes:
         for f in c.fields:
             base_type = _base_type_name(f.type_info)
             if base_type not in types:
-                raise CqError(f"{ast.name}: tipo desconhecido no campo {c.name}.{f.name}: {f.type_info}")
+                raise SotlasError(f"{ast.name}: tipo desconhecido no campo {c.name}.{f.name}: {f.type_info}")
     for variable_name, type_info in ast.static_variables:
         base_type = _base_type_name(type_info)
         if base_type not in types:
-            raise CqError(f"{ast.name}: tipo desconhecido na variável estática {variable_name}: {type_info}")
+            raise SotlasError(f"{ast.name}: tipo desconhecido na variável estática {variable_name}: {type_info}")
 
     # Valida assinaturas de funções
     for fn in ast.functions:
@@ -428,18 +420,18 @@ def typecheck_ast(ast: CqModuleAST, known_types: set | None = None) -> bool:
         for parameter_name, type_info in all_types:
             base_type = _base_type_name(type_info)
             if base_type not in types:
-                raise CqError(f"{ast.name}:{fn.line}: tipo desconhecido em {fn.name} ({parameter_name}): {type_info}")
+                raise SotlasError(f"{ast.name}:{fn.line}: tipo desconhecido em {fn.name} ({parameter_name}): {type_info}")
 
     return True
 
-def exported_type_names(ast: CqModuleAST) -> set:
+def exported_type_names(ast: SotlasModuleAst) -> set:
     """Tipos que outro módulo pode usar por meio de `import modulo::*`."""
     return {item.name for item in ast.structs if item.is_pub} | {
         item.name for item in ast.classes if item.is_pub
     }
 
 def validate_module_interfaces(asts: dict, manifest: dict) -> None:
-    """Aplica visibilidade de tipos e detecta colisões na interface Cq."""
+    """Aplica visibilidade de tipos e detecta colisões na interface Sotlas."""
     imports = {unit["module"]: unit["imports"] for unit in manifest["units"]}
     for module, ast in asts.items():
         local = {item.name for item in ast.structs} | {item.name for item in ast.classes}
@@ -450,7 +442,7 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
         seen = set()
         for fn in ast.functions:
             if fn.name in seen:
-                raise CqError(f"{module}:{fn.line}: função declarada mais de uma vez: {fn.name}")
+                raise SotlasError(f"{module}:{fn.line}: função declarada mais de uma vez: {fn.name}")
             seen.add(fn.name)
         callable_names = {fn.name for fn in ast.functions}
         for imported in imports[module]:
@@ -461,31 +453,31 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
             for call in re.finditer(r"(?<![.A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", body):
                 name = call.group(1)
                 if name not in callable_names and name not in language_calls:
-                    raise CqError(f"{module}:{fn.line}: chamada não resolvida em {fn.name}: {name}")
+                    raise SotlasError(f"{module}:{fn.line}: chamada não resolvida em {fn.name}: {name}")
 
 def _c_identifier(module: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", module)
 
-def emit_c_header(ast: CqModuleAST, output: Path) -> Path:
-    """Gera a interface C estável do módulo, sem vazar o fonte Cq."""
+def emit_c_header(ast: SotlasModuleAst, output: Path) -> Path:
+    """Gera a interface C estável do módulo, sem vazar o fonte Sotlas."""
     module_id = _c_identifier(ast.name)
     guard = f"CQ_GENERATED_{module_id.upper()}_H"
     lines = [
-        "/* Interface gerada pelo VortexC. Não edite. */",
+        "/* Interface gerada pelo Sotlas Compile. Não edite. */",
         f"#ifndef {guard}", f"#define {guard}", "#include <stdint.h>",
-        f"extern const char cq_module_{module_id}[];",
-        f"extern const uint64_t cq_module_abi_{module_id};",
+        f"extern const char st_module_{module_id}[];",
+        f"extern const uint64_t st_module_abi_{module_id};",
     ]
     for fn in ast.functions:
         if fn.is_pub:
-            lines.append(f"void cq_export_{module_id}_{fn.name}(void);")
+            lines.append(f"void st_export_{module_id}_{fn.name}(void);")
     lines.extend(("#endif", ""))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join(lines), encoding="utf-8")
     return output
 
-def emit_interface_manifest(ast: CqModuleAST, output: Path) -> Path:
-    """Materializa a interface pública para ferramentas e linkedição Cq."""
+def emit_interface_manifest(ast: SotlasModuleAst, output: Path) -> Path:
+    """Materializa a interface pública para ferramentas e linkedição Sotlas."""
     data = {
         "module": ast.name,
         "imports": ast.imports,
@@ -508,10 +500,10 @@ def emit_interface_manifest(ast: CqModuleAST, output: Path) -> Path:
     output.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     return output
 
-def emit_c_module(ast: CqModuleAST, output: Path, header: Path) -> Path:
-    """Emite uma unidade C por módulo Cq.
+def emit_c_module(ast: SotlasModuleAst, output: Path, header: Path) -> Path:
+    """Emite uma unidade C por módulo Sotlas.
 
-    Nesta fase, o corpo Cq ainda não é reduzido diretamente para C; a unidade
+    Nesta fase, o corpo Sotlas ainda não é reduzido diretamente para C; a unidade
     emitida preserva identidade, ABI e exportações do módulo e permite que o
     linker verifique o grafo de objetos. O runtime gráfico legado fica isolado
     em outro objeto durante a migração incremental.
@@ -519,34 +511,34 @@ def emit_c_module(ast: CqModuleAST, output: Path, header: Path) -> Path:
     module_id = _c_identifier(ast.name)
     digest = hashlib.sha256(ast.name.encode("utf-8")).hexdigest()[:16]
     lines = [
-        "/* Gerado pelo VortexC. Não edite. */",
+        "/* Gerado pelo Sotlas Compile. Não edite. */",
         f'#include "{header.name}"',
-        f'const char cq_module_{module_id}[] = "{ast.name}";',
-        f"const uint64_t cq_module_abi_{module_id} = UINT64_C(0x{digest});",
+        f'const char st_module_{module_id}[] = "{ast.name}";',
+        f"const uint64_t st_module_abi_{module_id} = UINT64_C(0x{digest});",
     ]
     for fn in ast.functions:
         # Símbolos com mangling eliminam colisões entre métodos/funções com o
-        # mesmo nome em módulos diferentes até a geração de corpos Cq chegar.
+        # mesmo nome em módulos diferentes até a geração de corpos Sotlas chegar.
         if fn.is_pub:
-            lines.append(f"void cq_export_{module_id}_{fn.name}(void) {{ }}")
+            lines.append(f"void st_export_{module_id}_{fn.name}(void) {{ }}")
     if ast.name == "kernel::graphics_engine":
-        # Primeiro módulo com corpo Cq já reduzido para C: a API de framebuffer
+        # Primeiro módulo com corpo Sotlas já reduzido para C: a API de framebuffer
         # é pequena, não depende de libc e serve de referência ao lowerer.
         lines.extend((
             "#define BKN_GFX_MAX_WIDTH 3072u",
             "#define BKN_GFX_MAX_HEIGHT 2048u",
-            "typedef struct { uint32_t *base, *backbuffer; uint32_t width, height, pitch; uint8_t use_double_buffering; } CqFramebuffer;",
-            "static CqFramebuffer cq_fb;",
+            "typedef struct { uint32_t *base, *backbuffer; uint32_t width, height, pitch; uint8_t use_double_buffering; } SotlasFramebuffer;",
+            "static SotlasFramebuffer st_fb;",
             "/* 3072x2048 cobre painéis 2880x1800 com margem. Se o firmware\n * anunciar algo maior, renderizamos direto no GOP de forma segura. */",
             "static uint32_t g_backbuffer_storage[BKN_GFX_MAX_WIDTH * BKN_GFX_MAX_HEIGHT];",
-            "void gfx_init(uint32_t *base, uint32_t width, uint32_t height, uint32_t pitch) { cq_fb.base=base; cq_fb.width=width; cq_fb.height=height; cq_fb.pitch=pitch; cq_fb.use_double_buffering=(width<=BKN_GFX_MAX_WIDTH && height<=BKN_GFX_MAX_HEIGHT && pitch<=BKN_GFX_MAX_WIDTH); cq_fb.backbuffer=cq_fb.use_double_buffering?g_backbuffer_storage:base; }",
-            "uint32_t *gfx_get_backbuffer(void) { return cq_fb.backbuffer; }",
-            "uint32_t gfx_get_pitch(void) { return cq_fb.pitch; }",
-            "uint32_t gfx_get_width(void) { return cq_fb.width; }",
-            "uint32_t gfx_get_height(void) { return cq_fb.height; }",
-            "void gfx_swap_buffers(void) { if (!cq_fb.use_double_buffering || !cq_fb.base || !cq_fb.backbuffer) return; uint64_t *dst = (uint64_t*)cq_fb.base; const uint64_t *src = (const uint64_t*)cq_fb.backbuffer; uint64_t count = ((uint64_t)cq_fb.pitch * cq_fb.height) / 2; for (uint64_t i = 0; i < count; ++i) dst[i] = src[i]; }",
-            "void gfx_put_pixel(uint32_t x, uint32_t y, uint32_t color) { if (cq_fb.backbuffer && x<cq_fb.width && y<cq_fb.height) cq_fb.backbuffer[(uint64_t)y*cq_fb.pitch+x]=color; }",
-            "uint32_t gfx_get_pixel(uint32_t x, uint32_t y) { return (cq_fb.backbuffer && x<cq_fb.width && y<cq_fb.height) ? cq_fb.backbuffer[(uint64_t)y*cq_fb.pitch+x] : 0; }",
+            "void gfx_init(uint32_t *base, uint32_t width, uint32_t height, uint32_t pitch) { st_fb.base=base; st_fb.width=width; st_fb.height=height; st_fb.pitch=pitch; st_fb.use_double_buffering=(width<=BKN_GFX_MAX_WIDTH && height<=BKN_GFX_MAX_HEIGHT && pitch<=BKN_GFX_MAX_WIDTH); st_fb.backbuffer=st_fb.use_double_buffering?g_backbuffer_storage:base; }",
+            "uint32_t *gfx_get_backbuffer(void) { return st_fb.backbuffer; }",
+            "uint32_t gfx_get_pitch(void) { return st_fb.pitch; }",
+            "uint32_t gfx_get_width(void) { return st_fb.width; }",
+            "uint32_t gfx_get_height(void) { return st_fb.height; }",
+            "void gfx_swap_buffers(void) { if (!st_fb.use_double_buffering || !st_fb.base || !st_fb.backbuffer) return; uint64_t *dst = (uint64_t*)st_fb.base; const uint64_t *src = (const uint64_t*)st_fb.backbuffer; uint64_t count = ((uint64_t)st_fb.pitch * st_fb.height) / 2; for (uint64_t i = 0; i < count; ++i) dst[i] = src[i]; }",
+            "void gfx_put_pixel(uint32_t x, uint32_t y, uint32_t color) { if (st_fb.backbuffer && x<st_fb.width && y<st_fb.height) st_fb.backbuffer[(uint64_t)y*st_fb.pitch+x]=color; }",
+            "uint32_t gfx_get_pixel(uint32_t x, uint32_t y) { return (st_fb.backbuffer && x<st_fb.width && y<st_fb.height) ? st_fb.backbuffer[(uint64_t)y*st_fb.pitch+x] : 0; }",
         ))
     elif ast.name == "kernel::baken_rasterizer":
         lines.extend("""
@@ -615,32 +607,32 @@ static uint32_t baken_type_line_height(uint32_t role) {
 }
 
 /* Layout usa pixels lógicos; esta seleção protege a qualidade do asset. */
-static const CqFontAtlas *cq_select_font(uint32_t px) {
-    for (uint32_t i = 0; i < CQ_FONT_ATLAS_COUNT; ++i)
-        if (cq_font_atlases[i].px >= px) return &cq_font_atlases[i];
-    return &cq_font_atlases[CQ_FONT_ATLAS_COUNT - 1];
+static const SotlasFontAtlas *st_select_font(uint32_t px) {
+    for (uint32_t i = 0; i < SOTLAS_FONT_ATLAS_COUNT; ++i)
+        if (sotlas_font_atlases[i].px >= px) return &sotlas_font_atlases[i];
+    return &sotlas_font_atlases[SOTLAS_FONT_ATLAS_COUNT - 1];
 }
-static const CqMaterialIconAtlas *cq_select_icon_atlas(uint32_t px) {
-    for (uint32_t i = 0; i < CQ_MATERIAL_ICON_ATLAS_COUNT; ++i)
-        if (cq_material_icon_atlases[i].px >= px) return &cq_material_icon_atlases[i];
-    return &cq_material_icon_atlases[CQ_MATERIAL_ICON_ATLAS_COUNT - 1];
+static const SotlasMaterialIconAtlas *st_select_icon_atlas(uint32_t px) {
+    for (uint32_t i = 0; i < SOTLAS_MATERIAL_ICON_ATLAS_COUNT; ++i)
+        if (sotlas_material_icon_atlases[i].px >= px) return &sotlas_material_icon_atlases[i];
+    return &sotlas_material_icon_atlases[SOTLAS_MATERIAL_ICON_ATLAS_COUNT - 1];
 }
-static const CqBakenAppIconAtlas *cq_select_app_icon_atlas(uint32_t px) {
-    for (uint32_t i = 0; i < CQ_BAKEN_APP_ICON_ATLAS_COUNT; ++i)
-        if (cq_baken_app_icon_atlases[i].px >= px) return &cq_baken_app_icon_atlases[i];
-    return &cq_baken_app_icon_atlases[CQ_BAKEN_APP_ICON_ATLAS_COUNT - 1];
+static const SotlasBakenAppIconAtlas *st_select_app_icon_atlas(uint32_t px) {
+    for (uint32_t i = 0; i < SOTLAS_BAKEN_APP_ICON_ATLAS_COUNT; ++i)
+        if (sotlas_baken_app_icon_atlases[i].px >= px) return &sotlas_baken_app_icon_atlases[i];
+    return &sotlas_baken_app_icon_atlases[SOTLAS_BAKEN_APP_ICON_ATLAS_COUNT - 1];
 }
-static const CqBakenMotionIconAtlas *cq_select_motion_icon_atlas(uint32_t px) {
-    for (uint32_t i = 0; i < CQ_BAKEN_MOTION_ICON_ATLAS_COUNT; ++i)
-        if (cq_baken_motion_icon_atlases[i].px >= px) return &cq_baken_motion_icon_atlases[i];
-    return &cq_baken_motion_icon_atlases[CQ_BAKEN_MOTION_ICON_ATLAS_COUNT - 1];
+static const SotlasBakenMotionIconAtlas *st_select_motion_icon_atlas(uint32_t px) {
+    for (uint32_t i = 0; i < SOTLAS_BAKEN_MOTION_ICON_ATLAS_COUNT; ++i)
+        if (sotlas_baken_motion_icon_atlases[i].px >= px) return &sotlas_baken_motion_icon_atlases[i];
+    return &sotlas_baken_motion_icon_atlases[SOTLAS_BAKEN_MOTION_ICON_ATLAS_COUNT - 1];
 }
 static void gfx_put_pixel_subpixel(uint32_t x, uint32_t y, uint32_t c, uint8_t ar, uint8_t ag, uint8_t ab);
 
 /* Amostra a máscara do atlas maior no tamanho pedido. Assim uma fonte de
  * 32px pode ser reduzida para 28px, mas uma fonte 12px nunca é ampliada. */
 static void draw_char_aa(uint32_t x0, uint32_t y0, uint8_t ch, uint32_t color,
-                         const CqFontAtlas *font, uint32_t target_px, uint8_t opacity) {
+                         const SotlasFontAtlas *font, uint32_t target_px, uint8_t opacity) {
     const uint8_t *mask = font->alpha + (uint32_t)ch * font->width * font->height;
     int32_t gw = (int32_t)gfx_get_width();
     int32_t gh = (int32_t)gfx_get_height();
@@ -681,7 +673,7 @@ static void draw_char_aa(uint32_t x0, uint32_t y0, uint8_t ch, uint32_t color,
     }
 }
 
-static inline uint32_t cq_blend(uint32_t bg, uint32_t fg, uint8_t alpha) {
+static inline uint32_t st_blend(uint32_t bg, uint32_t fg, uint8_t alpha) {
     if (alpha >= 255) return (0xFF000000) | (fg & 0x00FFFFFF);
     if (alpha == 0) return bg;
     /* Composição em espaço linear de 16 bits. A conversão segue sRGB real,
@@ -702,13 +694,13 @@ static inline uint32_t cq_blend(uint32_t bg, uint32_t fg, uint8_t alpha) {
     return (0xFF000000) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
-uint32_t gfx_blend_color(uint32_t bg, uint32_t fg, uint8_t a) { return cq_blend(bg, fg, a); }
+uint32_t gfx_blend_color(uint32_t bg, uint32_t fg, uint8_t a) { return st_blend(bg, fg, a); }
 
 void gfx_put_pixel_alpha(uint32_t x, uint32_t y, uint32_t c, uint8_t a) {
     uint32_t *fb = gfx_get_backbuffer();
     uint32_t p = gfx_get_pitch();
     if (fb && x < gfx_get_width() && y < gfx_get_height() && x < p) {
-        fb[(uint64_t)y * p + x] = cq_blend(fb[(uint64_t)y * p + x], c, a);
+        fb[(uint64_t)y * p + x] = st_blend(fb[(uint64_t)y * p + x], c, a);
     }
 }
 
@@ -716,9 +708,9 @@ static void gfx_put_pixel_subpixel(uint32_t x, uint32_t y, uint32_t c, uint8_t a
     uint32_t *fb = gfx_get_backbuffer(), p = gfx_get_pitch();
     if (!fb || x >= gfx_get_width() || y >= gfx_get_height() || x >= p) return;
     uint32_t bg = fb[(uint64_t)y * p + x];
-    uint32_t rr = (cq_blend(bg, c, ar) >> 16) & 255u;
-    uint32_t gg = (cq_blend(bg, c, ag) >> 8) & 255u;
-    uint32_t bb = cq_blend(bg, c, ab) & 255u;
+    uint32_t rr = (st_blend(bg, c, ar) >> 16) & 255u;
+    uint32_t gg = (st_blend(bg, c, ag) >> 8) & 255u;
+    uint32_t bb = st_blend(bg, c, ab) & 255u;
     fb[(uint64_t)y * p + x] = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
 }
 
@@ -748,8 +740,8 @@ static uint8_t baken_round_rect_coverage(uint32_t px, uint32_t py, uint32_t w, u
  * antes de colocar uma superfície de vidro, sem depender de GPU ou heap. */
 #define BKN_BLUR_MAX_W 1600
 #define BKN_BLUR_MAX_H 640
-static uint32_t cq_blur_source[BKN_BLUR_MAX_W * BKN_BLUR_MAX_H];
-static uint32_t cq_blur_pass[BKN_BLUR_MAX_W * BKN_BLUR_MAX_H];
+static uint32_t st_blur_source[BKN_BLUR_MAX_W * BKN_BLUR_MAX_H];
+static uint32_t st_blur_pass[BKN_BLUR_MAX_W * BKN_BLUR_MAX_H];
 
 static void gfx_draw_backdrop_blur(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t blur_radius, uint32_t corner_radius) {
     uint32_t *fb = gfx_get_backbuffer(), pitch = gfx_get_pitch();
@@ -759,17 +751,17 @@ static void gfx_draw_backdrop_blur(uint32_t x, uint32_t y, uint32_t w, uint32_t 
     uint32_t y1 = y + h + blur_radius; if (y1 > gfx_get_height()) y1 = gfx_get_height();
     uint32_t bw = x1 - x0, bh = y1 - y0;
     if (bw > BKN_BLUR_MAX_W || bh > BKN_BLUR_MAX_H) return;
-    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) cq_blur_source[py*bw+px]=fb[(uint64_t)(y0+py)*pitch+x0+px];
+    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) st_blur_source[py*bw+px]=fb[(uint64_t)(y0+py)*pitch+x0+px];
     /* Box blur separável: duas passagens, custo linear e aspecto suave. */
     for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) {
         uint32_t rr=0,gg=0,bb=0,n=0; uint32_t lo=px>blur_radius?px-blur_radius:0, hi=px+blur_radius+1<bw?px+blur_radius+1:bw;
-        for(uint32_t sx=lo;sx<hi;++sx){uint32_t c=cq_blur_source[py*bw+sx];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
-        cq_blur_pass[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+        for(uint32_t sx=lo;sx<hi;++sx){uint32_t c=st_blur_source[py*bw+sx];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
+        st_blur_pass[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
     }
     for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) {
         uint32_t rr=0,gg=0,bb=0,n=0; uint32_t lo=py>blur_radius?py-blur_radius:0, hi=py+blur_radius+1<bh?py+blur_radius+1:bh;
-        for(uint32_t sy=lo;sy<hi;++sy){uint32_t c=cq_blur_pass[sy*bw+px];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
-        cq_blur_source[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+        for(uint32_t sy=lo;sy<hi;++sy){uint32_t c=st_blur_pass[sy*bw+px];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
+        st_blur_source[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
     }
     /* O blur só é escrito dentro do mesmo rounded-rect do material. Antes,
      * o retângulo de amostragem vazava uma faixa borrada entre cartões. */
@@ -778,7 +770,7 @@ static void gfx_draw_backdrop_blur(uint32_t x, uint32_t y, uint32_t w, uint32_t 
         if (!coverage) continue;
         uint32_t sx = x + px - x0, sy = y + py - y0;
         uint64_t dst_i = (uint64_t)(y + py) * pitch + x + px;
-        fb[dst_i] = cq_blend(fb[dst_i], cq_blur_source[sy*bw+sx], coverage);
+        fb[dst_i] = st_blend(fb[dst_i], st_blur_source[sy*bw+sx], coverage);
     }
 }
 
@@ -875,7 +867,7 @@ void gfx_draw_drop_shadow(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32
 
 /* Ruído determinístico de baixa amplitude. Ele quebra bandas de cor sem
  * carregar uma textura externa e mantém o mesmo resultado em toda VM. */
-static inline int32_t cq_material_grain(uint32_t x, uint32_t y) {
+static inline int32_t st_material_grain(uint32_t x, uint32_t y) {
     uint32_t n = x * 1973u + y * 9277u + 0x68BC21EBu;
     n ^= n >> 13;
     n *= 0x85EBCA6Bu;
@@ -919,7 +911,7 @@ static void gfx_draw_glass_rect_material_ex(uint32_t x, uint32_t y, uint32_t w, 
             int32_t vertical = 256 - (py * 20) / (h > 0 ? (int)h : 1);
             int32_t horizontal = ((int)w - px) * 8 / (w > 0 ? (int)w : 1);
             int32_t light_factor = vertical + horizontal;
-            int32_t grain = cq_material_grain((uint32_t)dest_x, (uint32_t)dest_y);
+            int32_t grain = st_material_grain((uint32_t)dest_x, (uint32_t)dest_y);
             int32_t lit_r = ((int32_t)bg_r * light_factor >> 8) + grain;
             int32_t lit_g = ((int32_t)bg_g * light_factor >> 8) + grain;
             int32_t lit_b = ((int32_t)bg_b * light_factor >> 8) + grain;
@@ -1039,7 +1031,7 @@ void gfx_draw_circle_button(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c) {
     if (r > 2) { gfx_draw_circle_alpha(cx, cy, r - 2, 0x00FFFFFF, 95); }
 }
 
-static inline uint8_t cq_decode_utf8_char(const uint8_t **s_ptr) {
+static inline uint8_t st_decode_utf8_char(const uint8_t **s_ptr) {
     const uint8_t *s = *s_ptr;
     uint8_t b0 = *s++;
     uint8_t ch = b0;
@@ -1062,10 +1054,10 @@ static inline uint8_t cq_decode_utf8_char(const uint8_t **s_ptr) {
 void gfx_draw_text_proportional(uint32_t x, uint32_t y, const char *str, uint32_t color) {
     if (!str) return;
     uint32_t target_px = baken_ui_px(BKN_TEXT_BODY);
-    const CqFontAtlas *font = cq_select_font(target_px);
+    const SotlasFontAtlas *font = st_select_font(target_px);
     const uint8_t *s = (const uint8_t*)str;
     while (*s) {
-        uint8_t ch = cq_decode_utf8_char(&s);
+        uint8_t ch = st_decode_utf8_char(&s);
         draw_char_aa(x, y, ch, color, font, target_px, 255);
         uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
         if (adv == 0) adv = 6;
@@ -1077,10 +1069,10 @@ void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str,
                         uint32_t color, uint32_t role) {
     if (!str) return;
     uint32_t target_px = baken_type_px(role);
-    const CqFontAtlas *font = cq_select_font(target_px);
+    const SotlasFontAtlas *font = st_select_font(target_px);
     const uint8_t *s = (const uint8_t*)str;
     while (*s) {
-        uint8_t ch = cq_decode_utf8_char(&s);
+        uint8_t ch = st_decode_utf8_char(&s);
         draw_char_aa(x, y, ch, color, font, target_px, 255);
         uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
         x += (adv ? adv : 6u) + 1u;
@@ -1094,11 +1086,11 @@ void gfx_draw_text(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c) {
 uint32_t gfx_measure_text(const char *str) {
     if (!str) return 0;
     uint32_t target_px = baken_ui_px(BKN_TEXT_BODY);
-    const CqFontAtlas *font = cq_select_font(target_px);
+    const SotlasFontAtlas *font = st_select_font(target_px);
     uint32_t width = 0;
     const uint8_t *s = (const uint8_t*)str;
     while (*s) {
-        uint8_t ch = cq_decode_utf8_char(&s);
+        uint8_t ch = st_decode_utf8_char(&s);
         uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
         width += (adv ? adv : 6u) + 1u;
     }
@@ -1108,10 +1100,10 @@ uint32_t gfx_measure_text(const char *str) {
 uint32_t gfx_measure_text_role(const char *str, uint32_t role) {
     if (!str) return 0;
     uint32_t target_px = baken_type_px(role), width = 0;
-    const CqFontAtlas *font = cq_select_font(target_px);
+    const SotlasFontAtlas *font = st_select_font(target_px);
     const uint8_t *s = (const uint8_t*)str;
     while (*s) {
-        uint8_t ch = cq_decode_utf8_char(&s);
+        uint8_t ch = st_decode_utf8_char(&s);
         uint32_t adv = (font->advances[ch] * target_px + font->px / 2u) / font->px;
         width += (adv ? adv : 6u) + 1u;
     }
@@ -1161,7 +1153,7 @@ void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width,
     if (gfx_measure_text(str) <= max_width) { gfx_draw_text_proportional(x, y, str, color); return; }
     char clipped[96]; uint32_t out = 0, used = 0;
     uint32_t target_px = baken_ui_px(BKN_TEXT_BODY);
-    const CqFontAtlas *font = cq_select_font(target_px);
+    const SotlasFontAtlas *font = st_select_font(target_px);
     const uint8_t *s = (const uint8_t*)str;
     uint32_t dots = ((font->advances[(uint8_t)'.'] * target_px + font->px / 2u) / font->px + 1u) * 3u;
     while (*s && out + 2u < sizeof(clipped)) {
@@ -1184,7 +1176,7 @@ void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c, u
     /* O valor legado scale=2 pede 24px lógico. O atlas escolhido é sempre
      * maior ou igual e é reduzido com cobertura alpha. */
     uint32_t target_px = (12 * scale * baken_ui_scale_percent() + 50u) / 100u;
-    const CqFontAtlas *font = cq_select_font(target_px);
+    const SotlasFontAtlas *font = st_select_font(target_px);
     const uint8_t *cursor = s;
     while (*cursor) {
         uint8_t ch = *cursor++;
@@ -1201,7 +1193,7 @@ void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c, u
  * máscara alpha evita um parser SVG e mantém o custo previsível no EFI. */
 void gfx_draw_material_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t icon_id, uint32_t color, uint8_t alpha) {
     if (size == 0 || icon_id >= MATERIAL_ICON_COUNT) return;
-    const CqMaterialIconAtlas *atlas = cq_select_icon_atlas(size);
+    const SotlasMaterialIconAtlas *atlas = st_select_icon_atlas(size);
     const uint8_t *mask = atlas->alpha + icon_id * atlas->px * atlas->px;
     for (uint32_t py = 0; py < size; ++py) {
         /* Bilinear alpha: só é usado ao reduzir um atlas nativo maior. */
@@ -1249,7 +1241,7 @@ void gfx_draw_motion_icon(uint32_t x, uint32_t y, uint32_t size,
                           uint32_t icon_id, uint32_t color, uint8_t opacity,
                           uint8_t mirror_x) {
     if (size == 0 || icon_id >= BAKEN_MOTION_ICON_COUNT || opacity == 0) return;
-    const CqBakenMotionIconAtlas *atlas = cq_select_motion_icon_atlas(size);
+    const SotlasBakenMotionIconAtlas *atlas = st_select_motion_icon_atlas(size);
     const uint8_t *mask = atlas->alpha + icon_id * atlas->px * atlas->px;
     for (uint32_t py = 0; py < size; ++py) {
         uint32_t fy = (py * (atlas->px - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
@@ -1269,7 +1261,7 @@ void gfx_draw_motion_icon(uint32_t x, uint32_t y, uint32_t size,
     }
 }
 
-static inline int32_t cq_material_grain(uint32_t x, uint32_t y);
+static inline int32_t st_material_grain(uint32_t x, uint32_t y);
 
 void gfx_draw_mesh_wallpaper(void) {
     uint32_t w = gfx_get_width(), h = gfx_get_height();
@@ -1332,7 +1324,7 @@ void gfx_draw_mesh_wallpaper(void) {
                 b -= yellow / 3 + green / 4 - pink / 2;
             }
 
-            int grain = cq_material_grain(x, y);
+            int grain = st_material_grain(x, y);
             r += grain;
             g += grain;
             b += grain;
@@ -1474,7 +1466,7 @@ static uint8_t gfx_draw_baken_app_asset(uint32_t x, uint32_t y, uint32_t size,
                                         uint32_t app_id, uint32_t color,
                                         uint8_t opacity) {
     if (size == 0 || app_id >= BAKEN_APP_ICON_COUNT) return 0;
-    const CqBakenAppIconAtlas *atlas = cq_select_app_icon_atlas(size);
+    const SotlasBakenAppIconAtlas *atlas = st_select_app_icon_atlas(size);
     const uint8_t *mask = atlas->alpha + app_id * atlas->px * atlas->px;
     for (uint32_t py = 0; py < size; ++py) {
         uint32_t fy = (py * (atlas->px - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
@@ -1549,7 +1541,7 @@ static void draw_baken_app_glyph(uint32_t x, uint32_t y, uint32_t size, uint32_t
         gfx_draw_glass_rect_material(x + 4*u, y + 10*u, 16*u, 10*u, white, 245, white, 2*u);
         for (uint32_t i=0; i<4; ++i) gfx_fill_rect_alpha(x + (5u+i*4u)*u, y + 6*u, 3*u, 5*u, (i&1u)?0x00059669:white, 240);
         gfx_draw_hline(x + 8*u, y + 15*u, 8*u, 0x00059669, 120);
-    } else if (id == 9) { /* Console Cq */
+    } else if (id == 9) { /* Console Sotlas */
         gfx_draw_glass_rect_material(x + 3*u, y + 5*u, 18*u, 14*u, 0x000F172A, 235, white, 2*u);
         gfx_draw_hline(x + 7*u, y + 10*u, 4*u, 0x0038BDF8, 255);
         gfx_draw_hline(x + 9*u, y + 12*u, 4*u, 0x0038BDF8, 255);
@@ -1664,7 +1656,7 @@ void gfx_draw_app_icon_hd(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id
         gfx_draw_glass_rect_material(x + 9, y + 13, 18, 15, 0x00FFFFFF, 240, 0x00A7F3D0, 3);
         gfx_draw_circle_alpha(x + 18, y + 13, 5, 0x00FFFFFF, 200);
         gfx_draw_circle_alpha(x + 18, y + 13, 3, 0x00059669, 255);
-    } else if (id == 9) { // Terminal / Console Cq (Grafite Escuro)
+    } else if (id == 9) { // Terminal / Console Sotlas (Grafite Escuro)
         draw_squircle_canvas(x, y, size, 0x00334155, 0x000F172A);
         gfx_draw_hline(x + 10, y + 12, 6, 0x0038BDF8, 255);
         gfx_draw_hline(x + 12, y + 14, 6, 0x0038BDF8, 255);
@@ -1686,11 +1678,11 @@ void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id) {
     elif ast.name == "kernel::baken_animation":
         lines.extend((
             '#include "baken_design_tokens.h"',
-            "typedef struct { float current_val, target_val, velocity, stiffness, damping; } CqSpringState;",
-            "static int32_t cq_abs_i32(int32_t value) { return value < 0 ? -value : value; }",
-            "float spring_update(CqSpringState *spring, float dt) { if (!spring) return 0.0f; float force=-spring->stiffness*(spring->current_val-spring->target_val); float damping=-spring->damping*spring->velocity; spring->velocity+=(force+damping)*dt; spring->current_val+=spring->velocity*dt; return spring->current_val; }",
-            "void baken_motion_init_spring(CqSpringState *spring) { if (!spring) return; *spring=(CqSpringState){1.0f,1.0f,0.0f,BKN_MOTION_SPRING_STIFFNESS,BKN_MOTION_SPRING_DAMPING}; }",
-            "float calculate_dock_magnify(int32_t cursor_x, int32_t icon_center_x, int32_t max_radius) { int32_t dist=cq_abs_i32(cursor_x-icon_center_x); if (max_radius<=0 || dist>=max_radius) return 1.0f; float ratio=(float)(max_radius-dist)/(float)max_radius; return 1.0f+ratio*ratio*0.45f; }",
+            "typedef struct { float current_val, target_val, velocity, stiffness, damping; } SotlasSpringState;",
+            "static int32_t st_abs_i32(int32_t value) { return value < 0 ? -value : value; }",
+            "float spring_update(SotlasSpringState *spring, float dt) { if (!spring) return 0.0f; float force=-spring->stiffness*(spring->current_val-spring->target_val); float damping=-spring->damping*spring->velocity; spring->velocity+=(force+damping)*dt; spring->current_val+=spring->velocity*dt; return spring->current_val; }",
+            "void baken_motion_init_spring(SotlasSpringState *spring) { if (!spring) return; *spring=(SotlasSpringState){1.0f,1.0f,0.0f,BKN_MOTION_SPRING_STIFFNESS,BKN_MOTION_SPRING_DAMPING}; }",
+            "float calculate_dock_magnify(int32_t cursor_x, int32_t icon_center_x, int32_t max_radius) { int32_t dist=st_abs_i32(cursor_x-icon_center_x); if (max_radius<=0 || dist>=max_radius) return 1.0f; float ratio=(float)(max_radius-dist)/(float)max_radius; return 1.0f+ratio*ratio*0.45f; }",
         ))
     elif ast.name == "kernel::baken_ui_oop":
         lines.extend("""
@@ -1706,8 +1698,8 @@ extern void gfx_draw_material_icon_state(uint32_t x, uint32_t y, uint32_t size, 
 extern void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
 extern uint32_t gfx_get_width(void), gfx_get_height(void);
 extern uint32_t baken_ui_px(uint32_t logical_px);
-typedef struct { float current_val, target_val, velocity, stiffness, damping; } CqSpringState;
-extern float spring_update(CqSpringState *spring, float dt);
+typedef struct { float current_val, target_val, velocity, stiffness, damping; } SotlasSpringState;
+extern float spring_update(SotlasSpringState *spring, float dt);
 extern float calculate_dock_magnify(int32_t cursor_x, int32_t icon_center_x, int32_t max_radius);
 
 typedef struct {
@@ -1715,8 +1707,8 @@ typedef struct {
     uint32_t icon_size;
     uint32_t item_count;
     const uint8_t *item_labels[16];
-    CqSpringState item_springs[16];
-    CqSpringState bounce_springs[16];
+    SotlasSpringState item_springs[16];
+    SotlasSpringState bounce_springs[16];
 } DesktopDock;
 
 /* Contrato geométrico único do dock. O shell usa exatamente estes limites
@@ -1742,15 +1734,15 @@ void dock_init(DesktopDock *dock) {
     dock->y_offset = 14; dock->icon_size = 40; dock->item_count = 0;
     for (int i = 0; i < 16; ++i) {
         dock->item_labels[i] = 0;
-        dock->item_springs[i] = (CqSpringState){1.0f, 1.0f, 0.0f, BKN_MOTION_SPRING_STIFFNESS, BKN_MOTION_SPRING_DAMPING};
-        dock->bounce_springs[i] = (CqSpringState){0.0f, 0.0f, 0.0f, 180.0f, 12.0f};
+        dock->item_springs[i] = (SotlasSpringState){1.0f, 1.0f, 0.0f, BKN_MOTION_SPRING_STIFFNESS, BKN_MOTION_SPRING_DAMPING};
+        dock->bounce_springs[i] = (SotlasSpringState){0.0f, 0.0f, 0.0f, 180.0f, 12.0f};
     }
 }
 void dock_add_item(DesktopDock *dock, const uint8_t *label) {
     if (!dock || dock->item_count >= 16) return;
     dock->item_labels[dock->item_count] = label;
-    dock->item_springs[dock->item_count] = (CqSpringState){1.0f, 1.0f, 0.0f, BKN_MOTION_SPRING_STIFFNESS, BKN_MOTION_SPRING_DAMPING};
-    dock->bounce_springs[dock->item_count] = (CqSpringState){0.0f, 0.0f, 0.0f, 180.0f, 12.0f};
+    dock->item_springs[dock->item_count] = (SotlasSpringState){1.0f, 1.0f, 0.0f, BKN_MOTION_SPRING_STIFFNESS, BKN_MOTION_SPRING_DAMPING};
+    dock->bounce_springs[dock->item_count] = (SotlasSpringState){0.0f, 0.0f, 0.0f, 180.0f, 12.0f};
     dock->item_count++;
 }
 void dock_trigger_bounce(DesktopDock *dock, uint32_t index) {
@@ -1814,17 +1806,17 @@ extern uint32_t gfx_get_width(void), gfx_get_height(void);
 extern uint8_t sys_has_nvme(void);
 extern uint8_t sys_has_ahci(void);
 extern uint8_t sys_has_nic(void);
-extern const char *cq_notes_get_text(void);
-extern const char *cq_fs_entry_name(uint32_t index);
-extern uint32_t cq_fs_entry_count(void);
-extern uint32_t cq_fs_entry_kind(uint32_t index);
-extern uint32_t cq_fs_entry_size(uint32_t index);
+extern const char *st_notes_get_text(void);
+extern const char *st_fs_entry_name(uint32_t index);
+extern uint32_t st_fs_entry_count(void);
+extern uint32_t st_fs_entry_kind(uint32_t index);
+extern uint32_t st_fs_entry_size(uint32_t index);
 extern void gfx_fill_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha);
 extern uint32_t desktop_shell_get_time_tick(void);
 extern void desktop_shell_render_terminal(uint32_t px, uint32_t py, uint32_t pw, uint32_t ph, uint8_t is_focused);
 extern void gfx_draw_hline(uint32_t x, uint32_t y, uint32_t width, uint32_t color, uint8_t alpha);
 extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t width, uint32_t height, uint32_t bg_color, uint8_t bg_alpha, uint32_t border_color, uint32_t radius);
-extern void cq_notes_save(void);
+extern void st_notes_save(void);
 void wm_unfocus_all(void);
 void installer_next_stage(void);
 void installer_prev_stage(void);
@@ -1832,13 +1824,13 @@ void installer_select_option(uint32_t opt);
 void installer_execute_repair(uint32_t opt);
 typedef struct { uint32_t MediaId; uint8_t RemovableMedia,MediaPresent,LogicalPartition,ReadOnly,WriteCaching; uint32_t BlockSize,IoAlign; uint64_t LastBlock,LowestAlignedLba; uint32_t LogicalBlocksPerPhysicalBlock,OptimalTransferLengthGranularity; } EFI_BLOCK_IO_MEDIA;
 typedef struct _EFI_BLOCK_IO_PROTOCOL { uint64_t Revision; EFI_BLOCK_IO_MEDIA *Media; uint64_t (*Reset)(void*,uint8_t); uint64_t (*ReadBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*WriteBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*FlushBlocks)(void*); } EFI_BLOCK_IO_PROTOCOL;
-typedef struct { char name[32]; uint32_t lba, size, kind; } CqFsEntry;
-typedef struct { uint64_t magic; uint32_t version, entry_count; CqFsEntry entries[12]; uint8_t reserved[20]; } CqFsHeader;
-typedef struct { uint64_t magic; uint32_t version, dark_theme, location_permission; uint8_t reserved[496]; } CqDesktopConfig;
-typedef struct { uint64_t magic; uint32_t version, size; char text[496]; } CqTextFile;
-typedef struct { uint64_t magic; uint32_t version, profile_id; char profile_name[32]; char packages[448]; } CqProfileConfig;
-typedef struct { uint64_t magic; uint32_t version; char username[32]; char hostname[32]; char pin[16]; uint8_t reserved[416]; } CqUserConfig;
-typedef struct { uint64_t magic; uint32_t version, timestamp; char name[32]; char description[464]; } CqSnapshotMeta;
+typedef struct { char name[32]; uint32_t lba, size, kind; } SotlasFsEntry;
+typedef struct { uint64_t magic; uint32_t version, entry_count; SotlasFsEntry entries[12]; uint8_t reserved[20]; } SotlasFsHeader;
+typedef struct { uint64_t magic; uint32_t version, dark_theme, location_permission; uint8_t reserved[496]; } SotlasDesktopConfig;
+typedef struct { uint64_t magic; uint32_t version, size; char text[496]; } SotlasTextFile;
+typedef struct { uint64_t magic; uint32_t version, profile_id; char profile_name[32]; char packages[448]; } SotlasProfileConfig;
+typedef struct { uint64_t magic; uint32_t version; char username[32]; char hostname[32]; char pin[16]; uint8_t reserved[416]; } SotlasUserConfig;
+typedef struct { uint64_t magic; uint32_t version, timestamp; char name[32]; char description[464]; } SotlasSnapshotMeta;
 
 #define INSTALL_TOTAL_LBAS 131072ULL
 #define INSTALL_ESP_FIRST 2048ULL
@@ -1881,7 +1873,7 @@ typedef struct {
     uint32_t hw_storage_score;
     uint32_t hw_gpu_score;
     uint32_t hw_total_score;
-    uint32_t selected_profile; /* 0 = Padrao, 1 = Dev Cq, 2 = Gamer 3D, 3 = Minimalista */
+    uint32_t selected_profile; /* 0 = Padrao, 1 = Dev Sotlas, 2 = Gamer 3D, 3 = Minimalista */
     char hostname[32];
     char username[32];
     char pin[8];
@@ -2084,12 +2076,12 @@ static uint8_t s_installer_sector[512] __attribute__((aligned(512)));
 static uint8_t s_installer_entries0[512] __attribute__((aligned(512)));
 static uint8_t s_installer_clus_buf[65536] __attribute__((aligned(512)));
 static uint8_t s_installer_fat_buf[512] __attribute__((aligned(512)));
-static CqFsHeader s_installer_fs_hdr __attribute__((aligned(512)));
-static CqDesktopConfig s_installer_desk_cfg __attribute__((aligned(512)));
-static CqProfileConfig s_installer_profile_cfg __attribute__((aligned(512)));
-static CqUserConfig s_installer_user_cfg __attribute__((aligned(512)));
-static CqTextFile s_installer_note_file __attribute__((aligned(512)));
-static CqSnapshotMeta s_installer_snapshot_meta __attribute__((aligned(512)));
+static SotlasFsHeader s_installer_fs_hdr __attribute__((aligned(512)));
+static SotlasDesktopConfig s_installer_desk_cfg __attribute__((aligned(512)));
+static SotlasProfileConfig s_installer_profile_cfg __attribute__((aligned(512)));
+static SotlasUserConfig s_installer_user_cfg __attribute__((aligned(512)));
+static SotlasTextFile s_installer_note_file __attribute__((aligned(512)));
+static SotlasSnapshotMeta s_installer_snapshot_meta __attribute__((aligned(512)));
 
 static int find_boot_file(BootFileInfo *info) {
     if (!g_boot_block_io || !g_boot_block_io->Media || !g_boot_block_io->ReadBlocks || !info) return 0;
@@ -2361,7 +2353,7 @@ void installer_execute_installation(void) {
     const char *prof_names[] = {"Padrao", "Desenvolvedor Soberano", "Gamer 3D", "Minimalista"};
     const char *pn = prof_names[g_installer.selected_profile % 4];
     for (int i = 0; i < 31 && pn[i]; ++i) s_installer_profile_cfg.profile_name[i] = pn[i];
-    const char *pkgs = "core,shell,bakenfs,vortexc_sdk,notas,loja,ajustes,terminal";
+    const char *pkgs = "core,shell,bakenfs,sotlas_compile_sdk,notas,loja,ajustes,terminal";
     for (int i = 0; i < 440 && pkgs[i]; ++i) s_installer_profile_cfg.packages[i] = pkgs[i];
     if (!installer_target_write(INSTALL_DATA_FIRST + 3, &s_installer_profile_cfg)) { g_installer.error = 1; return; }
 
@@ -2794,7 +2786,7 @@ uint8_t wm_handle_mouse_down(int32_t mx, int32_t my) {
         uint32_t px = (win->x < 0) ? 12 : (uint32_t)win->x + 12;
         uint32_t py = (win->y < 0) ? TITLE_BAR_HEIGHT + 8 : (uint32_t)win->y + TITLE_BAR_HEIGHT + 8;
         if (mx >= (int32_t)(px + 18) && mx <= (int32_t)(px + 86) && my >= (int32_t)(py + 12) && my <= (int32_t)(py + 34)) {
-            cq_notes_save();
+            st_notes_save();
         }
     }
     return 1;
@@ -2878,7 +2870,7 @@ static void wm_render_single_window(const Window *win) {
             baken_lua_draw_surface(px + 12, py + 10, pw - 24, 30, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
             gfx_draw_text_proportional(px + 24, py + 17, "<   >   ^   |   Local: BakenFS (/home)", 0x000284C7);
 
-            uint32_t count = cq_fs_entry_count();
+            uint32_t count = st_fs_entry_count();
             uint32_t cols = pw > 360 ? 3 : (pw > 240 ? 2 : 1);
             uint32_t card_w = (pw - 24 - (cols - 1) * 8) / cols;
             uint32_t card_h = 58;
@@ -2890,12 +2882,12 @@ static void wm_render_single_window(const Window *win) {
                 uint32_t cy = py + 48 + row * (card_h + 8);
                 if (cy + card_h > py + ph - 34) break;
 
-                uint32_t kind = cq_fs_entry_kind(i);
+                uint32_t kind = st_fs_entry_kind(i);
                 uint32_t icon_id = (kind == 1) ? 0 : ((kind == 3) ? 10 : 6);
                 baken_lua_draw_surface(cx, cy, card_w, card_h, BKN_LUA_MICA, BKN_LUA_REST, 8);
                 gfx_draw_app_icon_hd(cx + 8, cy + 13, 32, icon_id);
 
-                const char *fname = cq_fs_entry_name(i);
+                const char *fname = st_fs_entry_name(i);
                 const char *disp_name = fname;
                 for (int k = 0; fname[k]; ++k) {
                     if (fname[k] == '/' && fname[k+1]) disp_name = fname + k + 1;
@@ -2907,7 +2899,7 @@ static void wm_render_single_window(const Window *win) {
                 } else if (kind == 3) {
                     gfx_draw_text_proportional(cx + 46, cy + 32, "Configuracao", 0x0064748B);
                 } else {
-                    uint32_t sz = cq_fs_entry_size(i);
+                    uint32_t sz = st_fs_entry_size(i);
                     char sz_str[24];
                     if (sz >= 1024) {
                         int kb = (int)(sz / 1024);
@@ -2949,14 +2941,14 @@ static void wm_render_single_window(const Window *win) {
                 gfx_draw_text_proportional(px + 20, py + 122, "04", 0x0094A3B8);
 
                 gfx_draw_text_proportional(px + 56, py + 56, "Notas persistentes — Enter salva no disco", 0x000284C7);
-                const char *nt = cq_notes_get_text();
+                const char *nt = st_notes_get_text();
                 gfx_draw_text_proportional(px + 56, py + 80, nt, 0x001E293B);
                 if (win->is_focused && (desktop_shell_get_time_tick() % 40) < 24) {
                     uint32_t tw = gfx_measure_text(nt);
                     gfx_fill_rect_alpha(px + 58 + tw, py + 78, 2, 16, 0x000284C7, 240);
                 }
             }
-        } else if (win->app_id == 4) { // Terminal Cq - Vortex Core
+        } else if (win->app_id == 4) { // Terminal Sotlas - Vortex Core
             desktop_shell_render_terminal(px, py, pw, ph, win->is_focused);
         } else if (win->app_id == 3) { // Ajustes & Hardware (Cards Modernos Light Aero)
             // Header Card com status
@@ -3104,7 +3096,7 @@ static void wm_render_single_window(const Window *win) {
                 baken_lua_draw_surface(px + 12, py + 72, pw - 24, 180, BKN_LUA_MICA, BKN_LUA_REST, 8);
                 gfx_draw_text_proportional(px + 24, py + 84, "Principios Fundamentais do Baken OS Sovereign:", 0x000284C7);
                 gfx_draw_text_proportional(px + 24, py + 106, "1. Soberania e Privacidade Total: Zero telemetria e controle absoluto dos dados.", 0x001E293B);
-                gfx_draw_text_proportional(px + 24, py + 128, "2. Codigo Aberto e Auditavel: Kernel Cq nativo e micro-arquitetura modular.", 0x001E293B);
+                gfx_draw_text_proportional(px + 24, py + 128, "2. Codigo Aberto e Auditavel: Kernel Sotlas nativo e micro-arquitetura modular.", 0x001E293B);
                 gfx_draw_text_proportional(px + 24, py + 150, "3. Desempenho Freestanding: Execucao direta sobre UEFI sem intermediarios.", 0x001E293B);
                 gfx_draw_text_proportional(px + 24, py + 172, "4. Resiliencia por Snapshots: Recuperacao automatica e pontos de restauracao.", 0x001E293B);
                 gfx_draw_text_proportional(px + 24, py + 200, "Ao instalar, voce concorda com a liberdade de execucao e soberania digital.", 0x0064748B);
@@ -3161,7 +3153,7 @@ static void wm_render_single_window(const Window *win) {
 
                 uint32_t cw = (pw - 36) / 2;
                 static const char *p_titles[] = {"[1] Usuario Padrao", "[2] Desenvolvedor Soberano", "[3] Gamer & Multimidia", "[4] Minimalista / Estacao"};
-                static const char *p_descs[] = {"Desktop completo, Navegador, Loja, Notas, Ajustes, Player.", "SDK Cq Nativo, VortexC, Terminal PRO, Compilador Freestanding.", "3D Studio, Pipeline grafico acelerado, Otimizacoes GOP e Audio.", "Kernel ultraleve, BakenFS basico, Terminal de baixo consumo."};
+                static const char *p_descs[] = {"Desktop completo, Navegador, Loja, Notas, Ajustes, Player.", "SDK Sotlas Nativo, Sotlas Compile, Terminal PRO, Compilador Freestanding.", "3D Studio, Pipeline grafico acelerado, Otimizacoes GOP e Audio.", "Kernel ultraleve, BakenFS basico, Terminal de baixo consumo."};
 
                 for (uint32_t i = 0; i < 4; ++i) {
                     uint32_t col = i % 2;
@@ -3325,7 +3317,7 @@ static void wm_render_single_window(const Window *win) {
                 gfx_draw_text_role(px + 62, py + 92, "Parabens! Seu sistema esta pronto para o primeiro boot.", 0x000F172A, BKN_TYPE_TITLE);
 
                 gfx_draw_text_proportional(px + 30, py + 130, "Resumo da Instalacao Soberana:", 0x000284C7);
-                gfx_draw_text_proportional(px + 30, py + 150, "• Perfil Instalado: Desenvolvedor Soberano (SDK Cq & VortexC)", 0x001E293B);
+                gfx_draw_text_proportional(px + 30, py + 150, "• Perfil Instalado: Desenvolvedor Soberano (SDK Sotlas & Sotlas Compile)", 0x001E293B);
                 gfx_draw_text_proportional(px + 30, py + 170, "• Usuario Principal: baken@baken-workstation", 0x001E293B);
                 gfx_draw_text_proportional(px + 30, py + 190, "• Particoes: ESP FAT32 (41 MB) + Baken Data BakenFS (23 MB)", 0x001E293B);
                 gfx_draw_text_proportional(px + 30, py + 210, "• Snapshot Inicial: Ponto de restauracao 'Instalacao_Inicial' criado", 0x0010B981);
@@ -3368,7 +3360,7 @@ static void wm_render_single_window(const Window *win) {
 
             if (ph > 90) {
                 baken_lua_draw_surface(px + 12, py + 84, pw - 24, ph - 94, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 24, py + 96, "Linguagem e Linker: VortexC (Cq Nativo)", 0x001E293B);
+                gfx_draw_text_proportional(px + 24, py + 96, "Linguagem e Linker: Sotlas Compile (Sotlas Nativo)", 0x001E293B);
                 gfx_draw_text_proportional(px + 24, py + 118, "Motor Grafico: GOP 32bpp Linear com Double Buffer", 0x001E293B);
                 gfx_draw_text_proportional(px + 24, py + 140, "Ponteiro: Protocolos UEFI Absolute e Simple", 0x00166534);
                 gfx_draw_text_proportional(px + 24, py + 162, "Copyright (c) 2026 Baken Project.", 0x0064748B);
@@ -3414,7 +3406,7 @@ extern void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32
 extern void gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t c);
 extern void gfx_draw_mesh_wallpaper(void);
 extern void gfx_swap_buffers(void);
-extern uint32_t cq_fs_entry_count(void);
+extern uint32_t st_fs_entry_count(void);
 extern void wm_init(void);
 extern void wm_render_windows(void);
 extern void wm_bring_to_front(uint32_t id);
@@ -3518,12 +3510,12 @@ static void pci_scan_hardware(void) {
     }
 }
 
-typedef struct { float current_val, target_val, velocity, stiffness, damping; } CqSpringState;
+typedef struct { float current_val, target_val, velocity, stiffness, damping; } SotlasSpringState;
 typedef struct {
     uint32_t y_offset, icon_size, item_count;
     const uint8_t *item_labels[16];
-    CqSpringState item_springs[16];
-    CqSpringState bounce_springs[16];
+    SotlasSpringState item_springs[16];
+    SotlasSpringState bounce_springs[16];
 } DesktopDock;
 extern void dock_init(DesktopDock *dock);
 extern void dock_add_item(DesktopDock *dock, const uint8_t *label);
@@ -3542,15 +3534,15 @@ extern void desktop_shell_toggle_control_center(void);
 extern void desktop_shell_toggle_spotlight(void);
 extern void desktop_shell_toggle_context_menu(void);
 extern void gfx_set_mesh_time_tick(uint32_t t);
-extern const char *cq_notes_get_text(void);
-extern uint32_t cq_fs_entry_count(void);
-extern const char *cq_fs_entry_name(uint32_t index);
-extern uint32_t cq_fs_entry_kind(uint32_t index);
-extern uint32_t cq_fs_entry_size(uint32_t index);
-extern int cq_fs_add(const char *name, uint32_t kind, uint32_t size, uint32_t lba);
-extern int cq_fs_remove(const char *name);
-extern int cq_fs_write_file(const char *name, const char *text, uint32_t len);
-extern int cq_fs_read_file(const char *name, char *out_text, uint32_t max_len);
+extern const char *st_notes_get_text(void);
+extern uint32_t st_fs_entry_count(void);
+extern const char *st_fs_entry_name(uint32_t index);
+extern uint32_t st_fs_entry_kind(uint32_t index);
+extern uint32_t st_fs_entry_size(uint32_t index);
+extern int st_fs_add(const char *name, uint32_t kind, uint32_t size, uint32_t lba);
+extern int st_fs_remove(const char *name);
+extern int st_fs_write_file(const char *name, const char *text, uint32_t len);
+extern int st_fs_read_file(const char *name, char *out_text, uint32_t max_len);
 extern void desktop_config_save(void);
 extern uint8_t installer_is_boot_mode_live(void);
 
@@ -3584,7 +3576,7 @@ typedef struct {
 
 static BakenTerminalState g_terminal = {
     {
-        "Baken OS Sovereign Kernel v2.0 (Cq Native)",
+        "Baken OS Sovereign Kernel v2.0 (Sotlas Native)",
         "Terminal interativo - Digite 'help' para comandos."
     },
     2,
@@ -3647,19 +3639,19 @@ static void terminal_execute_command(void) {
         terminal_append_line("Comandos: ls, cat, touch, mkdir, rm, write, theme, sysinfo, clear");
     } else if (str_contains_nocase(cmd, "sysinfo")) {
         terminal_append_line("Arch: x86_64 UEFI | Mem: 512MB / 2048MB | GOP: 1080p");
-        terminal_append_line("Kernel: Baken Modular Cq v2.0 | FS: BakenFS Sovereign v1");
+        terminal_append_line("Kernel: Baken Modular Sotlas v2.0 | FS: BakenFS Sovereign v1");
     } else if (str_contains_nocase(cmd, "stat") || str_contains_nocase(cmd, "df")) {
         terminal_append_line("BakenFS Estado:");
         terminal_append_line("  Dispositivo: ESP Blk 86016 | Entradas: 12 max");
         terminal_append_line("  Status: Montado (Leitura / Gravacao ativas)");
     } else if (cmd[0] == 'l' && cmd[1] == 's') {
-        uint32_t cnt = cq_fs_entry_count();
+        uint32_t cnt = st_fs_entry_count();
         terminal_append_line("Arquivos no BakenFS:");
         for (uint32_t i = 0; i < cnt && i < 6; ++i) {
             char line_buf[64];
-            uint32_t kind = cq_fs_entry_kind(i);
+            uint32_t kind = st_fs_entry_kind(i);
             const char *prefix = (kind == 1) ? " [DIR] " : ((kind == 3) ? " [CFG] " : " [ARQ] ");
-            const char *fn = cq_fs_entry_name(i);
+            const char *fn = st_fs_entry_name(i);
             int p = 0;
             while (prefix[p]) { line_buf[p] = prefix[p]; p++; }
             int f = 0;
@@ -3671,7 +3663,7 @@ static void terminal_execute_command(void) {
         const char *fn = cmd + 6;
         while (*fn == ' ') fn++;
         if (*fn) {
-            if (cq_fs_add(fn, 2, 0, 86020)) {
+            if (st_fs_add(fn, 2, 0, 86020)) {
                 terminal_append_line("Arquivo criado com sucesso no BakenFS.");
             } else {
                 terminal_append_line("Erro ao criar arquivo (disco cheio ou somente-leitura).");
@@ -3681,7 +3673,7 @@ static void terminal_execute_command(void) {
         const char *fn = cmd + 6;
         while (*fn == ' ') fn++;
         if (*fn) {
-            if (cq_fs_add(fn, 1, 0, 0)) {
+            if (st_fs_add(fn, 1, 0, 0)) {
                 terminal_append_line("Diretorio criado com sucesso no BakenFS.");
             } else {
                 terminal_append_line("Erro ao criar diretorio.");
@@ -3691,7 +3683,7 @@ static void terminal_execute_command(void) {
         const char *fn = cmd + 3;
         while (*fn == ' ') fn++;
         if (*fn) {
-            if (cq_fs_remove(fn)) {
+            if (st_fs_remove(fn)) {
                 terminal_append_line("Arquivo removido do BakenFS.");
             } else {
                 terminal_append_line("Arquivo nao encontrado.");
@@ -3702,7 +3694,7 @@ static void terminal_execute_command(void) {
         while (*fn == ' ') fn++;
         if (!*fn) fn = "/home/notas.txt";
         char read_buf[128];
-        if (cq_fs_read_file(fn, read_buf, sizeof(read_buf))) {
+        if (st_fs_read_file(fn, read_buf, sizeof(read_buf))) {
             terminal_append_line(read_buf);
         } else {
             terminal_append_line("(Arquivo vazio ou nao encontrado)");
@@ -3716,7 +3708,7 @@ static void terminal_execute_command(void) {
         while (*p == ' ') p++;
         if (fname[0] && *p) {
             uint32_t tlen = 0; while (p[tlen]) tlen++;
-            if (cq_fs_write_file(fname, p, tlen)) {
+            if (st_fs_write_file(fname, p, tlen)) {
                 terminal_append_line("Gravado com sucesso no BakenFS.");
             } else {
                 terminal_append_line("Erro ao gravar arquivo.");
@@ -3742,8 +3734,8 @@ static void terminal_execute_command(void) {
         terminal_append_line(desktop_shell_is_dark_theme() ? "Tema: Escuro" : "Tema: Claro");
     } else if (str_contains_nocase(cmd, "clear")) {
         g_terminal.line_count = 0;
-    } else if (str_contains_nocase(cmd, "cq")) {
-        terminal_append_line("VortexC / Cq 0.1 Self-Hosted Language Engine");
+    } else if (str_contains_nocase(cmd, "st")) {
+        terminal_append_line("Sotlas Compile / Sotlas Bootstrap Self-Hosted Language Engine");
     } else {
         terminal_append_line("Comando desconhecido. Digite 'help' para ajuda.");
     }
@@ -3832,7 +3824,7 @@ static const BakenMenu g_menus[6] = {
     {
         "Ajuda", 3, {
             {"Ajuda do Baken OS", "F1", 4, 0, 0},
-            {"Documentacao Cq", "", 4, 0, 0},
+            {"Documentacao Sotlas", "", 4, 0, 0},
             {"Assistente Q-HAL AI", "Ctrl+H", 4, 0, 0}
         }
     }
@@ -3985,7 +3977,7 @@ static void desktop_open_app(uint32_t app_id) {
         wm_create_window(3, (const uint8_t*)"Central de Ajustes & Hardware", (int32_t)(sw / 2 - 250), (int32_t)(sh / 2 - 150), 500, 300, 0x00F8FAFC, 215, 0x00FFFFFF);
         wm_bring_to_front(3);
     } else if (app_id == 9) {
-        wm_create_window(4, (const uint8_t*)"Terminal Cq - Vortex Core", (int32_t)(sw / 2 - 270), (int32_t)(sh / 2 - 170), 540, 340, 0x00F8FAFC, 215, 0x00FFFFFF);
+        wm_create_window(4, (const uint8_t*)"Terminal Sotlas - Vortex Core", (int32_t)(sw / 2 - 270), (int32_t)(sh / 2 - 170), 540, 340, 0x00F8FAFC, 215, 0x00FFFFFF);
         wm_bring_to_front(4);
     } else if (app_id == 14) {
         wm_create_window(5, (const uint8_t*)"Instalador e Setup - Baken OS Sovereign", (int32_t)(sw / 2 - 370), (int32_t)(sh / 2 - 250), 740, 500, 0x00F8FAFC, 215, 0x00FFFFFF);
@@ -4188,7 +4180,7 @@ static void render_spotlight_overlay(void) {
         {"Arquivos - BakenFS", "Explorador de Arquivos (/home)", 0},
         {"Notas Rapidas", "Editor de texto persistente", 6},
         {"Central de Ajustes", "Configuracoes de Hardware", 10},
-        {"Terminal Cq", "Interpretador de Comandos Vortex", 9},
+        {"Terminal Sotlas", "Interpretador de Comandos Vortex", 9},
         {"Assistente Q-HAL AI", "Inteligencia Artificial Soberana", 4},
         {"Instalar Baken OS", "Assistente de Instalacao UEFI", 14}
     };
@@ -4959,7 +4951,7 @@ static void render_widgets_stack(void) {
 
         // Item 3: BakenFS
         char fs_status[24];
-        uint32_t fs_count = cq_fs_entry_count();
+        uint32_t fs_count = st_fs_entry_count();
         fs_status[0]='B'; fs_status[1]='a'; fs_status[2]='k'; fs_status[3]='e'; fs_status[4]='n'; fs_status[5]='F'; fs_status[6]='S'; fs_status[7]=':'; fs_status[8]=' ';
         fs_status[9]=(char)('0'+(fs_count % 10)); fs_status[10]=' '; fs_status[11]='i'; fs_status[12]='t'; fs_status[13]='e'; fs_status[14]='n'; fs_status[15]='s'; fs_status[16]=0;
         gfx_draw_circle_alpha(wx + U(22), y + U(81), U(3), 0x0010B981, 255);
@@ -4974,7 +4966,7 @@ static void render_widgets_stack(void) {
         gfx_draw_hline(wx + U(16), y + U(28), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
 
         gfx_draw_circle_alpha(wx + U(22), y + U(41), U(2), 0x000284C7, 255);
-        gfx_draw_text_proportional(wx + U(30), y + U(34), "Interface Cq ativa", text_color);
+        gfx_draw_text_proportional(wx + U(30), y + U(34), "Interface Sotlas ativa", text_color);
 
         gfx_draw_circle_alpha(wx + U(22), y + U(60), U(2), 0x000284C7, 255);
         gfx_draw_text_proportional(wx + U(30), y + U(53), "Dados no BakenFS", text_color);
@@ -5118,69 +5110,69 @@ extern void installer_setup_io(void *boot_io, void *target_io);
 
 typedef struct { uint32_t MediaId; uint8_t RemovableMedia,MediaPresent,LogicalPartition,ReadOnly,WriteCaching; uint32_t BlockSize,IoAlign; uint64_t LastBlock,LowestAlignedLba; uint32_t LogicalBlocksPerPhysicalBlock,OptimalTransferLengthGranularity; } EFI_BLOCK_IO_MEDIA;
 typedef struct _EFI_BLOCK_IO_PROTOCOL { uint64_t Revision; EFI_BLOCK_IO_MEDIA *Media; uint64_t (*Reset)(void*,uint8_t); uint64_t (*ReadBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*WriteBlocks)(void*,uint32_t,uint64_t,uint64_t,void*); uint64_t (*FlushBlocks)(void*); } EFI_BLOCK_IO_PROTOCOL;
-typedef struct { char name[32]; uint32_t lba, size, kind; } CqFsEntry;
-typedef struct { uint64_t magic; uint32_t version, entry_count; CqFsEntry entries[12]; uint8_t reserved[20]; } CqFsHeader;
-static EFI_BLOCK_IO_PROTOCOL *cq_fs_io;
-static CqFsHeader cq_fs_header;
-static uint8_t cq_fs_mounted;
+typedef struct { char name[32]; uint32_t lba, size, kind; } SotlasFsEntry;
+typedef struct { uint64_t magic; uint32_t version, entry_count; SotlasFsEntry entries[12]; uint8_t reserved[20]; } SotlasFsHeader;
+static EFI_BLOCK_IO_PROTOCOL *st_fs_io;
+static SotlasFsHeader st_fs_header;
+static uint8_t st_fs_mounted;
 
-static void cq_fs_init_defaults(void) {
-    if (cq_fs_header.entry_count == 0) {
-        cq_fs_header.magic = UINT64_C(0x3153464E454B4142);
-        cq_fs_header.version = 1;
-        cq_fs_header.entry_count = 3;
+static void st_fs_init_defaults(void) {
+    if (st_fs_header.entry_count == 0) {
+        st_fs_header.magic = UINT64_C(0x3153464E454B4142);
+        st_fs_header.version = 1;
+        st_fs_header.entry_count = 3;
 
         const char *e0 = "/config/theme.cfg";
-        for (int i = 0; i < 31 && e0[i]; ++i) cq_fs_header.entries[0].name[i] = e0[i];
-        cq_fs_header.entries[0].kind = 3; cq_fs_header.entries[0].size = 512; cq_fs_header.entries[0].lba = 86017;
+        for (int i = 0; i < 31 && e0[i]; ++i) st_fs_header.entries[0].name[i] = e0[i];
+        st_fs_header.entries[0].kind = 3; st_fs_header.entries[0].size = 512; st_fs_header.entries[0].lba = 86017;
 
         const char *e1 = "/home/notas.txt";
-        for (int i = 0; i < 31 && e1[i]; ++i) cq_fs_header.entries[1].name[i] = e1[i];
-        cq_fs_header.entries[1].kind = 2; cq_fs_header.entries[1].size = 64; cq_fs_header.entries[1].lba = 86018;
+        for (int i = 0; i < 31 && e1[i]; ++i) st_fs_header.entries[1].name[i] = e1[i];
+        st_fs_header.entries[1].kind = 2; st_fs_header.entries[1].size = 64; st_fs_header.entries[1].lba = 86018;
 
         const char *e2 = "/home/documentos";
-        for (int i = 0; i < 31 && e2[i]; ++i) cq_fs_header.entries[2].name[i] = e2[i];
-        cq_fs_header.entries[2].kind = 1; cq_fs_header.entries[2].size = 0; cq_fs_header.entries[2].lba = 0;
+        for (int i = 0; i < 31 && e2[i]; ++i) st_fs_header.entries[2].name[i] = e2[i];
+        st_fs_header.entries[2].kind = 1; st_fs_header.entries[2].size = 0; st_fs_header.entries[2].lba = 0;
     }
 }
 
-static uint8_t cq_fs_mount(void) {
-    if (!cq_fs_io || !cq_fs_io->Media) {
-        cq_fs_init_defaults();
-        cq_fs_mounted = 1;
+static uint8_t st_fs_mount(void) {
+    if (!st_fs_io || !st_fs_io->Media) {
+        st_fs_init_defaults();
+        st_fs_mounted = 1;
         return 1;
     }
-    if (cq_fs_io->ReadBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header) == 0 &&
-        cq_fs_header.magic == UINT64_C(0x3153464E454B4142) &&
-        cq_fs_header.version == 1 &&
-        cq_fs_header.entry_count <= 12 &&
-        cq_fs_header.entry_count > 0) {
-        cq_fs_mounted = 1;
+    if (st_fs_io->ReadBlocks(st_fs_io, st_fs_io->Media->MediaId, 86016, 512, &st_fs_header) == 0 &&
+        st_fs_header.magic == UINT64_C(0x3153464E454B4142) &&
+        st_fs_header.version == 1 &&
+        st_fs_header.entry_count <= 12 &&
+        st_fs_header.entry_count > 0) {
+        st_fs_mounted = 1;
         return 1;
     }
-    cq_fs_init_defaults();
-    cq_fs_mounted = 1;
+    st_fs_init_defaults();
+    st_fs_mounted = 1;
     return 1;
 }
 
-uint32_t cq_fs_entry_count(void) { return cq_fs_mount() ? cq_fs_header.entry_count : 0; }
+uint32_t st_fs_entry_count(void) { return st_fs_mount() ? st_fs_header.entry_count : 0; }
 
-const char *cq_fs_entry_name(uint32_t index) {
-    if (!cq_fs_mounted) cq_fs_mount();
-    return (cq_fs_mounted && index < cq_fs_header.entry_count) ? cq_fs_header.entries[index].name : "(vazio)";
+const char *st_fs_entry_name(uint32_t index) {
+    if (!st_fs_mounted) st_fs_mount();
+    return (st_fs_mounted && index < st_fs_header.entry_count) ? st_fs_header.entries[index].name : "(vazio)";
 }
 
-uint32_t cq_fs_entry_kind(uint32_t index) {
-    if (!cq_fs_mounted) cq_fs_mount();
-    return (cq_fs_mounted && index < cq_fs_header.entry_count) ? cq_fs_header.entries[index].kind : 2;
+uint32_t st_fs_entry_kind(uint32_t index) {
+    if (!st_fs_mounted) st_fs_mount();
+    return (st_fs_mounted && index < st_fs_header.entry_count) ? st_fs_header.entries[index].kind : 2;
 }
 
-uint32_t cq_fs_entry_size(uint32_t index) {
-    if (!cq_fs_mounted) cq_fs_mount();
-    return (cq_fs_mounted && index < cq_fs_header.entry_count) ? cq_fs_header.entries[index].size : 0;
+uint32_t st_fs_entry_size(uint32_t index) {
+    if (!st_fs_mounted) st_fs_mount();
+    return (st_fs_mounted && index < st_fs_header.entry_count) ? st_fs_header.entries[index].size : 0;
 }
 
-static int cq_str_eq(const char *a, const char *b) {
+static int st_str_eq(const char *a, const char *b) {
     if (!a || !b) return 0;
     while (*a && *b) {
         if (*a != *b) return 0;
@@ -5189,83 +5181,83 @@ static int cq_str_eq(const char *a, const char *b) {
     return *a == *b;
 }
 
-int cq_fs_find(const char *name) {
-    if (!cq_fs_mount()) return -1;
-    for (uint32_t i = 0; i < cq_fs_header.entry_count; ++i) {
-        if (cq_str_eq(cq_fs_header.entries[i].name, name)) return (int)i;
+int st_fs_find(const char *name) {
+    if (!st_fs_mount()) return -1;
+    for (uint32_t i = 0; i < st_fs_header.entry_count; ++i) {
+        if (st_str_eq(st_fs_header.entries[i].name, name)) return (int)i;
     }
     return -1;
 }
 
-int cq_fs_add(const char *name, uint32_t kind, uint32_t size, uint32_t lba) {
-    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly || cq_fs_header.entry_count >= 12) return 0;
-    int existing = cq_fs_find(name);
+int st_fs_add(const char *name, uint32_t kind, uint32_t size, uint32_t lba) {
+    if (!st_fs_mount() || !st_fs_io || !st_fs_io->Media || st_fs_io->Media->ReadOnly || st_fs_header.entry_count >= 12) return 0;
+    int existing = st_fs_find(name);
     if (existing >= 0) {
-        cq_fs_header.entries[existing].size = size;
-        cq_fs_header.entries[existing].kind = kind;
-        if (lba) cq_fs_header.entries[existing].lba = lba;
+        st_fs_header.entries[existing].size = size;
+        st_fs_header.entries[existing].kind = kind;
+        if (lba) st_fs_header.entries[existing].lba = lba;
     } else {
-        CqFsEntry *e = &cq_fs_header.entries[cq_fs_header.entry_count++];
+        SotlasFsEntry *e = &st_fs_header.entries[st_fs_header.entry_count++];
         for (uint32_t i = 0; i < sizeof(*e); ++i) ((uint8_t*)e)[i] = 0;
         for (uint32_t i = 0; i < 31 && name[i]; ++i) e->name[i] = name[i];
         e->kind = kind;
-        e->lba = lba ? lba : (86020 + cq_fs_header.entry_count);
+        e->lba = lba ? lba : (86020 + st_fs_header.entry_count);
         e->size = size;
     }
-    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header)) return 0;
-    return !cq_fs_io->FlushBlocks || cq_fs_io->FlushBlocks(cq_fs_io) == 0;
+    if (st_fs_io->WriteBlocks(st_fs_io, st_fs_io->Media->MediaId, 86016, 512, &st_fs_header)) return 0;
+    return !st_fs_io->FlushBlocks || st_fs_io->FlushBlocks(st_fs_io) == 0;
 }
 
-int cq_fs_remove(const char *name) {
-    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly) return 0;
-    int idx = cq_fs_find(name);
+int st_fs_remove(const char *name) {
+    if (!st_fs_mount() || !st_fs_io || !st_fs_io->Media || st_fs_io->Media->ReadOnly) return 0;
+    int idx = st_fs_find(name);
     if (idx < 0) return 0;
-    for (uint32_t i = (uint32_t)idx; i + 1 < cq_fs_header.entry_count; ++i) {
-        cq_fs_header.entries[i] = cq_fs_header.entries[i + 1];
+    for (uint32_t i = (uint32_t)idx; i + 1 < st_fs_header.entry_count; ++i) {
+        st_fs_header.entries[i] = st_fs_header.entries[i + 1];
     }
-    cq_fs_header.entry_count--;
-    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header)) return 0;
-    return !cq_fs_io->FlushBlocks || cq_fs_io->FlushBlocks(cq_fs_io) == 0;
+    st_fs_header.entry_count--;
+    if (st_fs_io->WriteBlocks(st_fs_io, st_fs_io->Media->MediaId, 86016, 512, &st_fs_header)) return 0;
+    return !st_fs_io->FlushBlocks || st_fs_io->FlushBlocks(st_fs_io) == 0;
 }
 
-typedef struct { uint64_t magic; uint32_t version, size; char text[496]; } CqTextFile;
-static char cq_note_text[128] = "Notas";
-static uint32_t cq_note_len = 5;
-static uint8_t cq_note_editing = 0;
-const char *cq_notes_get_text(void){ return cq_note_text; }
+typedef struct { uint64_t magic; uint32_t version, size; char text[496]; } SotlasTextFile;
+static char st_note_text[128] = "Notas";
+static uint32_t st_note_len = 5;
+static uint8_t st_note_editing = 0;
+const char *st_notes_get_text(void){ return st_note_text; }
 
-int cq_fs_write_file(const char *name, const char *text, uint32_t len) {
-    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly) return 0;
-    int idx = cq_fs_find(name);
+int st_fs_write_file(const char *name, const char *text, uint32_t len) {
+    if (!st_fs_mount() || !st_fs_io || !st_fs_io->Media || st_fs_io->Media->ReadOnly) return 0;
+    int idx = st_fs_find(name);
     uint32_t lba = 0;
     if (idx >= 0) {
-        lba = cq_fs_header.entries[idx].lba;
+        lba = st_fs_header.entries[idx].lba;
     } else {
-        lba = 86020 + cq_fs_header.entry_count;
-        if (!cq_fs_add(name, 2, len, lba)) return 0;
-        idx = cq_fs_find(name);
+        lba = 86020 + st_fs_header.entry_count;
+        if (!st_fs_add(name, 2, len, lba)) return 0;
+        idx = st_fs_find(name);
     }
-    CqTextFile file;
+    SotlasTextFile file;
     for (uint32_t i = 0; i < sizeof(file); ++i) ((uint8_t*)&file)[i] = 0;
     file.magic = UINT64_C(0x3158544E454B4142);
     file.version = 1;
     file.size = len > 490 ? 490 : len;
     for (uint32_t i = 0; i < file.size; ++i) file.text[i] = text[i];
-    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, lba, 512, &file)) return 0;
+    if (st_fs_io->WriteBlocks(st_fs_io, st_fs_io->Media->MediaId, lba, 512, &file)) return 0;
     if (idx >= 0) {
-        cq_fs_header.entries[idx].size = file.size;
-        cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86016, 512, &cq_fs_header);
+        st_fs_header.entries[idx].size = file.size;
+        st_fs_io->WriteBlocks(st_fs_io, st_fs_io->Media->MediaId, 86016, 512, &st_fs_header);
     }
-    return !cq_fs_io->FlushBlocks || cq_fs_io->FlushBlocks(cq_fs_io) == 0;
+    return !st_fs_io->FlushBlocks || st_fs_io->FlushBlocks(st_fs_io) == 0;
 }
 
-int cq_fs_read_file(const char *name, char *out_text, uint32_t max_len) {
-    if (!cq_fs_mount() || !cq_fs_io || !cq_fs_io->Media || !out_text || max_len == 0) return 0;
-    int idx = cq_fs_find(name);
-    uint32_t lba = (idx >= 0) ? cq_fs_header.entries[idx].lba : (cq_str_eq(name, "/home/notas.txt") ? 86018 : 0);
+int st_fs_read_file(const char *name, char *out_text, uint32_t max_len) {
+    if (!st_fs_mount() || !st_fs_io || !st_fs_io->Media || !out_text || max_len == 0) return 0;
+    int idx = st_fs_find(name);
+    uint32_t lba = (idx >= 0) ? st_fs_header.entries[idx].lba : (st_str_eq(name, "/home/notas.txt") ? 86018 : 0);
     if (!lba) return 0;
-    CqTextFile file;
-    if (cq_fs_io->ReadBlocks(cq_fs_io, cq_fs_io->Media->MediaId, lba, 512, &file)) return 0;
+    SotlasTextFile file;
+    if (st_fs_io->ReadBlocks(st_fs_io, st_fs_io->Media->MediaId, lba, 512, &file)) return 0;
     if (file.magic != UINT64_C(0x31544E4E454B4142) && file.magic != UINT64_C(0x3158544E454B4142)) return 0;
     uint32_t n = 0;
     while (n < max_len - 1 && n < file.size && file.text[n]) {
@@ -5276,18 +5268,18 @@ int cq_fs_read_file(const char *name, char *out_text, uint32_t max_len) {
     return 1;
 }
 
-static void cq_notes_load(void){
+static void st_notes_load(void){
     char buf[128];
-    if (cq_fs_read_file("/home/notas.txt", buf, sizeof(buf))) {
+    if (st_fs_read_file("/home/notas.txt", buf, sizeof(buf))) {
         uint32_t n = 0;
-        while (n < 127 && buf[n]) { cq_note_text[n] = buf[n]; ++n; }
-        cq_note_text[n] = 0;
-        cq_note_len = n;
+        while (n < 127 && buf[n]) { st_note_text[n] = buf[n]; ++n; }
+        st_note_text[n] = 0;
+        st_note_len = n;
     }
 }
-static void cq_notes_append(uint16_t ch){ if(ch>=32 && ch<127 && cq_note_len<127){cq_note_text[cq_note_len++]=(char)ch; cq_note_text[cq_note_len]=0;} }
-void cq_notes_save(void){
-    cq_fs_write_file("/home/notas.txt", cq_note_text, cq_note_len);
+static void st_notes_append(uint16_t ch){ if(ch>=32 && ch<127 && st_note_len<127){st_note_text[st_note_len++]=(char)ch; st_note_text[st_note_len]=0;} }
+void st_notes_save(void){
+    st_fs_write_file("/home/notas.txt", st_note_text, st_note_len);
 }
 
 extern void desktop_shell_toggle_theme(void);
@@ -5301,11 +5293,11 @@ typedef struct {
     uint8_t dark_theme;
     uint8_t location_permission;
     uint8_t reserved[502];
-} CqDesktopConfig;
+} SotlasDesktopConfig;
 
 static void desktop_config_load(void) {
-    CqDesktopConfig cfg;
-    if (!cq_fs_io || !cq_fs_io->Media || cq_fs_io->ReadBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86017, 512, &cfg)) return;
+    SotlasDesktopConfig cfg;
+    if (!st_fs_io || !st_fs_io->Media || st_fs_io->ReadBlocks(st_fs_io, st_fs_io->Media->MediaId, 86017, 512, &cfg)) return;
     if (cfg.magic != UINT64_C(0x314643444E4B4142)) return;
     if (cfg.dark_theme && !desktop_shell_is_dark_theme()) {
         desktop_shell_toggle_theme();
@@ -5318,16 +5310,16 @@ static void desktop_config_load(void) {
 }
 
 void desktop_config_save(void) {
-    if (!cq_fs_io || !cq_fs_io->Media || cq_fs_io->Media->ReadOnly) return;
-    CqDesktopConfig cfg;
+    if (!st_fs_io || !st_fs_io->Media || st_fs_io->Media->ReadOnly) return;
+    SotlasDesktopConfig cfg;
     for (uint32_t i = 0; i < sizeof(cfg); ++i) ((uint8_t*)&cfg)[i] = 0;
     cfg.magic = UINT64_C(0x314643444E4B4142);
     cfg.version = 1;
     cfg.dark_theme = desktop_shell_is_dark_theme();
     cfg.location_permission = desktop_shell_get_location_permission();
-    if (cq_fs_io->WriteBlocks(cq_fs_io, cq_fs_io->Media->MediaId, 86017, 512, &cfg) == 0) {
-        if (cq_fs_io->FlushBlocks) cq_fs_io->FlushBlocks(cq_fs_io);
-        cq_fs_add("/config/theme.cfg", 3, 512, 86017);
+    if (st_fs_io->WriteBlocks(st_fs_io, st_fs_io->Media->MediaId, 86017, 512, &cfg) == 0) {
+        if (st_fs_io->FlushBlocks) st_fs_io->FlushBlocks(st_fs_io);
+        st_fs_add("/config/theme.cfg", 3, 512, 86017);
     }
 }
 
@@ -5410,31 +5402,31 @@ extern uint8_t wm_app_is_open(uint32_t app_id);
 typedef struct {
     uint16_t unicode;
     uint16_t scan;
-} CqInputEvent;
+} SotlasInputEvent;
 
 #define CQ_INPUT_QUEUE_SIZE 32
-static CqInputEvent g_cq_input_queue[CQ_INPUT_QUEUE_SIZE];
-static uint32_t g_cq_input_head = 0;
-static uint32_t g_cq_input_tail = 0;
-static uint32_t g_cq_input_count = 0;
+static SotlasInputEvent g_st_input_queue[CQ_INPUT_QUEUE_SIZE];
+static uint32_t g_st_input_head = 0;
+static uint32_t g_st_input_tail = 0;
+static uint32_t g_st_input_count = 0;
 
-static void cq_input_push_key(uint16_t unicode, uint16_t scan) {
-    if (g_cq_input_count >= CQ_INPUT_QUEUE_SIZE) return;
-    g_cq_input_queue[g_cq_input_tail].unicode = unicode;
-    g_cq_input_queue[g_cq_input_tail].scan = scan;
-    g_cq_input_tail = (g_cq_input_tail + 1) % CQ_INPUT_QUEUE_SIZE;
-    g_cq_input_count++;
+static void st_input_push_key(uint16_t unicode, uint16_t scan) {
+    if (g_st_input_count >= CQ_INPUT_QUEUE_SIZE) return;
+    g_st_input_queue[g_st_input_tail].unicode = unicode;
+    g_st_input_queue[g_st_input_tail].scan = scan;
+    g_st_input_tail = (g_st_input_tail + 1) % CQ_INPUT_QUEUE_SIZE;
+    g_st_input_count++;
 }
 
-static int cq_input_pop(CqInputEvent *out_evt) {
-    if (g_cq_input_count == 0 || !out_evt) return 0;
-    *out_evt = g_cq_input_queue[g_cq_input_head];
-    g_cq_input_head = (g_cq_input_head + 1) % CQ_INPUT_QUEUE_SIZE;
-    g_cq_input_count--;
+static int st_input_pop(SotlasInputEvent *out_evt) {
+    if (g_st_input_count == 0 || !out_evt) return 0;
+    *out_evt = g_st_input_queue[g_st_input_head];
+    g_st_input_head = (g_st_input_head + 1) % CQ_INPUT_QUEUE_SIZE;
+    g_st_input_count--;
     return 1;
 }
 
-static void cq_dispatch_key(uint16_t unicode, uint16_t scan) {
+static void st_dispatch_key(uint16_t unicode, uint16_t scan) {
     if (desktop_shell_is_spotlight_open()) {
         desktop_shell_spotlight_key(unicode, scan);
     } else if (wm_is_window_focused(4)) {
@@ -5461,16 +5453,16 @@ static void cq_dispatch_key(uint16_t unicode, uint16_t scan) {
         if (unicode == 27 || scan == 0x17) {
             wm_unfocus_all();
         } else if (unicode == 13 || unicode == 10) {
-            cq_notes_save();
+            st_notes_save();
             desktop_shell_terminal_append("Notas salvas no BakenFS.");
         } else if (unicode == 8 || scan == 0x08) {
-            if (cq_note_len) { cq_note_text[--cq_note_len] = 0; }
+            if (st_note_len) { st_note_text[--st_note_len] = 0; }
         } else if (unicode >= 32 && unicode <= 126) {
-            cq_notes_append(unicode);
+            st_notes_append(unicode);
         }
     } else {
         if(unicode=='1') desktop_shell_launch_app(0); /* Arquivos */
-        else if(unicode=='2') { desktop_shell_launch_app(6); cq_note_editing=1; } /* Notas */
+        else if(unicode=='2') { desktop_shell_launch_app(6); st_note_editing=1; } /* Notas */
         else if(unicode=='3') desktop_shell_launch_app(8); /* Ajustes */
         else if(unicode=='4') desktop_shell_launch_app(9); /* Terminal */
         else if(unicode=='a'||unicode=='A') desktop_shell_open_menu(1); /* Menu Arquivo */
@@ -5487,8 +5479,8 @@ static void cq_dispatch_key(uint16_t unicode, uint16_t scan) {
             }
         }
         else if(unicode=='m'||unicode=='M') desktop_shell_toggle_media();
-        else if(unicode=='d'||unicode=='D') cq_fs_add("/home/documentos", 1, 0, 0);
-        else if(unicode=='n'||unicode=='N') cq_fs_add("/home/arquivo.txt", 2, 512, 86020);
+        else if(unicode=='d'||unicode=='D') st_fs_add("/home/documentos", 1, 0, 0);
+        else if(unicode=='n'||unicode=='N') st_fs_add("/home/arquivo.txt", 2, 512, 86020);
         else if(unicode>='5' && unicode<='9') desktop_shell_launch_app((uint32_t)(unicode-'3'));
     }
 }
@@ -5501,9 +5493,9 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
     uint32_t height = boot_info->screen_height;
     /* Serviços que o shell consulta no primeiro quadro devem existir antes do
       * compositor. Isso evita que widgets recebam um estado de montagem vazio. */
-    cq_fs_io = (EFI_BLOCK_IO_PROTOCOL*)boot_info->block_io_protocol;
+    st_fs_io = (EFI_BLOCK_IO_PROTOCOL*)boot_info->block_io_protocol;
     installer_setup_io(boot_info->block_io_protocol, boot_info->install_target_block_io_protocol);
-    cq_notes_load();
+    st_notes_load();
     desktop_config_load();
     gfx_init(boot_info->framebuffer_base, width, height, boot_info->pixels_per_scanline);
     desktop_compositor_init(width, height);
@@ -5530,12 +5522,12 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
         if (keyboard && keyboard->ReadKeyStroke) {
             EFI_INPUT_KEY key;
             while (keyboard->ReadKeyStroke(keyboard, &key) == 0) {
-                cq_input_push_key(key.UnicodeChar, key.ScanCode);
+                st_input_push_key(key.UnicodeChar, key.ScanCode);
             }
         }
-        CqInputEvent evt;
-        while (cq_input_pop(&evt)) {
-            cq_dispatch_key(evt.unicode, evt.scan);
+        SotlasInputEvent evt;
+        while (st_input_pop(&evt)) {
+            st_dispatch_key(evt.unicode, evt.scan);
         }
         if (abs_pointer && abs_pointer->GetState && abs_pointer->Mode) {
             EFI_ABSOLUTE_POINTER_STATE abs_st;
@@ -5625,14 +5617,14 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return output
 
-def emit_cq_kernel_entry(output: Path) -> Path:
+def emit_st_kernel_entry(output: Path) -> Path:
     """Entrada EFI canônica gerada a partir de kernel::main."""
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text("\n".join((
-        "/* Gerado pelo VortexC a partir de kernel::main. */",
+        "/* Gerado pelo Sotlas Compile a partir de kernel::main. */",
         '#include "baken_boot_info.h"',
         "extern void baken_kernel_main(const BakenBootInfo *boot_info);",
-        "void cq_kernel_entry(const BakenBootInfo *boot_info) {",
+        "void st_kernel_entry(const BakenBootInfo *boot_info) {",
         "    baken_kernel_main(boot_info);",
         "}",
         "",
@@ -5653,14 +5645,14 @@ def frontend(entry: Path) -> tuple:
     return root, manifest, units, asts
 
 def build_modular(entry: Path, output: Path | None = None) -> dict:
-    """Compilação e linkedição modular do kernel Cq / UEFI."""
+    """Compilação e linkedição modular do kernel Sotlas / UEFI."""
     import subprocess
     entry = entry.resolve()
     root, manifest, units, asts = frontend(entry)
     gcc = find_gcc(root)
 
-    obj_dir = root / "build" / "obj" / "cq"
-    generated_dir = root / "build" / "generated" / "cq"
+    obj_dir = root / "build" / "obj" / "st"
+    generated_dir = root / "build" / "generated" / "st"
     obj_dir.mkdir(parents=True, exist_ok=True)
     include_dir = root / "kernel" / "include"
 
@@ -5677,33 +5669,31 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
         "-fno-asynchronous-unwind-tables", "-nostdlib", "-I", str(include_dir), "-c",
     ]
 
-    # Emite e compila uma unidade C isolada por módulo Cq. Os corpos Cq ainda
+    # Emite e compila uma unidade C isolada por módulo Sotlas. Os corpos Sotlas ainda
     # migram progressivamente; estes objetos já materializam o grafo no link.
     for mod_name in manifest["compile_order"]:
         module_id = _c_identifier(mod_name)
         header = emit_c_header(asts[mod_name], generated_dir / f"{module_id}.h")
-        interface = emit_interface_manifest(asts[mod_name], generated_dir / f"{module_id}.cqi.json")
+        interface = emit_interface_manifest(asts[mod_name], generated_dir / f"{module_id}.sti.json")
         generated = emit_c_module(asts[mod_name], generated_dir / f"{module_id}.c", header)
         obj = obj_dir / f"{module_id}.o"
         res = subprocess.run([str(gcc), *common_flags, str(generated), "-o", str(obj)],
                              capture_output=True, text=True, env=env)
         if res.returncode != 0:
-            raise CqError(f"falha ao compilar módulo Cq {mod_name}: {res.stderr}")
+            raise SotlasError(f"falha ao compilar módulo Sotlas {mod_name}: {res.stderr}")
         generated_sources.append(generated)
         generated_headers.append(header)
         generated_interfaces.append(interface)
         compiled_objects.append(obj)
 
-    # Compila o bootloader UEFI — busca .st (Sotlas) ou .cq (legado)
+    # Compila o bootloader UEFI Sotlas.
     bootloader_src = root / "boot" / "uefi_bootloader.st"
-    if not bootloader_src.exists():
-        bootloader_src = root / "boot" / "uefi_bootloader.cq"
     if bootloader_src.exists():
         bootloader_obj = obj_dir / "uefi_bootloader.o"
         cmd = [str(gcc), *common_flags, "-x", "c", str(bootloader_src), "-o", str(bootloader_obj)]
         res = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if res.returncode != 0:
-            raise CqError(f"falha ao compilar bootloader UEFI: {res.stderr}")
+            raise SotlasError(f"falha ao compilar bootloader UEFI: {res.stderr}")
         compiled_objects.append(bootloader_obj)
 
     # 3. Executa a linkedição do binário BOOTX64.EFI
@@ -5717,7 +5707,7 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
 
         res = subprocess.run(link_cmd, capture_output=True, text=True, env=env)
         if res.returncode != 0:
-            raise CqError(f"falha no link do binário EFI: {res.stderr}")
+            raise SotlasError(f"falha no link do binário EFI: {res.stderr}")
 
     return {
         "manifest": manifest,
@@ -5729,7 +5719,7 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
     }
 
 def main():
-    parser = argparse.ArgumentParser(description="VortexC Cq module resolver and compiler")
+    parser = argparse.ArgumentParser(description="Sotlas Compile module resolver and compiler")
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("check", "build", "parse"):
         item = sub.add_parser(command)
@@ -5737,29 +5727,29 @@ def main():
         item.add_argument("-m", "--manifest", type=Path)
         if command == "build":
             item.add_argument("-o", "--output", required=True, type=Path)
-    # O frontend Cq 0.1 é isolado do caminho de compatibilidade usado pela ISO.
+    # O frontend Sotlas Bootstrap é isolado do caminho de compatibilidade usado pela ISO.
     # Assim o novo parser pode amadurecer com testes sem aceitar corpos opacos.
-    for command in ("cq01-check", "cq01-emit-c", "cq01-build"):
-        item = sub.add_parser(command, help="frontend procedural estrito Cq 0.1")
+    for command in ("bootstrap-check", "bootstrap-emit-c", "bootstrap-build"):
+        item = sub.add_parser(command, help="frontend procedural estrito Sotlas Bootstrap")
         item.add_argument("input", type=Path)
-        if command in ("cq01-emit-c", "cq01-build"):
+        if command in ("bootstrap-emit-c", "bootstrap-build"):
             item.add_argument("-o", "--output", required=True, type=Path)
     args = parser.parse_args()
     try:
-        if args.command.startswith("cq01-"):
-            from cq01 import compile_file, compile_project, emit_c_project, parse as cq01_parse, check as cq01_check
-            if args.command == "cq01-build":
+        if args.command.startswith("bootstrap-"):
+            from bootstrap import compile_file, compile_project, emit_c_project, parse as bootstrap_parse, check as bootstrap_check
+            if args.command == "bootstrap-build":
                 modules = compile_project(args.input)
                 emit_c_project(args.input, args.output)
-                print(f"[OK] projeto Cq 0.1 emitido: {args.output} ({len(modules)} módulos)")
+                print(f"[OK] projeto Sotlas Bootstrap emitido: {args.output} ({len(modules)} módulos)")
                 return 0
-            module = cq01_parse(args.input.read_text(encoding="utf-8"))
-            cq01_check(module)
-            if args.command == "cq01-emit-c":
+            module = bootstrap_parse(args.input.read_text(encoding="utf-8"))
+            bootstrap_check(module)
+            if args.command == "bootstrap-emit-c":
                 compile_file(args.input, args.output)
-                print(f"[OK] Cq 0.1 emitido: {args.output}")
+                print(f"[OK] Sotlas Bootstrap emitido: {args.output}")
             else:
-                print(f"[OK] Cq 0.1: {module.name}; {len(module.structs)} structs; {len(module.functions)} funções")
+                print(f"[OK] Sotlas Bootstrap: {module.name}; {len(module.structs)} structs; {len(module.functions)} funções")
             return 0
         root, manifest, units, asts = frontend(args.input)
         if args.manifest:
@@ -5776,8 +5766,8 @@ def main():
         elif args.command == "build":
             result = build_modular(args.input, args.output)
             print(f"[OK] Build concluído com sucesso: {result['output']} ({len(result['compiled_objects'])} objetos)")
-    except CqError as error:
-        print(f"[ERRO] Cq: {error}", file=sys.stderr)
+    except SotlasError as error:
+        print(f"[ERRO] Sotlas: {error}", file=sys.stderr)
         return 1
     return 0
 

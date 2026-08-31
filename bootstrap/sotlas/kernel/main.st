@@ -36,7 +36,7 @@ pub fn init_frame(frame: *mut BootFrame, fb: *mut u32, width: u32, height: u32, 
 @system
 pub fn kernel_main(frame: *mut BootFrame) -> u64 {
     serial_init(COM1);
-    serial_write_line(COM1, "[Baken OS] Kernel Cq 0.1 Minimal inicializado com sucesso!");
+    serial_write_line(COM1, "[Baken OS] Kernel Sotlas Bootstrap Minimal inicializado com sucesso!");
 
     if frame != null && frame.framebuffer != null {
         let mut fb: Framebuffer = 0;

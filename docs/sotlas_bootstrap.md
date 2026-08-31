@@ -1,6 +1,6 @@
 # Especificação da Linguagem Sotlas Bootstrap Stage 0
 
-O **Sotlas Bootstrap Stage 0** é o frontend procedural normativo da linguagem Cq para o Baken OS, fornecendo tipagem estática forte, gerenciamento de escopo sem overhead e compilação para C11 estrito.
+O **Sotlas Bootstrap Stage 0** é o frontend procedural normativo da linguagem Sotlas para o Baken OS, fornecendo tipagem estática forte, gerenciamento de escopo sem overhead e compilação para C11 estrito.
 
 ---
 
@@ -9,7 +9,7 @@ O **Sotlas Bootstrap Stage 0** é o frontend procedural normativo da linguagem C
 O operador `defer` agenda a execução de uma expressão para quando o escopo léxico atual for encerrado.
 
 ### Sintaxe
-```cq
+```st
 defer <expression>;
 ```
 
@@ -20,7 +20,7 @@ defer <expression>;
 4. **Avaliação na Saída**: A expressão em `defer` é executada na fronteira de saída do escopo.
 
 ### Exemplo
-```cq
+```st
 module core::demo;
 
 pub fn process_resource() -> i64 {

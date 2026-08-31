@@ -1,15 +1,15 @@
-"""Testes unitários e de integração para o servidor LSP Cq 0.1 (cq_lsp.py)."""
+"""Testes unitários e de integração para o servidor LSP Sotlas Bootstrap (lsp.py)."""
 import importlib.util
 from pathlib import Path
 import sys
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "tools" / "vortexc"))
-SPEC_LSP = importlib.util.spec_from_file_location("cq_lsp", ROOT / "tools" / "vortexc" / "cq_lsp.py")
-cq_lsp = importlib.util.module_from_spec(SPEC_LSP)
-sys.modules["cq_lsp"] = cq_lsp
-SPEC_LSP.loader.exec_module(cq_lsp)
+sys.path.insert(0, str(ROOT / "tools" / "sotlas_compile"))
+SPEC_LSP = importlib.util.spec_from_file_location("lsp", ROOT / "tools" / "sotlas_compile" / "lsp.py")
+lsp = importlib.util.module_from_spec(SPEC_LSP)
+sys.modules["lsp"] = lsp
+SPEC_LSP.loader.exec_module(lsp)
 
 
 SAMPLE_SOURCE = """
@@ -35,11 +35,11 @@ pub fn run_app(cfg: *mut Config) -> bool {
 """
 
 
-class CqLspServerTests(unittest.TestCase):
+class SotlasLspServerTests(unittest.TestCase):
     def setUp(self):
-        self.server = cq_lsp.CqLanguageServer()
+        self.server = lsp.SotlasLanguageServer()
         self.entry_path = ROOT / "bootstrap" / "sotlas" / "kernel" / "main.st"
-        self.entry_uri = cq_lsp.path_to_uri(self.entry_path)
+        self.entry_uri = lsp.path_to_uri(self.entry_path)
 
     def test_validate_publishes_no_diagnostics_on_valid_source(self):
         diagnostics = self.server.validate(self.entry_uri, self.entry_path.read_text(encoding="utf-8"))
@@ -114,7 +114,7 @@ class CqLspServerTests(unittest.TestCase):
         source = self.entry_path.read_text(encoding="utf-8")
         self.server.validate(self.entry_uri, source)
 
-        # Procura a definição de 'serial_init' chamada em main.cq
+        # Procura a definição de 'serial_init' chamada em main.st
         lines = source.splitlines()
         serial_line_idx = next(i for i, l in enumerate(lines) if "serial_init" in l)
         serial_char_idx = lines[serial_line_idx].find("serial_init")

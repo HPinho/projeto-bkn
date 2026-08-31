@@ -1,15 +1,15 @@
-module vortexc::main;
+module sotlas_compile::main;
 import core::mem::*;
 import core::fmt::*;
-import vortexc::token::*;
-import vortexc::lexer::*;
-import vortexc::emitter::*;
+import sotlas_compile::token::*;
+import sotlas_compile::lexer::*;
+import sotlas_compile::emitter::*;
 
 pub const MAX_TOKENS: usize = 512;
 
 @export
 @system
-pub fn vortexc_compile(source: *const u8, out_buf: *mut u8, max_len: usize) -> usize {
+pub fn sotlas_compile(source: *const u8, out_buf: *mut u8, max_len: usize) -> usize {
     if source == null || out_buf == null || max_len == 0 {
         return 0;
     }
