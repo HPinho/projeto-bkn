@@ -24,13 +24,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso
 
-      - name: Verify C-Quantum Compiler (vortexc)
+      - name: Verify Sotlas Compile module graph
         run: |
-          python3 tools/vortexc/vortexc.py --version || true
+          python3 tools/sotlas_compile/compiler.py check kernel/src/main.st --manifest build/sotlas-main.manifest.json
 
       - name: Compile Baken OS Kernel & Bootloader
         run: |
-          echo "Compiling Baken OS Kernel in Cq (@system)..."
+          echo "Checking Baken OS Kernel in Sotlas (@system)..."
           mkdir -p build
 
       - name: Build UEFI ISO Image
