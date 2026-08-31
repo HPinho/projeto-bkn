@@ -1,0 +1,454 @@
+(* =============================================================================
+   Sotlas Unified Specification — Gramática Formal Consolidada
+   Barecore, SRG Memory Graph, Topology Pointers, Hardware & Applications
+   ============================================================================= *)
+
+SourceFile
+    ::= [ BarecoreHeader ] ModuleDeclaration { ImportDeclaration } { TopLevelDeclaration } EOF ;
+
+BarecoreHeader
+    ::= "barecore" ";" ;
+
+ModuleDeclaration
+    ::= "module" QualifiedIdentifier ";" ;
+
+ImportDeclaration
+    ::= [ "pub" ] "import" QualifiedIdentifier [ "::" ( "*" | "{" IdentifierList "}" ) ] ";" ;
+
+IdentifierList
+    ::= Identifier { "," Identifier } ;
+
+QualifiedIdentifier
+    ::= Identifier { "::" Identifier } ;
+
+(* ============================================================================ *)
+(* 1. DECLARAÇÕES DE TOPO DE ESCOPO                                             *)
+(* ============================================================================ *)
+
+TopLevelDeclaration
+    ::= { Directive } [ "pub" ] (
+            StructDeclaration
+        |   ClassDeclaration
+        |   MeshDeclaration
+        |   SpecDeclaration
+        |   EnumDeclaration
+        |   ConstDeclaration
+        |   StaticDeclaration
+        |   FunctionDeclaration
+        |   TrapFunctionDeclaration
+        |   TypeAliasDeclaration
+        |   MouldBlock
+        ) ;
+
+(* --- Diretivas de Compilação & Atributos de Hardware --- *)
+Directive
+    ::= "@" Identifier [ "(" DirectiveArgList ")" ] ;
+
+DirectiveArgList
+    ::= DirectiveArg { "," DirectiveArg } ;
+
+DirectiveArg
+    ::= Identifier [ ":" ( Expression | QualifiedIdentifier ) ] ;
+
+(* --- Estruturas de Dados --- *)
+StructDeclaration
+    ::= "struct" Identifier [ GenericParams ] [ "adopts" SpecList ] "{" { StructMember } "}" ;
+
+(* --- Classes com Herança Simples (C++) e Adoção de Specs (Objective-C) --- *)
+ClassDeclaration
+    ::= "class" Identifier [ GenericParams ] [ ":" BaseClass ] [ "adopts" SpecList ] "{" { ClassMember } "}" ;
+
+BaseClass
+    ::= QualifiedIdentifier [ GenericArgs ] ;
+
+SpecList
+    ::= QualifiedIdentifier [ GenericArgs ] { "," QualifiedIdentifier [ GenericArgs ] } ;
+
+MeshDeclaration
+    ::= "mesh" Identifier "{" { MeshMember } "}" ;
+
+EnumDeclaration
+    ::= "enum" Identifier [ ":" Type ] "{" { EnumVariant } "}" ;
+
+EnumVariant
+    ::= Identifier [ "(" ParameterList ")" ] [ "=" Expression ] [ "," ] ;
+
+SpecDeclaration
+    ::= "spec" Identifier [ GenericParams ] "{" { SpecMember } "}" ;
+
+MouldBlock
+    ::= "mould" Block ;
+
+ConstDeclaration
+    ::= "const" Identifier ":" Type "=" Expression ";" ;
+
+StaticDeclaration
+    ::= "static" [ "shielded" | "nvkeep" | "seal" ] ( "let" | "var" ) Identifier ":" Type "=" Expression ";" ;
+
+(* --- Membros de Structs, Classes e Specs --- *)
+StructMember
+    ::= { Directive } [ Visibility ] (
+            FieldDeclaration
+        |   FunctionDeclaration
+        |   InitDeclaration
+        ) ;
+
+ClassMember
+    ::= { Directive } [ Visibility ] (
+            FieldDeclaration
+        |   MethodDeclaration
+        |   InitDeclaration
+        |   DeinitDeclaration
+        ) ;
+
+Visibility
+    ::= "pub" | "capsule" | "lineage" ;
+
+FieldDeclaration
+    ::= [ "shielded" | "nvkeep" | "seal" ] ( "let" | "var" ) Identifier ":" Type [ "=" Expression ] ";" ;
+
+MethodDeclaration
+    ::= [ "moldable" | "reshape" ] FunctionDeclaration ;
+
+InitDeclaration
+    ::= "init" "(" [ ParameterList ] ")" Block ;
+
+DeinitDeclaration
+    ::= "deinit" Block ;
+
+MeshMember
+    ::= Identifier ":" Type [ "align" "(" IntegerLiteral ")" ] ";" ;
+
+SpecMember
+    ::= [ "irqfree" ] [ "async" ] "fn" Identifier "(" [ ParameterList ] ")" [ "->" Type ] ";" ;
+
+(* --- Funções e Rotinas de Interrupção --- *)
+FunctionDeclaration
+    ::= [ "irqfree" ] [ "async" ] "fn" Identifier [ GenericParams ]
+        "(" [ ParameterList ] ")" [ "->" Type ] ( Block | ExprBody ) ;
+
+TrapFunctionDeclaration
+    ::= "trapfn" Identifier "(" [ ParameterList ] ")" [ "->" Type ] Block ;
+
+ParameterList
+    ::= Parameter { "," Parameter } ;
+
+Parameter
+    ::= [ Identifier ] Identifier ":" Type [ "=" Expression ] ;
+
+ExprBody
+    ::= "=>" Expression ";" ;
+
+GenericParams
+    ::= "<" GenericParam { "," GenericParam } ">" ;
+
+GenericParam
+    ::= Identifier [ ":" Type ] ;
+
+GenericArgs
+    ::= "<" Type { "," Type } ">" ;
+
+TypeAliasDeclaration
+    ::= "typealias" Identifier [ GenericParams ] "=" Type ";" ;
+
+(* ============================================================================ *)
+(* 2. SISTEMA DE TIPOS UNIFICADO (SRG + TOPOLOGY POINTERS)                     *)
+(* ============================================================================ *)
+
+Type
+    ::= [ OwnershipModifier ] NonOptionalType [ "?" ] ;
+
+OwnershipModifier
+    ::= "co-owned"  (* Grafo de posse compartilhada resolvido no escopo *)
+    |   "sole"      (* Posse estática exclusiva de custo zero           *)
+    |   "island"    (* Memória isolada para execução concorrente        *)
+    |   "whisper"   (* Referência fraca ao grafo                        *)
+    |   "direct"    (* Referência direta de alta performance            *)
+    ;
+
+NonOptionalType
+    ::= PrimitiveType
+    |   TopologyPointerType
+    |   BoundedType
+    |   ArrayType
+    |   FunctionType
+    |   TupleType
+    |   QualifiedIdentifier [ GenericArgs ]
+    ;
+
+PrimitiveType
+    ::= "Int" | "Int8" | "Int16" | "Int32" | "Int64"
+    |   "UInt" | "UInt8" | "UInt16" | "UInt32" | "UInt64"
+    |   "Float32" | "Float64" | "USize" | "ISize"
+    |   "Bool" | "Char" | "String" | "Void"
+    ;
+
+TopologyPointerType
+    ::= "*" ( "rawphys" | "virtmap" | "portwire" | "dmazone" | "voidzero" | "mut" | "const" ) [ "mut" ] Type ;
+
+BoundedType
+    ::= PrimitiveType "." "bound" "[" Expression ".." Expression "]" ;
+
+ArrayType
+    ::= "[" Type ( ";" Expression | "]" ) ;
+
+FunctionType
+    ::= "(" [ TypeList ] ")" [ "async" ] "->" Type ;
+
+TupleType
+    ::= "(" Type "," TypeList ")" ;
+
+TypeList
+    ::= Type { "," Type } ;
+
+(* ============================================================================ *)
+(* 3. INSTRUÇÕES E CONTROLE DE FLUXO                                            *)
+(* ============================================================================ *)
+
+Statement
+    ::= LocalVarDecl
+    |   AssignmentStmt
+    |   HandoverStmt
+    |   QuarantineStmt
+    |   ClinchStmt
+    |   QuenchStmt
+    |   GateStmt
+    |   EmitStmt
+    |   GuardStmt
+    |   IfStmt
+    |   MatchStmt
+    |   WhileStmt
+    |   ForStmt
+    |   UnsafeBlock
+    |   ReturnStmt
+    |   ReboundStmt
+    |   BreakStmt
+    |   ContinueStmt
+    |   ExpressionStmt
+    ;
+
+LocalVarDecl
+    ::= [ "shielded" | "nvkeep" | "seal" ] ( "let" | "var" ) Identifier [ ":" Type ] "=" Expression ";" ;
+
+AssignmentStmt
+    ::= PostfixExpr ( "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ) Expression ";" ;
+
+HandoverStmt
+    ::= "handover" Expression ";" ;
+
+QuarantineStmt
+    ::= "quarantine" Expression ";" ;
+
+ClinchStmt
+    ::= "clinch" Block [ "revert" Block ] ;
+
+QuenchStmt
+    ::= "quench" Block ;
+
+GateStmt
+    ::= "gate" "(" Expression ")" Block ;
+
+EmitStmt
+    ::= "emit" "(" StringLiteral [ AsmArgs ] ")" ";" ;
+
+AsmArgs
+    ::= ":" [ ExpressionList ] [ ":" [ ExpressionList ] [ ":" [ StringLiteralList ] ] ] ;
+
+GuardStmt
+    ::= "guard" Expression "else" Block ;
+
+IfStmt
+    ::= "if" ( Expression | "let" Identifier "=" Expression ) Block [ "else" ( IfStmt | Block ) ] ;
+
+MatchStmt
+    ::= "match" Expression "{" { MatchArm } "}" ;
+
+MatchArm
+    ::= MatchPattern "=>" ( Statement | Block ) ;
+
+MatchPattern
+    ::= Literal
+    |   "_"
+    |   "." Identifier [ "(" [ PatternArgList ] ")" ]
+    |   Identifier
+    ;
+
+PatternArgList
+    ::= MatchPattern { "," MatchPattern } ;
+
+WhileStmt
+    ::= "while" Expression Block ;
+
+ForStmt
+    ::= "for" Identifier "in" Expression Block ;
+
+UnsafeBlock
+    ::= "unsafe" Block ;
+
+ReturnStmt
+    ::= "return" [ Expression ] ";" ;
+
+ReboundStmt
+    ::= "rebound" ";" ;
+
+BreakStmt
+    ::= "break" ";" ;
+
+ContinueStmt
+    ::= "continue" ";" ;
+
+ExpressionStmt
+    ::= Expression ";" ;
+
+Block
+    ::= "{" { Statement } "}" ;
+
+(* ============================================================================ *)
+(* 4. EXPRESSÕES, BIT-SLICING E OPERADORES                                      *)
+(* ============================================================================ *)
+
+Expression
+    ::= BinaryExpr ;
+
+BinaryExpr
+    ::= UnaryExpr { BinaryOp UnaryExpr } ;
+
+BinaryOp
+    ::= "==" | "!=" | "&&" | "||" | "&" | "|" | "^"
+    |   "<<" | ">>" | "<" | "<=" | ">" | ">="
+    |   "+" | "-" | "*" | "/" | "%" | "??"
+    ;
+
+UnaryExpr
+    ::= ( "!" | "-" | "~" | "*" | "&" | "await" ) UnaryExpr
+    |   PostfixExpr
+    ;
+
+PostfixExpr
+    ::= PrimaryExpr { PostfixOp } ;
+
+PostfixOp
+    ::= "." "slit" "[" Expression ".." Expression "]"   (* Bit-slice: extrai campo de bits *)
+    |   "." "notch" "[" Expression "]"                  (* Bit-notch: extrai bit isolado    *)
+    |   "." "strand"                                    (* Bit-strand: inverte endianness   *)
+    |   "." Identifier [ GenericArgs ]
+    |   "[" Expression "]"
+    |   "(" [ ArgumentList ] ")"
+    |   TrailingClosure
+    |   "?"
+    |   "!"
+    |   "as" Type
+    ;
+
+TrailingClosure
+    ::= [ "(" [ ArgumentList ] ")" ] "{" [ ClosureParamList "->" ] { Statement } "}" ;
+
+ClosureParamList
+    ::= IdentifierList ;
+
+PrimaryExpr
+    ::= Literal
+    |   Identifier
+    |   "self"
+    |   "super"
+    |   "(" Expression ")"
+    |   "[" [ ArrayElements ] "]"
+    |   "[" [ MapElements ] "]"
+    |   ClosureExpr
+    ;
+
+ClosureExpr
+    ::= "{" [ ClosureParamList "->" ] { Statement } "}" ;
+
+ArrayElements
+    ::= Expression { "," Expression } ;
+
+MapElements
+    ::= Expression ":" Expression { "," Expression ":" Expression } ;
+
+ArgumentList
+    ::= Argument { "," Argument } ;
+
+Argument
+    ::= [ Identifier ":" ] Expression ;
+
+Literal
+    ::= IntegerLiteral
+    |   HexLiteral
+    |   BinaryLiteral
+    |   FloatLiteral
+    |   StringLiteral
+    |   CharLiteral
+    |   BooleanLiteral
+    |   "nil"
+    ;
+
+StringLiteralList
+    ::= StringLiteral { "," StringLiteral } ;
+
+ExpressionList
+    ::= Expression { "," Expression } ;
+
+(* ============================================================================ *)
+(* 5. ELEMENTOS LÉXICOS (LEXER TERMINALS)                                       *)
+(* ============================================================================ *)
+
+Identifier
+    ::= ( Letter | "_" ) { Letter | Digit | "_" } ;
+
+IntegerLiteral
+    ::= Digit { Digit } ;
+
+HexLiteral
+    ::= "0x" HexDigit { HexDigit } ;
+
+BinaryLiteral
+    ::= "0b" ( "0" | "1" ) { "0" | "1" } ;
+
+FloatLiteral
+    ::= Digit { Digit } "." Digit { Digit } ;
+
+StringLiteral
+    ::= '"' { AnyCharExceptQuote } '"' ;
+
+CharLiteral
+    ::= "'" AnyChar "'" ;
+
+BooleanLiteral
+    ::= "true" | "false" ;
+
+Letter
+    ::= "A"…"Z" | "a"…"z" ;
+
+Digit
+    ::= "0"…"9" ;
+
+HexDigit
+    ::= Digit | "A"…"F" | "a"…"f" ;
+
+(* ============================================================================ *)
+(* Semântica Normativa — Sotlas 0.1                                             *)
+(*                                                                               *)
+(* SRG (Scoped Reference Graph):                                                *)
+(*  - sole:     Posse única; destruição imediata ao sair do escopo; custo zero. *)
+(*  - co-owned: ARC híbrido; ciclos resolvidos pelo grafo de escopo na AST.    *)
+(*  - island:   Região de memória isolada; livre de corridas de dados.          *)
+(*  - whisper:  Referência fraca; não incrementa contagem; pode ser nil.        *)
+(*  - direct:   Ponteiro direto sem overhead; responsabilidade do programador.  *)
+(*                                                                               *)
+(* handover:    Transfere posse de um 'sole' para o chamador; não destrói.     *)
+(* quarantine:  Isola recurso em nova região 'island'; proíbe acesso externo.  *)
+(*                                                                               *)
+(* Topologia de Ponteiros:                                                      *)
+(*  - *rawphys: Mapeamento de endereço físico direto (MMIO).                   *)
+(*  - *virtmap: Ponteiro para espaço de endereço virtual mapeado.              *)
+(*  - *portwire: Porta de I/O do processador (in/out).                         *)
+(*  - *dmazone: Buffer de DMA — acesso zero-copy entre CPU e periféricos.      *)
+(*  - *voidzero: Ponteiro opaco sem tipo (equivalente ao void*).               *)
+(*                                                                               *)
+(* clinch/revert: Seção crítica com garantia de restauração (cli/sti em x86).  *)
+(* quench:       Barreira de memória persistente (sfence + clwb).              *)
+(* gate:         Assertion em tempo de execução com aborto controlado.         *)
+(* emit:         Assembly inline com controle explícito de clobbers.           *)
+(* trapfn:       Handler de interrupção com ABI de ISR (__attribute__((interrupt))). *)
+(* ============================================================================ *)

@@ -1,0 +1,103 @@
+// Fixture: Driver VGA Barecore em Sotlas
+// Demonstra: barecore, *portwire, .slit, .notch, .strand, trapfn, clinch/revert
+barecore;
+module hal::vga;
+
+// Constantes de hardware
+const VGA_WIDTH: UInt32 = 80;
+const VGA_HEIGHT: UInt32 = 25;
+const VGA_BASE: UInt64 = 0xB8000;
+
+// Registro de controle VGA (porta I/O)
+const VGA_CTRL_PORT: UInt16 = 0x3D4;
+const VGA_DATA_PORT: UInt16 = 0x3D5;
+
+// Entrada de célula VGA: [cor_fundo:4][cor_frente:4][char:8]
+struct VgaCell {
+    var raw: UInt16;
+}
+
+pub fn vga_cell_char(cell: UInt16) -> UInt8 {
+    // .slit[0..7] extrai os 8 bits inferiores (caractere ASCII)
+    return cell.slit[0..7] as UInt8;
+}
+
+pub fn vga_cell_fg_color(cell: UInt16) -> UInt8 {
+    // .notch[8..11] → 4 bits de cor do primeiro plano
+    return cell.slit[8..11] as UInt8;
+}
+
+pub fn vga_cell_bg_color(cell: UInt16) -> UInt8 {
+    // .slit[12..15] → 4 bits de cor do plano de fundo
+    return cell.slit[12..15] as UInt8;
+}
+
+pub fn vga_make_cell(ch: UInt8, fg: UInt8, bg: UInt8) -> UInt16 {
+    let color: UInt16 = ((bg as UInt16) << 4) | (fg as UInt16);
+    return ((color << 8) | (ch as UInt16));
+}
+
+// Escreve um caractere na posição (col, row) do buffer VGA
+pub fn vga_write_char(col: UInt32, row: UInt32, ch: UInt8, fg: UInt8, bg: UInt8) {
+    let offset: UInt32 = row * VGA_WIDTH + col;
+    // *rawphys: acesso direto ao endereço físico do framebuffer de texto
+    let cell: *rawphys UInt16 = (VGA_BASE + (offset as UInt64) * 2) as *rawphys UInt16;
+    unsafe {
+        // Escrita direta via pointer de topologia física
+        emit("movw %0, (%1)" : : cell, vga_make_cell(ch, fg, bg) : "memory");
+    }
+}
+
+// Limpa toda a tela VGA com espaços em branco
+pub fn vga_clear(fg: UInt8, bg: UInt8) {
+    let blank: UInt16 = vga_make_cell(0x20, fg, bg);
+    let i: UInt32 = 0;
+    while i < VGA_WIDTH * VGA_HEIGHT {
+        let cell: *rawphys UInt16 = (VGA_BASE + (i as UInt64) * 2) as *rawphys UInt16;
+        unsafe {
+            emit("movw %0, (%1)" : : cell, blank : "memory");
+        }
+        i = i + 1;
+    }
+}
+
+// Handler de interrupção de teclado (IRQ1 — PS/2)
+// trapfn → __attribute__((interrupt))
+trapfn keyboard_isr(frame: *rawphys UInt8) {
+    // *portwire: lê dado da porta I/O do controlador de teclado
+    let scancode: *portwire UInt8 = 0x60 as *portwire UInt8;
+    let key: UInt8 = 0;
+    unsafe {
+        emit("inb (%1), %0" : key : scancode : "memory");
+    }
+    // .notch[7] → bit de release (1 = tecla solta, 0 = tecla pressionada)
+    let released: UInt8 = key.notch[7] as UInt8;
+    if released == 0 {
+        // tecla pressionada — bits [0..6] são o scancode real
+        let code: UInt8 = key.slit[0..6] as UInt8;
+        vga_write_char(0, 0, code, 7, 0);
+    }
+    // Envia End-Of-Interrupt (EOI) ao PIC mestre
+    let pic: *portwire UInt8 = 0x20 as *portwire UInt8;
+    unsafe {
+        emit("outb %0, (%1)" : : pic, 0x20 as UInt8 : "memory");
+    }
+    rebound;
+}
+
+// Muda o cursor de hardware via seção crítica (clinch)
+pub fn vga_set_cursor(pos: UInt16) {
+    let ctrl: *portwire UInt8 = VGA_CTRL_PORT as *portwire UInt8;
+    let data: *portwire UInt8 = VGA_DATA_PORT as *portwire UInt8;
+    clinch {
+        unsafe {
+            emit("outb $0x0F, (%0)" : : ctrl : "memory");
+            emit("outb %0, (%1)" : : data, (pos as UInt8) : "memory");
+            emit("outb $0x0E, (%0)" : : ctrl : "memory");
+            emit("outb %0, (%1)" : : data, ((pos >> 8) as UInt8) : "memory");
+        }
+    } revert {
+        // Se ocorrer interrupção durante a escrita, restaura o estado
+        vga_set_cursor(0);
+    }
+}
