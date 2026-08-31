@@ -1,4 +1,4 @@
-// Baken OS - Motor Gráfico de Pixels de Alta Definição em Cq (@system)
+// Baken OS - Motor Gráfico de Pixels de Alta Definição em Sotlas (@system)
 // Renderização Linear 32-bit ARGB8888.
 // A rota gráfica inicial usa o framebuffer GOP diretamente. Double buffering
 // só pode ser ligado após o PMM ser inicializado com um mapa de memória UEFI

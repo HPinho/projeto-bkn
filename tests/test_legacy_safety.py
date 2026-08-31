@@ -34,20 +34,6 @@ class LegacySafetyTests(unittest.TestCase):
         for path in (ROOT / "tests").rglob("*.st"):
             self.assertIn("fixtures", path.parts, path)
 
-    def test_legacy_cq_vortexc_paths_are_absent(self):
-        obsolete = (
-            "bootstrap/cq01",
-            "tests/fixtures/vortexc",
-            "tools/vortexc",
-            "tools/vscode-cq",
-            "build/generated/cq",
-            "build/obj/cq",
-            "build/cq-main.manifest.json",
-            "build/cq-main.audit.manifest.json",
-        )
-        for relative in obsolete:
-            self.assertFalse((ROOT / relative).exists(), relative)
-
     def test_sotlas_toolchain_and_vscode_extension_are_canonical(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
         cmake = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")

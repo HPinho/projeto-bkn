@@ -1,4 +1,4 @@
-// Baken OS - Desktop Shell em Cq (@system).
+// Baken OS - Desktop Shell em Sotlas (@system).
 // Interface nativa da rota gráfica modular.
 
 module kernel::desktop_shell;

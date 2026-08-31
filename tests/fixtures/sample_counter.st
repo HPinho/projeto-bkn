@@ -1,4 +1,4 @@
-// Fixture: Contador simples em Sotlas (equivalente ao cq01_sample.cq)
+// Fixture: Contador simples em Sotlas.
 module core::counter;
 
 pub struct Counter {

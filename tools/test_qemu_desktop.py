@@ -179,7 +179,7 @@ if __name__ == "__main__":
         mode.add_argument("--menu", choices=["a", "b"], help="abre o menu suspenso ('a' = Arquivo, 'b' = Baken OS)")
         mode.add_argument("--control-center", action="store_true", help="abre a Central de Controle Q-HAL")
         mode.add_argument("--spotlight", action="store_true", help="abre a Busca Global Spotlight")
-        mode.add_argument("--terminal", action="store_true", help="abre a janela do Terminal Cq")
+        mode.add_argument("--terminal", action="store_true", help="abre a janela do Terminal Sotlas")
         mode.add_argument("--files", action="store_true", help="abre o Explorador de Arquivos BakenFS")
         mode.add_argument("--context-menu", action="store_true", help="abre o menu de contexto do desktop")
         mode.add_argument("--save-note", metavar="MARCADOR", help="anexa e salva um marcador no editor de notas")

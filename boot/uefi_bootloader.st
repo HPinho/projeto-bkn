@@ -132,7 +132,7 @@ static EFI_GUID EFI_ABSOLUTE_POINTER_PROTOCOL_GUID = {
     0x8d59d32b, 0xc655, 0x4ae9, {0x9b, 0x15, 0xf2, 0x59, 0x04, 0x99, 0x2a, 0x43}
 };
 
-/* UEFI Block I/O é a ponte temporária de persistência enquanto o driver Cq
+/* UEFI Block I/O é a ponte temporária de persistência enquanto o driver Sotlas
  * NVMe/AHCI é migrado. O kernel nunca recebe um caminho de host, só esta API
  * de blocos validada pelo firmware. */
 static EFI_GUID EFI_BLOCK_IO_PROTOCOL_GUID = {

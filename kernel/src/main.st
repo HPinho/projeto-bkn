@@ -1,6 +1,6 @@
-// Baken OS - entrada futura do kernel modular em Cq (@system).
+// Baken OS - entrada futura do kernel modular em Sotlas (@system).
 //
-// Esta é a única entrada planejada após o linker Cq resolver o grafo de
+// Esta é a única entrada planejada após o linker Sotlas resolver o grafo de
 // módulos. Até lá, a ISO usa a ponte documentada em docs/architecture.md;
 // não adicione outra função baken_kernel_main a módulos auxiliares.
 
@@ -24,7 +24,7 @@ pub struct BakenBootInfo {
     pub install_target_block_io_protocol: *mut u8;
 }
 
-// Entrada inicial do kernel Cq. A primeira meta é iniciar uma sessão gráfica
+// Entrada inicial do kernel Sotlas. A primeira meta é iniciar uma sessão gráfica
 // íntegra; drivers e serviços só entram aqui depois de terem testes de I/O e
 // de falha correspondentes.
 @system

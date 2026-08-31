@@ -1,4 +1,4 @@
-// Compositor canônico do desktop Cq.
+// Compositor canônico do desktop Sotlas.
 //
 // Esta é a única fachada que kernel::main pode usar para renderizar a sessão
 // gráfica. Ela impede que o boot, widgets e aplicativos inicializem motores de
@@ -17,7 +17,7 @@ pub fn desktop_compositor_init(screen_w: u32, screen_h: u32) -> void {
 
         // graphics_engine já recebeu o framebuffer no início de kernel::main.
         // A integração de BakenUI e WindowManager volta aqui quando ambos
-        // estiverem no build Cq validado; o shell continua sendo a única
+        // estiverem no build Sotlas validado; o shell continua sendo a única
         // superfície renderizada nesta rota inicial.
         desktop_shell_init(screen_w, screen_h);
         COMPOSITOR_READY = true;

@@ -6,13 +6,13 @@ Há **uma única rota executável de interface**. O firmware UEFI só prepara o
 hardware; nenhuma camada de boot desenha janelas, dock ou widgets.
 
 ```text
-boot/uefi_bootloader.cq
-    -> VortexC: kernel/src/main.cq + módulos Cq
+boot/uefi_bootloader.st
+    -> Sotlas Compile: kernel/src/main.st + módulos Sotlas
     -> framebuffer GOP
     -> desktop Baken OS
 ```
 
-`tools/build_uefi_desktop.ps1` chama o VortexC, que resolve a entrada Cq,
+`tools/build_uefi_desktop.ps1` chama o Sotlas Compile, que resolve a entrada Sotlas,
 gera uma unidade C por módulo e vincula o EFI aceito pelos launchers
 `run_baken.ps1`, `run_baken_iso.ps1` e `run_baken_vbox.ps1`.
 
@@ -28,7 +28,7 @@ Também não há bridge Electron/Antigravity/Wayland na rota oficial. Aplicativo
 futuros devem usar serviços próprios do Baken, sempre por compositor e gerente
 de janelas canônicos.
 
-O diretório `bknc/` também não participa do boot nem da cadeia Cq modular.
+O diretório `bknc/` também não participa do boot nem da cadeia Sotlas modular.
 Seu código remanescente é um protótipo de ferramenta hospedeira que só emite
 LLVM IR textual preliminar; ele não assina, empacota nem instala executáveis.
 O emissor legado, que preenchia uma assinatura fictícia, foi removido para que
@@ -55,10 +55,10 @@ subsystems só poderão retornar depois de um carregador e isolamento verificáv
 Antes de qualquer geração de binário, valide o grafo Sotlas com:
 
 ```powershell
-python tools/vortexc/vortexc.py (legado) check kernel/src/main.cq --manifest build/cq-main.manifest.json
+python tools/sotlas_compile/compiler.py check kernel/src/main.st --manifest build/sotlas-main.manifest.json
 ```
 
-Esse comando resolve a entrada e audita todos os módulos Cq conhecidos: detecta
+Esse comando resolve a entrada e audita todos os módulos Sotlas conhecidos: detecta
 módulos duplicados, imports ausentes, auto-imports e dependências circulares,
 gravando uma ordem de compilação reproduzível para a rota ativa.
 
@@ -103,7 +103,7 @@ padrão e não procura, desliga ou reutiliza uma VM pessoal chamada `BakenOS`.
 O boot nessa VM é uma validação obrigatória antes de classificar uma ISO como
 testável.
 
-## Migração para Cq modular
+## Migração para Sotlas modular
 
 O destino é manter uma única árvore em Sotlas:
 
@@ -116,20 +116,20 @@ kernel::main
     -> aplicações e widgets
 ```
 
-Os oito arquivos Cq canônicos fazem parte do EFI: o VortexC valida o grafo,
+Os oito arquivos Sotlas canônicos fazem parte do EFI: o Sotlas Compile valida o grafo,
 emite um objeto por módulo, gera interfaces e executa o link. A entrada pública
 é `kernel::main`; não há runtime C de desktop na rota oficial.
 
 `kernel::desktop_compositor` é a fachada gráfica canônica e é a única função
 de composição chamada por `kernel::main`. Ela inicializa o desktop shell, que
-inicializa o `window_manager` canônico. A rota Cq validada contém oito módulos:
+inicializa o `window_manager` canônico. A rota Sotlas validada contém oito módulos:
 renderização, animação/UI, gerenciador de janelas, shell, compositor e entrada.
 O `window_manager` não abre aplicativos de demonstração e não importa terminal,
 rede ou armazenamento; aplicativos só entram quando tiverem serviços reais.
 
 As pilhas paralelas `bakenfx`, `baken_ui`, `baken_compositor`, seus efeitos e
 o `shell_cli` legado foram removidos. `graphics_engine` + `baken_rasterizer` +
-`baken_ui_oop` são as únicas camadas visuais na rota Cq inicial.
+`baken_ui_oop` são as únicas camadas visuais na rota Sotlas inicial.
 
 Também foram removidas telas isoladas de central de controle, documentação,
 busca, splash, menus, temas e widgets alternativos. Elas não eram abertas pelo
@@ -151,7 +151,7 @@ serviços e persistência reais.
 ## Critério para remover a ponte C atual
 
 `baken_kernel_all.c` permanece apenas como referência histórica fora do build.
-O build Cq atende aos critérios de substituição:
+O build Sotlas atende aos critérios de substituição:
 
 1. resolver importações transitivas;
 2. gerar objetos separados por módulo;
@@ -159,4 +159,4 @@ O build Cq atende aos critérios de substituição:
 4. vincular `kernel::main` como a única entrada do kernel;
 5. produzir o mesmo `BOOTX64.EFI` validado em QEMU/VirtualBox.
 
-Ele não participa da ISO, do disco instalado nem do alvo `cq_build`.
+Ele não participa da ISO, do disco instalado nem do alvo `sotlas_build`.

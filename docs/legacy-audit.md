@@ -12,11 +12,11 @@ no LBA reservado e reconhecido após novo boot. A validação no VirtualBox aind
 é necessária antes de qualquer entrega mais ampla. Esse registro não é um
 sistema de arquivos nem torna a ISO instalável em uma máquina real.
 
-## Rota Cq oficial em construção
+## Rota Sotlas oficial em construção
 
 `kernel::main -> graphics_engine -> desktop_compositor -> desktop_shell -> window_manager`.
 
-O resolvedor Cq valida este grafo de oito módulos. Os demais módulos Cq legados
+O resolvedor Sotlas valida este grafo de oito módulos. Os demais módulos Sotlas legados
 foram removidos, não apenas desativados: não há uma segunda UI, terminal,
 aplicativo, driver ou serviço oculto fora da rota oficial.
 
@@ -25,24 +25,24 @@ aplicativo, driver ou serviço oculto fora da rota oficial.
 - `block_dev` não publica mais NVMe/SATA fictícios, suas capacidades ou modelos inventados.
 - NVMe e AHCI não retornam sucesso para I/O que não aguarda conclusão do dispositivo.
 - FAT32 e GPT usam a API correta de blocos e deixam de aceitar leitura falsa; GPT não inventa duas partições padrão.
-- A tela Cq do instalador é explicitamente uma prévia até o backend de armazenamento ser implementado.
-- O motor gráfico Cq inicial usa GOP diretamente; a alocação de backbuffer fica bloqueada até o PMM ser inicializado corretamente a partir do mapa UEFI.
+- A tela Sotlas do instalador é explicitamente uma prévia até o backend de armazenamento ser implementado.
+- O motor gráfico Sotlas inicial usa GOP diretamente; a alocação de backbuffer fica bloqueada até o PMM ser inicializado corretamente a partir do mapa UEFI.
 
 ## O que ainda não pode ser prometido
 
-- Compilação e link completos de todos os módulos Cq para `BOOTX64.EFI`.
+- Compilação e link completos de todos os módulos Sotlas para `BOOTX64.EFI`.
 - Driver NVMe/AHCI com filas, DMA, doorbells, interrupções e confirmação de I/O.
 - Leitura de entradas GPT, FAT32 completo ou BakenFS persistente.
 - Particionamento, formatação e cópia segura de uma instalação.
 - Fonte vetorial/anti-aliased e ícones finais idênticos à referência visual.
 - Os drivers USB Mass Storage e VirtIO-GPU: agora falham explicitamente, pois
   seus transportes ainda não foram implementados.
-- CMake produzir objetos Cq: CMake agora só executa verificações; ele não é um
-  compilador Cq e não deve alegar que produz um kernel.
+- CMake produzir objetos Sotlas: CMake agora só executa verificações; ele não é um
+  compilador Sotlas e não deve alegar que produz um kernel.
 - `Sotlas build` agora falha explicitamente até o backend gerar objetos de
   todos os módulos e realizar o link; a antiga transpiração isolada foi
   removida para não mascarar falhas de compilação.
-- A antiga ponte `libbkn/src/bkn_bridge.cq` foi removida: não era importada nem
+- A antiga ponte `libbkn/src/bkn_bridge.st` foi removida: não era importada nem
   construída, simulava telemetria/processos/chaves e executava código via
   caminhos antigos fora do workspace.
 - A rede agora começa desligada: os esqueletos Intel/Realtek não fazem mais
@@ -84,10 +84,10 @@ aplicativo, driver ou serviço oculto fora da rota oficial.
 - Os módulos de auto-reparo, auto-testes, crash dump, SMP e áudio foram
   removidos porque relatavam recuperação, aprovação criptográfica, registradores,
   CPUs ou reprodução sem validar o hardware e a execução correspondente.
-- Loader ELF, rede TCP/IP, QN-Bus, pipes e IPC foram removidos da árvore Cq.
+- Loader ELF, rede TCP/IP, QN-Bus, pipes e IPC foram removidos da árvore Sotlas.
   Ainda não há processos, socket, scheduler ou driver vinculados para sustentar
   essas APIs; mantê-las daria a impressão errada de execução user-mode e rede.
 
 ## Critério para reativar um subsistema
 
-Um subsistema sai desta lista somente com: teste automatizado de sucesso e falha, integração na rota Cq, e uma execução em QEMU antes de ser oferecido pelo instalador.
+Um subsistema sai desta lista somente com: teste automatizado de sucesso e falha, integração na rota Sotlas, e uma execução em QEMU antes de ser oferecido pelo instalador.

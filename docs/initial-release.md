@@ -14,14 +14,14 @@
   discos nem avança para uma instalação concluída.
 - Persistência mínima de teste: confirmação no assistente grava `INSTALL1`
   na imagem virtual via UEFI Block I/O; o registro é reconhecido após reboot.
-- Testes automatizados do grafo de módulos Cq, contratos de segurança e
+- Testes automatizados do grafo de módulos Sotlas, contratos de segurança e
   empacotamento. O boot em VM é executado separadamente antes de uma ISO.
 
 ## Como validar
 
 ```powershell
-python -m unittest tests/test_sotlas compile_resolver.py
-python tools/sotlas compile/sotlas compile.py check kernel/src/main.Sotlas --manifest build/cq-main.manifest.json
+python -m unittest tests.test_sotlas_resolver
+python tools/sotlas_compile/compiler.py check kernel/src/main.st --manifest build/sotlas-main.manifest.json
 ./tools/build_uefi_desktop.ps1
 python tools/scripts/create_fat32_img.py
 python tools/test_qemu_desktop.py --install
@@ -32,6 +32,6 @@ python tools/test_qemu_desktop.py --install
 Esta é uma versão inicial, não uma distribuição de produção. O registro
 persistente ainda não é um BakenFS completo: arquivos de usuário, permissões,
 diretórios e cópia do rootfs continuam sendo a próxima etapa. A ISO El Torito
-é mídia óptica para VM, não uma imagem híbrida para pendrive. O sotlas compile resolve
-e valida o grafo Cq, mas a ISO ainda usa a ponte C documentada enquanto o
+é mídia óptica para VM, não uma imagem híbrida para pendrive. O Sotlas Compile resolve
+e valida o grafo Sotlas, mas a ISO ainda usa a ponte C documentada enquanto o
 backend de geração de objetos Sotlas é ampliado.

@@ -1,4 +1,4 @@
-// Baken OS - Motor de Animação e Física em Cq (@system)
+// Baken OS - Motor de Animação e Física em Sotlas (@system)
 // Interpolação Bézier, Spring Physics para Dock Magnify e Transições de Janela
 
 module kernel::baken_animation;

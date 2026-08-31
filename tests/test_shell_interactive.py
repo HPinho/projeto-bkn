@@ -71,7 +71,7 @@ class ShellInteractiveTests(unittest.TestCase):
             {"title": "Arquivos - BakenFS", "sub": "Explorador de Arquivos (/home)", "app_id": 0},
             {"title": "Notas Rapidas", "sub": "Editor de texto persistente", "app_id": 6},
             {"title": "Central de Ajustes", "sub": "Configuracoes de Hardware", "app_id": 10},
-            {"title": "Terminal Cq", "sub": "Interpretador de Comandos Vortex", "app_id": 9},
+            {"title": "Terminal Sotlas", "sub": "Interpretador de Comandos Sotlas", "app_id": 9},
             {"title": "Assistente Q-HAL AI", "sub": "Inteligencia Artificial Soberana", "app_id": 4},
             {"title": "Instalar Baken OS", "sub": "Assistente de Instalacao UEFI", "app_id": 14},
         ]
@@ -93,7 +93,7 @@ class ShellInteractiveTests(unittest.TestCase):
         query = "term"
         filtered = [item for item in self.catalog if str_contains_nocase(item["title"], query) or str_contains_nocase(item["sub"], query)]
         self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered[0]["title"], "Terminal Cq")
+        self.assertEqual(filtered[0]["title"], "Terminal Sotlas")
         self.assertEqual(filtered[0]["app_id"], 9)
 
     def test_spotlight_dynamic_filtering_no_match(self):

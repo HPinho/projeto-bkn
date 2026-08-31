@@ -2,10 +2,10 @@
  * Baken OS 2.0 Sovereign — caminho canônico de renderização (C / Bare-Metal x86_64)
  *
  * RESPONSABILIDADE: este arquivo contém a implementação que é efetivamente
- * vinculada pela ISO. Ele é temporariamente monolítico porque o linker Cq
+ * vinculada pela ISO. Ele é temporariamente monolítico porque o linker Sotlas
  * ainda não compila o grafo `kernel::main -> desktop_shell -> compositor`.
  * Não crie uma segunda entrada `baken_kernel_main`: migre cada subsistema para
- * o compositor Cq e só então substitua esta ponte de compatibilidade.
+ * o compositor Sotlas e só então substitua esta ponte de compatibilidade.
  *
  * Capacidades presentes neste artefato:
  * - Handoff UEFI GOP, teclado, ponteiro e ciclo de composição gráfico.
@@ -1209,7 +1209,7 @@ static void render_desktop(uint32_t *fb, uint32_t stride, uint32_t width, uint32
         draw_string_aa(fb, stride, wx + 14, 434, "* Notas Rapidas", 0x854D0E);
         draw_string_aa(fb, stride, wx + 14, 450, "Lembrete Baken OS:", 0x713F12);
         draw_string_aa(fb, stride, wx + 14, 464, "- Desktop grafico em validacao", 0x854D0E);
-        draw_string_aa(fb, stride, wx + 14, 478, "- Compilador Cq: grafo validado", 0x854D0E);
+        draw_string_aa(fb, stride, wx + 14, 478, "- Compilador Sotlas: grafo validado", 0x854D0E);
         draw_string_aa(fb, stride, wx + 14, 492, "- Instalador: somente registro teste", 0x854D0E);
     }
 
@@ -1335,7 +1335,7 @@ static void handle_desktop_mouse_click(uint32_t width, uint32_t height, int *nee
     }
 }
 
-/* Durante a migração Cq, a entrada pública é gerada a partir de
+/* Durante a migração Sotlas, a entrada pública é gerada a partir de
  * kernel::main. Este runtime mantém o desktop funcional sob um símbolo
  * privado até que seus subsistemas tenham sido completamente portados. */
 #ifdef BAKEN_LEGACY_RUNTIME_ONLY
