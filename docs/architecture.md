@@ -52,10 +52,10 @@ instalação, sem permitir que a mídia de origem seja formatada.
 Não há compatibilidade POSIX, Win32, WASM ou LibC ativa nesta versão. Esses
 subsystems só poderão retornar depois de um carregador e isolamento verificáveis.
 
-Antes de qualquer geração de binário, valide o grafo Cq com:
+Antes de qualquer geração de binário, valide o grafo Sotlas com:
 
 ```powershell
-python tools/vortexc/vortexc.py check kernel/src/main.cq --manifest build/cq-main.manifest.json
+python tools/vortexc/vortexc.py (legado) check kernel/src/main.cq --manifest build/cq-main.manifest.json
 ```
 
 Esse comando resolve a entrada e audita todos os módulos Cq conhecidos: detecta
@@ -105,7 +105,7 @@ testável.
 
 ## Migração para Cq modular
 
-O destino é manter uma única árvore em Cq:
+O destino é manter uma única árvore em Sotlas:
 
 ```text
 kernel::main

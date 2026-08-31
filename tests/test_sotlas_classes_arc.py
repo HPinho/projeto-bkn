@@ -64,7 +64,7 @@ class CqClassesAndArcTests(unittest.TestCase):
         self.assertIn("Point_get_x(&(p))", emitted)
 
     def test_core_arc_compiles_and_links_cleanly(self):
-        entry = ROOT / "bootstrap" / "cq01" / "core" / "arc.cq"
+        entry = ROOT / "bootstrap" / "sotlas" / "core" / "arc.st"
         cq01.emit_c_project(entry, self.output_c)
         self.assertTrue(self.output_c.exists())
 
@@ -76,8 +76,8 @@ class CqClassesAndArcTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Erro GCC core::arc: {res.stderr}")
 
     def test_core_option_and_result_compile_cleanly(self):
-        for subpath in ["option.cq", "result.cq"]:
-            entry = ROOT / "bootstrap" / "cq01" / "core" / subpath
+        for subpath in ["option.st", "result.st"]:
+            entry = ROOT / "bootstrap" / "sotlas" / "core" / subpath
             cq01.emit_c_project(entry, self.output_c)
             gcc = vortexc.find_gcc(ROOT)
             env = dict(os.environ)
@@ -87,7 +87,7 @@ class CqClassesAndArcTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, f"Erro GCC core::{subpath}: {res.stderr}")
 
     def test_runtime_class_and_arc_execution(self):
-        test_source = ROOT / "bootstrap" / "cq01" / "test_runtime_app.cq"
+        test_source = ROOT / "bootstrap" / "sotlas" / "test_runtime_app.st"
         test_source.write_text("""
         module app::test;
         import core::mem::*;

@@ -39,7 +39,7 @@ aplicativo, driver ou serviço oculto fora da rota oficial.
   seus transportes ainda não foram implementados.
 - CMake produzir objetos Cq: CMake agora só executa verificações; ele não é um
   compilador Cq e não deve alegar que produz um kernel.
-- `vortexc build` agora falha explicitamente até o backend gerar objetos de
+- `Sotlas build` agora falha explicitamente até o backend gerar objetos de
   todos os módulos e realizar o link; a antiga transpiração isolada foi
   removida para não mascarar falhas de compilação.
 - A antiga ponte `libbkn/src/bkn_bridge.cq` foi removida: não era importada nem

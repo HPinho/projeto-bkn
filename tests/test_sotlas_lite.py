@@ -1,4 +1,4 @@
-"""Testes unitários e de integração para o compilador auto-hospedado VortexC-lite (Fase D)."""
+"""Testes unitários e de integração para o compilador auto-hospedado Sotlas-lite (Fase D)."""
 import os
 from pathlib import Path
 import subprocess
@@ -11,9 +11,9 @@ import cq01
 import vortexc
 
 
-class VortexCLiteTests(unittest.TestCase):
+class SotlasLiteTests(unittest.TestCase):
     def setUp(self):
-        self.entry_path = ROOT / "bootstrap" / "cq01" / "vortexc_lite" / "main.cq"
+        self.entry_path = ROOT / "bootstrap" / "sotlas" / "vortexc_lite" / "main.st"
         self.output_c = ROOT / "build" / "test_vortexc_lite_build.c"
         self.output_o = ROOT / "build" / "test_vortexc_lite_build.o"
 
@@ -47,7 +47,7 @@ class VortexCLiteTests(unittest.TestCase):
         env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
         cmd = [str(gcc), "-std=c11", "-Wall", "-Wextra", "-Werror", "-c", str(self.output_c), "-o", str(self.output_o)]
         res = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        self.assertEqual(res.returncode, 0, f"Falha na compilação GCC do VortexC-lite: {res.stderr}")
+        self.assertEqual(res.returncode, 0, f"Falha na compilação GCC do Sotlas-lite: {res.stderr}")
         self.assertTrue(self.output_o.exists())
 
     def test_self_hosted_compiler_executes_and_transpiles_cq_code(self):
@@ -83,9 +83,9 @@ int main(void) {
         env["PATH"] = str(gcc.parent) + os.pathsep + env.get("PATH", "")
         cmd = [str(gcc), "-std=c11", str(self.output_c), str(driver_c), "-o", str(driver_exe)]
         res = subprocess.run(cmd, capture_output=True, text=True, env=env)
-        self.assertEqual(res.returncode, 0, f"Falha ao ligar driver do VortexC-lite: {res.stderr}")
+        self.assertEqual(res.returncode, 0, f"Falha ao ligar driver do Sotlas-lite: {res.stderr}")
 
-        # Executa o executável compilado do VortexC-lite
+        # Executa o executável compilado do Sotlas-lite
         run_res = subprocess.run([str(driver_exe)], capture_output=True, text=True, env=env)
         self.assertEqual(run_res.returncode, 0, f"Erro na execução do driver: {run_res.stderr}")
         self.assertIn("uint32_t", run_res.stdout)

@@ -34,7 +34,7 @@ pub fn sum(limit: i64) -> i64 {
 """
 
 
-class Cq01FrontendTests(unittest.TestCase):
+class SotlasFrontendCompatTests(unittest.TestCase):
     def test_lex_parse_check_and_emit(self):
         module = cq01.parse(SOURCE)
         self.assertEqual(module.name, "core::counter")
@@ -206,7 +206,7 @@ class Cq01FrontendTests(unittest.TestCase):
         self.assertIn("((uint8_t *)(addr))", emitted)
 
     def test_core_fmt_module_compiles_cleanly(self):
-        source = (ROOT / "bootstrap" / "cq01" / "core" / "fmt.cq").read_text(encoding="utf-8")
+        source = (ROOT / "bootstrap" / "sotlas" / "core" / "fmt.cq").read_text(encoding="utf-8")
         module = cq01.parse(source)
         cq01.check(module)
         emitted = cq01.emit_c(module)
@@ -214,7 +214,7 @@ class Cq01FrontendTests(unittest.TestCase):
         self.assertIn("size_t u64_to_dec", emitted)
 
     def test_core_serial_module_compiles_cleanly(self):
-        source = (ROOT / "bootstrap" / "cq01" / "core" / "serial.cq").read_text(encoding="utf-8")
+        source = (ROOT / "bootstrap" / "sotlas" / "core" / "serial.cq").read_text(encoding="utf-8")
         module = cq01.parse(source)
         cq01.check(module)
         emitted = cq01.emit_c(module)
@@ -223,7 +223,7 @@ class Cq01FrontendTests(unittest.TestCase):
         self.assertIn("void serial_write_line", emitted)
 
     def test_core_vga_module_compiles_cleanly(self):
-        source = (ROOT / "bootstrap" / "cq01" / "core" / "vga.cq").read_text(encoding="utf-8")
+        source = (ROOT / "bootstrap" / "sotlas" / "core" / "vga.cq").read_text(encoding="utf-8")
         module = cq01.parse(source)
         cq01.check(module)
         emitted = cq01.emit_c(module)
@@ -232,7 +232,7 @@ class Cq01FrontendTests(unittest.TestCase):
         self.assertIn("void fill_rect(Framebuffer * fb", emitted)
 
     def test_compiles_bootstrap_project_in_dependency_order(self):
-        entry = ROOT / "bootstrap" / "cq01" / "kernel" / "main.cq"
+        entry = ROOT / "bootstrap" / "sotlas" / "kernel" / "main.st"
         modules = cq01.compile_project(entry)
         module_names = [item.name for item in modules]
         self.assertEqual(module_names, ["core::mem", "core::fmt", "core::serial", "core::vga", "kernel::minimal"])

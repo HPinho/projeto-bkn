@@ -1,6 +1,6 @@
-# Especificação da Linguagem Cq 0.1
+# Especificação da Linguagem Sotlas Bootstrap Stage 0
 
-O **Cq 0.1** é o frontend procedural normativo da linguagem Cq para o Baken OS, fornecendo tipagem estática forte, gerenciamento de escopo sem overhead e compilação para C11 estrito.
+O **Sotlas Bootstrap Stage 0** é o frontend procedural normativo da linguagem Cq para o Baken OS, fornecendo tipagem estática forte, gerenciamento de escopo sem overhead e compilação para C11 estrito.
 
 ---
 

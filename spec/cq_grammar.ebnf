@@ -1,5 +1,13 @@
-(* Cq 0.1 — contrato de módulos do MVP, agora expandido como subconjunto
- * procedural compilável pelo VortexC. *)
+(* =============================================================================
+   LEGADO: Cq 0.1 — gramática procedural original (subconjunto compilável pelo VortexC).
+   Este arquivo é mantido apenas por compatibilidade histórica.
+
+   SUCESSOR: spec/sotlas_grammar.ebnf — gramática formal unificada Sotlas 0.2
+             com SRG (Scoped Reference Graph), topology pointers, OOP, e barecore.
+
+   Toolchain migrado: sotlas compile  (substitui: VortexC / cqc)
+   Extensões migradas: .st / .sth     (substituem: .cq / .cqh)
+   ============================================================================= *)
 
 SourceFile       ::= ModuleDeclaration { ImportDeclaration } { TopLevelDeclaration } EOF ;
 ModuleDeclaration ::= "module" QualifiedIdentifier ";" ;

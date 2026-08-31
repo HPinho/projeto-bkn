@@ -1,0 +1,144 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Sotlas",
+  "patterns": [
+    { "include": "#keywords" },
+    { "include": "#ownership" },
+    { "include": "#topology_ptrs" },
+    { "include": "#hardware" },
+    { "include": "#bit_accessors" },
+    { "include": "#strings" },
+    { "include": "#char_literals" },
+    { "include": "#comments" },
+    { "include": "#types" },
+    { "include": "#attributes" },
+    { "include": "#numbers" }
+  ],
+  "repository": {
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.sotlas",
+          "match": "\\b(if|else|for|while|return|break|continue|in|match|guard|defer)\\b"
+        },
+        {
+          "name": "keyword.declaration.sotlas",
+          "match": "\\b(module|import|pub|priv|internal|fn|trapfn|struct|enum|class|mesh|spec|adopts|moldable|reshape|barecore|const|static|let|var|unsafe|as|where)\\b"
+        },
+        {
+          "name": "keyword.srg.sotlas",
+          "match": "\\b(handover|quarantine|rebound)\\b"
+        },
+        {
+          "name": "constant.language.sotlas",
+          "match": "\\b(true|false|nil)\\b"
+        },
+        {
+          "name": "keyword.operator.sotlas",
+          "match": "\\b(co-owned)\\b"
+        }
+      ]
+    },
+    "ownership": {
+      "patterns": [
+        {
+          "name": "storage.modifier.sotlas",
+          "match": "\\b(sole|island|whisper|direct|co-owned)\\b"
+        }
+      ]
+    },
+    "topology_ptrs": {
+      "patterns": [
+        {
+          "name": "storage.type.pointer.sotlas",
+          "match": "\\*(rawphys|virtmap|portwire|dmazone|voidzero|mut)\\b"
+        }
+      ]
+    },
+    "hardware": {
+      "patterns": [
+        {
+          "name": "keyword.hardware.sotlas",
+          "match": "\\b(clinch|revert|quench|gate|emit|rebound)\\b"
+        }
+      ]
+    },
+    "bit_accessors": {
+      "patterns": [
+        {
+          "name": "support.function.bit.sotlas",
+          "match": "\\.(slit|notch|strand)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.sotlas",
+          "match": "\\b(Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float32|Float64|USize|ISize|Bool|Void|String)\\b"
+        },
+        {
+          "name": "entity.name.type.sotlas",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "entity.name.function.decorator.sotlas",
+          "match": "@[a-zA-Z0-9_]+"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.sotlas",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.sotlas",
+          "match": "\\\\."
+        }
+      ]
+    },
+    "char_literals": {
+      "name": "string.quoted.single.sotlas",
+      "match": "'([^'\\\\]|\\\\.)'"
+    },
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.sotlas",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.sotlas",
+          "begin": "\\(\\*",
+          "end": "\\*\\)"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.sotlas",
+          "match": "\\b0x[0-9a-fA-F_]+\\b"
+        },
+        {
+          "name": "constant.numeric.binary.sotlas",
+          "match": "\\b0b[01_]+\\b"
+        },
+        {
+          "name": "constant.numeric.float.sotlas",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.sotlas",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    }
+  },
+  "scopeName": "source.sotlas"
+}

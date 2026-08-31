@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
-"""VortexC: frontend e backend modular inicial da linguagem Cq.
+"""VortexC: frontend e backend modular da linguagem Sotlas (anteriormente Cq).
 
-O compilador resolve o grafo Cq, valida sua interface pública e emite uma
+O compilador resolve o grafo Sotlas, valida sua interface pública e emite uma
 unidade C isolada para cada módulo. A entrada do kernel e a linkedição
-pertencem integralmente ao grafo Cq.
+pertencem integralmente ao grafo Sotlas.
+
+Extensões suportadas: .st (Sotlas source) / .sth (Sotlas headers)
+Alias legado: .cq (ainda suportado por compatibilidade retroativa)
 """
 import argparse
 import json
@@ -47,22 +50,31 @@ def discover_units(root):
     for source_root in (root / "kernel", root / "libbkn", root / "boot", root / "apps"):
         if not source_root.is_dir():
             continue
-        for path in source_root.rglob("*.cq"):
-            text = path.read_text(encoding="utf-8")
-            declarations = list(MODULE_RE.finditer(text))
-            if not declarations:
-                if MODULE_KEYWORD_RE.search(text):
-                    raise CqError(f"{path.relative_to(root)}: declaração module inválida")
-                continue
-            if len(declarations) != 1:
-                raise CqError(
-                    f"{path.relative_to(root)}: um arquivo Cq pode declarar exatamente um módulo"
-                )
-            name = declarations[0].group(1)
-            if name in units:
-                duplicates.append((name, units[name]["path"], path))
-            else:
-                units[name] = {"path": path, "text": text}
+        # Aceita .st (Sotlas) e .cq (legado Cq) — .st tem precedência
+        for ext in ("*.st", "*.cq"):
+            for path in source_root.rglob(ext):
+                text = path.read_text(encoding="utf-8")
+                declarations = list(MODULE_RE.finditer(text))
+                if not declarations:
+                    if MODULE_KEYWORD_RE.search(text):
+                        raise CqError(f"{path.relative_to(root)}: declaração module inválida")
+                    continue
+                if len(declarations) != 1:
+                    raise CqError(
+                        f"{path.relative_to(root)}: um arquivo Sotlas pode declarar exatamente um módulo"
+                    )
+                name = declarations[0].group(1)
+                if name in units:
+                    # .st tem precedência sobre .cq do mesmo módulo
+                    existing_path = units[name]["path"]
+                    if path.suffix == ".st" and existing_path.suffix == ".cq":
+                        units[name] = {"path": path, "text": text}  # sobrescreve com .st
+                    elif path.suffix == ".cq" and existing_path.suffix == ".st":
+                        pass  # mantém o .st já registrado
+                    else:
+                        duplicates.append((name, existing_path, path))
+                else:
+                    units[name] = {"path": path, "text": text}
     if duplicates:
         lines = [f"{name}: {first} e {second}" for name, first, second in duplicates]
         raise CqError("módulos declarados mais de uma vez:\n" + "\n".join(lines))
@@ -82,13 +94,13 @@ def validate_module_dialect(units, root):
     for unit in units.values():
         if C_PREPROCESSOR_RE.search(unit["text"]):
             raise CqError(
-                f"{unit['path'].relative_to(root)}: módulo Cq não pode usar "
+                f"{unit['path'].relative_to(root)}: módulo Sotlas não pode usar "
                 "pré-processador C"
             )
         for import_line in IMPORT_LINE_RE.findall(unit["text"]):
             if not IMPORT_RE.fullmatch(import_line):
                 raise CqError(
-                    f"{unit['path'].relative_to(root)}: import Cq inválido; "
+                    f"{unit['path'].relative_to(root)}: import Sotlas inválido; "
                     "use import modulo::*;"
                 )
 
@@ -5682,8 +5694,10 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
         generated_interfaces.append(interface)
         compiled_objects.append(obj)
 
-    # Compila o bootloader UEFI.
-    bootloader_src = root / "boot" / "uefi_bootloader.cq"
+    # Compila o bootloader UEFI — busca .st (Sotlas) ou .cq (legado)
+    bootloader_src = root / "boot" / "uefi_bootloader.st"
+    if not bootloader_src.exists():
+        bootloader_src = root / "boot" / "uefi_bootloader.cq"
     if bootloader_src.exists():
         bootloader_obj = obj_dir / "uefi_bootloader.o"
         cmd = [str(gcc), *common_flags, "-x", "c", str(bootloader_src), "-o", str(bootloader_obj)]

@@ -1,35 +1,45 @@
 cmake_minimum_required(VERSION 3.20)
 
-# O CMake delega a compilação da linguagem Cq ao VortexC; fontes .cq nunca são
-# entregues diretamente ao compilador C. O alvo cq_build produz o EFI modular
-# usado pela rota oficial de empacotamento.
+# O CMake delega a compilação da linguagem Sotlas ao toolchain 'sotlas compile'.
+# Fontes .st nunca são entregues diretamente ao compilador C.
+# O alvo sotlas_build produz o EFI modular usado pela rota oficial de empacotamento.
 project(BakenEcosystem LANGUAGES NONE)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 enable_testing()
 
-add_custom_target(cq_check
+add_custom_target(sotlas_check
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/vortexc/vortexc.py
-            check ${CMAKE_SOURCE_DIR}/kernel/src/main.cq
-            --manifest ${CMAKE_BINARY_DIR}/cq-main.manifest.json
+            check ${CMAKE_SOURCE_DIR}/kernel/src/main.st
+            --manifest ${CMAKE_BINARY_DIR}/sotlas-main.manifest.json
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Validando o grafo modular Cq"
+    COMMENT "Validando o grafo modular Sotlas"
 )
 
-add_custom_target(cq_build
+add_custom_target(sotlas_build
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/vortexc/vortexc.py
-            build ${CMAKE_SOURCE_DIR}/kernel/src/main.cq
-            -o ${CMAKE_SOURCE_DIR}/build/cmake-cq/BOOTX64.EFI
-            --manifest ${CMAKE_BINARY_DIR}/cq-main.manifest.json
+            build ${CMAKE_SOURCE_DIR}/kernel/src/main.st
+            -o ${CMAKE_SOURCE_DIR}/build/cmake-sotlas/BOOTX64.EFI
+            --manifest ${CMAKE_BINARY_DIR}/sotlas-main.manifest.json
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Gerando e vinculando o EFI modular Cq"
+    COMMENT "Gerando e vinculando o EFI modular Sotlas"
 )
+
+# Targets legados mantidos como aliases para compatibilidade
+add_custom_target(cq_check DEPENDS sotlas_check)
+add_custom_target(cq_build DEPENDS sotlas_build)
 
 add_test(
-    NAME vortexc_resolver
-    COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_vortexc_resolver.py
+    NAME sotlas_resolver
+    COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_sotlas_resolver.py
 )
-set_tests_properties(vortexc_resolver PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+set_tests_properties(sotlas_resolver PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(
+    NAME sotlas_frontend_compat
+    COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_sotlas_frontend_compat.py
+)
+set_tests_properties(sotlas_frontend_compat PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(
     NAME legacy_safety
@@ -54,3 +64,9 @@ add_test(
     COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_installed_disk.py
 )
 set_tests_properties(installed_disk PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(
+    NAME sotlas_compiler
+    COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p "test_sotlas_*.py"
+)
+set_tests_properties(sotlas_compiler PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

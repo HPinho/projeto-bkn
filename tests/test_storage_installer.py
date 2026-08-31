@@ -69,7 +69,7 @@ class StorageInstallerTests(unittest.TestCase):
         self.assertIn("/config/snapshot.meta", vortexc_py)
 
     def test_bootloader_recognizes_installed_gpt_as_its_own_boot_media(self):
-        bootloader = (ROOT / "boot/uefi_bootloader.cq").read_text(encoding="utf-8")
+        bootloader = (ROOT / "boot/uefi_bootloader.st").read_text(encoding="utf-8")
         self.assertIn("GUID de tipo Baken Data", bootloader)
         self.assertIn("sector[0]!='E'", bootloader)
         self.assertIn("data_guid", bootloader)

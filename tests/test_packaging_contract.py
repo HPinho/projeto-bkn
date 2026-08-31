@@ -100,11 +100,11 @@ class PackagingContractTests(unittest.TestCase):
         self.assertFalse((ROOT / "tools/test_fat16_boot.py").exists())
         self.assertFalse((ROOT / "tools/scripts/run_qemu.py").exists())
 
-    def test_uefi_build_delegates_to_vortexc_with_checked_bare_metal_flags(self):
+    def test_uefi_build_delegates_to_sotlas_with_checked_bare_metal_flags(self):
         build = (ROOT / "tools/build_uefi_desktop.ps1").read_text(encoding="utf-8")
         vortex = (ROOT / "tools/vortexc/vortexc.py").read_text(encoding="utf-8")
         self.assertIn("$vortex", build)
-        self.assertIn("kernel\\src\\main.cq", build)
+        self.assertIn("kernel\\src\\main.st", build)
         self.assertIn("generate_baken_app_icons.py", build)
         self.assertIn("baken_app_icons_atlas.h", build)
         self.assertIn("generate_motion_icons.py", build)

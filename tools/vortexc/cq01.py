@@ -1030,7 +1030,7 @@ def compile_project(entry: Path) -> list[Module]:
     while root.parent != root and not (root / "core").is_dir():
         root = root.parent
     units: dict[str, Module] = {}
-    for path in root.rglob("*.cq"):
+    for path in list(root.rglob("*.st")) + list(root.rglob("*.cq")):
         if "tests" in path.parts or "fixtures" in path.parts or ".git" in path.parts:
             continue
         try:

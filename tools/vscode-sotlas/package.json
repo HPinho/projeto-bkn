@@ -1,0 +1,37 @@
+{
+  "name": "baken-sotlas",
+  "displayName": "Baken Sotlas",
+  "publisher": "bakenos",
+  "description": "Realce de sintaxe para a linguagem de sistemas Sotlas do Baken OS (.st, .sth)",
+  "version": "0.2.0",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "sotlas",
+        "aliases": [
+          "Sotlas",
+          "Baken Sotlas",
+          "sotlas"
+        ],
+        "extensions": [
+          ".st",
+          ".sth"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "sotlas",
+        "scopeName": "source.sotlas",
+        "path": "./syntaxes/sotlas.tmLanguage.json"
+      }
+    ]
+  }
+}
