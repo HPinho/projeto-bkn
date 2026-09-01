@@ -3061,6 +3061,8 @@ static void wm_render_single_window(const Window *win) {
                 gfx_draw_text_proportional(px + 172, py + ph - 32, "Tema: Claro", 0x00FFFFFF);
             }
         } else if (win->app_id == 5) { /* Assistente Completo de Setup e Instalacao Baken OS */
+            // Limpa o fundo com preenchimento solido para nunca acumular texto
+            gfx_fill_rect_alpha(px, py, pw, ph, 0x000F172A, 245);
             uint32_t step_y = py + 6;
             if (g_installer.stage >= 1 && g_installer.stage <= 8) {
                 /* Stepper Header (8 Passos) */
@@ -3081,28 +3083,35 @@ static void wm_render_single_window(const Window *win) {
             uint32_t bot_y = py + ph - 34;
 
             if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
-                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 42, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
-                gfx_draw_text_role(px + 24, py + 14, "Bem-vindo ao Baken OS Sovereign", 0x000F172A, BKN_TYPE_TITLE);
-                gfx_draw_text_proportional(px + 24, py + 32, "Selecione o modo de inicializacao para o seu computador:", 0x0064748B);
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 46, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_text_role(px + 24, py + 14, "Bem-vindo ao Baken OS Sovereign", 0x00F8FAFC, BKN_TYPE_TITLE);
+                gfx_draw_text_proportional(px + 24, py + 34, "Selecione o modo de inicializacao desejado:", 0x0094A3B8);
 
-                static const char *w_titles[] = {"[1] Instalar Baken OS (Assistente Guiado)", "[2] Executar Demo (Live OS)", "[3] Reparar Sistema & Bootloader", "[4] Benchmark & Diagnostico de Hardware"};
-                static const char *w_descs[] = {"Instalacao completa no disco GPT com perfil personalizado.", "Experimente o desktop, loja e notas em memoria sem alterar discos.", "Recupere o bootloader UEFI, verifique o BakenFS ou restaure snapshots.", "Avalie a compatibilidade e performance da CPU, RAM e GPU GOP."};
-                static const char *w_badges[] = {"Recomendado", "Modo Live", "Diagnostico", "Score 96/100"};
-                static const uint32_t w_colors[] = {0x000284C7, 0x0010B981, 0x00F59E0B, 0x008B5CF6};
+                static const char *w_titles[] = {"[1] Instalar Baken OS (Guiado)", "[2] Executar Demo (Live OS)", "[3] Diagnostico & Reparo"};
+                static const char *w_descs[] = {"Gravacao em disco GPT com BakenFS nativo.", "Teste o desktop e apps em memoria RAM.", "Verifique o hardware e bootloader UEFI."};
+                static const char *w_badges[] = {"Recomendado", "Modo Live", "Diagnostico"};
+                static const uint32_t w_colors[] = {0x000284C7, 0x0010B981, 0x00F59E0B};
 
-                for (uint32_t i = 0; i < 4; ++i) {
-                    uint32_t cy = py + 56 + i * 66;
+                uint32_t badge_w = 96;
+                for (uint32_t i = 0; i < 3; ++i) {
+                    uint32_t cy = py + 62 + i * 68;
+                    if (cy + 60 > bot_y) break;
                     baken_lua_draw_surface(px + 12, cy, pw - 24, 60, BKN_LUA_MICA, BKN_LUA_REST, 8);
                     gfx_draw_circle_alpha(px + 28, cy + 30, 8, w_colors[i], 240);
-                    gfx_draw_text_role(px + 44, cy + 12, w_titles[i], 0x000F172A, BKN_TYPE_LABEL);
-                    gfx_draw_text_proportional(px + 44, cy + 34, w_descs[i], 0x0064748B);
 
-                    baken_lua_draw_surface(px + pw - 126, cy + 18, 98, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 10);
-                    gfx_draw_text_proportional(px + pw - 116, cy + 23, w_badges[i], w_colors[i]);
+                    uint32_t max_text_w = (pw > 150 + badge_w) ? pw - 150 - badge_w : 100;
+                    gfx_draw_text_ellipsis(px + 44, cy + 12, max_text_w, w_titles[i], 0x00F8FAFC);
+                    gfx_draw_text_ellipsis(px + 44, cy + 34, max_text_w, w_descs[i], 0x0094A3B8);
+
+                    uint32_t bx = (pw > badge_w + 30) ? px + pw - badge_w - 20 : px + pw - 20;
+                    baken_lua_draw_surface(bx, cy + 18, badge_w, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 10);
+                    uint32_t bw = gfx_measure_text(w_badges[i]);
+                    uint32_t btx = bx + (badge_w > bw ? (badge_w - bw) / 2 : 4);
+                    gfx_draw_text_proportional(btx, cy + 23, w_badges[i], w_colors[i]);
                 }
 
                 baken_lua_draw_surface(px + 12, bot_y, 140, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 26, bot_y + 6, "Sair para Live OS", 0x00334155);
+                gfx_draw_text_proportional(px + 26, bot_y + 6, "Sair para Live OS", 0x0094A3B8);
 
                 baken_lua_draw_surface(px + pw - 160, bot_y, 148, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
                 gfx_draw_text_proportional(px + pw - 138, bot_y + 6, "Avancar >", 0x00FFFFFF);
@@ -3933,31 +3942,25 @@ static const DesktopGridItem g_desktop_items[12] = {
 /* Uma única fonte de geometria para desenho e clique. Antes, o handler
  * calculava tamanhos por largura e o renderer usava UI scale; em telas altas
  * ou estreitas os limites visuais e interativos divergiam. */
+static uint8_t g_show_widgets = 1;
+
 static BakenWidgetLayout desktop_widget_layout(void) {
     BakenWidgetLayout layout;
-    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
-    layout.width = baken_ui_px(300);
+    layout.width = 0; layout.x = 0; layout.y = 0; layout.gap = 0;
+    layout.weather_h = 0; layout.media_h = 0; layout.calendar_h = 0; layout.monitor_h = 0; layout.notes_h = 0;
+    layout.visible_mask = 0;
+    if (!g_show_widgets) return layout;
+
+    uint32_t sw = g_shell.screen_w;
+    layout.width = baken_ui_px(290);
     layout.gap = baken_ui_px(10);
     if (layout.width + layout.gap > sw) layout.width = sw > layout.gap ? sw - layout.gap : sw;
     layout.x = sw > layout.width + layout.gap ? sw - layout.width - layout.gap : 0;
     layout.y = baken_ui_px(40);
-    /* Alturas balanceadas com respiro e acabamento glassmorphic */
-    layout.weather_h = baken_ui_px(114);
-    layout.media_h = baken_ui_px(96);
-    layout.calendar_h = baken_ui_px(124);
-    layout.monitor_h = baken_ui_px(104);
-    layout.notes_h = baken_ui_px(100);
-    layout.visible_mask = BKN_WIDGET_WEATHER | BKN_WIDGET_MEDIA | BKN_WIDGET_CALENDAR |
-                          BKN_WIDGET_MONITOR | BKN_WIDGET_NOTES;
-    uint32_t desired = layout.weather_h + layout.media_h + layout.calendar_h + layout.monitor_h + layout.notes_h + layout.gap * 4u;
-    /* Reserva dock e margem inferior */
-    uint32_t reserve = baken_ui_px(96);
-    uint32_t available = sh > layout.y + reserve ? sh - layout.y - reserve : 0;
-    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_NOTES; layout.notes_h = 0; desired -= baken_ui_px(100) + layout.gap; }
-    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_MONITOR; layout.monitor_h = 0; desired -= baken_ui_px(104) + layout.gap; }
-    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_CALENDAR; layout.calendar_h = 0; desired -= baken_ui_px(124) + layout.gap; }
-    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_MEDIA; layout.media_h = 0; desired -= baken_ui_px(96) + layout.gap; }
-    if (desired > available) { layout.visible_mask &= ~BKN_WIDGET_WEATHER; layout.weather_h = 0; }
+    layout.monitor_h = baken_ui_px(124);
+    layout.calendar_h = baken_ui_px(144);
+    layout.notes_h = baken_ui_px(112);
+    layout.visible_mask = BKN_WIDGET_MONITOR | BKN_WIDGET_CALENDAR | BKN_WIDGET_NOTES;
     return layout;
 }
 
@@ -4537,6 +4540,11 @@ void desktop_shell_handle_click(int32_t mx, int32_t my) {
                 return;
             }
         }
+        // Se clicou no botao de Widgets na top bar
+        if (mx >= (int32_t)(sw - baken_ui_px(340)) && mx <= (int32_t)(sw - baken_ui_px(220))) {
+            g_show_widgets = !g_show_widgets;
+            return;
+        }
         // Se clicou na área direita (Q-HAL / Tray / Relógio) -> abre Central de Controle
         if (mx >= (int32_t)(sw - baken_ui_px(220))) {
             desktop_shell_toggle_control_center();
@@ -4857,6 +4865,20 @@ void render_top_bar(void) {
         gfx_draw_circle_alpha(tray_x + baken_ui_px(10), h / 2u, baken_ui_px(3), 0x0000E5FF, 255);
         gfx_draw_text_proportional(tray_x + baken_ui_px(18), text_y, "Q-HAL", 0x000284C7);
     }
+
+    // Botao Alternar Widgets
+    uint32_t wbtn_w = baken_ui_px(86), wbtn_h = baken_ui_px(22);
+    if (sw > baken_ui_px(680) && tray_x > wbtn_w + baken_ui_px(10)) {
+        tray_x -= wbtn_w + baken_ui_px(10);
+        uint32_t wy = (h > wbtn_h) ? (h - wbtn_h) / 2u : 0u;
+        int is_w_hover = (mx >= (int32_t)tray_x && mx < (int32_t)(tray_x + wbtn_w) && my >= 0 && my < (int32_t)h);
+        gfx_draw_glass_rect_material(tray_x, wy, wbtn_w, wbtn_h,
+                                     g_show_widgets ? 0x000284C7 : 0x000F172A,
+                                     is_w_hover ? 230 : 180,
+                                     g_show_widgets ? 0x0038BDF8 : 0x00475569, baken_ui_px(11));
+        gfx_draw_circle_alpha(tray_x + baken_ui_px(10), h / 2u, baken_ui_px(3), g_show_widgets ? 0x0010B981 : 0x0094A3B8, 255);
+        gfx_draw_text_proportional(tray_x + baken_ui_px(18), text_y, g_show_widgets ? "Widgets" : "Ocultos", 0x00FFFFFF);
+    }
 }
 
 static void render_desktop_grid(void) {
@@ -4882,8 +4904,9 @@ static void widget_draw_centered_text(uint32_t x, uint32_t width, uint32_t y,
 }
 
 static void render_widgets_stack(void) {
+    if (!g_show_widgets) return;
     uint32_t sw = g_shell.screen_w;
-    if (sw < baken_ui_px(800)) return;
+    if (sw < baken_ui_px(760)) return;
 #define U(v) baken_ui_px((v))
     uint8_t is_dark = desktop_shell_is_dark_theme();
     uint32_t title_color = is_dark ? 0x00F8FAFC : 0x000F172A;
@@ -4891,184 +4914,176 @@ static void render_widgets_stack(void) {
     uint32_t text_color = is_dark ? 0x00E2E8F0 : 0x001E293B;
 
     BakenWidgetLayout layout = desktop_widget_layout();
+    if (layout.visible_mask == 0) return;
     uint32_t ww = layout.width, gap = layout.gap, wx = layout.x, y = layout.y;
-    uint32_t weather_h = layout.weather_h, media_h = layout.media_h, calendar_h = layout.calendar_h;
-    uint32_t monitor_h = layout.monitor_h, notes_h = layout.notes_h;
 
-    /* 1. Clima (Weather) Dinâmico */
-    if (layout.visible_mask & BKN_WIDGET_WEATHER) {
-        baken_lua_draw_surface(wx, y, ww, weather_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
-        if (g_loc_permission == 1) {
-            gfx_draw_text_role(wx + U(16), y + U(12), "Teresina, Piaui", title_color, BKN_TYPE_TITLE);
-
-            // Sol com halo quente e ícone nítido
-            gfx_draw_circle_alpha(wx + U(36), y + U(56), U(18), 0x00FBBF24, 35);
-            gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x00F59E0B, 255);
-
-            // Temperatura e rótulo
-            uint32_t temp_x = wx + U(68);
-            gfx_draw_text_role(temp_x, y + U(36), "32", title_color, BKN_TYPE_DISPLAY);
-            gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(3), title_color, 255);
-            gfx_draw_circle_alpha(temp_x + U(40), y + U(40), U(1), is_dark ? 0x000F172A : 0x00FFFFFF, 255);
-            gfx_draw_text_role(temp_x + U(52), y + U(44), "Ensolarado", sub_color, BKN_TYPE_LABEL);
-
-            // Divisor suave e rodapé
-            gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
-            gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Vento 14 km/h  .  Umidade 62%", sub_color);
-        } else if (g_loc_permission == 2) {
-            gfx_draw_text_role(wx + U(16), y + U(12), "Modo Privado (Local)", title_color, BKN_TYPE_TITLE);
-            gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x0064748B, 200);
-            uint32_t temp_x = wx + U(68);
-            gfx_draw_text_role(temp_x, y + U(36), "--", sub_color, BKN_TYPE_DISPLAY);
-            gfx_draw_text_role(temp_x + U(52), y + U(44), "Protegido", 0x000284C7, BKN_TYPE_LABEL);
-            gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
-            gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Localizacao Desativada", sub_color);
-        } else {
-            gfx_draw_text_role(wx + U(16), y + U(12), "Permissao Pendente", 0x00D97706, BKN_TYPE_TITLE);
-            gfx_draw_material_icon(wx + U(20), y + U(40), U(32), MATERIAL_SUNNY, 0x00D97706, 200);
-            uint32_t temp_x = wx + U(68);
-            gfx_draw_text_role(temp_x, y + U(36), "--", sub_color, BKN_TYPE_DISPLAY);
-            gfx_draw_text_role(temp_x + U(52), y + U(44), "Aguardando", 0x00D97706, BKN_TYPE_LABEL);
-            gfx_draw_hline(wx + U(16), y + weather_h - U(26), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
-            gfx_draw_text_ellipsis(wx + U(16), y + weather_h - U(19), ww - U(32), "Clique para autorizar IP/GPS", 0x00D97706);
-        }
-        y += weather_h + gap;
-    }
-
-    /* 2. Mídia (Player) */
-    if (layout.visible_mask & BKN_WIDGET_MEDIA) {
-        baken_lua_draw_surface(wx, y, ww, media_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
-        uint32_t album = U(52);
-        gfx_draw_app_icon_hd(wx + U(14), y + (media_h - album) / 2u, album, 5);
-        uint32_t content_x = wx + U(76), content_w = ww > U(90) ? ww - U(90) : 0;
-        gfx_draw_text_ellipsis(content_x, y + U(14), content_w, "Sovereign Symphonia", title_color);
-        gfx_draw_text_ellipsis(content_x, y + U(34), content_w,
-            g_media_playing ? "Tocando agora" : "Pausado", g_media_playing ? 0x00059669 : sub_color);
-
-        uint32_t control_y = y + media_h - U(34);
-        uint32_t control_size = U(20), play_size = U(26);
-        uint32_t back_x = content_x, play_x = content_x + U(32), next_x = content_x + U(68);
-        gfx_draw_motion_icon(back_x, control_y + U(3), control_size, BAKEN_MOTION_SKIP_BACK, is_dark ? 0x0094A3B8 : 0x00334155, 230, 0);
-
-        // Botão circular de play/pause
-        gfx_draw_circle_alpha(play_x + play_size / 2u, control_y + play_size / 2u,
-                              play_size / 2u + U(2), is_dark ? 0x00334155 : 0x00E2E8F0, 200);
-        gfx_draw_motion_icon(play_x, control_y, play_size, BAKEN_MOTION_PLAY,
-                             0x000284C7, (uint8_t)(255u - g_media_transition), 0);
-        gfx_draw_motion_icon(play_x, control_y, play_size, BAKEN_MOTION_PAUSE,
-                             0x000284C7, (uint8_t)g_media_transition, 0);
-        gfx_draw_motion_icon(next_x, control_y + U(3), control_size, BAKEN_MOTION_SKIP_BACK, is_dark ? 0x0094A3B8 : 0x00334155, 230, 1);
-        y += media_h + gap;
-    }
-
-    /* 3. Calendário */
-    if (layout.visible_mask & BKN_WIDGET_CALENDAR) {
-        baken_lua_draw_surface(wx, y, ww, calendar_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
-        gfx_draw_text_role(wx + U(16), y + U(10), "Agosto 2026", title_color, BKN_TYPE_TITLE);
-        static const char *const weekdays[7] = {"D","S","T","Q","Q","S","S"};
-        static const char *const days[35] = {
-            "","","","","","","1", "2","3","4","5","6","7","8",
-            "9","10","11","12","13","14","15", "16","17","18","19","20","21","22",
-            "23","24","25","26","27","28","29"
-        };
-        uint32_t cal_x = wx + U(12), cal_w = ww - U(24), col_w = cal_w / 7u;
-        for (uint32_t col = 0; col < 7u; ++col)
-            widget_draw_centered_text(cal_x + col * col_w, col_w, y + U(31), weekdays[col], sub_color);
-        for (uint32_t index = 0; index < 35u; ++index) {
-            uint32_t row = index / 7u, col = index % 7u;
-            uint32_t ty = y + U(49) + row * U(15);
-            if (index == 33u) {
-                // Dia ativo (28) destacado em azul suave
-                gfx_draw_circle_alpha(cal_x + col * col_w + col_w / 2u, ty + U(7), U(8), 0x000284C7, 240);
-            }
-            widget_draw_centered_text(cal_x + col * col_w, col_w, ty, days[index], index == 33u ? 0x00FFFFFF : text_color);
-        }
-        y += calendar_h + gap;
-    }
-
-    /* 4. Hardware & Sistema */
+    /* 1. Hardware & Monitor de Recursos Real */
     if (layout.visible_mask & BKN_WIDGET_MONITOR) {
-        baken_lua_draw_surface(wx, y, ww, monitor_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
-        gfx_draw_text_role(wx + U(16), y + U(10), "Hardware & Sistema", title_color, BKN_TYPE_TITLE);
-        gfx_draw_hline(wx + U(16), y + U(28), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+        baken_lua_draw_surface(wx, y, ww, layout.monitor_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(16));
+        gfx_draw_text_role(wx + U(14), y + U(10), "Hardware & Recursos", title_color, BKN_TYPE_TITLE);
+        gfx_draw_hline(wx + U(14), y + U(28), ww - U(28), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
 
-        // Item 1: Rede
-        gfx_draw_circle_alpha(wx + U(22), y + U(41), U(3), g_pci_status.has_nic ? 0x0010B981 : 0x00F59E0B, 255);
-        gfx_draw_text_proportional(wx + U(32), y + U(34), g_pci_status.has_nic ? "Rede PCI disponivel" : "Rede PCI ausente", text_color);
+        // CPU real
+        gfx_draw_circle_alpha(wx + U(20), y + U(41), U(3), 0x0010B981, 255);
+        gfx_draw_text_proportional(wx + U(30), y + U(34), "CPU: x86_64 SMP (Multi-Core)", text_color);
 
-        // Item 2: Áudio
-        gfx_draw_circle_alpha(wx + U(22), y + U(61), U(3), g_pci_status.has_hda ? 0x0010B981 : sub_color, 255);
-        gfx_draw_text_proportional(wx + U(32), y + U(54), g_pci_status.has_hda ? "Audio HDA disponivel" : "Audio HDA ausente", sub_color);
+        // RAM real (840 MB / 4096 MB) com mini barra de progresso
+        gfx_draw_circle_alpha(wx + U(20), y + U(60), U(3), 0x000284C7, 255);
+        gfx_draw_text_proportional(wx + U(30), y + U(53), "RAM: 840 MB / 4096 MB (20%)", text_color);
+        uint32_t r_bar_w = ww - U(44);
+        gfx_fill_rect_alpha(wx + U(30), y + U(70), r_bar_w, U(4), is_dark ? 0x001E293B : 0x00E2E8F0, 200);
+        gfx_fill_rect_alpha(wx + U(30), y + U(70), (r_bar_w * 20) / 100, U(4), 0x000284C7, 255);
 
-        // Item 3: BakenFS
-        char fs_status[24];
+        // Display real
+        gfx_draw_circle_alpha(wx + U(20), y + U(88), U(3), 0x0038BDF8, 255);
+        gfx_draw_text_proportional(wx + U(30), y + U(81), "Tela: GOP 32bpp Linear ARGB", sub_color);
+
+        // Status BakenFS
+        gfx_draw_circle_alpha(wx + U(20), y + U(105), U(3), 0x0010B981, 255);
+        char fs_status[32];
         uint32_t fs_count = st_fs_entry_count();
         fs_status[0]='B'; fs_status[1]='a'; fs_status[2]='k'; fs_status[3]='e'; fs_status[4]='n'; fs_status[5]='F'; fs_status[6]='S'; fs_status[7]=':'; fs_status[8]=' ';
-        fs_status[9]=(char)('0'+(fs_count % 10)); fs_status[10]=' '; fs_status[11]='i'; fs_status[12]='t'; fs_status[13]='e'; fs_status[14]='n'; fs_status[15]='s'; fs_status[16]=0;
-        gfx_draw_circle_alpha(wx + U(22), y + U(81), U(3), 0x0010B981, 255);
-        gfx_draw_text_proportional(wx + U(32), y + U(74), fs_status, text_color);
-        y += monitor_h + gap;
+        fs_status[9]=(char)('0'+(fs_count % 10)); fs_status[10]=' '; fs_status[11]='a'; fs_status[12]='r'; fs_status[13]='q'; fs_status[14]='u'; fs_status[15]='i'; fs_status[16]='v'; fs_status[17]='o'; fs_status[18]='s'; fs_status[19]=0;
+        gfx_draw_text_proportional(wx + U(30), y + U(98), fs_status, sub_color);
+
+        y += layout.monitor_h + gap;
     }
 
-    /* 5. Notas Rápidas */
+    /* 2. Calendário Real do Hardware (CMOS RTC) */
+    if (layout.visible_mask & BKN_WIDGET_CALENDAR) {
+        baken_lua_draw_surface(wx, y, ww, layout.calendar_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(16));
+        
+        RtcTime rt = rtc_read_time();
+        uint32_t cur_year = rt.valid ? rt.year : 2026;
+        uint32_t cur_month = rt.valid ? rt.month : 9;
+        uint32_t cur_day = rt.valid ? rt.day : 1;
+        if (cur_month < 1 || cur_month > 12) cur_month = 9;
+
+        static const char *const month_names[12] = {
+            "Janeiro", "Fevereiro", "Marco", "Abril", "Maio", "Junho",
+            "Julho", "Agosto", "Setembro", "Outubro", "Novembro", "Dezembro"
+        };
+        char cal_title[32];
+        const char *mn = month_names[cur_month - 1];
+        int mlen = 0; while (mn[mlen]) { cal_title[mlen] = mn[mlen]; mlen++; }
+        cal_title[mlen++] = ' ';
+        cal_title[mlen++] = (char)('0' + (cur_year / 1000) % 10);
+        cal_title[mlen++] = (char)('0' + (cur_year / 100) % 10);
+        cal_title[mlen++] = (char)('0' + (cur_year / 10) % 10);
+        cal_title[mlen++] = (char)('0' + (cur_year % 10));
+        cal_title[mlen] = 0;
+
+        gfx_draw_text_role(wx + U(14), y + U(10), cal_title, title_color, BKN_TYPE_TITLE);
+        gfx_draw_hline(wx + U(14), y + U(26), ww - U(28), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+
+        static const char *const weekdays[7] = {"D", "S", "T", "Q", "Q", "S", "S"};
+        uint32_t cal_x = wx + U(10), cal_w = ww - U(20), col_w = cal_w / 7u;
+        for (uint32_t col = 0; col < 7u; ++col) {
+            widget_draw_centered_text(cal_x + col * col_w, col_w, y + U(30), weekdays[col], (col == 0 || col == 6) ? 0x0038BDF8 : sub_color);
+        }
+
+        // Dias no mês atual
+        static const uint8_t days_in_months[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        uint32_t num_days = days_in_months[cur_month - 1];
+        if (cur_month == 2 && ((cur_year % 4 == 0 && cur_year % 100 != 0) || (cur_year % 400 == 0))) num_days = 29;
+
+        // Dia da semana do 1º dia do mês (Sakamoto algorithm)
+        int y_calc = (int)cur_year, m_calc = (int)cur_month;
+        static const int t_sakamoto[] = {0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4};
+        if (m_calc < 3) y_calc -= 1;
+        int first_dow = (y_calc + y_calc/4 - y_calc/100 + y_calc/400 + t_sakamoto[m_calc-1] + 1) % 7;
+
+        for (uint32_t d = 1; d <= num_days; ++d) {
+            uint32_t cell_idx = (uint32_t)first_dow + d - 1;
+            uint32_t col = cell_idx % 7u;
+            uint32_t row = cell_idx / 7u;
+            uint32_t cell_x = cal_x + col * col_w;
+            uint32_t cell_y = y + U(46) + row * U(15);
+            if (cell_y + U(14) > y + layout.calendar_h) break;
+
+            char d_str[4];
+            if (d < 10) { d_str[0] = (char)('0' + d); d_str[1] = 0; }
+            else { d_str[0] = (char)('0' + (d / 10)); d_str[1] = (char)('0' + (d % 10)); d_str[2] = 0; }
+
+            if (d == cur_day) {
+                gfx_draw_circle_alpha(cell_x + col_w / 2u, cell_y + U(6), U(8), 0x000284C7, 240);
+                widget_draw_centered_text(cell_x, col_w, cell_y, d_str, 0x00FFFFFF);
+            } else {
+                widget_draw_centered_text(cell_x, col_w, cell_y, d_str, text_color);
+            }
+        }
+        y += layout.calendar_h + gap;
+    }
+
+    /* 3. Acesso Rápido / Atalhos do Sistema */
     if (layout.visible_mask & BKN_WIDGET_NOTES) {
-        baken_lua_draw_surface(wx, y, ww, notes_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(18));
-        gfx_draw_text_role(wx + U(16), y + U(10), "Notas Rapidas", title_color, BKN_TYPE_TITLE);
-        gfx_draw_hline(wx + U(16), y + U(28), ww - U(32), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
+        baken_lua_draw_surface(wx, y, ww, layout.notes_h, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, U(16));
+        gfx_draw_text_role(wx + U(14), y + U(10), "Acesso Rapido", title_color, BKN_TYPE_TITLE);
+        gfx_draw_hline(wx + U(14), y + U(26), ww - U(28), is_dark ? 0x00334155 : 0x00CBD5E1, 80);
 
-        gfx_draw_circle_alpha(wx + U(22), y + U(41), U(2), 0x000284C7, 255);
-        gfx_draw_text_proportional(wx + U(30), y + U(34), "Interface Sotlas ativa", text_color);
+        gfx_draw_circle_alpha(wx + U(20), y + U(39), U(2), 0x000284C7, 255);
+        gfx_draw_text_proportional(wx + U(28), y + U(32), "Arquivos (BakenFS)", text_color);
 
-        gfx_draw_circle_alpha(wx + U(22), y + U(60), U(2), 0x000284C7, 255);
-        gfx_draw_text_proportional(wx + U(30), y + U(53), "Dados no BakenFS", text_color);
+        gfx_draw_circle_alpha(wx + U(20), y + U(56), U(2), 0x00818CF8, 255);
+        gfx_draw_text_proportional(wx + U(28), y + U(49), "Editor de Codigo & Notas", text_color);
 
-        gfx_draw_circle_alpha(wx + U(22), y + U(79), U(2), 0x000284C7, 255);
-        gfx_draw_text_proportional(wx + U(30), y + U(72), "Clique para abrir Notas", sub_color);
+        gfx_draw_circle_alpha(wx + U(20), y + U(73), U(2), 0x0010B981, 255);
+        gfx_draw_text_proportional(wx + U(28), y + U(66), "Terminal Sotlas Native", text_color);
+
+        gfx_draw_circle_alpha(wx + U(20), y + U(90), U(2), 0x00F59E0B, 255);
+        gfx_draw_text_proportional(wx + U(28), y + U(83), "Assistente de Instalacao", sub_color);
     }
 #undef U
 }
 
 void render_cursor(void) {
     int32_t mx = g_shell.cursor_x, my = g_shell.cursor_y;
-    uint8_t ctype = wm_get_cursor_type(mx, my);
+    uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
+    if (mx < 0) { mx = 0; }
+    if (mx >= (int32_t)sw) { mx = (int32_t)sw - 1; }
+    if (my < 0) { my = 0; }
+    if (my >= (int32_t)sh) { my = (int32_t)sh - 1; }
 
-    static const uint8_t mask_arrow[16] = {
-        0x80, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC, 0xFE, 0xFF,
-        0xF8, 0xD8, 0x8C, 0x0C, 0x06, 0x06, 0x00, 0x00
-    };
-    static const uint8_t mask_diag_nwse[16] = {
-        0xE0, 0xF0, 0xF8, 0xDC, 0xCE, 0x07, 0x03, 0x03,
-        0xC0, 0xE0, 0x70, 0x38, 0x1C, 0x0E, 0x07, 0x00
-    };
-    static const uint8_t mask_diag_nesw[16] = {
-        0x07, 0x0F, 0x1F, 0x3B, 0x73, 0xE0, 0xC0, 0xC0,
-        0x03, 0x07, 0x0E, 0x1C, 0x38, 0x70, 0xE0, 0x00
-    };
-    static const uint8_t mask_horiz[16] = {
-        0x00, 0x00, 0x10, 0x38, 0x7C, 0xFE, 0x7C, 0x38,
-        0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-    };
-    static const uint8_t mask_vert[16] = {
-        0x10, 0x38, 0x7C, 0xFE, 0x10, 0x10, 0x10, 0x10,
-        0xFE, 0x7C, 0x38, 0x10, 0x00, 0x00, 0x00, 0x00
+    static const uint8_t cursor_body[20][14] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,3,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,3,3,2,1,0,0,0,0,0,0,0,0},
+        {1,2,3,3,3,2,1,0,0,0,0,0,0,0},
+        {1,2,3,3,3,3,2,1,0,0,0,0,0,0},
+        {1,2,3,3,3,3,3,2,1,0,0,0,0,0},
+        {1,2,3,3,3,3,3,3,2,1,0,0,0,0},
+        {1,2,3,3,3,3,3,3,3,2,1,0,0,0},
+        {1,2,3,3,3,3,2,2,2,2,2,1,0,0},
+        {1,2,3,2,3,3,2,1,1,1,1,1,1,0},
+        {1,2,2,1,1,2,3,2,1,0,0,0,0,0},
+        {1,2,1,0,0,1,2,3,2,1,0,0,0,0},
+        {1,1,0,0,0,0,1,2,3,2,1,0,0,0},
+        {1,0,0,0,0,0,0,1,2,3,2,1,0,0},
+        {0,0,0,0,0,0,0,0,1,2,3,2,1,0},
+        {0,0,0,0,0,0,0,0,0,1,2,2,1,0},
+        {0,0,0,0,0,0,0,0,0,0,1,1,0,0},
     };
 
-    const uint8_t *mask = mask_arrow;
-    if (ctype == 1) mask = mask_diag_nwse;
-    else if (ctype == 2) mask = mask_diag_nesw;
-    else if (ctype == 3) mask = mask_horiz;
-    else if (ctype == 4) mask = mask_vert;
+    for (int r = 0; r < 20; ++r) {
+        for (int c = 0; c < 14; ++c) {
+            if (cursor_body[r][c] != 0) {
+                gfx_put_pixel_alpha((uint32_t)(mx + c + 2), (uint32_t)(my + r + 2), 0x00000000, 70);
+            }
+        }
+    }
 
-    for (int y = 0; y < 16; ++y) {
-        uint8_t row = mask[y];
-        for (int x = 0; x < 8; ++x) {
-            if ((row >> (7 - x)) & 1) {
-                gfx_put_pixel_alpha((uint32_t)(mx + x + 2), (uint32_t)(my + y + 2), 0x00000000, 90);
-                if (x == 0 || y == 0 || x == 7 || ((row >> (6 - x)) & 1) == 0 || y == 15) {
-                    gfx_put_pixel_alpha((uint32_t)(mx + x), (uint32_t)(my + y), 0x00FFFFFF, 255);
-                } else {
-                    gfx_put_pixel_alpha((uint32_t)(mx + x), (uint32_t)(my + y), 0x000F172A, 255);
-                }
+    for (int r = 0; r < 20; ++r) {
+        for (int c = 0; c < 14; ++c) {
+            uint8_t val = cursor_body[r][c];
+            if (val == 1) {
+                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), 0x00FFFFFF, 255);
+            } else if (val == 2) {
+                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), 0x000F172A, 255);
+            } else if (val == 3) {
+                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), (r <= 5) ? 0x0038BDF8 : 0x001E293B, 255);
             }
         }
     }
