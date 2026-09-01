@@ -69,7 +69,7 @@ pub fn app_notes_render(x: u32, y: u32, w: u32, h: u32) -> void {
             }
 
             if i == 0 {
-                gfx_draw_text_alpha(text_x, ly + 2, "// Baken OS - Kernel Sovereign Core", 0x0064748B, 1, 200);
+                gfx_draw_text_alpha(text_x, ly + 2, "// Baken OS - Kernel Native Core", 0x0064748B, 1, 200);
             } else if i == 1 {
                 gfx_draw_text_alpha(text_x, ly + 2, "module kernel::app_notes;", 0x00C084FC, 1, 240);
             } else if i == 2 {

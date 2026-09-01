@@ -1,7 +1,7 @@
 /*
  * Baken OS — UEFI Hardware Bootloader & Handoff Loader (x86_64)
  * Papel: Diálogo com firmware UEFI, ativação GOP Framebuffer, Memory Map e Handoff direto para o Microkernel.
- * ZERO código de UI no bootloader (Arquitetura Modular Soberana).
+ * ZERO código de UI no bootloader (Arquitetura Modular Nativa).
  */
 
 #include <stdint.h>
@@ -27,6 +27,14 @@ typedef struct {
 
 static EFI_GUID EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID = {
     0x9042a9de, 0x23dc, 0x4a38, {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}
+};
+
+static EFI_GUID EFI_ACPI_20_TABLE_GUID = {
+    0x8868e871, 0xe4f1, 0x11d3, {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}
+};
+
+static EFI_GUID EFI_ACPI_10_TABLE_GUID = {
+    0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}
 };
 
 typedef struct {
@@ -109,6 +117,11 @@ typedef struct _EFI_BOOT_SERVICES {
 } EFI_BOOT_SERVICES;
 
 typedef struct {
+    EFI_GUID VendorGuid;
+    void *VendorTable;
+} EFI_CONFIGURATION_TABLE;
+
+typedef struct {
     uint8_t Hdr[24];
     CHAR16 *FirmwareVendor;
     uint32_t FirmwareRevision;
@@ -121,7 +134,7 @@ typedef struct {
     void *RuntimeServices;
     EFI_BOOT_SERVICES *BootServices;
     UINTN NumberOfTableEntries;
-    void *ConfigurationTable;
+    EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
 static EFI_GUID EFI_SIMPLE_POINTER_PROTOCOL_GUID = {
@@ -162,7 +175,7 @@ typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(uint32_t SearchType, const EFI_GU
 #define BY_PROTOCOL 2U
 
 /* Escolhe apenas um segundo disco bruto, presente e gravável. A mídia usada
- * para o boot permanece fora do alvo; a futura rotina de instalação recebe
+ * para o boot permanece fora do alvo; a rotina de instalação recebe
  * este ponteiro explicitamente, nunca um nome de unidade do Windows. */
 static EFI_BLOCK_IO_PROTOCOL *find_install_target(EFI_BOOT_SERVICES *bs,
                                                    EFI_BLOCK_IO_PROTOCOL *boot_media) {
@@ -188,61 +201,138 @@ static EFI_BLOCK_IO_PROTOCOL *find_install_target(EFI_BOOT_SERVICES *bs,
     return target;
 }
 
+/* Localiza a tabela ACPI RSDP (versão 2.0 com fallback para 1.0) */
+static void *find_acpi_rsdp(const EFI_SYSTEM_TABLE *st) {
+    if (!st || !st->ConfigurationTable) return NULL;
+    void *rsdp_10 = NULL;
+    for (UINTN i = 0; i < st->NumberOfTableEntries; ++i) {
+        const EFI_CONFIGURATION_TABLE *entry = &st->ConfigurationTable[i];
+        if (entry->VendorGuid.Data1 == EFI_ACPI_20_TABLE_GUID.Data1 &&
+            entry->VendorGuid.Data2 == EFI_ACPI_20_TABLE_GUID.Data2 &&
+            entry->VendorGuid.Data3 == EFI_ACPI_20_TABLE_GUID.Data3) {
+            return entry->VendorTable;
+        }
+        if (entry->VendorGuid.Data1 == EFI_ACPI_10_TABLE_GUID.Data1 &&
+            entry->VendorGuid.Data2 == EFI_ACPI_10_TABLE_GUID.Data2 &&
+            entry->VendorGuid.Data3 == EFI_ACPI_10_TABLE_GUID.Data3) {
+            rsdp_10 = entry->VendorTable;
+        }
+    }
+    return rsdp_10;
+}
+
 static int is_baken_boot_media(EFI_BLOCK_IO_PROTOCOL *io) {
     uint8_t sector[512];
     if (!io || !io->Media || !io->ReadBlocks || io->Media->BlockSize != 512 ||
         io->Media->LastBlock < 4096 || io->ReadBlocks(io, io->Media->MediaId, 0, 512, sector) != EFI_SUCCESS) return 0;
+    
+    /* MBR híbrido / partição com assinatura Baken */
     uint32_t start = (uint32_t)sector[454] | ((uint32_t)sector[455]<<8) | ((uint32_t)sector[456]<<16) | ((uint32_t)sector[457]<<24);
     if (sector[450] == 0xEF && start != 0 &&
-        io->ReadBlocks(io,io->Media->MediaId,start,512,sector)==EFI_SUCCESS)
-        return sector[3]=='B' && sector[4]=='A' && sector[5]=='K' && sector[6]=='E' && sector[7]=='N';
+        io->ReadBlocks(io, io->Media->MediaId, start, 512, sector) == EFI_SUCCESS) {
+        if (sector[3]=='B' && sector[4]=='A' && sector[5]=='K' && sector[6]=='E' && sector[7]=='N') return 1;
+    }
 
     /* A instalação final usa GPT/FAT32, portanto o disco bruto também deve
      * ser reconhecido como mídia de origem. Isto é essencial para o kernel
      * acessar a partição Baken Data por LBA absoluto, e evita montar apenas
      * a ESP lógica encontrada pelo firmware. */
-    if (io->ReadBlocks(io,io->Media->MediaId,1,512,sector)!=EFI_SUCCESS ||
+    if (io->ReadBlocks(io, io->Media->MediaId, 1, 512, sector) != EFI_SUCCESS ||
         sector[0]!='E' || sector[1]!='F' || sector[2]!='I' || sector[3]!=' ' ||
         sector[4]!='P' || sector[5]!='A' || sector[6]!='R' || sector[7]!='T') return 0;
-    if (io->ReadBlocks(io,io->Media->MediaId,2,512,sector)!=EFI_SUCCESS) return 0;
+    
     /* GUID de tipo Baken Data: 7F3C7258-2F1C-4E03-BF20-42414B454E31. */
-    static const uint8_t data_guid[16]={0x58,0x72,0x3C,0x7F,0x1C,0x2F,0x03,0x4E,0xBF,0x20,0x42,0x41,0x4B,0x45,0x4E,0x31};
-    for (UINTN off=0; off+16<=512; off+=128) { UINTN i=0; for(;i<16 && sector[off+i]==data_guid[i];++i){} if(i==16)return 1; }
+    static const uint8_t data_guid[16] = {
+        0x58, 0x72, 0x3C, 0x7F, 0x1C, 0x2F, 0x03, 0x4E, 0xBF, 0x20, 0x42, 0x41, 0x4B, 0x45, 0x4E, 0x31
+    };
+
+    /* Varredura completa da tabela de partições GPT (LBAs 2 a 33 = até 128 partições) */
+    for (uint64_t lba = 2; lba <= 33 && lba <= io->Media->LastBlock; ++lba) {
+        if (io->ReadBlocks(io, io->Media->MediaId, lba, 512, sector) != EFI_SUCCESS) break;
+        for (UINTN off = 0; off + 16 <= 512; off += 128) {
+            UINTN i = 0;
+            for (; i < 16 && sector[off + i] == data_guid[i]; ++i) {}
+            if (i == 16) return 1;
+        }
+    }
     return 0;
 }
+
 static EFI_BLOCK_IO_PROTOCOL *find_boot_media(EFI_BOOT_SERVICES *bs, EFI_BLOCK_IO_PROTOCOL *fallback) {
     if (!bs || !bs->LocateHandleBuffer || !bs->HandleProtocol) return fallback;
-    EFI_HANDLE *handles=NULL; UINTN count=0; EFI_BLOCK_IO_PROTOCOL *result=fallback;
-    EFI_LOCATE_HANDLE_BUFFER locate=(EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
-    EFI_HANDLE_PROTOCOL hp=(EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
-    if(locate(BY_PROTOCOL,&EFI_BLOCK_IO_PROTOCOL_GUID,NULL,&count,&handles)==EFI_SUCCESS) {
-        for(UINTN i=0;i<count;++i){ EFI_BLOCK_IO_PROTOCOL *candidate=NULL; if(hp(handles[i],&EFI_BLOCK_IO_PROTOCOL_GUID,(void**)&candidate)==EFI_SUCCESS && candidate && !candidate->Media->LogicalPartition && is_baken_boot_media(candidate)){result=candidate;break;} }
-        if(handles && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(handles);
+    EFI_HANDLE *handles = NULL;
+    UINTN count = 0;
+    EFI_BLOCK_IO_PROTOCOL *result = fallback;
+    EFI_LOCATE_HANDLE_BUFFER locate = (EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
+    EFI_HANDLE_PROTOCOL hp = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
+    if (locate(BY_PROTOCOL, &EFI_BLOCK_IO_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS) {
+        for (UINTN i = 0; i < count; ++i) {
+            EFI_BLOCK_IO_PROTOCOL *candidate = NULL;
+            if (hp(handles[i], &EFI_BLOCK_IO_PROTOCOL_GUID, (void**)&candidate) == EFI_SUCCESS &&
+                candidate && candidate->Media && !candidate->Media->LogicalPartition &&
+                is_baken_boot_media(candidate)) {
+                result = candidate;
+                break;
+            }
+        }
+        if (handles && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(handles);
     }
     return result;
 }
 
-/* O GOP é a fonte de verdade para a resolução da VM ou do painel. Escolhemos
- * o maior modo que ainda cabe no compositor 3072x2048; assim 1440x900 e
- * 2880x1800 são usados quando o firmware os anuncia, sem forçar resolução
- * inexistente nem ultrapassar o backbuffer. */
+/* O GOP é a fonte de verdade para a resolução da VM ou do painel. Selecionamos
+ * o melhor modo nativo de alta densidade no formato 32-bit BGRX (0x00RRGGBB). */
 static void choose_high_density_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
                                          EFI_BOOT_SERVICES *bs) {
     if (!gop || !gop->Mode || !gop->Mode->Info || !gop->QueryMode || !gop->SetMode) return;
     EFI_GOP_QUERY_MODE query = (EFI_GOP_QUERY_MODE)gop->QueryMode;
     uint32_t best_mode = gop->Mode->Mode;
     uint64_t best_area = (uint64_t)gop->Mode->Info->HorizontalResolution * gop->Mode->Info->VerticalResolution;
+
     for (uint32_t mode = 0; mode < gop->Mode->MaxMode; ++mode) {
         UINTN info_size = 0;
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         if (query(gop, mode, &info_size, &info) != EFI_SUCCESS || !info) continue;
+        
         uint64_t area = (uint64_t)info->HorizontalResolution * info->VerticalResolution;
         if (info->PixelFormat == PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR &&
-            info->HorizontalResolution <= 3072 && info->VerticalResolution <= 2048 &&
-            area > best_area) { best_mode = mode; best_area = area; }
+            info->HorizontalResolution <= 1920 && info->VerticalResolution <= 1080 &&
+            area >= best_area) {
+            best_mode = mode;
+            best_area = area;
+        }
         if (bs && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(info);
     }
     if (best_mode != gop->Mode->Mode) (void)gop->SetMode(gop, best_mode);
+}
+
+static void *find_pointer_protocol(EFI_BOOT_SERVICES *bs) {
+    if (!bs) return NULL;
+    void *ptr = NULL;
+    if (bs->LocateProtocol) {
+        if (bs->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
+        if (bs->LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
+    }
+    if (bs->LocateHandleBuffer && bs->HandleProtocol) {
+        EFI_HANDLE *handles = NULL;
+        UINTN count = 0;
+        EFI_LOCATE_HANDLE_BUFFER locate = (EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
+        EFI_HANDLE_PROTOCOL hp = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
+        if (locate(BY_PROTOCOL, &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
+            for (UINTN i = 0; i < count; ++i) {
+                if (hp(handles[i], &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
+            }
+            if (handles && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(handles);
+            if (ptr) return ptr;
+        }
+        if (locate(BY_PROTOCOL, &EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
+            for (UINTN i = 0; i < count; ++i) {
+                if (hp(handles[i], &EFI_SIMPLE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
+            }
+            if (handles && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(handles);
+        }
+    }
+    return ptr;
 }
 
 // Declaração do Ponto de Entrada do Microkernel Baken OS
@@ -262,20 +352,19 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     // 1. Localiza o Protocolo Gráfico do Hardware (UEFI GOP) e ponteiros de entrada
     if (bs->LocateProtocol) {
         bs->LocateProtocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, NULL, (void**)&gop);
-        bs->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, (void**)&pointer);
-        if (!pointer) {
-            bs->LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, (void**)&pointer);
-        }
         bs->LocateProtocol(&EFI_BLOCK_IO_PROTOCOL_GUID, NULL, (void**)&block_io);
         block_io = find_boot_media(bs, (EFI_BLOCK_IO_PROTOCOL*)block_io);
         install_target = find_install_target(bs, (EFI_BLOCK_IO_PROTOCOL*)block_io);
     }
+    pointer = find_pointer_protocol(bs);
 
     choose_high_density_gop_mode(gop, bs);
 
+    // Validação estrita do frame de vídeo
     if (gop && gop->Mode && gop->Mode->Info && gop->Mode->FrameBufferBase &&
         gop->Mode->Info->PixelFormat == PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR &&
         gop->Mode->Info->PixelsPerScanLine >= gop->Mode->Info->HorizontalResolution) {
+        
         // 2. Prepara o pacote BakenBootInfo com os parâmetros do hardware
         BakenBootInfo boot_info;
         boot_info.framebuffer_base    = (uint32_t*)gop->Mode->FrameBufferBase;
@@ -290,10 +379,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         boot_info.block_io_protocol   = block_io;
         boot_info.install_target_block_io_protocol = install_target;
 
+        // Opcional: validação da tabela ACPI RSDP para inicialização de barramentos
+        (void)find_acpi_rsdp(SystemTable);
+
         // 3. Handoff imediato para o Microkernel do Baken OS
         baken_kernel_main(&boot_info);
-        // Um kernel gráfico não deve retornar. Se retornar, sinalize falha ao
-        // firmware em vez de congelar a CPU dentro de serviços UEFI ativos.
+        
+        // Um kernel gráfico não deve retornar. Se retornar, sinaliza falha ao firmware.
         return EFI_ABORTED;
     }
 

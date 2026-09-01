@@ -187,7 +187,7 @@ pub fn wm_handle_mouse_down(mx: i32, my: i32) -> bool {
             else if win.id == 3 { app_settings_handle_click(rel_x, rel_y); }
             else if win.id == 4 { app_about_handle_click(rel_x, rel_y); }
             else if win.id == 5 { app_terminal_handle_click(rel_x, rel_y); }
-            else if win.id == 6 { baken_installer_handle_click(rel_x, rel_y); }
+            else if win.id == 6 { baken_installer_handle_click(rel_x, rel_y, win.width, win.height); }
         }
         return true;
     }

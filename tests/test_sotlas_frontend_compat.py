@@ -7,11 +7,13 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("bootstrap", ROOT / "tools" / "sotlas_compile" / "bootstrap.py")
+assert SPEC is not None and SPEC.loader is not None
 bootstrap = importlib.util.module_from_spec(SPEC)
 sys.modules["bootstrap"] = bootstrap
 SPEC.loader.exec_module(bootstrap)
 
 SPEC_COMPILER = importlib.util.spec_from_file_location("compiler", ROOT / "tools" / "sotlas_compile" / "compiler.py")
+assert SPEC_COMPILER is not None and SPEC_COMPILER.loader is not None
 sotlas_compile = importlib.util.module_from_spec(SPEC_COMPILER)
 SPEC_COMPILER.loader.exec_module(sotlas_compile)
 

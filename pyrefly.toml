@@ -1,6 +1,7 @@
 [tool.pyrefly]
 # Só analisar código Python do projeto
 project_includes = ["tools/**/*.py", "tests/**/*.py"]
+search_path = [".", "tools", "tools/sotlas_compile"]
 
 # Excluir código C gerado, build artifacts e arquivos Sotlas
 project_excludes = [

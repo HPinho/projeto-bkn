@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools" / "sotlas_compile"))
 SPEC_LSP = importlib.util.spec_from_file_location("lsp", ROOT / "tools" / "sotlas_compile" / "lsp.py")
+assert SPEC_LSP is not None and SPEC_LSP.loader is not None
 lsp = importlib.util.module_from_spec(SPEC_LSP)
 sys.modules["lsp"] = lsp
 SPEC_LSP.loader.exec_module(lsp)

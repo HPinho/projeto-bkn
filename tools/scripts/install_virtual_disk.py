@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = ROOT / "build"
 spec = importlib.util.spec_from_file_location("installed_disk", ROOT / "tools/scripts/create_installed_disk.py")
+assert spec is not None and spec.loader is not None
 installed_disk = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installed_disk)
 

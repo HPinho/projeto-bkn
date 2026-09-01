@@ -35,7 +35,7 @@ pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
 
         // Título e Versão
         let title_y = y + 84;
-        let title = "Baken OS Sovereign Edition";
+        let title = "Baken OS Desktop Edition";
         let title_w = gfx_measure_text(title.as_ptr());
         gfx_draw_text_alpha(center_x - (title_w / 2), title_y, title.as_ptr(), 0x00F8FAFC, 1, 255);
 

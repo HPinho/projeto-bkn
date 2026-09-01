@@ -39,7 +39,7 @@ class StorageInstallerTests(unittest.TestCase):
         self.assertIn("find_boot_file", compiler)
         self.assertIn("installer_execute_installation", compiler)
         self.assertIn("installer_handle_click", compiler)
-        self.assertIn("Instalador e Setup - Baken OS Sovereign", compiler)
+        self.assertIn("Instalador e Setup - Baken OS", compiler)
         self.assertIn("Volume", compiler)
 
     def test_sotlas_compile_contains_complete_setup_wizard_stages(self):
@@ -73,6 +73,39 @@ class StorageInstallerTests(unittest.TestCase):
         self.assertIn("GUID de tipo Baken Data", bootloader)
         self.assertIn("sector[0]!='E'", bootloader)
         self.assertIn("data_guid", bootloader)
+
+    def test_installer_presentation_benchmark_and_oobe_contracts(self):
+        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
+        # Apresentação e TasteTrack Systems
+        self.assertIn("TasteTrack Systems LTDA", compiler)
+        self.assertIn("Comecar agora", compiler)
+        self.assertIn("Restaurar ou Corrigir Computador", compiler)
+        # Hub Central & Propaganda / Showcase
+        self.assertIn("Diferenciais do Baken OS", compiler)
+        self.assertIn("Testar BakenOS", compiler)
+        self.assertIn("Instalar agora", compiler)
+        self.assertIn("Teste de Desempenho", compiler)
+        # Benchmark com medições dinâmicas e nota calculada
+        self.assertIn("st_rdtsc", compiler)
+        self.assertIn("st_cpuid", compiler)
+        self.assertIn("installer_run_hardware_benchmark", compiler)
+        self.assertIn("Nota Geral do Computador:", compiler)
+        self.assertIn("Nivel Ouro", compiler)
+        # Proteção estrita da mídia de boot
+        self.assertIn("Protecao ativa", compiler)
+        self.assertIn("boot_disk_is_protected", compiler)
+        # 4 Passos normativos de instalação
+        self.assertIn("1. Copiando Arquivos do Sistema...", compiler)
+        self.assertIn("2. Verificando atualizacoes...", compiler)
+        self.assertIn("3. Instalando atualizacoes...", compiler)
+        self.assertIn("4. Finalizando Instalacao...", compiler)
+        # OOBE primeiro boot e gradiente
+        self.assertIn("Iniciando operadores...", compiler)
+        self.assertIn("Configurando tudo para voce...", compiler)
+        self.assertIn("INSTALLER_STAGE_OOBE_BOOT", compiler)
+        self.assertIn("INSTALLER_STAGE_OOBE_WIZARD", compiler)
+        self.assertIn("INSTALLER_STAGE_OOBE_FINISH", compiler)
+        self.assertIn("O futuro do seu computador comeca agora.", compiler)
 
 
 if __name__ == "__main__":

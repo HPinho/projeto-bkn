@@ -24,8 +24,8 @@ def render(size, width, height, baseline):
         image = Image.new('L', (width, height), 0)
         ImageDraw.Draw(image).text((0, baseline), char, fill=255, font=font)
         start = code * width * height
-        pixels[start:start + width * height] = list(image.getdata())
-        advance = int(round(font.getlength(char)))
+        pixels[start:start + width * height] = list(image.tobytes())
+        advance = round(font.getlength(char))
         advances[code] = max(2, min(width, 4 if char == ' ' else advance))
     return advances, pixels
 

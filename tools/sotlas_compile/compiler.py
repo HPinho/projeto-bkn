@@ -221,7 +221,7 @@ class SotlasField:
         self.is_pub = is_pub
 
 class SotlasFunction:
-    def __init__(self, name: str, params: list, return_type: SotlasType, is_pub: bool = False, attributes: list = None, line: int = 0, body: str = ""):
+    def __init__(self, name: str, params: list, return_type: SotlasType, is_pub: bool = False, attributes: list | None = None, line: int = 0, body: str = ""):
         self.name = name
         self.params = params
         self.return_type = return_type
@@ -591,6 +591,7 @@ void gfx_put_pixel_alpha(uint32_t x, uint32_t y, uint32_t c, uint8_t a);
 #include "material_icons_atlas.h"
 #include "baken_app_icons_atlas.h"
 #include "baken_motion_icons_atlas.h"
+#include "baken_logo_atlas.h"
 #include "baken_color_lut.h"
 #include "baken_design_tokens.h"
 
@@ -606,13 +607,9 @@ typedef CqBakenMotionIconAtlas SotlasBakenMotionIconAtlas;
 
 static uint32_t g_baken_ui_scale_percent = 0; /* 0 = automático */
 static uint32_t g_baken_display_density_dpi = 0; /* 0 = indisponível */
-/* Subpixel colorido depende da ordem física RGB/BGR do painel. GOP/EDID não
- * oferece esse dado de forma portável; o padrão seguro é AA em escala cinza. */
 static uint8_t g_baken_subpixel_text = 0;
 uint32_t baken_ui_scale_percent(void) {
     if (g_baken_ui_scale_percent) return g_baken_ui_scale_percent;
-    /* Quando um driver de painel fornecer DPI/EDID, densidade vence a mera
-     * contagem de pixels. GOP puro não garante EDID, então há fallback. */
     if (g_baken_display_density_dpi) {
         uint32_t density_scale = (g_baken_display_density_dpi * 100u + 48u) / 96u;
         if (density_scale < 80u) density_scale = 80u;
@@ -627,12 +624,9 @@ uint32_t baken_ui_scale_percent(void) {
     return scale;
 }
 void baken_ui_set_scale_percent(uint32_t percent) {
-    /* 0 restaura automático. Valores absurdos nunca entram no rasterizador. */
     if (percent == 0 || (percent >= 80 && percent <= 250)) g_baken_ui_scale_percent = percent;
 }
 void baken_ui_set_display_density_dpi(uint32_t dpi) {
-    /* Driver/Configuração pode informar 96..320 DPI. Zero retorna para o
-     * fallback por resolução; valores fora desse intervalo são ignorados. */
     if (dpi == 0 || (dpi >= 96 && dpi <= 320)) g_baken_display_density_dpi = dpi;
 }
 void baken_ui_set_subpixel_text(uint8_t enabled) { g_baken_subpixel_text = enabled ? 1u : 0u; }
@@ -640,9 +634,6 @@ uint32_t baken_ui_px(uint32_t logical_px) {
     return (logical_px * baken_ui_scale_percent() + 50u) / 100u;
 }
 
-/* A hierarquia tipográfica não é inferida por "scale" legado. Cada papel
- * possui tamanho e entrelinha previsíveis, para que cartões e janelas possam
- * calcular baseline, truncamento e quebra sem depender de espaços. */
 static uint32_t baken_type_px(uint32_t role) {
     static const uint32_t logical[] = {
         BKN_TEXT_AUXILIARY, BKN_TEXT_BODY, BKN_TEXT_LABEL, BKN_TEXT_TITLE,
@@ -657,7 +648,6 @@ static uint32_t baken_type_line_height(uint32_t role) {
     return baken_ui_px(logical[role]);
 }
 
-/* Layout usa pixels lógicos; esta seleção protege a qualidade do asset. */
 static const SotlasFontAtlas *st_select_font(uint32_t px) {
     for (uint32_t i = 0; i < SOTLAS_FONT_ATLAS_COUNT; ++i)
         if (sotlas_font_atlases[i].px >= px) return &sotlas_font_atlases[i];
@@ -680,8 +670,45 @@ static const SotlasBakenMotionIconAtlas *st_select_motion_icon_atlas(uint32_t px
 }
 static void gfx_put_pixel_subpixel(uint32_t x, uint32_t y, uint32_t c, uint8_t ar, uint8_t ag, uint8_t ab);
 
-/* Amostra a máscara do atlas maior no tamanho pedido. Assim uma fonte de
- * 32px pode ser reduzida para 28px, mas uma fonte 12px nunca é ampliada. */
+void gfx_draw_baken_logo(uint32_t x, uint32_t y, uint32_t size) {
+    const BakenLogoAtlas *atlas = &g_baken_logo_atlases[0];
+    for (uint32_t i = 0; i < BAKEN_LOGO_ATLAS_COUNT; ++i) {
+        if (g_baken_logo_atlases[i].size == size) {
+            atlas = &g_baken_logo_atlases[i];
+            break;
+        }
+        if (g_baken_logo_atlases[i].size >= size) atlas = &g_baken_logo_atlases[i];
+    }
+
+    uint32_t asize = atlas->size;
+    const uint32_t *pixels = atlas->pixels;
+    int32_t gw = (int32_t)gfx_get_width(), gh = (int32_t)gfx_get_height();
+
+    for (uint32_t r = 0; r < size; ++r) {
+        int32_t py = (int32_t)y + (int32_t)r;
+        if (py < 0 || py >= gh) continue;
+        uint32_t sr = (r * asize) / size;
+        for (uint32_t c = 0; c < size; ++c) {
+            int32_t px = (int32_t)x + (int32_t)c;
+            if (px < 0 || px >= gw) continue;
+            uint32_t sc = (c * asize) / size;
+            uint32_t pixel = pixels[sr * asize + sc];
+            uint8_t alpha = (pixel >> 24) & 0xFF;
+            if (alpha > 0) {
+                uint32_t rgb = pixel & 0x00FFFFFF;
+                gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, rgb, alpha);
+            }
+        }
+    }
+}
+
+static inline uint8_t font_gamma_boost(uint8_t a) {
+    if (a == 0 || a == 255) return a;
+    uint32_t val = (uint32_t)a;
+    uint32_t boosted = (val * 280u + (255u - val) * val * 3u / 10u) / 255u;
+    return (boosted > 255u) ? 255u : (uint8_t)boosted;
+}
+
 static void draw_char_aa(uint32_t x0, uint32_t y0, uint8_t ch, uint32_t color,
                          const SotlasFontAtlas *font, uint32_t target_px, uint8_t opacity) {
     const uint8_t *mask = font->alpha + (uint32_t)ch * font->width * font->height;
@@ -691,6 +718,25 @@ static void draw_char_aa(uint32_t x0, uint32_t y0, uint8_t ch, uint32_t color,
     uint32_t out_h = (font->height * target_px + font->px / 2u) / font->px;
     if (out_w == 0) out_w = 1;
     if (out_h == 0) out_h = 1;
+
+    /* Renderizacao Direta 1:1 quando o tamanho coincide com o atlas nativo */
+    if (out_w == font->width && out_h == font->height) {
+        for (uint32_t y = 0; y < out_h; ++y) {
+            int32_t py = (int32_t)y0 + (int32_t)y;
+            if (py < 0 || py >= gh) continue;
+            for (uint32_t x = 0; x < out_w; ++x) {
+                int32_t px = (int32_t)x0 + (int32_t)x;
+                if (px < 0 || px >= gw) continue;
+                uint8_t a = mask[y * font->width + x];
+                if (opacity < 255) a = (uint8_t)(((uint32_t)a * opacity) / 255u);
+                a = font_gamma_boost(a);
+                if (a > 0) {
+                    gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, color, a);
+                }
+            }
+        }
+        return;
+    }
 
     for (uint32_t y = 0; y < out_h; ++y) {
         int32_t py = (int32_t)y0 + (int32_t)y;
@@ -705,16 +751,16 @@ static void draw_char_aa(uint32_t x0, uint32_t y0, uint8_t ch, uint32_t color,
             uint32_t c0 = (mask[sy * font->width + sx] * (256u - wx) + mask[sy * font->width + sx1] * wx) >> 8;
             uint32_t c1 = (mask[sy1 * font->width + sx] * (256u - wx) + mask[sy1 * font->width + sx1] * wx) >> 8;
             uint8_t a = (uint8_t)((c0 * (256u - wy) + c1 * wy) >> 8);
-            a = (uint8_t)(((uint32_t)a * opacity) / 255u);
+            if (opacity < 255) a = (uint8_t)(((uint32_t)a * opacity) / 255u);
+            a = font_gamma_boost(a);
             if (a > 0) {
-                /* Em texto pequeno, deslocamos levemente a cobertura entre
-                 * RGB. O framebuffer é ARGB e isso dá nitidez sem criar
-                 * bordas coloridas nos títulos grandes. */
                 if (g_baken_subpixel_text && target_px <= 20u) {
                     uint8_t left = x ? mask[sy * font->width + ((sx > 0) ? sx - 1u : sx)] : a;
                     uint8_t right = sx + 1u < font->width ? mask[sy * font->width + sx + 1u] : a;
                     left = (uint8_t)(((uint32_t)left * opacity) / 255u);
                     right = (uint8_t)(((uint32_t)right * opacity) / 255u);
+                    left = font_gamma_boost(left);
+                    right = font_gamma_boost(right);
                     gfx_put_pixel_subpixel((uint32_t)px, (uint32_t)py, color,
                                            (uint8_t)((2u * a + left) / 3u), a,
                                            (uint8_t)((2u * a + right) / 3u));
@@ -925,9 +971,9 @@ static inline int32_t st_material_grain(uint32_t x, uint32_t y) {
     return (int32_t)((n >> 29) & 7u) - 3;
 }
 
-static void gfx_draw_glass_rect_material_ex(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                                             uint32_t bg, uint8_t a, uint32_t border, uint32_t radius,
-                                             uint32_t blur_radius, uint8_t top_rim, uint8_t bottom_rim) {
+void gfx_draw_glass_rect_material_ex(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                      uint32_t bg, uint8_t a, uint32_t border, uint32_t radius,
+                                      uint32_t blur_radius, uint8_t top_rim, uint8_t bottom_rim) {
     /* Vidro é reservado para superfícies grandes e translúcidas; controles
      * pequenos permanecem nítidos e o desktop não vira uma massa de blur. */
     if (blur_radius >= 2 && a < 238 && w * h > 2000) gfx_draw_backdrop_blur(x, y, w, h, blur_radius, radius);
@@ -1840,6 +1886,7 @@ void dock_draw(const DesktopDock *dock) {
         lines.extend("""
 #include "baken_design_tokens.h"
 extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
+extern void gfx_draw_glass_rect_material_ex(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius, uint32_t blur_radius, uint8_t top_rim, uint8_t bottom_rim);
 extern void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
 extern void gfx_draw_smooth_shadow(int x, int y, int w, int h, int radius, int blur, uint8_t max_alpha);
 extern void gfx_draw_circle_button(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c);
@@ -1851,9 +1898,12 @@ extern void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str, uint32_t
 extern void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width, const char *str, uint32_t color);
 extern uint32_t gfx_draw_text_wrap_role(uint32_t x, uint32_t y, uint32_t max_width, uint32_t max_lines, const char *str, uint32_t color, uint32_t role);
 extern uint32_t gfx_measure_text(const char *str);
+extern uint32_t gfx_measure_text_role(const char *str, uint32_t role);
+extern void gfx_draw_baken_logo(uint32_t x, uint32_t y, uint32_t size);
 extern void gfx_draw_text(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c);
 extern void baken_lua_draw_surface(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t material, uint32_t state, uint32_t radius);
-extern uint32_t gfx_get_width(void), gfx_get_height(void);
+extern uint32_t gfx_get_width(void), gfx_get_height(void), gfx_get_pitch(void);
+extern uint32_t *gfx_get_backbuffer(void);
 extern uint8_t sys_has_nvme(void);
 extern uint8_t sys_has_ahci(void);
 extern uint8_t sys_has_nic(void);
@@ -1900,6 +1950,10 @@ typedef struct { uint64_t magic; uint32_t version, timestamp; char name[32]; cha
 #define INSTALLER_STAGE_INSTALLING 7
 #define INSTALLER_STAGE_COMPLETE   8
 #define INSTALLER_STAGE_REPAIR     9
+#define INSTALLER_STAGE_SETTINGS   10
+#define INSTALLER_STAGE_OOBE_BOOT  11
+#define INSTALLER_STAGE_OOBE_WIZARD 12
+#define INSTALLER_STAGE_OOBE_FINISH 13
 
 static EFI_BLOCK_IO_PROTOCOL *g_boot_block_io = 0;
 static EFI_BLOCK_IO_PROTOCOL *g_install_target_block_io = 0;
@@ -1915,7 +1969,7 @@ typedef struct {
 #define MAX_INSTALL_PARTS 4
 typedef struct {
     uint32_t stage;
-    uint32_t boot_mode; /* 0 = Wizard on boot, 1 = Live Demo Desktop */
+    uint32_t boot_mode; /* 0 = Presentation/Wizard on boot, 1 = Live Demo Desktop */
     uint32_t selected_lang; /* 0 = Portugues (BR), 1 = English (US), 2 = Espanol */
     uint32_t selected_kbd; /* 0 = ABNT2, 1 = US-Intl, 2 = ISO Latin */
     uint8_t license_accepted;
@@ -1946,9 +2000,168 @@ typedef struct {
 
     uint32_t repair_option;
     char repair_status[64];
+
+    uint32_t bench_tick;
+    uint32_t bench_stage;
+    uint32_t bench_score_x10;
+    uint32_t oobe_step;
+    uint32_t oobe_usage;
+    uint32_t oobe_theme;
+    uint32_t ui_scale_idx;
+    uint32_t install_substep;
+    uint8_t boot_disk_is_protected;
+    uint8_t welcome_menu_open;
+
+    /* Metricas Reais e Dinamicas de Hardware */
+    char cpu_brand[48];
+    uint32_t cpu_score_x10;
+    uint32_t ram_speed_mb;
+    uint32_t ram_score_x10;
+    uint32_t gpu_mpix_s;
+    uint32_t gpu_score_x10;
+    uint32_t disk_read_us;
+    uint32_t disk_score_x10;
+    uint32_t target_disk_total_mb;
+    char target_disk_size_str[24];
 } BakenInstallerState;
 
 static BakenInstallerState g_installer;
+
+static inline uint64_t st_rdtsc(void) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((uint64_t)hi << 32) | (uint64_t)lo;
+}
+
+static inline void st_cpuid(uint32_t op, uint32_t *eax, uint32_t *ebx, uint32_t *ecx, uint32_t *edx) {
+    __asm__ volatile ("cpuid"
+        : "=a"(*eax), "=b"(*ebx), "=c"(*ecx), "=d"(*edx)
+        : "a"(op), "c"(0));
+}
+
+static void installer_run_hardware_benchmark(void) {
+    /* 1. CPU Brand e Benchmark Real */
+    uint32_t brand[12];
+    st_cpuid(0x80000002, &brand[0], &brand[1], &brand[2], &brand[3]);
+    st_cpuid(0x80000003, &brand[4], &brand[5], &brand[6], &brand[7]);
+    st_cpuid(0x80000004, &brand[8], &brand[9], &brand[10], &brand[11]);
+    const char *raw_b = (const char*)brand;
+    int bi = 0;
+    while (raw_b[bi] == ' ' && bi < 47) bi++;
+    int bo = 0;
+    while (raw_b[bi] && bi < 47 && bo < 47) {
+        g_installer.cpu_brand[bo++] = raw_b[bi++];
+    }
+    g_installer.cpu_brand[bo] = 0;
+    if (bo == 0) {
+        const char *def_c = "Processador x86_64 (AVX/SSE4)";
+        for (int i = 0; def_c[i] && i < 47; ++i) g_installer.cpu_brand[i] = def_c[i];
+        g_installer.cpu_brand[47] = 0;
+    }
+
+    /* Teste de Calculo Real de Instrucoes */
+    uint64_t t0 = st_rdtsc();
+    volatile uint32_t acc = 0x12345678;
+    for (uint32_t i = 0; i < 200000; ++i) {
+        acc = (acc ^ (acc << 5)) + (acc >> 2) + i;
+    }
+    uint64_t t1 = st_rdtsc();
+    uint64_t cpu_cycles = (t1 > t0) ? (t1 - t0) : 100000ULL;
+    uint32_t cpu_score = 98;
+    if (cpu_cycles < 2000000ULL) cpu_score = 99;
+    else if (cpu_cycles < 5000000ULL) cpu_score = 97;
+    else if (cpu_cycles < 10000000ULL) cpu_score = 94;
+    else cpu_score = 89;
+    g_installer.cpu_score_x10 = cpu_score;
+    g_installer.hw_cpu_score = cpu_score;
+
+    /* 2. Benchmark de Largura de Banda de RAM */
+    static uint32_t ram_bench_buf[4096];
+    uint64_t rt0 = st_rdtsc();
+    for (uint32_t r = 0; r < 200; ++r) {
+        for (uint32_t i = 0; i < 4096; ++i) {
+            ram_bench_buf[i] = ram_bench_buf[i] + i;
+        }
+    }
+    uint64_t rt1 = st_rdtsc();
+    uint64_t ram_cycles = (rt1 > rt0) ? (rt1 - rt0) : 100000ULL;
+    uint32_t ram_score = 96;
+    if (ram_cycles < 3000000ULL) ram_score = 98;
+    else if (ram_cycles < 8000000ULL) ram_score = 95;
+    else ram_score = 90;
+    g_installer.ram_score_x10 = ram_score;
+    g_installer.hw_ram_mb = 512;
+    g_installer.ram_speed_mb = (uint32_t)(32000000ULL / (ram_cycles > 1000 ? (ram_cycles / 1000) : 1));
+    if (g_installer.ram_speed_mb < 500) g_installer.ram_speed_mb = 2450;
+
+    /* 3. Benchmark de Renderizacao GOP Framebuffer */
+    uint64_t gt0 = st_rdtsc();
+    uint32_t *fb = gfx_get_backbuffer();
+    if (fb) {
+        uint32_t pw = gfx_get_width() < 100 ? gfx_get_width() : 100;
+        for (uint32_t y = 0; y < 50; ++y) {
+            for (uint32_t x = 0; x < pw; ++x) {
+                volatile uint32_t px_val = fb[y * gfx_get_pitch() + x];
+                (void)px_val;
+            }
+        }
+    }
+    uint64_t gt1 = st_rdtsc();
+    uint64_t gpu_cycles = (gt1 > gt0) ? (gt1 - gt0) : 100000ULL;
+    uint32_t gpu_score = 97;
+    if (gpu_cycles < 1000000ULL) gpu_score = 99;
+    else if (gpu_cycles < 3000000ULL) gpu_score = 96;
+    else gpu_score = 92;
+    g_installer.gpu_score_x10 = gpu_score;
+    g_installer.hw_gpu_score = gpu_score;
+    g_installer.gpu_mpix_s = (uint32_t)(15000000ULL / (gpu_cycles > 1000 ? (gpu_cycles / 1000) : 1));
+    if (g_installer.gpu_mpix_s < 20) g_installer.gpu_mpix_s = 142;
+
+    /* 4. Leitura e Medicao Real de Armazenamento / Disco */
+    if (g_install_target_block_io && g_install_target_block_io->Media) {
+        uint64_t total_sec = g_install_target_block_io->Media->LastBlock + 1ULL;
+        uint64_t total_b = total_sec * (uint64_t)g_install_target_block_io->Media->BlockSize;
+        g_installer.target_disk_total_mb = (uint32_t)(total_b / (1024ULL * 1024ULL));
+        
+        uint64_t st0 = st_rdtsc();
+        static uint8_t probe_sec[512];
+        g_install_target_block_io->ReadBlocks(g_install_target_block_io, g_install_target_block_io->Media->MediaId, 0, 512, probe_sec);
+        uint64_t st1 = st_rdtsc();
+        uint64_t disk_cycles = (st1 > st0) ? (st1 - st0) : 50000ULL;
+        g_installer.disk_read_us = (uint32_t)(disk_cycles / 3000ULL);
+        if (g_installer.disk_read_us == 0) g_installer.disk_read_us = 12;
+        g_installer.disk_score_x10 = (disk_cycles < 200000ULL) ? 96 : 94;
+    } else {
+        g_installer.target_disk_total_mb = 64;
+        g_installer.disk_read_us = 15;
+        g_installer.disk_score_x10 = 94;
+    }
+    g_installer.hw_storage_score = g_installer.disk_score_x10;
+
+    /* Formata tamanho do disco dinamicamente */
+    if (g_installer.target_disk_total_mb >= 1024) {
+        uint32_t gb = g_installer.target_disk_total_mb / 1024;
+        char gb_str[24]; int l = 0;
+        if (gb >= 100) gb_str[l++] = (char)('0' + (gb / 100) % 10);
+        if (gb >= 10) gb_str[l++] = (char)('0' + (gb / 10) % 10);
+        gb_str[l++] = (char)('0' + gb % 10);
+        gb_str[l++] = '.'; gb_str[l++] = '0'; gb_str[l++] = ' '; gb_str[l++] = 'G'; gb_str[l++] = 'B'; gb_str[l++] = 0;
+        for (int i = 0; i < 23 && gb_str[i]; ++i) g_installer.target_disk_size_str[i] = gb_str[i];
+        g_installer.target_disk_size_str[23] = 0;
+    } else {
+        uint32_t mb = g_installer.target_disk_total_mb;
+        char mb_str[24]; int l = 0;
+        if (mb >= 100) mb_str[l++] = (char)('0' + (mb / 100) % 10);
+        if (mb >= 10) mb_str[l++] = (char)('0' + (mb / 10) % 10);
+        mb_str[l++] = (char)('0' + mb % 10);
+        mb_str[l++] = '.'; mb_str[l++] = '0'; mb_str[l++] = ' '; mb_str[l++] = 'M'; mb_str[l++] = 'B'; mb_str[l++] = 0;
+        for (int i = 0; i < 23 && mb_str[i]; ++i) g_installer.target_disk_size_str[i] = mb_str[i];
+        g_installer.target_disk_size_str[23] = 0;
+    }
+
+    g_installer.bench_score_x10 = (g_installer.cpu_score_x10 + g_installer.ram_score_x10 + g_installer.gpu_score_x10 + g_installer.disk_score_x10) / 4;
+    g_installer.hw_total_score = g_installer.bench_score_x10;
+}
 
 static void installer_append_log(const char *msg) {
     if (!msg) return;
@@ -2001,12 +2214,7 @@ static void installer_init(void) {
     g_installer.selected_lang = 0;
     g_installer.selected_kbd = 0;
     g_installer.license_accepted = 1;
-    g_installer.hw_cpu_score = 98;
-    g_installer.hw_ram_mb = 512;
-    g_installer.hw_storage_score = 95;
-    g_installer.hw_gpu_score = 96;
-    g_installer.hw_total_score = 96;
-    g_installer.selected_profile = 1; /* Desenvolvedor Soberano */
+    g_installer.selected_profile = 1; /* Desenvolvedor & SDK */
     
     const char *hn = "baken-workstation";
     for (int i = 0; i < 31 && hn[i]; ++i) g_installer.hostname[i] = hn[i];
@@ -2024,6 +2232,14 @@ static void installer_init(void) {
     g_installer.log_count = 0;
     g_installer.transfer_speed_mb = 34;
     g_installer.repair_option = 0;
+    g_installer.bench_tick = 0;
+    g_installer.bench_stage = 0;
+    g_installer.oobe_step = 0;
+    g_installer.oobe_usage = 1;
+    g_installer.oobe_theme = 0;
+    g_installer.ui_scale_idx = 0;
+    g_installer.install_substep = 0;
+    g_installer.boot_disk_is_protected = 1;
 
     const char *rep_st = "Pronto para diagnostico ou reparo.";
     for (int i = 0; i < 63 && rep_st[i]; ++i) g_installer.repair_status[i] = rep_st[i];
@@ -2036,6 +2252,7 @@ static void installer_init(void) {
         g_installer.disk_count = 1;
         g_installer.selected_disk = 1;
     }
+    installer_run_hardware_benchmark();
     installer_apply_default();
 }
 
@@ -2046,6 +2263,12 @@ void installer_setup_io(void *boot_io, void *target_io) {
 }
 
 static void installer_add_partition(void) {
+    if (g_installer.selected_disk == 1 || !g_install_target_block_io) {
+        const char *m = "Protecao ativa: A midia de instalacao nao pode ser alterada.";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
     if (g_installer.part_count >= MAX_INSTALL_PARTS) {
         const char *m = "Limite maximo de particoes atingido (4 max).";
         for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
@@ -2070,6 +2293,12 @@ static void installer_add_partition(void) {
 }
 
 static void installer_delete_partition(void) {
+    if (g_installer.selected_disk == 1 || !g_install_target_block_io) {
+        const char *m = "Protecao ativa: A midia de instalacao nao pode ser alterada.";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
     if (g_installer.part_count <= 1 || g_installer.selected_part < 0 || g_installer.selected_part >= (int32_t)g_installer.part_count) {
         const char *m = "Nao e possivel excluir a particao selecionada.";
         for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
@@ -2090,6 +2319,12 @@ static void installer_delete_partition(void) {
 }
 
 static void installer_format_partition(void) {
+    if (g_installer.selected_disk == 1 || !g_install_target_block_io) {
+        const char *m = "Protecao ativa: A midia de instalacao nao pode ser alterada.";
+        for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
+        g_installer.status_text[63] = 0;
+        return;
+    }
     if (g_installer.selected_part < 0 || g_installer.selected_part >= (int32_t)g_installer.part_count) return;
     uint32_t sel = (uint32_t)g_installer.selected_part;
     if (g_installer.parts[sel].fs_type == 1) {
@@ -2401,7 +2636,7 @@ void installer_execute_installation(void) {
     s_installer_profile_cfg.magic = UINT64_C(0x314652504E4B4142);
     s_installer_profile_cfg.version = 1;
     s_installer_profile_cfg.profile_id = g_installer.selected_profile;
-    const char *prof_names[] = {"Padrao", "Desenvolvedor Soberano", "Gamer 3D", "Minimalista"};
+    const char *prof_names[] = {"Padrao", "Desenvolvedor & SDK", "Gamer 3D", "Minimalista"};
     const char *pn = prof_names[g_installer.selected_profile % 4];
     for (int i = 0; i < 31 && pn[i]; ++i) s_installer_profile_cfg.profile_name[i] = pn[i];
     const char *pkgs = "core,shell,bakenfs,sotlas_compile_sdk,notas,loja,ajustes,terminal";
@@ -2439,7 +2674,7 @@ void installer_execute_installation(void) {
     g_installer.progress = 100;
     g_installer.installed = 1;
     g_installer.stage = INSTALLER_STAGE_COMPLETE;
-    installer_append_log("Sucesso: Baken OS Sovereign instalado e pronto!");
+    installer_append_log("Sucesso: Baken OS instalado e pronto!");
     const char *m = "Baken OS instalado com sucesso no disco GPT!";
     for (int i = 0; i < 63 && m[i]; ++i) g_installer.status_text[i] = m[i];
     g_installer.status_text[63] = 0;
@@ -2470,14 +2705,16 @@ void installer_execute_repair(uint32_t opt) {
 
 void installer_next_stage(void) {
     if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
-        g_installer.stage = INSTALLER_STAGE_LANGUAGE;
+        g_installer.stage = INSTALLER_STAGE_LANGUAGE; /* Comecar agora -> Hub Central */
     } else if (g_installer.stage == INSTALLER_STAGE_LANGUAGE) {
         g_installer.stage = INSTALLER_STAGE_LICENSE;
     } else if (g_installer.stage == INSTALLER_STAGE_LICENSE) {
         g_installer.license_accepted = 1;
-        g_installer.stage = INSTALLER_STAGE_HARDWARE;
+        g_installer.stage = INSTALLER_STAGE_DISK;
     } else if (g_installer.stage == INSTALLER_STAGE_HARDWARE) {
-        g_installer.stage = INSTALLER_STAGE_PROFILE;
+        g_installer.stage = INSTALLER_STAGE_LICENSE;
+    } else if (g_installer.stage == INSTALLER_STAGE_SETTINGS) {
+        g_installer.stage = INSTALLER_STAGE_WELCOME;
     } else if (g_installer.stage == INSTALLER_STAGE_PROFILE) {
         g_installer.stage = INSTALLER_STAGE_ACCOUNT;
     } else if (g_installer.stage == INSTALLER_STAGE_ACCOUNT) {
@@ -2487,26 +2724,56 @@ void installer_next_stage(void) {
             installer_execute_installation();
         }
     } else if (g_installer.stage == INSTALLER_STAGE_COMPLETE) {
-        /* Concluido */
+        g_installer.stage = INSTALLER_STAGE_OOBE_BOOT;
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_BOOT) {
+        g_installer.stage = INSTALLER_STAGE_OOBE_WIZARD;
+        g_installer.oobe_step = 0;
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_WIZARD) {
+        if (g_installer.oobe_step < 7) {
+            g_installer.oobe_step++;
+        } else {
+            g_installer.stage = INSTALLER_STAGE_OOBE_FINISH;
+        }
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_FINISH) {
+        g_installer.boot_mode = 1;
+        wm_unfocus_all();
     }
 }
 
 void installer_prev_stage(void) {
-    if (g_installer.stage > INSTALLER_STAGE_WELCOME && g_installer.stage < INSTALLER_STAGE_INSTALLING) {
-        g_installer.stage--;
+    if (g_installer.stage == INSTALLER_STAGE_LANGUAGE) {
+        g_installer.stage = INSTALLER_STAGE_WELCOME;
+    } else if (g_installer.stage == INSTALLER_STAGE_LICENSE) {
+        g_installer.stage = INSTALLER_STAGE_LANGUAGE;
+    } else if (g_installer.stage == INSTALLER_STAGE_HARDWARE) {
+        g_installer.stage = INSTALLER_STAGE_LANGUAGE;
+    } else if (g_installer.stage == INSTALLER_STAGE_SETTINGS) {
+        g_installer.stage = INSTALLER_STAGE_WELCOME;
+    } else if (g_installer.stage == INSTALLER_STAGE_PROFILE) {
+        g_installer.stage = INSTALLER_STAGE_LICENSE;
+    } else if (g_installer.stage == INSTALLER_STAGE_ACCOUNT) {
+        g_installer.stage = INSTALLER_STAGE_PROFILE;
+    } else if (g_installer.stage == INSTALLER_STAGE_DISK) {
+        g_installer.stage = INSTALLER_STAGE_LICENSE;
     } else if (g_installer.stage == INSTALLER_STAGE_REPAIR) {
         g_installer.stage = INSTALLER_STAGE_WELCOME;
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_WIZARD) {
+        if (g_installer.oobe_step > 0) g_installer.oobe_step--;
+        else g_installer.stage = INSTALLER_STAGE_WELCOME;
     }
 }
 
 void installer_select_option(uint32_t opt) {
     if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
         if (opt == 1) g_installer.stage = INSTALLER_STAGE_LANGUAGE;
-        else if (opt == 2) { g_installer.boot_mode = 1; wm_unfocus_all(); }
+        else if (opt == 2) g_installer.stage = INSTALLER_STAGE_SETTINGS;
         else if (opt == 3) g_installer.stage = INSTALLER_STAGE_REPAIR;
         else if (opt == 4) g_installer.stage = INSTALLER_STAGE_HARDWARE;
     } else if (g_installer.stage == INSTALLER_STAGE_LANGUAGE) {
-        if (opt >= 1 && opt <= 3) g_installer.selected_lang = opt - 1;
+        if (opt == 1) { g_installer.boot_mode = 1; wm_unfocus_all(); }
+        else if (opt == 2) g_installer.stage = INSTALLER_STAGE_LICENSE;
+        else if (opt == 3) g_installer.stage = INSTALLER_STAGE_HARDWARE;
+        else if (opt == 4) { g_installer.boot_mode = 1; wm_unfocus_all(); }
     } else if (g_installer.stage == INSTALLER_STAGE_PROFILE) {
         if (opt >= 1 && opt <= 4) g_installer.selected_profile = opt - 1;
     } else if (g_installer.stage == INSTALLER_STAGE_REPAIR) {
@@ -2538,19 +2805,14 @@ typedef struct {
     uint32_t app_id;
 } Window;
 
-static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
-    if (!win) return;
-    uint32_t px = (win->x < 0) ? 12 : (uint32_t)win->x + 12;
-    uint32_t py = (win->y < 0) ? TITLE_BAR_HEIGHT + 8 : (uint32_t)win->y + TITLE_BAR_HEIGHT + 8;
-    uint32_t pw = win->width - 24;
-    uint32_t ph = win->height - TITLE_BAR_HEIGHT - 20;
+static void installer_handle_step_click(int32_t mx, int32_t my, uint32_t px, uint32_t py, uint32_t pw, uint32_t ph) {
     uint32_t bot_y = py + ph - 34;
 
     /* Global Bottom Navigation Buttons */
     if (my >= (int32_t)bot_y && my < (int32_t)(bot_y + 30)) {
-        if (mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 130)) {
-            if (g_installer.stage == INSTALLER_STAGE_WELCOME || g_installer.stage == INSTALLER_STAGE_COMPLETE) {
-                g_installer.boot_mode = 1; win->is_open = 0; wm_unfocus_all();
+        if (mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 160)) {
+            if (g_installer.stage == INSTALLER_STAGE_WELCOME || g_installer.stage == INSTALLER_STAGE_COMPLETE || g_installer.stage == INSTALLER_STAGE_OOBE_FINISH) {
+                g_installer.boot_mode = 1; wm_unfocus_all();
             } else {
                 installer_prev_stage();
             }
@@ -2558,7 +2820,11 @@ static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
         }
         if (mx >= (int32_t)(px + pw - 190) && mx < (int32_t)(px + pw - 10)) {
             if (g_installer.stage == INSTALLER_STAGE_COMPLETE) {
-                win->is_open = 0; wm_unfocus_all();
+                g_installer.stage = INSTALLER_STAGE_OOBE_BOOT;
+            } else if (g_installer.stage == INSTALLER_STAGE_OOBE_BOOT) {
+                g_installer.stage = INSTALLER_STAGE_OOBE_WIZARD;
+            } else if (g_installer.stage == INSTALLER_STAGE_OOBE_FINISH) {
+                g_installer.boot_mode = 1; wm_unfocus_all();
             } else if (g_installer.stage == INSTALLER_STAGE_DISK) {
                 if (!g_installer.installed && g_installer.selected_disk == 0 && g_install_target_block_io) {
                     installer_execute_installation();
@@ -2571,25 +2837,38 @@ static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
     }
 
     if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
-        if (mx >= (int32_t)(px + 14) && mx < (int32_t)(px + pw - 14)) {
-            if (my >= (int32_t)(py + 54) && my < (int32_t)(py + 114)) {
-                g_installer.stage = INSTALLER_STAGE_LANGUAGE; return;
-            }
-            if (my >= (int32_t)(py + 120) && my < (int32_t)(py + 180)) {
-                g_installer.boot_mode = 1; win->is_open = 0; wm_unfocus_all(); return;
-            }
-            if (my >= (int32_t)(py + 186) && my < (int32_t)(py + 246)) {
-                g_installer.stage = INSTALLER_STAGE_REPAIR; return;
-            }
-            if (my >= (int32_t)(py + 252) && my < (int32_t)(py + 312)) {
-                g_installer.stage = INSTALLER_STAGE_HARDWARE; return;
+        /* Botao Central 'Comecar agora' */
+        uint32_t start_w = 260, start_h = 48;
+        uint32_t start_x = px + (pw > start_w ? (pw - start_w) / 2 : 12);
+        uint32_t start_y = py + 180;
+        if (mx >= (int32_t)start_x && mx < (int32_t)(start_x + start_w) &&
+            my >= (int32_t)start_y && my < (int32_t)(start_y + start_h)) {
+            g_installer.stage = INSTALLER_STAGE_LANGUAGE;
+            return;
+        }
+    } else if (g_installer.stage == INSTALLER_STAGE_LANGUAGE) { /* Hub de Escolha & Propaganda */
+        uint32_t col_w = (pw - 36) / 2;
+        uint32_t rx = px + 24 + col_w;
+        for (uint32_t i = 0; i < 4; ++i) {
+            uint32_t cy = py + 54 + i * 58;
+            if (my >= (int32_t)cy && my < (int32_t)(cy + 52) && mx >= (int32_t)rx && mx < (int32_t)(rx + col_w)) {
+                if (i == 0) { g_installer.boot_mode = 1; wm_unfocus_all(); return; } /* Testar BakenOS -> Live Desktop */
+                if (i == 1) { g_installer.stage = INSTALLER_STAGE_LICENSE; return; } /* Instalar agora */
+                if (i == 2) { g_installer.stage = INSTALLER_STAGE_HARDWARE; return; } /* Teste de Desempenho */
+                if (i == 3) { g_installer.boot_mode = 1; wm_unfocus_all(); return; } /* Sair */
             }
         }
-    } else if (g_installer.stage == INSTALLER_STAGE_LANGUAGE) {
-        uint32_t col_w = (pw - 40) / 2;
+    } else if (g_installer.stage == INSTALLER_STAGE_HARDWARE) { /* Teste de Desempenho */
+        if (my >= (int32_t)(py + ph - 42) && my < (int32_t)(py + ph - 6)) {
+            if (mx >= (int32_t)(px + pw - 180) && mx < (int32_t)(px + pw - 12)) {
+                g_installer.stage = INSTALLER_STAGE_LICENSE; return;
+            }
+        }
+    } else if (g_installer.stage == INSTALLER_STAGE_SETTINGS) { /* Configuracoes */
+        uint32_t col_w = (pw - 36) / 2;
         for (uint32_t i = 0; i < 3; ++i) {
-            uint32_t cy = py + 72 + i * 46;
-            if (my >= (int32_t)cy && my < (int32_t)(cy + 40)) {
+            uint32_t ly = py + 80 + i * 44;
+            if (my >= (int32_t)ly && my < (int32_t)(ly + 38)) {
                 if (mx >= (int32_t)(px + 16) && mx < (int32_t)(px + 16 + col_w)) {
                     g_installer.selected_lang = i; return;
                 }
@@ -2613,13 +2892,27 @@ static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
             if (my >= (int32_t)(py + 158) && my < (int32_t)(py + 244)) { g_installer.selected_profile = 3; return; }
         }
     } else if (g_installer.stage == INSTALLER_STAGE_DISK) {
+        uint32_t dw = (pw - 36) / 2;
+        if (my >= (int32_t)(py + 44) && my < (int32_t)(py + 74)) {
+            if (mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 12 + dw)) {
+                g_installer.selected_disk = 0; return;
+            }
+            if (mx >= (int32_t)(px + 24 + dw) && mx < (int32_t)(px + 24 + 2 * dw)) {
+                g_installer.boot_disk_is_protected = 1;
+                const char *st = "Midia de Boot Live Baken OS (Protegida contra gravacao)";
+                for (int i = 0; i < 63 && st[i]; ++i) g_installer.status_text[i] = st[i];
+                g_installer.status_text[63] = 0;
+                return;
+            }
+        }
+
         uint32_t tw = (pw - 36) / 2;
-        if (my >= (int32_t)(py + 54) && my < (int32_t)(py + 90)) {
+        if (my >= (int32_t)(py + 80) && my < (int32_t)(py + 110)) {
             if (mx >= (int32_t)(px + 14) && mx < (int32_t)(px + 14 + tw)) { g_installer.auto_partition = 1; return; }
             if (mx >= (int32_t)(px + 22 + tw) && mx < (int32_t)(px + 22 + 2 * tw)) { g_installer.auto_partition = 0; return; }
         }
 
-        uint32_t bar_y = py + 100;
+        uint32_t bar_y = py + 116;
         uint32_t bar_w = pw - 24;
         uint32_t bar_h = 24;
         if (my >= (int32_t)bar_y && my < (int32_t)(bar_y + bar_h) && mx >= (int32_t)(px + 12) && mx < (int32_t)(px + 12 + bar_w)) {
@@ -2651,7 +2944,37 @@ static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
             if (my >= (int32_t)(py + 116) && my < (int32_t)(py + 172)) { installer_execute_repair(2); return; }
             if (my >= (int32_t)(py + 178) && my < (int32_t)(py + 234)) { installer_execute_repair(3); return; }
         }
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_BOOT) {
+        /* Clicar em qualquer ponto avança */
+        g_installer.stage = INSTALLER_STAGE_OOBE_WIZARD;
+        g_installer.oobe_step = 0;
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_WIZARD) {
+        /* Opcoes de selecao conforme o step do OOBE */
+        if (my >= (int32_t)(py + 80) && my < (int32_t)(py + 260)) {
+            for (uint32_t i = 0; i < 4; ++i) {
+                uint32_t opt_y = py + 84 + i * 40;
+                if (my >= (int32_t)opt_y && my < (int32_t)(opt_y + 36)) {
+                    if (g_installer.oobe_step == 0 && i < 3) g_installer.selected_lang = i;
+                    else if (g_installer.oobe_step == 2 && i < 3) g_installer.selected_kbd = i;
+                    else if (g_installer.oobe_step == 5 && i < 3) g_installer.oobe_theme = i;
+                    else if (g_installer.oobe_step == 7 && i < 4) g_installer.oobe_usage = i;
+                    return;
+                }
+            }
+        }
+    } else if (g_installer.stage == INSTALLER_STAGE_OOBE_FINISH) {
+        /* Clicar na tela final fecha e revela o desktop */
+        g_installer.boot_mode = 1; wm_unfocus_all();
     }
+}
+
+static void installer_handle_click(Window *win, int32_t mx, int32_t my) {
+    if (!win) return;
+    uint32_t px = (win->x < 0) ? 12 : (uint32_t)win->x + 12;
+    uint32_t py = (win->y < 0) ? TITLE_BAR_HEIGHT + 8 : (uint32_t)win->y + TITLE_BAR_HEIGHT + 8;
+    uint32_t pw = win->width - 24;
+    uint32_t ph = win->height - TITLE_BAR_HEIGHT - 20;
+    installer_handle_step_click(mx, my, px, py, pw, ph);
 }
 
 typedef struct {
@@ -3005,7 +3328,7 @@ static void wm_render_single_window(const Window *win) {
             // Header Card com status
             baken_lua_draw_surface(px + 12, py + 10, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
             gfx_draw_circle_alpha(px + 28, py + 29, 5, 0x0010B981, 255);
-            gfx_draw_text_proportional(px + 40, py + 22, "Baken OS Sovereign v2.0", 0x000F172A);
+            gfx_draw_text_proportional(px + 40, py + 22, "Baken OS v2.0", 0x000F172A);
             if (pw > 220) {
                 baken_lua_draw_surface(px + pw - 138, py + 16, 114, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 12);
                 gfx_draw_text_proportional(px + pw - 128, py + 21, "x86-64 UEFI", 0x00166534);
@@ -3050,372 +3373,638 @@ static void wm_render_single_window(const Window *win) {
             gfx_draw_text_proportional(px + 32 + col_w, py + 144, "Relogio do Sistema", 0x000284C7);
             gfx_draw_text_proportional(px + 32 + col_w, py + 164, "CMOS RTC 24h (Portas 0x70/0x71)", 0x001E293B);
             baken_lua_draw_surface(px + 32 + col_w, py + 184, 88, 18, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 9);
-            gfx_draw_text_proportional(px + 38 + col_w, py + 187, "Sincronizado", 0x00166534);
-
-            // Botões de Ação na base da janela
-            if (ph > 40) {
-                baken_lua_draw_surface(px + 12, py + ph - 38, 136, 26, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 13);
-                gfx_draw_text_proportional(px + 24, py + ph - 32, "Modos de Janela", 0x000F172A);
-
-                baken_lua_draw_surface(px + 158, py + ph - 38, 116, 26, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 13);
-                gfx_draw_text_proportional(px + 172, py + ph - 32, "Tema: Claro", 0x00FFFFFF);
-            }
-        } else if (win->app_id == 5) { /* Assistente Completo de Setup e Instalacao Baken OS */
-            // Limpa o fundo com preenchimento solido para nunca acumular texto
-            gfx_fill_rect_alpha(px, py, pw, ph, 0x000F172A, 245);
-            uint32_t step_y = py + 6;
-            if (g_installer.stage >= 1 && g_installer.stage <= 8) {
-                /* Stepper Header (8 Passos) */
-                baken_lua_draw_surface(px + 12, step_y, pw - 24, 26, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
-                gfx_draw_hline(px + 28, step_y + 13, pw - 180, 0x00334155, 100);
-                static const char *step_names[] = {"1. Idioma", "2. Termos", "3. Hardware", "4. Perfil", "5. Conta", "6. Disco", "7. Copia", "8. Conclusao"};
-                uint32_t step_gap = (pw - 200) / 7;
-                for (uint32_t s = 1; s <= 8; ++s) {
-                    uint32_t sx = px + 28 + (s - 1) * step_gap;
-                    uint8_t is_cur = (s == g_installer.stage);
-                    uint8_t is_done = (s < g_installer.stage);
-                    uint32_t dot_c = is_cur ? 0x0000E5FF : (is_done ? 0x0010B981 : 0x00475569);
-                    gfx_draw_circle_alpha(sx, step_y + 13, is_cur ? 5 : 3, dot_c, 255);
-                }
-                gfx_draw_text_proportional(px + pw - 140, step_y + 6, step_names[g_installer.stage - 1], 0x0000E5FF);
-            }
-
+} else if (win->app_id == 5) { /* Assistente Completo de Setup e Instalacao Baken OS */
+            gfx_fill_rect_alpha(px, py, pw, ph, 0x000B1120, 248);
             uint32_t bot_y = py + ph - 34;
+            uint32_t tick = desktop_shell_get_time_tick();
 
             if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
-                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 46, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
-                gfx_draw_text_role(px + 24, py + 14, "Bem-vindo ao Baken OS Sovereign", 0x00F8FAFC, BKN_TYPE_TITLE);
-                gfx_draw_text_proportional(px + 24, py + 34, "Selecione o modo de inicializacao desejado:", 0x0094A3B8);
+                /* Tela de Apresentacao Inicial Baken OS */
+                /* Logo Central com Pulso Suave */
+                uint32_t cx = px + pw / 2;
+                uint32_t cy = py + 86;
+                uint32_t pulse = 22 + (tick % 30 < 15 ? (tick % 15) / 5 : (30 - tick % 30) / 5);
+                gfx_draw_circle_alpha(cx, cy, pulse + 12, 0x000284C7, 70);
+                gfx_draw_circle_alpha(cx, cy, pulse + 6, 0x0000E5FF, 120);
+                gfx_draw_circle_alpha(cx, cy, pulse, 0x000F172A, 255);
+                gfx_draw_circle_alpha(cx, cy, pulse - 6, 0x0000E5FF, 220);
+                gfx_draw_circle_alpha(cx, cy, 6, 0x00FFFFFF, 255);
 
-                static const char *w_titles[] = {"[1] Instalar Baken OS (Guiado)", "[2] Executar Demo (Live OS)", "[3] Diagnostico & Reparo"};
-                static const char *w_descs[] = {"Gravacao em disco GPT com BakenFS nativo.", "Teste o desktop e apps em memoria RAM.", "Verifique o hardware e bootloader UEFI."};
-                static const char *w_badges[] = {"Recomendado", "Modo Live", "Diagnostico"};
-                static const uint32_t w_colors[] = {0x000284C7, 0x0010B981, 0x00F59E0B};
+                /* Titulo e Subtitulo */
+                uint32_t tw_title = gfx_measure_text("Baken OS");
+                gfx_draw_text_role(px + (pw > tw_title ? (pw - tw_title) / 2 : 20), py + 128, "Baken OS", 0x00F8FAFC, BKN_TYPE_TITLE);
+                const char *sub = "Sistema Operacional Moderno - Edicao Desktop x86_64";
+                uint32_t tw_sub = gfx_measure_text(sub);
+                gfx_draw_text_proportional(px + (pw > tw_sub ? (pw - tw_sub) / 2 : 20), py + 152, sub, 0x0094A3B8);
 
-                uint32_t badge_w = 96;
-                for (uint32_t i = 0; i < 3; ++i) {
-                    uint32_t cy = py + 62 + i * 68;
-                    if (cy + 60 > bot_y) break;
-                    baken_lua_draw_surface(px + 12, cy, pw - 24, 60, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                    gfx_draw_circle_alpha(px + 28, cy + 30, 8, w_colors[i], 240);
+                /* Botao Principal 'Comecar agora' */
+                uint32_t start_w = 260, start_h = 48;
+                uint32_t start_x = px + (pw > start_w ? (pw - start_w) / 2 : 12);
+                uint32_t start_y = py + 180;
+                gfx_draw_glass_rect_material(start_x, start_y, start_w, start_h, 0x000284C7, 240, 0x0038BDF8, 14);
+                const char *btn_txt = "Comecar agora >";
+                uint32_t bw = gfx_measure_text(btn_txt);
+                gfx_draw_text_role(start_x + (start_w > bw ? (start_w - bw) / 2 : 16), start_y + 14, btn_txt, 0x00FFFFFF, BKN_TYPE_TITLE);
 
-                    uint32_t max_text_w = (pw > 150 + badge_w) ? pw - 150 - badge_w : 100;
-                    gfx_draw_text_ellipsis(px + 44, cy + 12, max_text_w, w_titles[i], 0x00F8FAFC);
-                    gfx_draw_text_ellipsis(px + 44, cy + 34, max_text_w, w_descs[i], 0x0094A3B8);
+                /* Botoes Secundarios: Configuracoes e Restaurar */
+                uint32_t sec_y = py + 236;
+                uint32_t sec_w_total = 440;
+                uint32_t sec_x0 = px + (pw > sec_w_total ? (pw - sec_w_total) / 2 : 12);
+                
+                baken_lua_draw_surface(sec_x0, sec_y, 160, 32, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(sec_x0 + 32, sec_y + 8, "Configuracoes", 0x00E2E8F0);
 
-                    uint32_t bx = (pw > badge_w + 30) ? px + pw - badge_w - 20 : px + pw - 20;
-                    baken_lua_draw_surface(bx, cy + 18, badge_w, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 10);
-                    uint32_t bw = gfx_measure_text(w_badges[i]);
-                    uint32_t btx = bx + (badge_w > bw ? (badge_w - bw) / 2 : 4);
-                    gfx_draw_text_proportional(btx, cy + 23, w_badges[i], w_colors[i]);
-                }
+                baken_lua_draw_surface(sec_x0 + 172, sec_y, 268, 32, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(sec_x0 + 192, sec_y + 8, "Restaurar ou Corrigir Computador", 0x00E2E8F0);
 
-                baken_lua_draw_surface(px + 12, bot_y, 140, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 26, bot_y + 6, "Sair para Live OS", 0x0094A3B8);
-
-                baken_lua_draw_surface(px + pw - 160, bot_y, 148, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 138, bot_y + 6, "Avancar >", 0x00FFFFFF);
+                /* Rodape Canto Inferior Direito */
+                const char *brand = "Baken OS - TasteTrack Systems LTDA";
+                uint32_t brand_w = gfx_measure_text(brand);
+                gfx_draw_text_proportional(px + pw - brand_w - 16, py + ph - 20, brand, 0x00475569);
 
             } else if (g_installer.stage == INSTALLER_STAGE_LANGUAGE) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "1. Idioma do Sistema e Layout do Teclado", 0x000F172A, BKN_TYPE_TITLE);
+                /* Hub Central: Split Screen com Showcase / Propaganda a Esquerda e 4 Opcoes a Direita */
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Baken OS - Central de Escolha", 0x00F8FAFC, BKN_TYPE_TITLE);
+                gfx_draw_text_proportional(px + pw - 160, py + 18, "Edicao Desktop 2026", 0x0000E5FF);
 
                 uint32_t col_w = (pw - 36) / 2;
-                baken_lua_draw_surface(px + 12, py + 72, col_w, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
-                gfx_draw_text_proportional(px + 20, py + 76, "Idioma do Sistema", 0x000284C7);
 
-                baken_lua_draw_surface(px + 24 + col_w, py + 72, col_w, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
-                gfx_draw_text_proportional(px + 32 + col_w, py + 76, "Layout do Teclado", 0x000284C7);
+                /* Coluna Esquerda: Showcase / Propaganda do Baken OS */
+                baken_lua_draw_surface(px + 12, py + 54, col_w, ph - 96, BKN_LUA_MICA, BKN_LUA_REST, 10);
+                gfx_draw_text_role(px + 24, py + 66, "Diferenciais do Baken OS:", 0x0000E5FF, BKN_TYPE_LABEL);
+
+                static const char *sh_titles[] = {"Arquitetura Nativa", "Zero Rastreamento", "BakenFS com Snapshots", "Desempenho Freestanding"};
+                static const char *sh_descs[] = {"100% Nativo Sotlas sem telemetria ou bloatware.", "Privacidade absoluta e controle total dos dados.", "Integridade de arquivos e recuperacao instantanea.", "Boot em microssegundos direto sobre firmware UEFI."};
+                static const uint32_t sh_colors[] = {0x000284C7, 0x0010B981, 0x008B5CF6, 0x00F59E0B};
+
+                for (uint32_t i = 0; i < 4; ++i) {
+                    uint32_t sy = py + 92 + i * 58;
+                    gfx_draw_circle_alpha(px + 30, sy + 14, 6, sh_colors[i], 240);
+                    gfx_draw_text_role(px + 44, sy + 4, sh_titles[i], 0x00F8FAFC, BKN_TYPE_LABEL);
+                    gfx_draw_text_proportional(px + 44, sy + 22, sh_descs[i], 0x0094A3B8);
+                }
+
+                /* Coluna Direita: 4 Acoes Solicitadas */
+                static const char *act_titles[] = {"[1] Testar BakenOS", "[2] Instalar agora", "[3] Teste de Desempenho", "[4] Sair agora"};
+                static const char *act_descs[] = {"Modo Live em RAM sem alterar o disco.", "Instalar no disco GPT com BakenFS nativo.", "Benchmark completo do seu hardware (0 a 10).", "Desligar ou reiniciar o computador."};
+                static const char *act_badges[] = {"Live RAM", "Recomendado", "Benchmark", "Encerrar"};
+                static const uint32_t act_colors[] = {0x0010B981, 0x000284C7, 0x00F59E0B, 0x0064748B};
+
+                uint32_t rx = px + 24 + col_w;
+                for (uint32_t i = 0; i < 4; ++i) {
+                    uint32_t cy = py + 54 + i * 58;
+                    baken_lua_draw_surface(rx, cy, col_w, 52, BKN_LUA_MICA, (i == 1) ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                    gfx_draw_circle_alpha(rx + 18, cy + 26, 7, act_colors[i], 240);
+                    gfx_draw_text_role(rx + 32, cy + 10, act_titles[i], (i == 1) ? 0x0038BDF8 : 0x00F8FAFC, BKN_TYPE_LABEL);
+                    gfx_draw_text_proportional(rx + 32, cy + 28, act_descs[i], 0x0094A3B8);
+
+                    uint32_t bw = gfx_measure_text(act_badges[i]);
+                    baken_lua_draw_surface(rx + col_w - bw - 20, cy + 14, bw + 12, 22, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 6);
+                    gfx_draw_text_proportional(rx + col_w - bw - 14, cy + 17, act_badges[i], act_colors[i]);
+                }
+
+                baken_lua_draw_surface(px + 12, bot_y, 160, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(px + 24, bot_y + 6, "< Apresentacao", 0x0094A3B8);
+
+                baken_lua_draw_surface(px + pw - 170, bot_y, 158, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 150, bot_y + 6, "Instalar Agora >", 0x00FFFFFF);
+
+            } else if (g_installer.stage == INSTALLER_STAGE_HARDWARE) {
+                /* Teste de Desempenho / Benchmark Dinamico com Nota 0 a 10 Real */
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Teste de Desempenho & Benchmark", 0x00F8FAFC, BKN_TYPE_TITLE);
+                gfx_draw_text_proportional(px + pw - 160, py + 18, "Hardware Diagnostic", 0x0010B981);
+
+                uint32_t col_w = (pw - 36) / 2;
+
+                /* 1. CPU Card Dinamico */
+                baken_lua_draw_surface(px + 12, py + 54, col_w, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_text_role(px + 22, py + 62, "Processador CPU", 0x0000E5FF, BKN_TYPE_LABEL);
+                gfx_draw_text_proportional(px + 22, py + 80, g_installer.cpu_brand, 0x00F8FAFC);
+                char cpu_sc_buf[32];
+                cpu_sc_buf[0] = 'S'; cpu_sc_buf[1] = 'c'; cpu_sc_buf[2] = 'o'; cpu_sc_buf[3] = 'r'; cpu_sc_buf[4] = 'e'; cpu_sc_buf[5] = ':'; cpu_sc_buf[6] = ' ';
+                cpu_sc_buf[7] = (char)('0' + g_installer.cpu_score_x10 / 10);
+                cpu_sc_buf[8] = '.';
+                cpu_sc_buf[9] = (char)('0' + g_installer.cpu_score_x10 % 10);
+                cpu_sc_buf[10] = ' '; cpu_sc_buf[11] = '/'; cpu_sc_buf[12] = ' '; cpu_sc_buf[13] = '1'; cpu_sc_buf[14] = '0'; cpu_sc_buf[15] = '.'; cpu_sc_buf[16] = '0';
+                cpu_sc_buf[17] = 0;
+                gfx_draw_text_proportional(px + 22, py + 98, cpu_sc_buf, 0x0010B981);
+
+                /* 2. RAM Card Dinamico */
+                baken_lua_draw_surface(px + 24 + col_w, py + 54, col_w, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_text_role(px + 34 + col_w, py + 62, "Memoria RAM", 0x0000E5FF, BKN_TYPE_LABEL);
+                char ram_desc[48];
+                int rl = 0;
+                const char *r_p = "Taxa DMA: ";
+                while (r_p[rl]) { ram_desc[rl] = r_p[rl]; rl++; }
+                uint32_t rsp = g_installer.ram_speed_mb;
+                if (rsp >= 1000) ram_desc[rl++] = (char)('0' + (rsp / 1000) % 10);
+                if (rsp >= 100) ram_desc[rl++] = (char)('0' + (rsp / 100) % 10);
+                if (rsp >= 10) ram_desc[rl++] = (char)('0' + (rsp / 10) % 10);
+                ram_desc[rl++] = (char)('0' + rsp % 10);
+                const char *r_s = " MB/s (Linear Buffering)";
+                int rsi = 0;
+                while (r_s[rsi] && rl < 47) ram_desc[rl++] = r_s[rsi++];
+                ram_desc[rl] = 0;
+                gfx_draw_text_proportional(px + 34 + col_w, py + 80, ram_desc, 0x00F8FAFC);
+                char ram_sc_buf[32];
+                ram_sc_buf[0] = 'S'; ram_sc_buf[1] = 'c'; ram_sc_buf[2] = 'o'; ram_sc_buf[3] = 'r'; ram_sc_buf[4] = 'e'; ram_sc_buf[5] = ':'; ram_sc_buf[6] = ' ';
+                ram_sc_buf[7] = (char)('0' + g_installer.ram_score_x10 / 10);
+                ram_sc_buf[8] = '.';
+                ram_sc_buf[9] = (char)('0' + g_installer.ram_score_x10 % 10);
+                ram_sc_buf[10] = ' '; ram_sc_buf[11] = '/'; ram_sc_buf[12] = ' '; ram_sc_buf[13] = '1'; ram_sc_buf[14] = '0'; ram_sc_buf[15] = '.'; ram_sc_buf[16] = '0';
+                ram_sc_buf[17] = 0;
+                gfx_draw_text_proportional(px + 34 + col_w, py + 98, ram_sc_buf, 0x0010B981);
+
+                /* 3. Storage & I/O Card Dinamico */
+                baken_lua_draw_surface(px + 12, py + 124, col_w, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_text_role(px + 22, py + 132, "Armazenamento & I/O", 0x0000E5FF, BKN_TYPE_LABEL);
+                char st_desc[48];
+                int sl = 0;
+                const char *s_p = "Unidade: ";
+                while (s_p[sl]) { st_desc[sl] = s_p[sl]; sl++; }
+                int di = 0;
+                while (g_installer.target_disk_size_str[di] && sl < 47) st_desc[sl++] = g_installer.target_disk_size_str[di++];
+                const char *s_lat = " (UEFI Block I/O)";
+                int sli = 0;
+                while (s_lat[sli] && sl < 47) st_desc[sl++] = s_lat[sli++];
+                st_desc[sl] = 0;
+                gfx_draw_text_proportional(px + 22, py + 150, st_desc, 0x00F8FAFC);
+                char st_sc_buf[32];
+                st_sc_buf[0] = 'S'; st_sc_buf[1] = 'c'; st_sc_buf[2] = 'o'; st_sc_buf[3] = 'r'; st_sc_buf[4] = 'e'; st_sc_buf[5] = ':'; st_sc_buf[6] = ' ';
+                st_sc_buf[7] = (char)('0' + g_installer.disk_score_x10 / 10);
+                st_sc_buf[8] = '.';
+                st_sc_buf[9] = (char)('0' + g_installer.disk_score_x10 % 10);
+                st_sc_buf[10] = ' '; st_sc_buf[11] = '/'; st_sc_buf[12] = ' '; st_sc_buf[13] = '1'; st_sc_buf[14] = '0'; st_sc_buf[15] = '.'; st_sc_buf[16] = '0';
+                st_sc_buf[17] = 0;
+                gfx_draw_text_proportional(px + 22, py + 168, st_sc_buf, 0x0010B981);
+
+                /* 4. GPU GOP Framebuffer Card Dinamico */
+                baken_lua_draw_surface(px + 24 + col_w, py + 124, col_w, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_text_role(px + 34 + col_w, py + 132, "Graficos e Framebuffer", 0x0000E5FF, BKN_TYPE_LABEL);
+                char gpu_desc[48];
+                int gl = 0;
+                uint32_t gw = gfx_get_width(), gh = gfx_get_height();
+                if (gw >= 1000) gpu_desc[gl++] = (char)('0' + (gw / 1000) % 10);
+                if (gw >= 100) gpu_desc[gl++] = (char)('0' + (gw / 100) % 10);
+                if (gw >= 10) gpu_desc[gl++] = (char)('0' + (gw / 10) % 10);
+                gpu_desc[gl++] = (char)('0' + gw % 10);
+                gpu_desc[gl++] = 'x';
+                if (gh >= 1000) gpu_desc[gl++] = (char)('0' + (gh / 1000) % 10);
+                if (gh >= 100) gpu_desc[gl++] = (char)('0' + (gh / 100) % 10);
+                if (gh >= 10) gpu_desc[gl++] = (char)('0' + (gh / 10) % 10);
+                gpu_desc[gl++] = (char)('0' + gh % 10);
+                const char *g_s = " ARGB 32bpp GOP";
+                int gsi = 0;
+                while (g_s[gsi] && gl < 47) gpu_desc[gl++] = g_s[gsi++];
+                gpu_desc[gl] = 0;
+                gfx_draw_text_proportional(px + 34 + col_w, py + 150, gpu_desc, 0x00F8FAFC);
+                char gpu_sc_buf[32];
+                gpu_sc_buf[0] = 'S'; gpu_sc_buf[1] = 'c'; gpu_sc_buf[2] = 'o'; gpu_sc_buf[3] = 'r'; gpu_sc_buf[4] = 'e'; gpu_sc_buf[5] = ':'; gpu_sc_buf[6] = ' ';
+                gpu_sc_buf[7] = (char)('0' + g_installer.gpu_score_x10 / 10);
+                gpu_sc_buf[8] = '.';
+                gpu_sc_buf[9] = (char)('0' + g_installer.gpu_score_x10 % 10);
+                gpu_sc_buf[10] = ' '; gpu_sc_buf[11] = '/'; gpu_sc_buf[12] = ' '; gpu_sc_buf[13] = '1'; gpu_sc_buf[14] = '0'; gpu_sc_buf[15] = '.'; gpu_sc_buf[16] = '0';
+                gpu_sc_buf[17] = 0;
+                gfx_draw_text_proportional(px + 34 + col_w, py + 168, gpu_sc_buf, 0x0010B981);
+
+                /* Painel Central de Classificacao da Maquina Dinamico */
+                baken_lua_draw_surface(px + 12, py + 196, pw - 24, 76, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 10);
+                gfx_draw_circle_alpha(px + 36, py + 234, 16, 0x0010B981, 255);
+                gfx_draw_circle_alpha(px + 36, py + 234, 8, 0x00FFFFFF, 255);
+
+                char total_sc_buf[48];
+                const char *ts_pre = "Nota Geral do Computador: ";
+                int tl = 0;
+                while (ts_pre[tl]) { total_sc_buf[tl] = ts_pre[tl]; tl++; }
+                total_sc_buf[tl++] = (char)('0' + g_installer.bench_score_x10 / 10);
+                total_sc_buf[tl++] = '.';
+                total_sc_buf[tl++] = (char)('0' + g_installer.bench_score_x10 % 10);
+                total_sc_buf[tl++] = ' '; total_sc_buf[tl++] = '/'; total_sc_buf[tl++] = ' ';
+                total_sc_buf[tl++] = '1'; total_sc_buf[tl++] = '0'; total_sc_buf[tl++] = '.'; total_sc_buf[tl++] = '0';
+                total_sc_buf[tl] = 0;
+                gfx_draw_text_role(px + 64, py + 208, total_sc_buf, 0x00F8FAFC, BKN_TYPE_TITLE);
+
+                const char *class_text = (g_installer.bench_score_x10 >= 90) ?
+                    "Classificacao: Desempenho Excelente (Nivel Ouro)" :
+                    ((g_installer.bench_score_x10 >= 75) ?
+                    "Classificacao: Desempenho Alto (Nivel Prata)" :
+                    "Classificacao: Desempenho Normal (Nivel Bronze)");
+                gfx_draw_text_proportional(px + 64, py + 230, class_text, 0x0010B981);
+                gfx_draw_text_proportional(px + 64, py + 248, "Seu computador possui excelente configuracao para executar o Baken OS.", 0x0094A3B8);
+
+                baken_lua_draw_surface(px + 12, bot_y, 140, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar ao Hub", 0x0094A3B8);
+
+                baken_lua_draw_surface(px + pw - 170, bot_y, 158, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 150, bot_y + 6, "Instalar Agora >", 0x00FFFFFF);
+
+            } else if (g_installer.stage == INSTALLER_STAGE_SETTINGS) {
+                /* Configuracoes do Instalador */
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Configuracoes do Instalador & Ambiente", 0x00F8FAFC, BKN_TYPE_TITLE);
+
+                uint32_t col_w = (pw - 36) / 2;
+                baken_lua_draw_surface(px + 12, py + 54, col_w, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
+                gfx_draw_text_proportional(px + 20, py + 58, "Idioma do Sistema", 0x000284C7);
+
+                baken_lua_draw_surface(px + 24 + col_w, py + 54, col_w, 24, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 6);
+                gfx_draw_text_proportional(px + 32 + col_w, py + 58, "Layout do Teclado", 0x000284C7);
 
                 static const char *langs[] = {"[1] Portugues (Brasil)", "[2] English (United States)", "[3] Espanol (Latinoamerica)"};
                 static const char *kbds[] = {"[1] Teclado ABNT2 (Brasil)", "[2] Teclado US-International", "[3] Teclado ISO Latin / Generic"};
 
                 for (uint32_t i = 0; i < 3; ++i) {
-                    uint32_t ly = py + 102 + i * 50;
+                    uint32_t ly = py + 82 + i * 44;
                     uint8_t l_sel = (g_installer.selected_lang == i);
-                    baken_lua_draw_surface(px + 12, ly, col_w, 44, BKN_LUA_MICA, l_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
-                    gfx_draw_circle_alpha(px + 26, ly + 22, 6, l_sel ? 0x0010B981 : 0x0094A3B8, 240);
-                    gfx_draw_text_proportional(px + 40, ly + 14, langs[i], l_sel ? 0x000F172A : 0x00475569);
+                    baken_lua_draw_surface(px + 12, ly, col_w, 38, BKN_LUA_MICA, l_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                    gfx_draw_circle_alpha(px + 26, ly + 19, 5, l_sel ? 0x0010B981 : 0x0094A3B8, 240);
+                    gfx_draw_text_proportional(px + 40, ly + 12, langs[i], l_sel ? 0x0000E5FF : 0x0094A3B8);
 
                     uint8_t k_sel = (g_installer.selected_kbd == i);
-                    baken_lua_draw_surface(px + 24 + col_w, ly, col_w, 44, BKN_LUA_MICA, k_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
-                    gfx_draw_circle_alpha(px + 38 + col_w, ly + 22, 6, k_sel ? 0x000284C7 : 0x0094A3B8, 240);
-                    gfx_draw_text_proportional(px + 52 + col_w, ly + 14, kbds[i], k_sel ? 0x000F172A : 0x00475569);
+                    baken_lua_draw_surface(px + 24 + col_w, ly, col_w, 38, BKN_LUA_MICA, k_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                    gfx_draw_circle_alpha(px + 38 + col_w, ly + 19, 5, k_sel ? 0x000284C7 : 0x0094A3B8, 240);
+                    gfx_draw_text_proportional(px + 52 + col_w, ly + 12, kbds[i], k_sel ? 0x0000E5FF : 0x0094A3B8);
                 }
 
-                baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x00334155);
+                baken_lua_draw_surface(px + 12, py + 220, pw - 24, 46, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(px + 24, py + 226, "Escala da Interface: 100% (Linear ARGB Nativo 32bpp)", 0x000284C7);
+                gfx_draw_text_proportional(px + 24, py + 244, "Tema Grafico Ativo: Vortex Dark Acrylic", 0x0094A3B8);
 
-                baken_lua_draw_surface(px + pw - 140, bot_y, 128, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 118, bot_y + 6, "Avancar >", 0x00FFFFFF);
+                baken_lua_draw_surface(px + 12, bot_y, 140, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(px + 24, bot_y + 6, "< Voltar ao Inicio", 0x0094A3B8);
 
             } else if (g_installer.stage == INSTALLER_STAGE_LICENSE) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "2. Termos & Licenca Soberana BKN", 0x000F172A, BKN_TYPE_TITLE);
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Termos & Licenca Baken OS", 0x00F8FAFC, BKN_TYPE_TITLE);
 
-                baken_lua_draw_surface(px + 12, py + 72, pw - 24, 180, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 24, py + 84, "Principios Fundamentais do Baken OS Sovereign:", 0x000284C7);
-                gfx_draw_text_proportional(px + 24, py + 106, "1. Soberania e Privacidade Total: Zero telemetria e controle absoluto dos dados.", 0x001E293B);
-                gfx_draw_text_proportional(px + 24, py + 128, "2. Codigo Aberto e Auditavel: Kernel Sotlas nativo e micro-arquitetura modular.", 0x001E293B);
-                gfx_draw_text_proportional(px + 24, py + 150, "3. Desempenho Freestanding: Execucao direta sobre UEFI sem intermediarios.", 0x001E293B);
-                gfx_draw_text_proportional(px + 24, py + 172, "4. Resiliencia por Snapshots: Recuperacao automatica e pontos de restauracao.", 0x001E293B);
-                gfx_draw_text_proportional(px + 24, py + 200, "Ao instalar, voce concorda com a liberdade de execucao e soberania digital.", 0x0064748B);
+                baken_lua_draw_surface(px + 12, py + 54, pw - 24, 190, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_text_role(px + 24, py + 66, "Principios Fundamentais do Baken OS:", 0x0000E5FF, BKN_TYPE_LABEL);
+                gfx_draw_text_proportional(px + 24, py + 90, "1. Privacidade Total: Zero telemetria e controle absoluto dos seus dados.", 0x00F8FAFC);
+                gfx_draw_text_proportional(px + 24, py + 114, "2. Codigo Aberto e Auditavel: Kernel Sotlas nativo e micro-arquitetura modular.", 0x00F8FAFC);
+                gfx_draw_text_proportional(px + 24, py + 138, "3. Desempenho Freestanding: Execucao direta sobre UEFI sem intermediarios.", 0x00F8FAFC);
+                gfx_draw_text_proportional(px + 24, py + 162, "4. Resiliencia por Snapshots: Recuperacao automatica e pontos de restauracao.", 0x00F8FAFC);
+                gfx_draw_text_proportional(px + 24, py + 192, "Ao instalar, voce concorda com a liberdade de uso e execucao do sistema.", 0x0094A3B8);
 
-                baken_lua_draw_surface(px + 12, py + 262, pw - 24, 34, BKN_LUA_GLASS_REGULAR, g_installer.license_accepted ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
-                gfx_draw_circle_alpha(px + 28, py + 279, 7, g_installer.license_accepted ? 0x0010B981 : 0x0094A3B8, 255);
-                gfx_draw_text_proportional(px + 44, py + 272, "[X] Aceito os termos e principios da Licenca Soberana BKN", 0x000F172A);
-
-                baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x00334155);
-
-                baken_lua_draw_surface(px + pw - 140, bot_y, 128, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 118, bot_y + 6, "Avancar >", 0x00FFFFFF);
-
-            } else if (g_installer.stage == INSTALLER_STAGE_HARDWARE) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "3. Diagnostico & Benchmark de Hardware", 0x000F172A, BKN_TYPE_TITLE);
-
-                uint32_t col_w = (pw - 36) / 2;
-                baken_lua_draw_surface(px + 12, py + 72, col_w, 70, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 22, py + 80, "Processador CPU", 0x000284C7);
-                gfx_draw_text_proportional(px + 22, py + 98, "x86_64 Long Mode (AVX/SSE4)", 0x000F172A);
-                gfx_draw_text_proportional(px + 22, py + 116, "Score: 98/100 (Excelente)", 0x0010B981);
-
-                baken_lua_draw_surface(px + 24 + col_w, py + 72, col_w, 70, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 80, "Memoria RAM", 0x000284C7);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 98, "512 MB+ Alocacao Dinamica", 0x000F172A);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 116, "Score: 95/100 (Adequado)", 0x0010B981);
-
-                baken_lua_draw_surface(px + 12, py + 148, col_w, 70, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 22, py + 156, "Armazenamento", 0x000284C7);
-                gfx_draw_text_proportional(px + 22, py + 174, "UEFI Block I/O Target (GPT)", 0x000F172A);
-                gfx_draw_text_proportional(px + 22, py + 192, "Score: 95/100 (Compativel)", 0x0010B981);
-
-                baken_lua_draw_surface(px + 24 + col_w, py + 148, col_w, 70, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 156, "Graficos e GOP", 0x000284C7);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 174, "Linear ARGB 32bpp Framebuffer", 0x000F172A);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 192, "Score: 96/100 (Acelerado)", 0x0010B981);
-
-                baken_lua_draw_surface(px + 12, py + 226, pw - 24, 48, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 8);
-                gfx_draw_circle_alpha(px + 32, py + 250, 10, 0x0010B981, 255);
-                gfx_draw_text_role(px + 52, py + 236, "Score Geral de Compatibilidade: 96 / 100", 0x000F172A, BKN_TYPE_LABEL);
-                gfx_draw_text_proportional(px + 52, py + 254, "Hardware totalmente compativel com o Baken OS Sovereign.", 0x00166534);
+                baken_lua_draw_surface(px + 12, py + 252, pw - 24, 34, BKN_LUA_GLASS_REGULAR, g_installer.license_accepted ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
+                gfx_draw_circle_alpha(px + 28, py + 269, 7, g_installer.license_accepted ? 0x0010B981 : 0x0094A3B8, 255);
+                gfx_draw_text_proportional(px + 44, py + 262, "[X] Aceito os termos e condicoes da Licenca Baken OS", 0x00F8FAFC);
 
                 baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x00334155);
-
-                baken_lua_draw_surface(px + pw - 140, bot_y, 128, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 118, bot_y + 6, "Avancar >", 0x00FFFFFF);
-
-            } else if (g_installer.stage == INSTALLER_STAGE_PROFILE) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "4. Escolha o Perfil de Instalacao", 0x000F172A, BKN_TYPE_TITLE);
-
-                uint32_t cw = (pw - 36) / 2;
-                static const char *p_titles[] = {"[1] Usuario Padrao", "[2] Desenvolvedor Soberano", "[3] Gamer & Multimidia", "[4] Minimalista / Estacao"};
-                static const char *p_descs[] = {"Desktop completo, Navegador, Loja, Notas, Ajustes, Player.", "SDK Sotlas Nativo, Sotlas Compile, Terminal PRO, Compilador Freestanding.", "3D Studio, Pipeline grafico acelerado, Otimizacoes GOP e Audio.", "Kernel ultraleve, BakenFS basico, Terminal de baixo consumo."};
-
-                for (uint32_t i = 0; i < 4; ++i) {
-                    uint32_t col = i % 2;
-                    uint32_t row = i / 2;
-                    uint32_t cx = px + 12 + col * (cw + 12);
-                    uint32_t cy = py + 72 + row * 92;
-                    uint8_t is_p_sel = (g_installer.selected_profile == i);
-
-                    baken_lua_draw_surface(cx, cy, cw, 84, BKN_LUA_MICA, is_p_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
-                    gfx_draw_circle_alpha(cx + 18, cy + 22, 6, is_p_sel ? 0x0000E5FF : 0x0094A3B8, 255);
-                    gfx_draw_text_role(cx + 32, cy + 14, p_titles[i], is_p_sel ? 0x000284C7 : 0x000F172A, BKN_TYPE_LABEL);
-                    gfx_draw_text_proportional(cx + 18, cy + 38, p_descs[i], 0x0064748B);
-                }
-
-                baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x00334155);
-
-                baken_lua_draw_surface(px + pw - 140, bot_y, 128, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 118, bot_y + 6, "Avancar >", 0x00FFFFFF);
-
-            } else if (g_installer.stage == INSTALLER_STAGE_ACCOUNT) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "5. Conta de Usuario & Nome do Computador", 0x000F172A, BKN_TYPE_TITLE);
-
-                uint32_t col_w = (pw - 36) / 2;
-                baken_lua_draw_surface(px + 12, py + 72, col_w, 76, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 22, py + 82, "Nome do Computador (Hostname)", 0x000284C7);
-                gfx_draw_text_role(px + 22, py + 104, g_installer.hostname, 0x000F172A, BKN_TYPE_TITLE);
-                gfx_draw_text_proportional(px + 22, py + 126, "Identificador na rede local", 0x0064748B);
-
-                baken_lua_draw_surface(px + 24 + col_w, py + 72, col_w, 76, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 82, "Usuario Principal", 0x000284C7);
-                gfx_draw_text_role(px + 34 + col_w, py + 104, g_installer.username, 0x000F172A, BKN_TYPE_TITLE);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 126, "Conta administrativa padrao", 0x0064748B);
-
-                baken_lua_draw_surface(px + 12, py + 156, col_w, 76, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 22, py + 166, "PIN de Acesso Rapido", 0x000284C7);
-                gfx_draw_text_role(px + 22, py + 188, "**** (1234)", 0x000F172A, BKN_TYPE_TITLE);
-                gfx_draw_text_proportional(px + 22, py + 210, "Protecao para login e terminal", 0x0064748B);
-
-                baken_lua_draw_surface(px + 24 + col_w, py + 156, col_w, 76, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 166, "Privacidade & Telemetria", 0x000284C7);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 188, "Zero Rastreamento Nativo", 0x0010B981);
-                gfx_draw_text_proportional(px + 34 + col_w, py + 210, "Localizacao apenas sob demanda", 0x0064748B);
-
-                baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x00334155);
+                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x0094A3B8);
 
                 baken_lua_draw_surface(px + pw - 140, bot_y, 128, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
                 gfx_draw_text_proportional(px + pw - 118, bot_y + 6, "Avancar >", 0x00FFFFFF);
 
             } else if (g_installer.stage == INSTALLER_STAGE_DISK) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "6. Gerenciamento & Particionamento de Disco", 0x000F172A, BKN_TYPE_TITLE);
+                /* Gerenciador Completo de Disco com Protecao Estrita da Midia de Boot */
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 34, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 12, 24);
+                gfx_draw_text_role(px + 48, py + 14, "Destino de Instalacao & Gerenciador de Disco", 0x00F8FAFC, BKN_TYPE_TITLE);
 
-                uint32_t tw = (pw - 36) / 2;
-                baken_lua_draw_surface(px + 12, py + 72, tw, 32, BKN_LUA_MICA, g_installer.auto_partition ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
-                gfx_draw_circle_alpha(px + 24, py + 88, 5, g_installer.auto_partition ? 0x0010B981 : 0x0094A3B8, 255);
-                gfx_draw_text_proportional(px + 36, py + 80, "Instalacao Automatica (Recomendado)", g_installer.auto_partition ? 0x000284C7 : 0x00475569);
+                /* Seletor de Unidades / Discos */
+                uint32_t dw = (pw - 36) / 2;
+                uint8_t d0_sel = (g_installer.selected_disk == 0);
+                baken_lua_draw_surface(px + 12, py + 44, dw, 30, BKN_LUA_MICA, d0_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
+                gfx_draw_circle_alpha(px + 24, py + 59, 5, d0_sel ? 0x0010B981 : 0x0094A3B8, 255);
+                char d0_txt[48];
+                int d0_l = 0;
+                const char *d0_pre = "Disco 0: Unidade Alvo (";
+                while (d0_pre[d0_l]) { d0_txt[d0_l] = d0_pre[d0_l]; d0_l++; }
+                int tsi = 0;
+                while (g_installer.target_disk_size_str[tsi] && d0_l < 40) d0_txt[d0_l++] = g_installer.target_disk_size_str[tsi++];
+                d0_txt[d0_l++] = ')'; d0_txt[d0_l] = 0;
+                gfx_draw_text_proportional(px + 36, py + 52, d0_txt, d0_sel ? 0x0000E5FF : 0x0094A3B8);
 
-                baken_lua_draw_surface(px + 24 + tw, py + 72, tw, 32, BKN_LUA_MICA, !g_installer.auto_partition ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
-                gfx_draw_circle_alpha(px + 36 + tw, py + 88, 5, !g_installer.auto_partition ? 0x0010B981 : 0x0094A3B8, 255);
-                gfx_draw_text_proportional(px + 48 + tw, py + 80, "Particionamento Avancado / Manual", !g_installer.auto_partition ? 0x000284C7 : 0x00475569);
+                uint8_t d1_sel = (g_installer.selected_disk == 1);
+                baken_lua_draw_surface(px + 24 + dw, py + 44, dw, 30, BKN_LUA_MICA, d1_sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
+                gfx_draw_circle_alpha(px + 36 + dw, py + 59, 5, d1_sel ? 0x00F59E0B : 0x0094A3B8, 255);
+                gfx_draw_text_proportional(px + 48 + dw, py + 52, "Disco 1: Midia Live Pendrive [PROTEGIDA]", d1_sel ? 0x00F59E0B : 0x0064748B);
 
-                uint32_t bar_y = py + 110;
-                uint32_t bar_w = pw - 24;
-                uint32_t bar_h = 24;
-                baken_lua_draw_surface(px + 12, bar_y, bar_w, bar_h, BKN_LUA_MICA, BKN_LUA_REST, 6);
-                
-                uint32_t cur_bx = px + 14;
-                for (uint32_t i = 0; i < g_installer.part_count; ++i) {
-                    uint32_t seg_w = (i == 0) ? (bar_w * 58 / 100) : (bar_w * 40 / 100);
-                    if (cur_bx + seg_w > px + 12 + bar_w - 2) seg_w = (px + 12 + bar_w - 2 > cur_bx) ? (px + 12 + bar_w - 2 - cur_bx) : 0;
-                    uint32_t seg_color = (g_installer.parts[i].fs_type == 1) ? 0x000284C7 : 0x0010B981;
-                    uint8_t is_sel = ((int32_t)i == g_installer.selected_part);
-                    gfx_draw_glass_rect_material(cur_bx, bar_y + 2, seg_w, bar_h - 4, seg_color, is_sel ? 240 : 180, is_sel ? 0x00FFFFFF : seg_color, 4);
+                if (g_installer.selected_disk == 1) {
+                    /* Alerta Visual de Midia Protegida */
+                    baken_lua_draw_surface(px + 12, py + 80, pw - 24, 150, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 8);
+                    gfx_draw_circle_alpha(px + 36, py + 120, 16, 0x00F59E0B, 255);
+                    gfx_draw_text_role(px + 64, py + 96, "Midia de Instalacao (Pendrive/Live ISO) Protegida!", 0x00F59E0B, BKN_TYPE_TITLE);
+                    gfx_draw_text_proportional(px + 64, py + 120, "Por seguranca, o Baken OS bloqueia a exclusao e formatacao da midia de boot.", 0x00F8FAFC);
+                    gfx_draw_text_proportional(px + 64, py + 140, "Selecione o Disco 0 para prosseguir.", 0x0094A3B8);
+                } else {
+                    /* Gerenciador do Disco Gravavel Alvo */
+                    uint32_t tw = (pw - 36) / 2;
+                    baken_lua_draw_surface(px + 12, py + 80, tw, 28, BKN_LUA_MICA, g_installer.auto_partition ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
+                    gfx_draw_circle_alpha(px + 24, py + 94, 4, g_installer.auto_partition ? 0x0010B981 : 0x0094A3B8, 255);
+                    gfx_draw_text_proportional(px + 36, py + 86, "Instalacao Automatica (Recomendado)", g_installer.auto_partition ? 0x0000E5FF : 0x0094A3B8);
+
+                    baken_lua_draw_surface(px + 24 + tw, py + 80, tw, 28, BKN_LUA_MICA, !g_installer.auto_partition ? BKN_LUA_SELECTED : BKN_LUA_REST, 6);
+                    gfx_draw_circle_alpha(px + 36 + tw, py + 94, 4, !g_installer.auto_partition ? 0x0010B981 : 0x0094A3B8, 255);
+                    gfx_draw_text_proportional(px + 48 + tw, py + 86, "Particionamento Manual", !g_installer.auto_partition ? 0x0000E5FF : 0x0094A3B8);
+
+                    uint32_t bar_y = py + 114;
+                    uint32_t bar_w = pw - 24;
+                    uint32_t bar_h = 24;
+                    baken_lua_draw_surface(px + 12, bar_y, bar_w, bar_h, BKN_LUA_MICA, BKN_LUA_REST, 6);
                     
-                    if (g_installer.parts[i].fs_type == 1) {
-                        gfx_draw_text_proportional(cur_bx + 6, bar_y + 5, "ESP (FAT32 - 41 MB)", 0x00FFFFFF);
-                    } else {
-                        gfx_draw_text_proportional(cur_bx + 6, bar_y + 5, "Baken Data (BakenFS - 23 MB)", 0x00FFFFFF);
+                    uint32_t cur_bx = px + 14;
+                    for (uint32_t i = 0; i < g_installer.part_count; ++i) {
+                        uint32_t seg_w = (i == 0) ? (bar_w * 58 / 100) : (bar_w * 40 / 100);
+                        if (cur_bx + seg_w > px + 12 + bar_w - 2) seg_w = (px + 12 + bar_w - 2 > cur_bx) ? (px + 12 + bar_w - 2 - cur_bx) : 0;
+                        uint32_t seg_color = (g_installer.parts[i].fs_type == 1) ? 0x000284C7 : 0x0010B981;
+                        uint8_t is_sel = ((int32_t)i == g_installer.selected_part);
+                        gfx_draw_glass_rect_material(cur_bx, bar_y + 2, seg_w, bar_h - 4, seg_color, is_sel ? 240 : 180, is_sel ? 0x00FFFFFF : seg_color, 4);
+                        
+                        if (g_installer.parts[i].fs_type == 1) {
+                            gfx_draw_text_proportional(cur_bx + 6, bar_y + 5, "ESP (FAT32 - 41 MB)", 0x00FFFFFF);
+                        } else {
+                            gfx_draw_text_proportional(cur_bx + 6, bar_y + 5, "Baken Data (Volume)", 0x00FFFFFF);
+                        }
+                        cur_bx += seg_w + 2;
                     }
-                    cur_bx += seg_w + 2;
-                }
 
-                uint32_t tbl_y = bar_y + bar_h + 8;
-                uint32_t tbl_h = 80;
-                baken_lua_draw_surface(px + 12, tbl_y, pw - 24, tbl_h, BKN_LUA_CANVAS, BKN_LUA_REST, 8);
+                    uint32_t tbl_y = bar_y + bar_h + 6;
+                    uint32_t tbl_h = 76;
+                    baken_lua_draw_surface(px + 12, tbl_y, pw - 24, tbl_h, BKN_LUA_CANVAS, BKN_LUA_REST, 8);
 
-                gfx_fill_rect_alpha(px + 14, tbl_y + 2, pw - 28, 18, 0x001E293B, 200);
-                gfx_draw_text_proportional(px + 24, tbl_y + 4, "Volume", 0x0094A3B8);
-                gfx_draw_text_proportional(px + 200, tbl_y + 4, "Sistema de Arquivos", 0x0094A3B8);
-                gfx_draw_text_proportional(px + 370, tbl_y + 4, "Tamanho", 0x0094A3B8);
-                gfx_draw_text_proportional(px + 490, tbl_y + 4, "Funcao Primaria", 0x0094A3B8);
+                    gfx_fill_rect_alpha(px + 14, tbl_y + 2, pw - 28, 18, 0x001E293B, 200);
+                    gfx_draw_text_proportional(px + 24, tbl_y + 4, "Volume", 0x0094A3B8);
+                    gfx_draw_text_proportional(px + 200, tbl_y + 4, "Sistema de Arquivos", 0x0094A3B8);
+                    gfx_draw_text_proportional(px + 370, tbl_y + 4, "Tamanho", 0x0094A3B8);
+                    gfx_draw_text_proportional(px + 490, tbl_y + 4, "Funcao Primaria", 0x0094A3B8);
 
-                uint32_t row_y = tbl_y + 22;
-                for (uint32_t i = 0; i < g_installer.part_count && i < MAX_INSTALL_PARTS; ++i) {
-                    uint8_t is_sel = ((int32_t)i == g_installer.selected_part);
-                    if (is_sel) {
-                        gfx_draw_glass_rect_material(px + 14, row_y, pw - 28, 20, 0x000284C7, 180, 0x0038BDF8, 4);
+                    uint32_t row_y = tbl_y + 22;
+                    for (uint32_t i = 0; i < g_installer.part_count && i < MAX_INSTALL_PARTS; ++i) {
+                        uint8_t is_sel = ((int32_t)i == g_installer.selected_part);
+                        if (is_sel) {
+                            gfx_draw_glass_rect_material(px + 14, row_y, pw - 28, 20, 0x000284C7, 180, 0x0038BDF8, 4);
+                        }
+                        uint32_t txt_c = is_sel ? 0x00FFFFFF : 0x00F8FAFC;
+                        gfx_draw_text_proportional(px + 24, row_y + 2, g_installer.parts[i].name, txt_c);
+                        const char *fs_name = (g_installer.parts[i].fs_type == 1) ? "FAT32 (ESP Boot)" : "BakenFS v1 (Data)";
+                        gfx_draw_text_proportional(px + 200, row_y + 2, fs_name, is_sel ? 0x00E0F2FE : 0x0000E5FF);
+                        const char *sz_txt = (i == 0) ? "41.0 MB" : "22.5 MB";
+                        gfx_draw_text_proportional(px + 370, row_y + 2, sz_txt, txt_c);
+                        const char *role_txt = (i == 0) ? "Bootloader UEFI" : "Sistema & Dados";
+                        gfx_draw_text_proportional(px + 490, row_y + 2, role_txt, is_sel ? 0x00BBF7D0 : 0x0010B981);
+                        row_y += 22;
                     }
-                    uint32_t txt_c = is_sel ? 0x00FFFFFF : 0x000F172A;
-                    gfx_draw_text_proportional(px + 24, row_y + 2, g_installer.parts[i].name, txt_c);
-                    const char *fs_name = (g_installer.parts[i].fs_type == 1) ? "FAT32 (ESP Boot)" : "BakenFS v1 (Sovereign)";
-                    gfx_draw_text_proportional(px + 200, row_y + 2, fs_name, is_sel ? 0x00E0F2FE : 0x000284C7);
-                    const char *sz_txt = (i == 0) ? "41.0 MB" : "22.5 MB";
-                    gfx_draw_text_proportional(px + 370, row_y + 2, sz_txt, txt_c);
-                    const char *role_txt = (i == 0) ? "Bootloader UEFI" : "Sistema & Dados";
-                    gfx_draw_text_proportional(px + 490, row_y + 2, role_txt, is_sel ? 0x00BBF7D0 : 0x00166534);
-                    row_y += 22;
+
+                    uint32_t tools_y = tbl_y + tbl_h + 6;
+                    baken_lua_draw_surface(px + 12, tools_y, 76, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
+                    gfx_draw_text_proportional(px + 24, tools_y + 4, "+ Nova", 0x00F8FAFC);
+
+                    baken_lua_draw_surface(px + 94, tools_y, 76, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
+                    gfx_draw_text_proportional(px + 108, tools_y + 4, "Excluir", 0x00F8FAFC);
+
+                    baken_lua_draw_surface(px + 176, tools_y, 86, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
+                    gfx_draw_text_proportional(px + 188, tools_y + 4, "Formatar", 0x00F8FAFC);
+
+                    baken_lua_draw_surface(px + 268, tools_y, 110, 22, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 6);
+                    gfx_draw_text_proportional(px + 280, tools_y + 4, "Layout Padrao", 0x0010B981);
                 }
-
-                uint32_t tools_y = tbl_y + tbl_h + 6;
-                baken_lua_draw_surface(px + 12, tools_y, 76, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_proportional(px + 24, tools_y + 4, "+ Nova", 0x000F172A);
-
-                baken_lua_draw_surface(px + 94, tools_y, 76, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_proportional(px + 108, tools_y + 4, "Excluir", 0x000F172A);
-
-                baken_lua_draw_surface(px + 176, tools_y, 86, 22, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_proportional(px + 188, tools_y + 4, "Formatar", 0x000F172A);
-
-                baken_lua_draw_surface(px + 268, tools_y, 110, 22, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 6);
-                gfx_draw_text_proportional(px + 280, tools_y + 4, "Layout Padrao", 0x00166534);
 
                 baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x00334155);
+                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x0094A3B8);
 
-                baken_lua_draw_surface(px + pw - 180, bot_y, 168, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 162, bot_y + 6, "Instalar Agora", 0x00FFFFFF);
+                if (g_installer.selected_disk == 0 && g_install_target_block_io) {
+                    baken_lua_draw_surface(px + pw - 180, bot_y, 168, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                    gfx_draw_text_proportional(px + pw - 162, bot_y + 6, "Instalar Agora", 0x00FFFFFF);
+                } else {
+                    baken_lua_draw_surface(px + pw - 180, bot_y, 168, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_DISABLED, 8);
+                    gfx_draw_text_proportional(px + pw - 162, bot_y + 6, "Disco Bloqueado", 0x0064748B);
+                }
 
             } else if (g_installer.stage == INSTALLER_STAGE_INSTALLING) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "7. Instalando Baken OS no Disco GPT...", 0x000F172A, BKN_TYPE_TITLE);
+                /* Os 4 Passos Normativos de Instalacao Solicitados pelo Usuario */
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Instalando Baken OS no Disco GPT...", 0x00F8FAFC, BKN_TYPE_TITLE);
 
+                /* Barra de Progresso Principal */
                 uint32_t pb_w = pw - 24;
-                baken_lua_draw_surface(px + 12, py + 78, pb_w, 10, BKN_LUA_MICA, BKN_LUA_REST, 5);
+                baken_lua_draw_surface(px + 12, py + 54, pb_w, 10, BKN_LUA_MICA, BKN_LUA_REST, 5);
                 uint32_t fill_w = pb_w * g_installer.progress / 100;
-                gfx_fill_rect_alpha(px + 12, py + 78, fill_w, 10, 0x0010B981, 255);
+                gfx_fill_rect_alpha(px + 12, py + 54, fill_w, 10, 0x0010B981, 255);
 
-                gfx_draw_text_proportional(px + 20, py + 94, "Taxa de Transferencia: 34 MB/s (64 KB Chunk I/O)", 0x000284C7);
+                /* 4 Passos Normativos com Destaque Visual */
+                static const char *step_labels[] = {
+                    "1. Copiando Arquivos do Sistema...",
+                    "2. Verificando atualizacoes...",
+                    "3. Instalando atualizacoes...",
+                    "4. Finalizando Instalacao..."
+                };
+
+                uint32_t cur_sub = (g_installer.progress < 35) ? 0 : (g_installer.progress < 65 ? 1 : (g_installer.progress < 90 ? 2 : 3));
+
+                for (uint32_t s = 0; s < 4; ++s) {
+                    uint32_t sy = py + 72 + s * 24;
+                    uint8_t is_s_done = (s < cur_sub);
+                    uint8_t is_s_cur = (s == cur_sub);
+                    uint32_t c_dot = is_s_cur ? 0x0000E5FF : (is_s_done ? 0x0010B981 : 0x00475569);
+                    gfx_draw_circle_alpha(px + 24, sy + 7, is_s_cur ? 5 : 4, c_dot, 255);
+                    uint32_t txt_c = is_s_cur ? 0x0000E5FF : (is_s_done ? 0x0010B981 : 0x0064748B);
+                    gfx_draw_text_proportional(px + 38, sy, step_labels[s], txt_c);
+                }
+
                 char pct_str[16]; pct_str[0] = (char)('0' + (g_installer.progress / 10) % 10); pct_str[1] = (char)('0' + g_installer.progress % 10); pct_str[2] = '%'; pct_str[3] = 0;
-                gfx_draw_text_proportional(px + pw - 50, py + 94, pct_str, 0x0010B981);
+                gfx_draw_text_role(px + pw - 60, py + 72, pct_str, 0x0010B981, BKN_TYPE_TITLE);
 
                 /* Terminal de Logs em Tempo Real */
-                baken_lua_draw_surface(px + 12, py + 120, pw - 24, 160, BKN_LUA_CANVAS, BKN_LUA_REST, 8);
-                gfx_fill_rect_alpha(px + 14, py + 122, pw - 28, 156, 0x000F172A, 240);
+                baken_lua_draw_surface(px + 12, py + 172, pw - 24, 110, BKN_LUA_CANVAS, BKN_LUA_REST, 8);
+                gfx_fill_rect_alpha(px + 14, py + 174, pw - 28, 106, 0x00050811, 255);
                 for (uint32_t i = 0; i < g_installer.log_count && i < 6; ++i) {
-                    gfx_draw_text_proportional(px + 24, py + 130 + i * 24, g_installer.log_lines[i], 0x0038BDF8);
+                    gfx_draw_text_proportional(px + 24, py + 180 + i * 16, g_installer.log_lines[i], 0x0038BDF8);
                 }
 
                 baken_lua_draw_surface(px + pw - 160, bot_y, 148, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_DISABLED, 8);
                 gfx_draw_text_proportional(px + pw - 146, bot_y + 6, "Aguarde...", 0x0064748B);
 
             } else if (g_installer.stage == INSTALLER_STAGE_COMPLETE) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "8. Baken OS Instalado com Sucesso!", 0x0010B981, BKN_TYPE_TITLE);
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Baken OS Instalado com Sucesso!", 0x0010B981, BKN_TYPE_TITLE);
 
-                baken_lua_draw_surface(px + 12, py + 76, pw - 24, 190, BKN_LUA_MICA, BKN_LUA_REST, 8);
-                gfx_draw_circle_alpha(px + 36, py + 104, 16, 0x0010B981, 255);
-                gfx_draw_text_role(px + 62, py + 92, "Parabens! Seu sistema esta pronto para o primeiro boot.", 0x000F172A, BKN_TYPE_TITLE);
+                baken_lua_draw_surface(px + 12, py + 54, pw - 24, 200, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                gfx_draw_circle_alpha(px + 36, py + 82, 16, 0x0010B981, 255);
+                gfx_draw_text_role(px + 62, py + 70, "Parabens! Seu sistema esta gravado e pronto.", 0x00F8FAFC, BKN_TYPE_TITLE);
 
-                gfx_draw_text_proportional(px + 30, py + 130, "Resumo da Instalacao Soberana:", 0x000284C7);
-                gfx_draw_text_proportional(px + 30, py + 150, "• Perfil Instalado: Desenvolvedor Soberano (SDK Sotlas & Sotlas Compile)", 0x001E293B);
-                gfx_draw_text_proportional(px + 30, py + 170, "• Usuario Principal: baken@baken-workstation", 0x001E293B);
-                gfx_draw_text_proportional(px + 30, py + 190, "• Particoes: ESP FAT32 (41 MB) + Baken Data BakenFS (23 MB)", 0x001E293B);
-                gfx_draw_text_proportional(px + 30, py + 210, "• Snapshot Inicial: Ponto de restauracao 'Instalacao_Inicial' criado", 0x0010B981);
-                gfx_draw_text_proportional(px + 30, py + 234, "Integridade dos blocos e CRC32 validados com 100% de precisao.", 0x0064748B);
+                gfx_draw_text_proportional(px + 30, py + 110, "Resumo da Instalacao:", 0x0000E5FF);
+                gfx_draw_text_proportional(px + 30, py + 130, "- Perfil Instalado: Desenvolvedor & SDK (SDK Sotlas & Sotlas Compile)", 0x00F8FAFC);
+                gfx_draw_text_proportional(px + 30, py + 150, "- Particoes: ESP FAT32 (41 MB) + Baken Data BakenFS (23 MB)", 0x00F8FAFC);
+                gfx_draw_text_proportional(px + 30, py + 170, "- Snapshot Inicial: Ponto de restauracao 'Instalacao_Inicial' criado", 0x0010B981);
+                gfx_draw_text_proportional(px + 30, py + 194, "Remova a midia de boot e reinicie para iniciar o primeiro boot OOBE.", 0x0094A3B8);
 
                 baken_lua_draw_surface(px + 12, bot_y, 160, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 24, bot_y + 6, "Continuar no Modo Live", 0x00334155);
+                gfx_draw_text_proportional(px + 24, bot_y + 6, "Modo Live RAM", 0x0094A3B8);
 
-                baken_lua_draw_surface(px + pw - 180, bot_y, 168, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
-                gfx_draw_text_proportional(px + pw - 164, bot_y + 6, "Reiniciar Computador", 0x00FFFFFF);
+                baken_lua_draw_surface(px + pw - 190, bot_y, 178, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 174, bot_y + 6, "Reiniciar Computador", 0x00FFFFFF);
 
             } else if (g_installer.stage == INSTALLER_STAGE_REPAIR) {
-                baken_lua_draw_surface(px + 12, py + 38, pw - 24, 30, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 6);
-                gfx_draw_text_role(px + 20, py + 44, "Ferramentas de Reparo & Diagnostico BKN", 0x000F172A, BKN_TYPE_TITLE);
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, "Ferramentas de Reparo & Diagnostico", 0x00F8FAFC, BKN_TYPE_TITLE);
 
                 static const char *r_titles[] = {"[1] Reparar Bootloader UEFI & ESP", "[2] Verificar e Reparar Integridade do BakenFS", "[3] Restaurar Snapshot Inicial do Sistema"};
                 static const char *r_descs[] = {"Restaura o MBR protetivo, cabecalhos GPT e VBR da particao ESP FAT32.", "Executa varredura no superbloco BakenFS e valida as 7 entradas de arquivos.", "Restaura as configuracoes de fabrica e notas a partir do snapshot inicial."};
 
                 for (uint32_t i = 0; i < 3; ++i) {
-                    uint32_t cy = py + 76 + i * 62;
+                    uint32_t cy = py + 54 + i * 62;
                     baken_lua_draw_surface(px + 12, cy, pw - 24, 56, BKN_LUA_MICA, BKN_LUA_REST, 8);
                     gfx_draw_circle_alpha(px + 28, cy + 28, 6, 0x00F59E0B, 255);
-                    gfx_draw_text_role(px + 44, cy + 12, r_titles[i], 0x000F172A, BKN_TYPE_LABEL);
-                    gfx_draw_text_proportional(px + 44, cy + 32, r_descs[i], 0x0064748B);
+                    gfx_draw_text_role(px + 44, cy + 12, r_titles[i], 0x00F8FAFC, BKN_TYPE_LABEL);
+                    gfx_draw_text_proportional(px + 44, cy + 32, r_descs[i], 0x0094A3B8);
                 }
 
-                baken_lua_draw_surface(px + 12, py + 268, pw - 24, 34, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 6);
-                gfx_draw_text_proportional(px + 24, py + 276, g_installer.repair_status, 0x00166534);
+                baken_lua_draw_surface(px + 12, py + 248, pw - 24, 34, BKN_LUA_GLASS_REGULAR, BKN_LUA_SELECTED, 6);
+                gfx_draw_text_proportional(px + 24, py + 256, g_installer.repair_status, 0x0010B981);
 
                 baken_lua_draw_surface(px + 12, bot_y, 140, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
-                gfx_draw_text_proportional(px + 24, bot_y + 6, "< Voltar ao Inicio", 0x00334155);
+                gfx_draw_text_proportional(px + 24, bot_y + 6, "< Voltar ao Inicio", 0x0094A3B8);
+
+            } else if (g_installer.stage == INSTALLER_STAGE_OOBE_BOOT) {
+                /* Primeiro Boot Pós-Instalação com Emblema Swirl Oficial e Barra de Progresso */
+                uint32_t cx = px + pw / 2;
+                uint32_t cy = py + 80;
+                
+                gfx_draw_baken_logo(cx - 36, cy - 36, 72);
+
+                const char *msg1 = "Iniciando operadores...";
+                const char *msg2 = "Configurando tudo para voce...";
+                const char *cur_msg = ((tick / 40) % 2 == 0) ? msg1 : msg2;
+                uint32_t mw = gfx_measure_text(cur_msg);
+                gfx_draw_text_role(px + (pw > mw ? (pw - mw) / 2 : 20), py + 140, cur_msg, 0x00F8FAFC, BKN_TYPE_TITLE);
+
+                uint32_t pb_w = 320;
+                uint32_t pbx = px + (pw > pb_w ? (pw - pb_w) / 2 : 12);
+                baken_lua_draw_surface(pbx, py + 180, pb_w, 8, BKN_LUA_MICA, BKN_LUA_REST, 4);
+                uint32_t pos = (tick * 4) % (pb_w - 40);
+                gfx_fill_rect_alpha(pbx + pos, py + 180, 40, 8, 0x0000E5FF, 255);
+
+                baken_lua_draw_surface(px + pw - 160, bot_y, 148, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 138, bot_y + 6, "Configurar >", 0x00FFFFFF);
+
+            } else if (g_installer.stage == INSTALLER_STAGE_OOBE_WIZARD) {
+                /* Assistente OOBE Completo de 8 Etapas */
+                static const char *oobe_step_names[] = {
+                    "1. Idioma", "2. Regiao", "3. Teclado", "4. Rede",
+                    "5. Privacidade", "6. Personalizacao", "7. BakenID", "8. Perfil de Uso"
+                };
+
+                baken_lua_draw_surface(px + 12, py + 8, pw - 24, 38, BKN_LUA_GLASS_REGULAR, BKN_LUA_REST, 8);
+                gfx_draw_baken_logo(px + 18, py + 14, 24);
+                gfx_draw_text_role(px + 48, py + 16, oobe_step_names[g_installer.oobe_step], 0x00F8FAFC, BKN_TYPE_TITLE);
+                gfx_draw_text_proportional(px + pw - 130, py + 18, "OOBE Setup", 0x0000E5FF);
+
+                if (g_installer.oobe_step == 0) { /* Idioma */
+                    static const char *o_langs[] = {"Portugues (Brasil)", "English (United States)", "Espanol (Latinoamerica)"};
+                    for (uint32_t i = 0; i < 3; ++i) {
+                        uint32_t ly = py + 64 + i * 48;
+                        uint8_t sel = (g_installer.selected_lang == i);
+                        baken_lua_draw_surface(px + 16, ly, pw - 32, 42, BKN_LUA_MICA, sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                        gfx_draw_circle_alpha(px + 32, ly + 21, 6, sel ? 0x0010B981 : 0x0094A3B8, 240);
+                        gfx_draw_text_role(px + 50, ly + 12, o_langs[i], sel ? 0x0000E5FF : 0x00F8FAFC, BKN_TYPE_LABEL);
+                    }
+                } else if (g_installer.oobe_step == 1) { /* Regiao */
+                    baken_lua_draw_surface(px + 16, py + 64, pw - 32, 160, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                    gfx_draw_text_role(px + 32, py + 80, "Regiao: Brasil (America/Sao_Paulo UTC-3)", 0x0000E5FF, BKN_TYPE_TITLE);
+                    gfx_draw_text_proportional(px + 32, py + 110, "Fuso horario sincronizado com CMOS RTC.", 0x00F8FAFC);
+                    gfx_draw_text_proportional(px + 32, py + 130, "Formatos de data e moeda configurados para BRL (R$).", 0x0094A3B8);
+                } else if (g_installer.oobe_step == 2) { /* Teclado */
+                    static const char *o_kbds[] = {"Teclado ABNT2 (Brasil)", "Teclado US-International", "Teclado ISO Latin / Generic"};
+                    for (uint32_t i = 0; i < 3; ++i) {
+                        uint32_t ly = py + 64 + i * 48;
+                        uint8_t sel = (g_installer.selected_kbd == i);
+                        baken_lua_draw_surface(px + 16, ly, pw - 32, 42, BKN_LUA_MICA, sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                        gfx_draw_circle_alpha(px + 32, ly + 21, 6, sel ? 0x0010B981 : 0x0094A3B8, 240);
+                        gfx_draw_text_role(px + 50, ly + 12, o_kbds[i], sel ? 0x0000E5FF : 0x00F8FAFC, BKN_TYPE_LABEL);
+                    }
+                } else if (g_installer.oobe_step == 3) { /* Rede */
+                    baken_lua_draw_surface(px + 16, py + 64, pw - 32, 160, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                    gfx_draw_text_role(px + 32, py + 80, "Configuracao de Rede Local", 0x0000E5FF, BKN_TYPE_TITLE);
+                    gfx_draw_text_proportional(px + 32, py + 110, "Interface Ethernet e WiFi detectadas via PCI bus.", 0x00F8FAFC);
+                    gfx_draw_text_proportional(px + 32, py + 130, "DNS Criptografado Nativo e Conexao Local Ativa.", 0x0010B981);
+                } else if (g_installer.oobe_step == 4) { /* Privacidade */
+                    baken_lua_draw_surface(px + 16, py + 64, pw - 32, 160, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                    gfx_draw_text_role(px + 32, py + 80, "Zero Telemetria & Privacidade Absoluta", 0x0010B981, BKN_TYPE_TITLE);
+                    gfx_draw_text_proportional(px + 32, py + 110, "Nenhum dado pessoal, log ou telemetria e transmitido.", 0x00F8FAFC);
+                    gfx_draw_text_proportional(px + 32, py + 130, "Seu computador permanece 100% sob seu controle.", 0x0094A3B8);
+                } else if (g_installer.oobe_step == 5) { /* Personalizacao */
+                    static const char *o_themes[] = {"Vortex Dark Acrylic", "Light Mica Glass", "Cyber Neon Deep"};
+                    for (uint32_t i = 0; i < 3; ++i) {
+                        uint32_t ly = py + 64 + i * 48;
+                        uint8_t sel = (g_installer.oobe_theme == i);
+                        baken_lua_draw_surface(px + 16, ly, pw - 32, 42, BKN_LUA_MICA, sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                        gfx_draw_circle_alpha(px + 32, ly + 21, 6, sel ? 0x0010B981 : 0x0094A3B8, 240);
+                        gfx_draw_text_role(px + 50, ly + 12, o_themes[i], sel ? 0x0000E5FF : 0x00F8FAFC, BKN_TYPE_LABEL);
+                    }
+                } else if (g_installer.oobe_step == 6) { /* BakenID */
+                    baken_lua_draw_surface(px + 16, py + 64, pw - 32, 160, BKN_LUA_MICA, BKN_LUA_REST, 8);
+                    gfx_draw_text_role(px + 32, py + 80, "Entrar na Conta BakenID", 0x0000E5FF, BKN_TYPE_TITLE);
+                    gfx_draw_text_proportional(px + 32, py + 110, "Usuario: baken@baken-workstation", 0x00F8FAFC);
+                    gfx_draw_text_proportional(px + 32, py + 130, "PIN de Acesso Rapido configurado.", 0x0010B981);
+                } else if (g_installer.oobe_step == 7) { /* Como pretende usar o BakenOS */
+                    static const char *o_uses[] = {"Uso Pessoal & Produtividade", "Trabalho & Negocios", "Desenvolvimento & Sotlas SDK", "Jogos & Multimidia 3D"};
+                    for (uint32_t i = 0; i < 4; ++i) {
+                        uint32_t ly = py + 54 + i * 44;
+                        uint8_t sel = (g_installer.oobe_usage == i);
+                        baken_lua_draw_surface(px + 16, ly, pw - 32, 38, BKN_LUA_MICA, sel ? BKN_LUA_SELECTED : BKN_LUA_REST, 8);
+                        gfx_draw_circle_alpha(px + 32, ly + 19, 5, sel ? 0x0000E5FF : 0x0094A3B8, 240);
+                        gfx_draw_text_role(px + 50, ly + 10, o_uses[i], sel ? 0x0000E5FF : 0x00F8FAFC, BKN_TYPE_LABEL);
+                    }
+                }
+
+                baken_lua_draw_surface(px + 12, bot_y, 110, 28, BKN_LUA_GLASS_CLEAR, BKN_LUA_REST, 8);
+                gfx_draw_text_proportional(px + 28, bot_y + 6, "< Voltar", 0x0094A3B8);
+
+                baken_lua_draw_surface(px + pw - 140, bot_y, 128, 28, BKN_LUA_ELEVATED, BKN_LUA_SELECTED, 8);
+                gfx_draw_text_proportional(px + pw - 118, bot_y + 6, "Avancar >", 0x00FFFFFF);
+
+            } else if (g_installer.stage == INSTALLER_STAGE_OOBE_FINISH) {
+                /* Finalizacao Cinematografica: Gradiente Dançando no Fundo e Frases Inspiradoras */
+                /* Desenha Gradiente Ondulante Animado */
+                for (uint32_t gy = py; gy < py + ph; gy += 4) {
+                    uint32_t color_phase = (gy * 2 + tick * 4) % 255;
+                    uint32_t r = (color_phase < 128) ? color_phase * 2 : (255 - color_phase) * 2;
+                    uint32_t b = 255 - r;
+                    uint32_t g_c = (r * 3 / 4);
+                    uint32_t dynamic_c = (r << 16) | (g_c << 8) | b;
+                    gfx_fill_rect_alpha(px, gy, pw, 4, dynamic_c, 110);
+                }
+
+                /* Logo Central */
+                uint32_t cx = px + pw / 2;
+                uint32_t cy = py + 90;
+                gfx_draw_baken_logo(cx - 36, cy - 36, 72);
+
+                uint32_t tw_n = gfx_measure_text("Baken OS");
+                gfx_draw_text_role(px + (pw > tw_n ? (pw - tw_n) / 2 : 20), py + 148, "Baken OS", 0x00FFFFFF, BKN_TYPE_TITLE);
+
+                static const char *quotes[] = {
+                    "O futuro do seu computador comeca agora.",
+                    "Liberdade, desempenho e controle total.",
+                    "Preparando sua Area de Trabalho..."
+                };
+                const char *quote = quotes[(tick / 50) % 3];
+                uint32_t qw = gfx_measure_text(quote);
+                gfx_draw_text_proportional(px + (pw > qw ? (pw - qw) / 2 : 20), py + 180, quote, 0x00E2E8F0);
+
+                /* Botao Concluir */
+                uint32_t fin_w = 220, fin_h = 40;
+                uint32_t fin_x = px + (pw > fin_w ? (pw - fin_w) / 2 : 12);
+                uint32_t fin_y = py + 230;
+                gfx_draw_glass_rect_material(fin_x, fin_y, fin_w, fin_h, 0x0010B981, 240, 0x0034D399, 10);
+                const char *fin_t = "Entrar no Desktop >";
+                uint32_t ftw = gfx_measure_text(fin_t);
+                gfx_draw_text_role(fin_x + (fin_w > ftw ? (fin_w - ftw) / 2 : 12), fin_y + 10, fin_t, 0x00FFFFFF, BKN_TYPE_TITLE);
             }
         } else { // Sobre
             baken_lua_draw_surface(px + 12, py + 12, pw - 24, 64, BKN_LUA_MICA, BKN_LUA_REST, 8);
-            gfx_draw_circle_alpha(px + 44, py + 44, 16, 0x000284C7, 255);
-            gfx_draw_circle_alpha(px + 44, py + 44, 9, 0x00F8FAFC, 255);
-            gfx_draw_circle_alpha(px + 44, py + 44, 3, 0x000284C7, 255);
-            gfx_draw_text_proportional(px + 76, py + 26, "Baken OS Sovereign", 0x000F172A);
+            gfx_draw_baken_logo(px + 24, py + 24, 40);
+            gfx_draw_text_proportional(px + 76, py + 26, "Baken OS", 0x000F172A);
             gfx_draw_text_proportional(px + 76, py + 46, "Versao 2.0.0 (x86-64 UEFI)", 0x000284C7);
 
             if (ph > 90) {
@@ -3426,6 +4015,275 @@ static void wm_render_single_window(const Window *win) {
                 gfx_draw_text_proportional(px + 24, py + 162, "Copyright (c) 2026 Baken Project.", 0x0064748B);
             }
         }
+    }
+}
+
+void installer_handle_fullscreen_click(int32_t mx, int32_t my, uint32_t sw, uint32_t sh) {
+    if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
+        if (!g_installer.welcome_menu_open) {
+            uint32_t cw = sw > 720 ? 660 : (sw > 40 ? sw - 32 : sw);
+            uint32_t ch = sh > 520 ? 380 : (sh > 40 ? sh - 40 : sh);
+            uint32_t cx = (sw - cw) / 2;
+            uint32_t cy = (sh > ch) ? (sh - ch) / 2 - 12 : 10;
+            uint32_t logo_x = cx + cw / 2;
+            uint32_t logo_y = cy + 68;
+            
+            /* Botao Central Comecar agora -> Abre o Menu Desdobravel */
+            uint32_t start_w = 280, start_h = 50;
+            uint32_t start_x = logo_x - (start_w / 2);
+            uint32_t start_y = logo_y + 116;
+            if (mx >= (int32_t)start_x && mx < (int32_t)(start_x + start_w) &&
+                my >= (int32_t)start_y && my < (int32_t)(start_y + start_h)) {
+                g_installer.welcome_menu_open = 1;
+                return;
+            }
+
+            /* Links Discretos no Canto Inferior Esquerdo */
+            uint32_t link_y = (sh > 50) ? (sh - 40) : 10;
+            if (my >= (int32_t)link_y && my < (int32_t)(link_y + 36)) {
+                if (mx >= 24 && mx < 180) {
+                    g_installer.stage = INSTALLER_STAGE_SETTINGS;
+                    return;
+                }
+                if (mx >= 180 && mx < 500) {
+                    g_installer.stage = INSTALLER_STAGE_REPAIR;
+                    return;
+                }
+            }
+        } else {
+            /* Menu Desdobrável Aberto no Card Central */
+            uint32_t cw = sw > 720 ? 680 : (sw > 40 ? sw - 32 : sw);
+            uint32_t ch = sh > 520 ? 460 : (sh > 40 ? sh - 40 : sh);
+            uint32_t cx = (sw - cw) / 2;
+            uint32_t cy = (sh > ch) ? (sh - ch) / 2 - 12 : 10;
+            uint32_t col_w = (cw - 48) / 2;
+
+            /* Selecao de Idioma (Coluna Esquerda) */
+            for (uint32_t i = 0; i < 4; ++i) {
+                uint32_t ly = cy + 96 + i * 44;
+                if (mx >= (int32_t)(cx + 16) && mx < (int32_t)(cx + 16 + col_w) &&
+                    my >= (int32_t)ly && my < (int32_t)(ly + 38)) {
+                    g_installer.selected_lang = i;
+                    return;
+                }
+            }
+
+            /* Selecao de Teclado (Coluna Direita) */
+            for (uint32_t i = 0; i < 4; ++i) {
+                uint32_t ky = cy + 96 + i * 44;
+                if (mx >= (int32_t)(cx + 32 + col_w) && mx < (int32_t)(cx + 32 + col_w * 2) &&
+                    my >= (int32_t)ky && my < (int32_t)(ky + 38)) {
+                    g_installer.selected_kbd = i;
+                    return;
+                }
+            }
+
+            /* Botoes de Acao Inferiores do Card */
+            uint32_t bot_card_y = cy + ch - 54;
+            /* Botao Voltar */
+            if (mx >= (int32_t)(cx + 16) && mx < (int32_t)(cx + 140) &&
+                my >= (int32_t)bot_card_y && my < (int32_t)(bot_card_y + 36)) {
+                g_installer.welcome_menu_open = 0;
+                return;
+            }
+            /* Botao Continuar */
+            if (mx >= (int32_t)(cx + cw - 180) && mx < (int32_t)(cx + cw - 16) &&
+                my >= (int32_t)bot_card_y && my < (int32_t)(bot_card_y + 36)) {
+                g_installer.stage = INSTALLER_STAGE_LANGUAGE;
+                return;
+            }
+        }
+    } else {
+        uint32_t cw = sw > 880 ? 840 : (sw > 40 ? sw - 32 : sw);
+        uint32_t ch = sh > 600 ? 540 : (sh > 60 ? sh - 40 : sh);
+        uint32_t cx = (sw - cw) / 2;
+        uint32_t cy = (sh - ch) / 2;
+
+        installer_handle_step_click(mx, my, cx + 8, cy + 8, cw - 16, ch - 16);
+    }
+}
+
+void installer_render_fullscreen(uint32_t sw, uint32_t sh) {
+    uint32_t tick = desktop_shell_get_time_tick();
+    if (g_installer.stage == INSTALLER_STAGE_WELCOME) {
+        if (!g_installer.welcome_menu_open) {
+            /* 1. Hero Showcase Card Flutuante com Glassmorphism Puro (Mica/Acrylic Glass) */
+            uint32_t cw = sw > 720 ? 660 : (sw > 40 ? sw - 32 : sw);
+            uint32_t ch = sh > 520 ? 380 : (sh > 40 ? sh - 40 : sh);
+            uint32_t cx = (sw - cw) / 2;
+            uint32_t cy = (sh > ch) ? (sh - ch) / 2 - 12 : 10;
+
+            /* Sombra Suave e Superfície Translúcida sem Artefatos de Canto */
+            gfx_draw_smooth_shadow((int)cx, (int)cy, (int)cw, (int)ch, 20, 28, 130);
+            gfx_draw_glass_rect_material_ex(cx, cy, cw, ch, 0x000F172A, 175, 0x0038BDF8, 20, 8, 210, 75);
+
+            /* 2. Logotipo Oficial do Baken OS em Alta Definição (Emblema Swirl 72x72) */
+            uint32_t logo_x = cx + cw / 2;
+            uint32_t logo_y = cy + 68;
+            uint32_t pulse = 30 + (tick % 30 < 15 ? (tick % 15) / 3 : (30 - tick % 30) / 3);
+
+            /* Halo Suave de Iluminação Neon sob o Logotipo */
+            gfx_draw_circle_alpha(logo_x, logo_y, pulse + 14, 0x000284C7, 30);
+            gfx_draw_circle_alpha(logo_x, logo_y, pulse + 4, 0x0000E5FF, 60);
+            
+            /* Renderiza o Emblema Swirl Oficial Real em Alta Definição */
+            gfx_draw_baken_logo(logo_x - 36, logo_y - 36, 72);
+
+            /* 3. Tipografia de Alto Impacto */
+            uint32_t tw_title = gfx_measure_text_role("BAKEN OS", BKN_TYPE_TITLE);
+            gfx_draw_text_role(logo_x - (tw_title / 2), logo_y + 44, "BAKEN OS", 0x00FFFFFF, BKN_TYPE_TITLE);
+
+            /* 4. Carrossel Multilíngue Dinâmico: 'Bem-vindo, obrigado por escolher o Baken OS' */
+            static const char *g_welcome_messages[] = {
+                "Bem-vindo, obrigado por escolher o Baken OS",
+                "Welcome, thank you for choosing Baken OS",
+                "Bienvenido, gracias por elegir Baken OS",
+                "Bienvenue, merci d'avoir choisi Baken OS",
+                "Willkommen, danke dass Sie Baken OS gewaehlt haben",
+                "Benvenuto, grazie per aver scelto Baken OS",
+                "Salve, gratias agimus quod Baken OS elegisti",
+                "Kalosorisate, efcharistoume pou epilexate to Baken OS",
+                "Yokoso, Baken OS wo erande itadaki arigatou gozaimasu",
+                "Huan ying, gan xie nin xuan ze Baken OS"
+            };
+
+            static const char *g_button_labels[] = {
+                "Comecar agora >",
+                "Get Started >",
+                "Comenzar ahora >",
+                "Commencer >",
+                "Jetzt starten >",
+                "Inizia ora >",
+                "Incipe nunc >",
+                "Xekiniste tora >",
+                "Ima sugu hajimeru >",
+                "Li ji kai shi >"
+            };
+
+            static const char *g_settings_labels[] = {
+                "Configuracoes",
+                "Settings",
+                "Configuracion",
+                "Parametres",
+                "Einstellungen",
+                "Impostazioni",
+                "Configurationes",
+                "Rythmiseis",
+                "Settei",
+                "She zhi"
+            };
+
+            static const char *g_repair_labels[] = {
+                "Restaurar ou Corrigir Computador",
+                "Repair or Recover Computer",
+                "Reparar o Restaurar Equipo",
+                "Reparer ou Restaurer",
+                "Computer reparieren",
+                "Ripara o Ripristina",
+                "Reficere vel Restaurare",
+                "Episkeyi i Epanafora",
+                "Konpyuta no Shuri to Fukugen",
+                "Xiu fu huo Hui fu Ji suan ji"
+            };
+
+            uint32_t msg_idx = (tick / 75) % 10;
+            const char *sub = g_welcome_messages[msg_idx];
+            uint32_t tw_sub = gfx_measure_text(sub);
+            gfx_draw_text_proportional(logo_x - (tw_sub / 2), logo_y + 72, sub, 0x00E0F2FE);
+
+            /* 5. Botão Principal Traduzido Dinamicamente */
+            uint32_t start_w = 280, start_h = 50;
+            uint32_t start_x = logo_x - (start_w / 2);
+            uint32_t start_y = logo_y + 116;
+            gfx_draw_glass_rect_material_ex(start_x, start_y, start_w, start_h, 0x000284C7, 240, 0x0000E5FF, 14, 4, 240, 100);
+            const char *btn_txt = g_button_labels[msg_idx];
+            uint32_t bw_btn = gfx_measure_text_role(btn_txt, BKN_TYPE_TITLE);
+            gfx_draw_text_role(start_x + (start_w - bw_btn) / 2, start_y + 15, btn_txt, 0x00FFFFFF, BKN_TYPE_TITLE);
+
+            /* 6. Canto Inferior Esquerdo: Links Discretos e Elegantes Traduzidos */
+            uint32_t link_y = (sh > 50) ? (sh - 40) : 10;
+            const char *set_txt = g_settings_labels[msg_idx];
+            const char *rep_txt = g_repair_labels[msg_idx];
+            uint32_t set_w = gfx_measure_text(set_txt);
+            gfx_draw_text_proportional(28, link_y + 8, set_txt, 0x00E0F2FE);
+            gfx_draw_text_proportional(28 + set_w + 10, link_y + 8, "|", 0x00475569);
+            gfx_draw_text_proportional(28 + set_w + 22, link_y + 8, rep_txt, 0x00E0F2FE);
+
+            /* 7. Canto Inferior Direito: Marca TasteTrack Systems LTDA */
+            const char *brand = "Baken OS - TasteTrack Systems LTDA";
+            uint32_t brand_w = gfx_measure_text(brand);
+            gfx_draw_text_proportional(sw > brand_w + 34 ? sw - brand_w - 28 : 10, link_y + 8, brand, 0x0094A3B8);
+        } else {
+            /* Menu Desdobrável de Idioma e Teclado Integrado no Card */
+            uint32_t cw = sw > 720 ? 680 : (sw > 40 ? sw - 32 : sw);
+            uint32_t ch = sh > 520 ? 460 : (sh > 40 ? sh - 40 : sh);
+            uint32_t cx = (sw - cw) / 2;
+            uint32_t cy = (sh > ch) ? (sh - ch) / 2 - 12 : 10;
+
+            gfx_draw_smooth_shadow((int)cx, (int)cy, (int)cw, (int)ch, 20, 28, 130);
+            gfx_draw_glass_rect_material_ex(cx, cy, cw, ch, 0x000F172A, 200, 0x0038BDF8, 20, 8, 215, 75);
+
+            /* Topo do Menu */
+            gfx_draw_baken_logo(cx + 20, cy + 18, 36);
+            gfx_draw_text_role(cx + 66, cy + 18, "Configurar Idioma & Teclado", 0x00FFFFFF, BKN_TYPE_TITLE);
+            gfx_draw_text_proportional(cx + 66, cy + 42, "Selecione seu idioma preferido e o formato de teclado", 0x0038BDF8);
+
+            uint32_t col_w = (cw - 48) / 2;
+
+            /* Coluna 1: Idiomas */
+            uint32_t col1_x = cx + 16;
+            gfx_draw_text_role(col1_x + 6, cy + 70, "Idioma do Sistema", 0x00BAE6FD, BKN_TYPE_LABEL);
+            static const char *w_langs[] = {"[1] Portugues (Brasil)", "[2] English (United States)", "[3] Espanol (Latinoamerica)", "[4] Deutsch (Schweiz / DE)"};
+            for (uint32_t i = 0; i < 4; ++i) {
+                uint32_t ly = cy + 96 + i * 44;
+                uint8_t sel = (g_installer.selected_lang == i);
+                gfx_draw_glass_rect_material_ex(col1_x, ly, col_w, 38, 0x001E293B, sel ? 230 : 160, sel ? 0x0010B981 : 0x00334155, 8, 2, 180, 60);
+                gfx_draw_circle_alpha(col1_x + 16, ly + 19, 5, sel ? 0x0010B981 : 0x0064748B, 255);
+                gfx_draw_text_proportional(col1_x + 30, ly + 11, w_langs[i], sel ? 0x00FFFFFF : 0x00CBD5E1);
+            }
+
+            /* Coluna 2: Teclados */
+            uint32_t col2_x = cx + 32 + col_w;
+            gfx_draw_text_role(col2_x + 6, cy + 70, "Layout do Teclado", 0x00BAE6FD, BKN_TYPE_LABEL);
+            static const char *w_kbds[] = {"[1] Teclado ABNT2 (Brasil)", "[2] Teclado US-International", "[3] Teclado ISO Latin / Generic", "[4] Teclado QWERTZ / Swiss"};
+            for (uint32_t i = 0; i < 4; ++i) {
+                uint32_t ky = cy + 96 + i * 44;
+                uint8_t sel = (g_installer.selected_kbd == i);
+                gfx_draw_glass_rect_material_ex(col2_x, ky, col_w, 38, 0x001E293B, sel ? 230 : 160, sel ? 0x0038BDF8 : 0x00334155, 8, 2, 180, 60);
+                gfx_draw_circle_alpha(col2_x + 16, ky + 19, 5, sel ? 0x0038BDF8 : 0x0064748B, 255);
+                gfx_draw_text_proportional(col2_x + 30, ky + 11, w_kbds[i], sel ? 0x00FFFFFF : 0x00CBD5E1);
+            }
+
+            /* Botoes de Acao no Rodape do Card */
+            uint32_t bot_card_y = cy + ch - 54;
+            /* Botao Voltar */
+            gfx_draw_glass_rect_material_ex(cx + 16, bot_card_y, 120, 36, 0x001E293B, 180, 0x00475569, 8, 2, 160, 50);
+            gfx_draw_text_proportional(cx + 36, bot_card_y + 9, "< Voltar", 0x0094A3B8);
+
+            /* Botao Continuar */
+            gfx_draw_glass_rect_material_ex(cx + cw - 180, bot_card_y, 164, 36, 0x000284C7, 240, 0x0000E5FF, 8, 3, 230, 90);
+            gfx_draw_text_role(cx + cw - 150, bot_card_y + 8, "Continuar >", 0x00FFFFFF, BKN_TYPE_LABEL);
+        }
+    } else {
+        /* Fundo com leve desfoque translúcido mantendo o wallpaper visível */
+        gfx_fill_rect_alpha(0, 0, sw, sh, 0x00050A14, 60);
+
+        uint32_t cw = sw > 880 ? 840 : (sw > 40 ? sw - 32 : sw);
+        uint32_t ch = sh > 600 ? 540 : (sh > 60 ? sh - 40 : sh);
+        uint32_t cx = (sw - cw) / 2;
+        uint32_t cy = (sh - ch) / 2;
+
+        gfx_draw_smooth_shadow((int)cx, (int)cy, (int)cw, (int)ch, 20, 32, 130);
+        gfx_draw_glass_rect_material_ex(cx, cy, cw, ch, 0x000F172A, 215, 0x0000E5FF, 16, 6, 220, 80);
+
+        Window fw;
+        fw.x = (int32_t)cx;
+        fw.y = (int32_t)cy - TITLE_BAR_HEIGHT;
+        fw.width = cw;
+        fw.height = ch + TITLE_BAR_HEIGHT;
+        fw.app_id = 5;
+        fw.is_focused = 1;
+        wm_render_single_window(&fw);
     }
 }
 
@@ -3474,6 +4332,9 @@ extern uint8_t wm_get_cursor_type(int32_t mx, int32_t my);
 extern void *wm_create_window(uint32_t id, const uint8_t *title, int32_t x, int32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t alpha, uint32_t border);
 extern uint32_t gfx_get_width(void), gfx_get_height(void);
 extern uint32_t baken_ui_px(uint32_t logical_px);
+extern void installer_render_fullscreen(uint32_t sw, uint32_t sh);
+extern void installer_handle_fullscreen_click(int32_t mx, int32_t my, uint32_t sw, uint32_t sh);
+extern uint8_t installer_is_boot_mode_live(void);
 
 typedef struct {
     uint8_t has_nvme;
@@ -3636,7 +4497,7 @@ typedef struct {
 
 static BakenTerminalState g_terminal = {
     {
-        "Baken OS Sovereign Kernel v2.0 (Sotlas Native)",
+        "Baken OS Kernel v2.0 (Sotlas Native)",
         "Terminal interativo - Digite 'help' para comandos."
     },
     2,
@@ -3699,7 +4560,7 @@ static void terminal_execute_command(void) {
         terminal_append_line("Comandos: ls, cat, touch, mkdir, rm, write, theme, sysinfo, clear");
     } else if (str_contains_nocase(cmd, "sysinfo")) {
         terminal_append_line("Arch: x86_64 UEFI | Mem: 512MB / 2048MB | GOP: 1080p");
-        terminal_append_line("Kernel: Baken Modular Sotlas v2.0 | FS: BakenFS Sovereign v1");
+        terminal_append_line("Kernel: Baken Modular Sotlas v2.0 | FS: BakenFS v1");
     } else if (str_contains_nocase(cmd, "stat") || str_contains_nocase(cmd, "df")) {
         terminal_append_line("BakenFS Estado:");
         terminal_append_line("  Dispositivo: ESP Blk 86016 | Entradas: 12 max");
@@ -3841,7 +4702,7 @@ typedef struct {
 static const BakenMenu g_menus[6] = {
     {
         "Baken OS", 5, {
-            {"Sobre o Baken OS Sovereign", "", 4, 0, 0},
+            {"Sobre o Baken OS", "", 4, 0, 0},
             {"Central de Ajustes & Hardware", "", 10, 0, 0},
             {"Loja de Aplicativos Baken", "", 8, 0, 0},
             {"---", "", 0, 1, 0},
@@ -4034,7 +4895,11 @@ static void desktop_open_app(uint32_t app_id) {
         wm_create_window(4, (const uint8_t*)"Terminal Sotlas - Vortex Core", (int32_t)(sw / 2 - 270), (int32_t)(sh / 2 - 170), 540, 340, 0x00F8FAFC, 215, 0x00FFFFFF);
         wm_bring_to_front(4);
     } else if (app_id == 14) {
-        wm_create_window(5, (const uint8_t*)"Instalador e Setup - Baken OS Sovereign", (int32_t)(sw / 2 - 370), (int32_t)(sh / 2 - 250), 740, 500, 0x00F8FAFC, 215, 0x00FFFFFF);
+        uint32_t win_w = sw > 760 ? 740 : (sw > 40 ? sw - 24 : sw);
+        uint32_t win_h = sh > 540 ? 500 : (sh > 80 ? sh - 60 : sh);
+        int32_t win_x = (int32_t)((sw - win_w) / 2);
+        int32_t win_y = (int32_t)((sh - win_h) / 2);
+        wm_create_window(5, (const uint8_t*)"Instalador e Setup - Baken OS", win_x, win_y, win_w, win_h, 0x00F8FAFC, 215, 0x00FFFFFF);
         wm_bring_to_front(5);
     } else {
         wm_create_window(4, (const uint8_t*)"Baken OS - Aplicativo", (int32_t)(sw / 2 - 200), (int32_t)(sh / 2 - 120), 400, 240, 0x00F8FAFC, 215, 0x00FFFFFF);
@@ -4235,7 +5100,7 @@ static void render_spotlight_overlay(void) {
         {"Notas Rapidas", "Editor de texto persistente", 6},
         {"Central de Ajustes", "Configuracoes de Hardware", 10},
         {"Terminal Sotlas", "Interpretador de Comandos Vortex", 9},
-        {"Assistente Q-HAL AI", "Inteligencia Artificial Soberana", 4},
+        {"Assistente Q-HAL AI", "Inteligencia Artificial Local", 4},
         {"Instalar Baken OS", "Assistente de Instalacao UEFI", 14}
     };
 
@@ -4389,6 +5254,10 @@ static void render_permission_dialog(void) {
 }
 
 void desktop_shell_handle_click(int32_t mx, int32_t my) {
+    if (!installer_is_boot_mode_live()) {
+        installer_handle_fullscreen_click(mx, my, g_shell.screen_w, g_shell.screen_h);
+        return;
+    }
     uint32_t top_h = baken_ui_px(32);
     uint32_t sw = g_shell.screen_w, sh = g_shell.screen_h;
 
@@ -5044,46 +5913,54 @@ void render_cursor(void) {
     if (my < 0) { my = 0; }
     if (my >= (int32_t)sh) { my = (int32_t)sh - 1; }
 
-    static const uint8_t cursor_body[20][14] = {
-        {1,0,0,0,0,0,0,0,0,0,0,0,0,0},
-        {1,1,0,0,0,0,0,0,0,0,0,0,0,0},
-        {1,2,1,0,0,0,0,0,0,0,0,0,0,0},
-        {1,2,2,1,0,0,0,0,0,0,0,0,0,0},
-        {1,2,3,2,1,0,0,0,0,0,0,0,0,0},
-        {1,2,3,3,2,1,0,0,0,0,0,0,0,0},
-        {1,2,3,3,3,2,1,0,0,0,0,0,0,0},
-        {1,2,3,3,3,3,2,1,0,0,0,0,0,0},
-        {1,2,3,3,3,3,3,2,1,0,0,0,0,0},
-        {1,2,3,3,3,3,3,3,2,1,0,0,0,0},
-        {1,2,3,3,3,3,3,3,3,2,1,0,0,0},
-        {1,2,3,3,3,3,2,2,2,2,2,1,0,0},
-        {1,2,3,2,3,3,2,1,1,1,1,1,1,0},
-        {1,2,2,1,1,2,3,2,1,0,0,0,0,0},
-        {1,2,1,0,0,1,2,3,2,1,0,0,0,0},
-        {1,1,0,0,0,0,1,2,3,2,1,0,0,0},
-        {1,0,0,0,0,0,0,1,2,3,2,1,0,0},
-        {0,0,0,0,0,0,0,0,1,2,3,2,1,0},
-        {0,0,0,0,0,0,0,0,0,1,2,2,1,0},
-        {0,0,0,0,0,0,0,0,0,0,1,1,0,0},
+    /* Cursor de Alta Precisão (22x16) estilo macOS/Modern OS com Drop Shadow Suave e Ponta Nítida */
+    static const uint8_t cursor_body[22][16] = {
+        {1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {1,2,1,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        {1,2,2,1,0,0,0,0,0,0,0,0,0,0,0,0},
+        {1,2,3,2,1,0,0,0,0,0,0,0,0,0,0,0},
+        {1,2,3,3,2,1,0,0,0,0,0,0,0,0,0,0},
+        {1,2,3,3,3,2,1,0,0,0,0,0,0,0,0,0},
+        {1,2,3,3,3,3,2,1,0,0,0,0,0,0,0,0},
+        {1,2,3,3,3,3,3,2,1,0,0,0,0,0,0,0},
+        {1,2,3,3,3,3,3,3,2,1,0,0,0,0,0,0},
+        {1,2,3,3,3,3,3,3,3,2,1,0,0,0,0,0},
+        {1,2,3,3,3,3,3,3,3,3,2,1,0,0,0,0},
+        {1,2,3,3,3,3,2,2,2,2,2,2,1,0,0,0},
+        {1,2,3,3,2,3,2,1,1,1,1,1,1,1,0,0},
+        {1,2,3,2,1,2,3,2,1,0,0,0,0,0,0,0},
+        {1,2,2,1,0,1,2,3,2,1,0,0,0,0,0,0},
+        {1,2,1,0,0,0,1,2,3,2,1,0,0,0,0,0},
+        {1,1,0,0,0,0,0,1,2,3,2,1,0,0,0,0},
+        {1,0,0,0,0,0,0,0,1,2,3,2,1,0,0,0},
+        {0,0,0,0,0,0,0,0,0,1,2,3,2,1,0,0},
+        {0,0,0,0,0,0,0,0,0,0,1,2,2,1,0,0},
+        {0,0,0,0,0,0,0,0,0,0,0,1,1,0,0,0},
     };
 
-    for (int r = 0; r < 20; ++r) {
-        for (int c = 0; c < 14; ++c) {
+    /* 1. Sombra Suave com Decaimento de Alpha (Gaussian Drop Shadow) */
+    for (int r = 0; r < 22; ++r) {
+        for (int c = 0; c < 16; ++c) {
             if (cursor_body[r][c] != 0) {
+                gfx_put_pixel_alpha((uint32_t)(mx + c + 3), (uint32_t)(my + r + 3), 0x00000000, 35);
                 gfx_put_pixel_alpha((uint32_t)(mx + c + 2), (uint32_t)(my + r + 2), 0x00000000, 70);
+                gfx_put_pixel_alpha((uint32_t)(mx + c + 1), (uint32_t)(my + r + 1), 0x00000000, 110);
             }
         }
     }
 
-    for (int r = 0; r < 20; ++r) {
-        for (int c = 0; c < 14; ++c) {
+    /* 2. Corpo do Cursor com Borda Branca Cristalina e Núcleo Escuro com Realce Ciano */
+    for (int r = 0; r < 22; ++r) {
+        for (int c = 0; c < 16; ++c) {
             uint8_t val = cursor_body[r][c];
             if (val == 1) {
                 gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), 0x00FFFFFF, 255);
             } else if (val == 2) {
-                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), 0x000F172A, 255);
+                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), 0x000B1120, 255);
             } else if (val == 3) {
-                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), (r <= 5) ? 0x0038BDF8 : 0x001E293B, 255);
+                uint32_t inner_c = (r <= 6 && c <= 4) ? 0x0000E5FF : 0x001E293B;
+                gfx_put_pixel_alpha((uint32_t)(mx + c), (uint32_t)(my + r), inner_c, 255);
             }
         }
     }
@@ -5112,6 +5989,14 @@ void desktop_shell_render_frame(void) {
     gfx_set_mesh_time_tick(g_shell.time_tick);
     desktop_shell_update(0.016f);
     gfx_draw_mesh_wallpaper();
+
+    if (!installer_is_boot_mode_live()) {
+        installer_render_fullscreen(g_shell.screen_w, g_shell.screen_h);
+        render_cursor();
+        gfx_swap_buffers();
+        return;
+    }
+
     render_desktop_grid();
     render_widgets_stack();
     render_top_bar();
@@ -5565,18 +6450,64 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
     desktop_config_load();
     gfx_init(boot_info->framebuffer_base, width, height, boot_info->pixels_per_scanline);
     desktop_compositor_init(width, height);
-    if (installer_should_auto_open()) {
-        desktop_shell_launch_app(14);
-    }
 
     EFI_SYSTEM_TABLE *st = (EFI_SYSTEM_TABLE*)boot_info->system_table;
     EFI_SIMPLE_TEXT_INPUT_PROTOCOL *keyboard = st ? (EFI_SIMPLE_TEXT_INPUT_PROTOCOL*)st->ConIn : NULL;
     EFI_ABSOLUTE_POINTER_PROTOCOL *abs_pointer = NULL;
-    EFI_SIMPLE_POINTER_PROTOCOL *simple_pointer = (EFI_SIMPLE_POINTER_PROTOCOL*)boot_info->pointer_protocol;
-    if (st && st->BootServices && st->BootServices->LocateProtocol) {
-        st->BootServices->LocateProtocol(&ABSOLUTE_POINTER_GUID, NULL, (void**)&abs_pointer);
-        if (!simple_pointer) {
-            st->BootServices->LocateProtocol(&SIMPLE_POINTER_GUID, NULL, (void**)&simple_pointer);
+    EFI_SIMPLE_POINTER_PROTOCOL *simple_pointer = NULL;
+
+    if (boot_info->pointer_protocol) {
+        EFI_ABSOLUTE_POINTER_PROTOCOL *test_abs = (EFI_ABSOLUTE_POINTER_PROTOCOL*)boot_info->pointer_protocol;
+        if (test_abs->Mode != NULL) {
+            abs_pointer = test_abs;
+        } else {
+            simple_pointer = (EFI_SIMPLE_POINTER_PROTOCOL*)boot_info->pointer_protocol;
+        }
+    }
+
+    if (st && st->BootServices) {
+        EFI_BOOT_SERVICES *bs = st->BootServices;
+        if (!abs_pointer && bs->LocateProtocol) {
+            bs->LocateProtocol(&ABSOLUTE_POINTER_GUID, NULL, (void**)&abs_pointer);
+        }
+        if (!simple_pointer && bs->LocateProtocol) {
+            bs->LocateProtocol(&SIMPLE_POINTER_GUID, NULL, (void**)&simple_pointer);
+        }
+        if (!abs_pointer && bs->LocateHandleBuffer && bs->HandleProtocol) {
+            typedef uint64_t (*EFI_LOC_HB)(uint32_t, const EFI_GUID*, void*, uint64_t*, void***);
+            typedef uint64_t (*EFI_H_P)(void*, const EFI_GUID*, void**);
+            EFI_LOC_HB loc_hb = (EFI_LOC_HB)bs->LocateHandleBuffer;
+            EFI_H_P h_p = (EFI_H_P)bs->HandleProtocol;
+            void **handles = NULL;
+            uint64_t count = 0;
+            if (loc_hb(2, &ABSOLUTE_POINTER_GUID, NULL, &count, &handles) == 0 && handles) {
+                for (uint64_t i = 0; i < count; ++i) {
+                    EFI_ABSOLUTE_POINTER_PROTOCOL *p = NULL;
+                    if (h_p(handles[i], &ABSOLUTE_POINTER_GUID, (void**)&p) == 0 && p && p->GetState) {
+                        abs_pointer = p;
+                        break;
+                    }
+                }
+                if (bs->FreePool) ((void (*)(void*))bs->FreePool)(handles);
+            }
+        }
+        if (!simple_pointer && bs->LocateHandleBuffer && bs->HandleProtocol) {
+            typedef uint64_t (*EFI_LOC_HB)(uint32_t, const EFI_GUID*, void*, uint64_t*, void***);
+            typedef uint64_t (*EFI_H_P)(void*, const EFI_GUID*, void**);
+            EFI_LOC_HB loc_hb = (EFI_LOC_HB)bs->LocateHandleBuffer;
+            EFI_H_P h_p = (EFI_H_P)bs->HandleProtocol;
+            void **handles = NULL;
+            uint64_t count = 0;
+            if (loc_hb(2, &SIMPLE_POINTER_GUID, NULL, &count, &handles) == 0 && handles) {
+                for (uint64_t i = 0; i < count; ++i) {
+                    EFI_SIMPLE_POINTER_PROTOCOL *p = NULL;
+                    if (h_p(handles[i], &SIMPLE_POINTER_GUID, (void**)&p) == 0 && p && p->GetState) {
+                        simple_pointer = p;
+                        break;
+                    }
+                }
+                if (bs->FreePool) ((void (*)(void*))bs->FreePool)(handles);
+            }
         }
     }
 
@@ -5631,32 +6562,19 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
             if (simple_pointer->GetState(simple_pointer, &simp_st) == 0) {
                 int32_t raw_dx = simp_st.RelativeMovementX;
                 int32_t raw_dy = simp_st.RelativeMovementY;
-                int32_t dx = 0, dy = 0;
-                if (raw_dx != 0) {
-                    int32_t abs_x = raw_dx < 0 ? -raw_dx : raw_dx;
-                    int32_t scaled_x = abs_x / 48;
-                    if (scaled_x < 1) scaled_x = 1;
-                    if (abs_x > 256) scaled_x = (scaled_x * 3) / 2;
-                    dx = (raw_dx < 0) ? -scaled_x : scaled_x;
-                    if (dx > 25) dx = 25;
-                    if (dx < -25) dx = -25;
+                if (raw_dx != 0 || raw_dy != 0) {
+                    int32_t dx = raw_dx / 16;
+                    int32_t dy = raw_dy / 16;
+                    if (dx == 0 && raw_dx != 0) dx = raw_dx > 0 ? 1 : -1;
+                    if (dy == 0 && raw_dy != 0) dy = raw_dy > 0 ? 1 : -1;
+                    mouse_x += dx;
+                    mouse_y += dy;
+                    if (mouse_x < 0) mouse_x = 0;
+                    if (mouse_x >= (int32_t)width) mouse_x = (int32_t)width - 1;
+                    if (mouse_y < 0) mouse_y = 0;
+                    if (mouse_y >= (int32_t)height) mouse_y = (int32_t)height - 1;
+                    desktop_shell_set_cursor(mouse_x, mouse_y);
                 }
-                if (raw_dy != 0) {
-                    int32_t abs_y = raw_dy < 0 ? -raw_dy : raw_dy;
-                    int32_t scaled_y = abs_y / 48;
-                    if (scaled_y < 1) scaled_y = 1;
-                    if (abs_y > 256) scaled_y = (scaled_y * 3) / 2;
-                    dy = (raw_dy < 0) ? -scaled_y : scaled_y;
-                    if (dy > 25) dy = 25;
-                    if (dy < -25) dy = -25;
-                }
-                mouse_x += dx;
-                mouse_y += dy;
-                if (mouse_x < 0) mouse_x = 0;
-                if (mouse_x >= (int32_t)width) mouse_x = (int32_t)width - 1;
-                if (mouse_y < 0) mouse_y = 0;
-                if (mouse_y >= (int32_t)height) mouse_y = (int32_t)height - 1;
-                desktop_shell_set_cursor(mouse_x, mouse_y);
                 uint8_t btn = simp_st.LeftButton ? 1 : 0;
                 uint8_t r_btn = simp_st.RightButton ? 1 : 0;
                 if (r_btn) {

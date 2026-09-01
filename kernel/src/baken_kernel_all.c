@@ -1,5 +1,5 @@
 /*
- * Baken OS 2.0 Sovereign — caminho canônico de renderização (C / Bare-Metal x86_64)
+ * Baken OS 2.0 — caminho canônico de renderização (C / Bare-Metal x86_64)
  *
  * RESPONSABILIDADE: este arquivo contém a implementação que é efetivamente
  * vinculada pela ISO. Ele é temporariamente monolítico porque o linker Sotlas
@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "baken_boot_info.h"
+#include "../include/baken_boot_info.h"
 
 // =============================================================================
 // ESTRUTURAS DE HANDOFF E HARDWARE
@@ -1120,7 +1120,7 @@ static void render_desktop(uint32_t *fb, uint32_t stride, uint32_t width, uint32
             draw_string_aa(fb, stride, win_x + 24, win_y + 134, "t ou T     : Alternar temas do desktop (4 paletas)", 0xF59E0B);
             draw_string_aa(fb, stride, win_x + 24, win_y + 156, "w ou W     : Fechar janela atual", 0x38BDF8);
 
-            draw_string_aa(fb, stride, win_x + 24, win_y + win_h - 34, "Baken OS 2.0 Sovereign - Ambiente Grafico EFI", 0x94A3B8);
+            draw_string_aa(fb, stride, win_x + 24, win_y + win_h - 34, "Baken OS 2.0 - Ambiente Grafico EFI", 0x94A3B8);
         } else if (g_active_desktop_item == 5) {
             // Painel de Sessão & Ajustes
             draw_string_aa(fb, stride, win_x + 24, win_y + 36, "Temas Visuais (Pressione 't' para alternar):", 0x38BDF8);

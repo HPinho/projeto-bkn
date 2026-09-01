@@ -1,0 +1,255 @@
+// Baken OS first-boot experience. No disk/partition privileges by design.
+module kernel::baken_oobe_screen;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+
+const REGION: u32 = 0;
+const NETWORK: u32 = 1;
+const PROFILE: u32 = 2;
+const PRIVACY: u32 = 3;
+const STYLE: u32 = 4;
+const READY: u32 = 5;
+
+const BG: u32 = 0x00070B14;
+const CARD: u32 = 0x00101825;
+const CARD2: u32 = 0x00172232;
+const LINE: u32 = 0x00283A51;
+const TEXT: u32 = 0x00F7FAFC;
+const MUTED: u32 = 0x009AA9BC;
+const BLUE: u32 = 0x004CC9F0;
+const VIOLET: u32 = 0x007C6CFF;
+const GREEN: u32 = 0x003DDC97;
+
+pub struct OobeState {
+    pub step: u32;
+    pub region: u32;
+    pub network: u32;
+    pub diagnostics: u8;
+    pub location: u8;
+    pub theme: u32;
+    pub tick: u32;
+    pub completed: u8;
+}
+
+static mut O: OobeState = OobeState {
+    step: REGION,
+    region: 0,
+    network: 0,
+    diagnostics: 0,
+    location: 0,
+    theme: 0,
+    tick: 0,
+    completed: 0,
+};
+
+@system
+pub fn baken_oobe_init() -> void {
+    unsafe {
+        O.step = REGION;
+        O.region = 0;
+        O.network = 0;
+        O.diagnostics = 0;
+        O.location = 0;
+        O.theme = 0;
+        O.tick = 0;
+        O.completed = 0;
+    }
+}
+
+@system
+fn btn(x: u32, y: u32, w: u32, s: *const u8, p: u8) -> void {
+    gfx_draw_glass_rect(x, y, w, 42, if (p == 1) { VIOLET } else { CARD2 }, 245, if (p == 1) { BLUE } else { LINE }, 12);
+    let tw = gfx_measure_text(s);
+    gfx_draw_text_alpha(x + (w - tw) / 2, y + 13, s, TEXT, 1, 255);
+}
+
+@system
+fn option(x: u32, y: u32, w: u32, a: *const u8, b: *const u8, on: u8) -> void {
+    gfx_draw_glass_rect(x, y, w, 58, if (on == 1) { 0x00132338 } else { CARD2 }, 235, if (on == 1) { BLUE } else { LINE }, 11);
+    gfx_draw_text_alpha(x + 16, y + 10, a, TEXT, 1, 255);
+    gfx_draw_text_alpha(x + 16, y + 32, b, MUTED, 1, 230);
+    gfx_draw_circle_alpha(x + w - 22, y + 20, 6, if (on == 1) { BLUE } else { LINE }, 255);
+}
+
+@system
+fn toggle(x: u32, y: u32, on: u8) -> void {
+    gfx_draw_glass_rect(x, y, 42, 22, if (on == 1) { GREEN } else { LINE }, 255, LINE, 11);
+    gfx_draw_circle_alpha(if (on == 1) { x + 31 } else { x + 11 }, y + 11, 8, TEXT, 255);
+}
+
+@inline
+fn get_bounds_cx(x: u32, w: u32) -> u32 {
+    let q = if (w > 760) { 650 } else { w - 32 };
+    return x + (w - q) / 2 + 34;
+}
+
+@inline
+fn get_bounds_cw(w: u32) -> u32 {
+    let q = if (w > 760) { 650 } else { w - 32 };
+    return q - 68;
+}
+
+@system
+fn frame(x: u32, y: u32, w: u32, h: u32) -> void {
+    gfx_fill_rect_alpha(x, y, w, h, BG, 255);
+    gfx_draw_circle_alpha(x + w - 70, y + 48, 116, VIOLET, 16);
+    gfx_draw_circle_alpha(x + 48, y + h - 28, 90, BLUE, 13);
+    let q = if (w > 760) { 650 } else { w - 32 };
+    let px = x + (w - q) / 2;
+    gfx_draw_glass_rect(px, y + 18, q, h - 36, CARD, 232, LINE, 20);
+    gfx_draw_text_alpha(px + 26, y + 38, "BAKEN".as_ptr(), TEXT, 1, 255);
+    let s = unsafe { O.step };
+    for mut i in 0..6 {
+        gfx_draw_circle_alpha(px + q - 104 + (i as u32 * 16), y + 44, 3, if (i as u32 <= s) { BLUE } else { LINE }, 255);
+    }
+}
+
+@system
+pub fn baken_oobe_render(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe { O.tick = (O.tick + 1) % 3600; }
+    frame(x, y, w, h);
+    let s = unsafe { O.step };
+    if (s == REGION) { region(x, y, w, h); }
+    else if (s == NETWORK) { network(x, y, w, h); }
+    else if (s == PROFILE) { profile(x, y, w, h); }
+    else if (s == PRIVACY) { privacy(x, y, w, h); }
+    else if (s == STYLE) { style(x, y, w, h); }
+    else { ready(x, y, w, h); }
+}
+
+@system
+fn region(x: u32, y: u32, w: u32, h: u32) -> void {
+    let cx = get_bounds_cx(x, w);
+    let cw = get_bounds_cw(w);
+    let t = y + 82;
+    gfx_draw_text_alpha(cx, t, "Boas-vindas ao Baken OS".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx, t + 26, "Confirme sua regiao e o layout do teclado.".as_ptr(), MUTED, 1, 235);
+    option(cx, t + 68, cw, "Brasil".as_ptr(), "Portugues (Brasil) / ABNT2".as_ptr(), 1);
+    option(cx, t + 134, cw, "Estados Unidos".as_ptr(), "English / US International".as_ptr(), 0);
+    option(cx, t + 200, cw, "America Latina".as_ptr(), "Espanol / Latinoamericano".as_ptr(), 0);
+    btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
+}
+
+@system
+fn network(x: u32, y: u32, w: u32, h: u32) -> void {
+    let cx = get_bounds_cx(x, w);
+    let cw = get_bounds_cw(w);
+    let t = y + 82;
+    gfx_draw_text_alpha(cx, t, "Conecte-se quando quiser".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx, t + 26, "A configuracao offline continua disponivel.".as_ptr(), MUTED, 1, 235);
+    option(cx, t + 70, cw, "BakenNet-5G".as_ptr(), "Sinal excelente / WPA3".as_ptr(), 1);
+    option(cx, t + 138, cw, "Rede residencial".as_ptr(), "Sinal bom / WPA2".as_ptr(), 0);
+    gfx_draw_text_alpha(cx, t + 218, "Configurar offline".as_ptr(), BLUE, 1, 245);
+    btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
+    btn(cx + cw - 150, y + h - 78, 150, "Conectar  >".as_ptr(), 1);
+}
+
+@system
+fn profile(x: u32, y: u32, w: u32, h: u32) -> void {
+    let cx = get_bounds_cx(x, w);
+    let cw = get_bounds_cw(w);
+    let t = y + 82;
+    gfx_draw_text_alpha(cx, t, "Este espaco e seu".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx, t + 26, "Crie um perfil local. BakenID e opcional.".as_ptr(), MUTED, 1, 235);
+    gfx_draw_text_alpha(cx, t + 78, "Nome de exibicao".as_ptr(), MUTED, 1, 230);
+    gfx_draw_glass_rect(cx, t + 100, cw, 44, CARD2, 240, BLUE, 10);
+    gfx_draw_text_alpha(cx + 14, t + 114, "Usuario Baken".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx, t + 166, "Senha do dispositivo".as_ptr(), MUTED, 1, 230);
+    gfx_draw_glass_rect(cx, t + 188, cw, 44, CARD2, 240, LINE, 10);
+    gfx_draw_text_alpha(cx + 14, t + 202, "********".as_ptr(), TEXT, 1, 255);
+    btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
+    btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
+}
+
+@system
+fn privacy(x: u32, y: u32, w: u32, h: u32) -> void {
+    let cx = get_bounds_cx(x, w);
+    let cw = get_bounds_cw(w);
+    let t = y + 78;
+    gfx_draw_text_alpha(cx, t, "Privacidade sem letras miudas".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx, t + 26, "Tudo comeca desligado. Voce decide.".as_ptr(), MUTED, 1, 235);
+    gfx_draw_glass_rect(cx, t + 70, cw, 66, CARD2, 235, LINE, 11);
+    gfx_draw_text_alpha(cx + 16, t + 82, "Diagnostico anonimo".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx + 16, t + 106, "Encontra falhas sem dados pessoais".as_ptr(), MUTED, 1, 225);
+    toggle(cx + cw - 58, t + 90, unsafe { O.diagnostics });
+    gfx_draw_glass_rect(cx, t + 144, cw, 66, CARD2, 235, LINE, 11);
+    gfx_draw_text_alpha(cx + 16, t + 156, "Servicos de localizacao".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx + 16, t + 180, "Permissao individual por aplicativo".as_ptr(), MUTED, 1, 225);
+    toggle(cx + cw - 58, t + 164, unsafe { O.location });
+    btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
+    btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
+}
+
+@system
+fn style(x: u32, y: u32, w: u32, h: u32) -> void {
+    let cx = get_bounds_cx(x, w);
+    let cw = get_bounds_cw(w);
+    let t = y + 78;
+    gfx_draw_text_alpha(cx, t, "Escolha a atmosfera".as_ptr(), TEXT, 1, 255);
+    gfx_draw_text_alpha(cx, t + 26, "A aparencia pode ser alterada depois.".as_ptr(), MUTED, 1, 235);
+    let gap: u32 = 10;
+    let tile = (cw - gap * 2) / 3;
+    let names = ["Aurora".as_ptr(), "Claro".as_ptr(), "Contraste".as_ptr()];
+    for mut i in 0..3 {
+        let tx = cx + (i as u32 * (tile + gap));
+        gfx_draw_glass_rect(tx, t + 76, tile, 122, if (i == 0) { 0x00132338 } else { CARD2 }, 240, if (i == 0) { BLUE } else { LINE }, 12);
+        gfx_fill_rect_alpha(tx + 12, t + 90, tile - 24, 60, if (i == 0) { VIOLET } else if (i == 1) { 0x00E6EDF7 } else { 0x00000000 }, 255);
+        gfx_draw_text_alpha(tx + 12, t + 166, names[i], TEXT, 1, 245);
+    }
+    btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
+    btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
+}
+
+@system
+fn ready(x: u32, y: u32, w: u32, h: u32) -> void {
+    let cx = get_bounds_cx(x, w);
+    let cw = get_bounds_cw(w);
+    let t = y + 108;
+    let p = 34 + ((unsafe { O.tick } % 30) / 10);
+    gfx_draw_circle_alpha(cx + cw / 2, t + 48, p + 16, VIOLET, 28);
+    gfx_draw_circle_alpha(cx + cw / 2, t + 48, p, BLUE, 210);
+    gfx_draw_circle_alpha(cx + cw / 2, t + 48, p / 3, BG, 255);
+    let a = "Pronto para explorar";
+    gfx_draw_text_alpha(cx + (cw - gfx_measure_text(a.as_ptr())) / 2, t + 112, a.as_ptr(), TEXT, 1, 255);
+    let b = "Seu Baken OS foi configurado com sucesso.";
+    gfx_draw_text_alpha(cx + (cw - gfx_measure_text(b.as_ptr())) / 2, t + 140, b.as_ptr(), MUTED, 1, 235);
+    btn(cx + (cw - 190) / 2, t + 192, 190, "Abrir meu espaco".as_ptr(), 1);
+}
+
+@system
+pub fn baken_oobe_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
+    unsafe {
+        let q = if (w > 760) { 650 } else { w - 32 };
+        let cx = (w - q) / 2 + 34;
+        let cw = q - 68;
+        if (O.step == PRIVACY && ry >= 148 && ry < 300 && rx > (cx + cw - 90) as i32) {
+            if (ry < 226) {
+                O.diagnostics = 1 - O.diagnostics;
+            } else {
+                O.location = 1 - O.location;
+            }
+            return;
+        }
+        if (ry > (h as i32) - 96) {
+            if (rx < (cx as i32) + 130 && O.step > REGION) {
+                O.step -= 1;
+                return;
+            }
+            if (rx > (cx + cw - 180) as i32) {
+                if (O.step < READY) {
+                    O.step += 1;
+                } else {
+                    O.completed = 1;
+                }
+            }
+        }
+    }
+}
+
+@system
+pub fn baken_oobe_is_complete() -> u8 {
+    unsafe {
+        return O.completed;
+    }
+}

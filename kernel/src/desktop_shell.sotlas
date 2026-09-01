@@ -154,7 +154,7 @@ pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
                 } else if win_id == 4 {
                     wm_create_window(4, "BakenTerminal - /home/root", (sw / 2 - 260) as i32, (sh / 2 - 160) as i32, 520, 320, 0x00050811, 240, 0x0010B981);
                 } else if win_id == 5 {
-                    wm_create_window(5, "Sobre o Baken OS Sovereign", (sw / 2 - 230) as i32, (sh / 2 - 160) as i32, 460, 320, 0x000F172A, 240, 0x0038BDF8);
+                    wm_create_window(5, "Sobre o Baken OS", (sw / 2 - 230) as i32, (sh / 2 - 160) as i32, 460, 320, 0x000F172A, 240, 0x0038BDF8);
                 }
                 wm_bring_to_front(win_id);
                 return;

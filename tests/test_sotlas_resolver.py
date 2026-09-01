@@ -9,6 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("compiler", ROOT / "tools" / "sotlas_compile" / "compiler.py")
+assert SPEC is not None and SPEC.loader is not None
 sotlas_compile = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sotlas_compile)
 

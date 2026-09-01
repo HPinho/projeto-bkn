@@ -88,7 +88,7 @@ pub fn app_settings_render(x: u32, y: u32, w: u32, h: u32) -> void {
             gfx_draw_glass_rect(content_x, card_y, card_w, 80, 0x001E293B, 220, 0x00334155, 10);
 
             gfx_draw_text_alpha(content_x + 16, card_y + 14, "Memoria RAM Fisica: 840 MB / 4096 MB (20.5% em uso)", 0x00E2E8F0, 1, 240);
-            gfx_draw_text_alpha(content_x + 16, card_y + 32, "Kernel Sovereign Core: 48 MB | GPU Framebuffer: 32 MB", 0x0094A3B8, 1, 200);
+            gfx_draw_text_alpha(content_x + 16, card_y + 32, "Kernel Native Core: 48 MB | GPU Framebuffer: 32 MB", 0x0094A3B8, 1, 200);
 
             // Barra de Progresso RAM
             let bar_y = card_y + 54;

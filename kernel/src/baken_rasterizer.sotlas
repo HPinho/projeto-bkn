@@ -1,11 +1,11 @@
 // Baken OS - Rasterizador Vetorial e Efeitos Visuais (BakenFX)
-// Renderização Linear 32-bit ARGB8888, SDF Anti-Aliasing, Glassmorphism, Sombras e Gradientes Mesh
+// Renderizacao Linear 32-bit ARGB8888, SDF Anti-Aliasing, Glassmorphism, Sombras e Gradientes Mesh
 
 module kernel::baken_rasterizer;
 
 import kernel::graphics_engine::*;
 
-// --- Constantes Físicas do Baken OS (Fluent/HIG) ---
+// --- Constantes Fisicas do Baken OS (Fluent/HIG) ---
 pub const ELEVATION_WALLPAPER: u32 = 0;
 pub const ELEVATION_DESKTOP: u32 = 1;
 pub const ELEVATION_DOCK: u32 = 8;
@@ -20,20 +20,197 @@ pub const MATERIAL_SMOKE: u8 = 2;
 pub const MATERIAL_SOLID: u8 = 3;
 // ----------------------------------------------------
 
-// FONT_8X8: Fonte Minúscula 8x8 Integrada (Somente caracteres visíveis ASCII 32 a 126)
-// Cada byte = 1 linha de 8 pixels, 8 linhas por caractere.
-static const FONT_8X8: [u8; 32] = [
-    // Espaço (32)
+// Atlas de fonte e logotipo vinculados dinamicamente pela ponte de assets do kernel.
+static mut FONT_ADVANCES: *const u8 = null as *const u8;
+static mut FONT_ALPHA: *const u8 = null as *const u8;
+static mut FONT_CELL_W: u32 = 0;
+static mut FONT_CELL_H: u32 = 0;
+static mut FONT_PX: u32 = 0;
+
+static mut LOGO_PIXELS: *const u32 = null as *const u32;
+static mut LOGO_SIZE: u32 = 0;
+
+// Fonte 8x8 de Fallback para inicializacao bare-metal quando atlas nao estiver vinculado
+static const FONT_FALLBACK_GLYPHS: [u8; 96 * 8] = [
+    // 32: Space
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // Exclamação ! (33)
+    // 33: !
     0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00,
-    // Aspas " (34)
+    // 34: "
     0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // 'A' (65)
-    0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00
+    // 35: #
+    0x36, 0x36, 0x7F, 0x36, 0x7F, 0x36, 0x36, 0x00,
+    // 36: $
+    0x18, 0x7E, 0x60, 0x3C, 0x06, 0x7E, 0x18, 0x00,
+    // 37: %
+    0x62, 0x66, 0x0C, 0x18, 0x30, 0x66, 0x46, 0x00,
+    // 38: &
+    0x38, 0x6C, 0x38, 0x76, 0xCC, 0xCC, 0x76, 0x00,
+    // 39: '
+    0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
+    // 40: (
+    0x0C, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0C, 0x00,
+    // 41: )
+    0x30, 0x18, 0x0C, 0x0C, 0x0C, 0x18, 0x30, 0x00,
+    // 42: *
+    0x00, 0x66, 0x3C, 0xFF, 0x3C, 0x66, 0x00, 0x00,
+    // 43: +
+    0x00, 0x18, 0x18, 0x7E, 0x18, 0x18, 0x00, 0x00,
+    // 44: ,
+    0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30, 0x00,
+    // 45: -
+    0x00, 0x00, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00,
+    // 46: .
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00,
+    // 47: /
+    0x06, 0x0C, 0x18, 0x30, 0x60, 0xC0, 0x80, 0x00,
+    // 48..57: 0..9
+    0x3C, 0x66, 0x6E, 0x76, 0x66, 0x66, 0x3C, 0x00, // 0
+    0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, // 1
+    0x3C, 0x66, 0x06, 0x0C, 0x18, 0x30, 0x7E, 0x00, // 2
+    0x3C, 0x66, 0x06, 0x1C, 0x06, 0x66, 0x3C, 0x00, // 3
+    0x0C, 0x1C, 0x34, 0x64, 0x7E, 0x04, 0x04, 0x00, // 4
+    0x7E, 0x60, 0x7C, 0x06, 0x06, 0x66, 0x3C, 0x00, // 5
+    0x1C, 0x30, 0x60, 0x7C, 0x66, 0x66, 0x3C, 0x00, // 6
+    0x7E, 0x06, 0x0C, 0x18, 0x30, 0x30, 0x30, 0x00, // 7
+    0x3C, 0x66, 0x66, 0x3C, 0x66, 0x66, 0x3C, 0x00, // 8
+    0x3C, 0x66, 0x66, 0x3E, 0x06, 0x0C, 0x38, 0x00, // 9
+    // 58: :
+    0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00,
+    // 59: ;
+    0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00,
+    // 60: <
+    0x0C, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0C, 0x00,
+    // 61: =
+    0x00, 0x7E, 0x00, 0x7E, 0x00, 0x00, 0x00, 0x00,
+    // 62: >
+    0x30, 0x18, 0x0C, 0x06, 0x0C, 0x18, 0x30, 0x00,
+    // 63: ?
+    0x3C, 0x66, 0x06, 0x0C, 0x18, 0x00, 0x18, 0x00,
+    // 64: @
+    0x3C, 0x66, 0x6E, 0x6A, 0x6E, 0x60, 0x3C, 0x00,
+    // 65..90: A..Z
+    0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00, // A
+    0x7C, 0x66, 0x66, 0x7C, 0x66, 0x66, 0x7C, 0x00, // B
+    0x3C, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3C, 0x00, // C
+    0x78, 0x6C, 0x66, 0x66, 0x66, 0x6C, 0x78, 0x00, // D
+    0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x7E, 0x00, // E
+    0x7E, 0x60, 0x60, 0x7C, 0x60, 0x60, 0x60, 0x00, // F
+    0x3C, 0x66, 0x60, 0x6E, 0x66, 0x66, 0x3A, 0x00, // G
+    0x66, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x66, 0x00, // H
+    0x3C, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, // I
+    0x0E, 0x06, 0x06, 0x06, 0x06, 0x66, 0x3C, 0x00, // J
+    0x66, 0x6C, 0x78, 0x70, 0x78, 0x6C, 0x66, 0x00, // K
+    0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7E, 0x00, // L
+    0x63, 0x77, 0x7F, 0x6B, 0x63, 0x63, 0x63, 0x00, // M
+    0x66, 0x76, 0x7E, 0x7E, 0x6E, 0x66, 0x66, 0x00, // N
+    0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00, // O
+    0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, 0x60, 0x00, // P
+    0x3C, 0x66, 0x66, 0x66, 0x6A, 0x6C, 0x36, 0x00, // Q
+    0x7C, 0x66, 0x66, 0x7C, 0x6C, 0x66, 0x66, 0x00, // R
+    0x3C, 0x66, 0x60, 0x3C, 0x06, 0x66, 0x3C, 0x00, // S
+    0x7E, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00, // T
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x00, // U
+    0x66, 0x66, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00, // V
+    0x63, 0x63, 0x63, 0x6B, 0x7F, 0x77, 0x63, 0x00, // W
+    0x66, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x66, 0x00, // X
+    0x66, 0x66, 0x66, 0x3C, 0x18, 0x18, 0x18, 0x00, // Y
+    0x7E, 0x06, 0x0C, 0x18, 0x30, 0x60, 0x7E, 0x00, // Z
+    // 91..96: [ \ ] ^ _ `
+    0x3C, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3C, 0x00, // [
+    0xC0, 0x60, 0x30, 0x18, 0x0C, 0x06, 0x02, 0x00, // \
+    0x3C, 0x0C, 0x0C, 0x0C, 0x0C, 0x0C, 0x3C, 0x00, // ]
+    0x18, 0x3C, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00, // ^
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0x00, // _
+    0x30, 0x18, 0x0C, 0x00, 0x00, 0x00, 0x00, 0x00, // `
+    // 97..122: a..z
+    0x00, 0x00, 0x3C, 0x06, 0x3E, 0x66, 0x3E, 0x00, // a
+    0x60, 0x60, 0x7C, 0x66, 0x66, 0x66, 0x7C, 0x00, // b
+    0x00, 0x00, 0x3C, 0x66, 0x60, 0x66, 0x3C, 0x00, // c
+    0x06, 0x06, 0x3E, 0x66, 0x66, 0x66, 0x3E, 0x00, // d
+    0x00, 0x00, 0x3C, 0x66, 0x7E, 0x60, 0x3C, 0x00, // e
+    0x1C, 0x30, 0x7C, 0x30, 0x30, 0x30, 0x30, 0x00, // f
+    0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x3C, // g
+    0x60, 0x60, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x00, // h
+    0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3C, 0x00, // i
+    0x0C, 0x00, 0x0C, 0x0C, 0x0C, 0x0C, 0x6C, 0x38, // j
+    0x60, 0x60, 0x66, 0x6C, 0x78, 0x6C, 0x66, 0x00, // k
+    0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3C, 0x00, // l
+    0x00, 0x00, 0x66, 0x7F, 0x7B, 0x63, 0x63, 0x00, // m
+    0x00, 0x00, 0x7C, 0x66, 0x66, 0x66, 0x66, 0x00, // n
+    0x00, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x3C, 0x00, // o
+    0x00, 0x00, 0x7C, 0x66, 0x66, 0x7C, 0x60, 0x60, // p
+    0x00, 0x00, 0x3E, 0x66, 0x66, 0x3E, 0x06, 0x06, // q
+    0x00, 0x00, 0x7C, 0x66, 0x60, 0x60, 0x60, 0x00, // r
+    0x00, 0x00, 0x3E, 0x60, 0x3C, 0x06, 0x7C, 0x00, // s
+    0x30, 0x30, 0x7C, 0x30, 0x30, 0x30, 0x1C, 0x00, // t
+    0x00, 0x00, 0x66, 0x66, 0x66, 0x66, 0x3E, 0x00, // u
+    0x00, 0x00, 0x66, 0x66, 0x66, 0x3C, 0x18, 0x00, // v
+    0x00, 0x00, 0x63, 0x6B, 0x7F, 0x36, 0x36, 0x00, // w
+    0x00, 0x00, 0x66, 0x3C, 0x18, 0x3C, 0x66, 0x00, // x
+    0x00, 0x00, 0x66, 0x66, 0x66, 0x3E, 0x06, 0x3C, // y
+    0x00, 0x00, 0x7E, 0x0C, 0x18, 0x30, 0x7E, 0x00, // z
+    // 123..126: { | } ~
+    0x0E, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0E, 0x00, // {
+    0x18, 0x18, 0x18, 0x00, 0x18, 0x18, 0x18, 0x00, // |
+    0x70, 0x18, 0x18, 0x0E, 0x18, 0x18, 0x70, 0x00, // }
+    0x6E, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // ~
 ];
 
-// Funcao auxiliar para modulo e max
+@system
+pub fn gfx_bind_font_atlas(advances: *const u8, alpha: *const u8,
+                           cell_w: u32, cell_h: u32, px: u32) -> u8 {
+    if (advances == (null as *const u8) || alpha == (null as *const u8) ||
+        cell_w == 0 || cell_h == 0 || px == 0) { return 0; }
+    unsafe {
+        FONT_ADVANCES = advances;
+        FONT_ALPHA = alpha;
+        FONT_CELL_W = cell_w;
+        FONT_CELL_H = cell_h;
+        FONT_PX = px;
+    }
+    return 1;
+}
+
+@system
+pub fn gfx_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
+    if (pixels == (null as *const u32) || size == 0) { return 0; }
+    unsafe {
+        LOGO_PIXELS = pixels;
+        LOGO_SIZE = size;
+    }
+    return 1;
+}
+
+@system
+pub fn gfx_draw_baken_logo(x: u32, y: u32, size: u32, opacity: u8) -> void {
+    if (size == 0 || opacity == 0) { return; }
+    unsafe {
+        if (LOGO_PIXELS == (null as *const u32) || LOGO_SIZE == 0) {
+            // Vetor procedural elegante com gradiente concentrico neon Baken OS
+            let r = size / 2;
+            gfx_draw_circle_alpha(x + r, y + r, r, 0x007C6CFF, opacity / 4);
+            gfx_draw_circle_alpha(x + r - r / 5, y + r - r / 6, (r * 2) / 3, 0x004CC9F0, opacity);
+            gfx_draw_circle_alpha(x + r + r / 4, y + r + r / 5, r / 2, 0x007C6CFF, opacity);
+            gfx_draw_circle_alpha(x + r, y + r, r / 3, 0x000F172A, opacity);
+            return;
+        }
+        for mut dy in 0..size {
+            let sy = (dy * LOGO_SIZE) / size;
+            for mut dx in 0..size {
+                let sx = (dx * LOGO_SIZE) / size;
+                let argb = *LOGO_PIXELS.add((sy * LOGO_SIZE + sx) as usize);
+                let src_a = ((argb >> 24) & 0xFF) as u8;
+                if (src_a != 0) {
+                    let final_a = (((src_a as u32) * (opacity as u32)) / 255) as u8;
+                    gfx_put_pixel_alpha(x + dx, y + dy, argb & 0x00FFFFFF, final_a);
+                }
+            }
+        }
+    }
+}
+
+// Funcoes auxiliares matematicas
 @inline
 fn abs_i32(x: i32) -> i32 {
     if (x < 0) { return -x; }
@@ -69,6 +246,7 @@ pub fn gfx_blend_color(bg: u32, fg: u32, alpha: u8) -> u32 {
 @system
 pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) -> void {
     if (alpha == 0) { return; }
+    if (x >= gfx_get_width() || y >= gfx_get_height()) { return; }
     if (alpha == 255) {
         gfx_put_pixel(x, y, color);
         return;
@@ -80,8 +258,13 @@ pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) -> void {
 
 @system
 pub fn gfx_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
-    for mut py in y .. (y + h) {
-        for mut px in x .. (x + w) {
+    let sw = gfx_get_width();
+    let sh = gfx_get_height();
+    let max_x = if (x + w > sw) { sw } else { x + w };
+    let max_y = if (y + h > sh) { sh } else { y + h };
+
+    for mut py in y..max_y {
+        for mut px in x..max_x {
             gfx_put_pixel(px, py, color);
         }
     }
@@ -89,8 +272,14 @@ pub fn gfx_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
 
 @system
 pub fn gfx_fill_rect_alpha(x: u32, y: u32, w: u32, h: u32, color: u32, alpha: u8) -> void {
-    for mut py in y .. (y + h) {
-        for mut px in x .. (x + w) {
+    if (alpha == 0) { return; }
+    let sw = gfx_get_width();
+    let sh = gfx_get_height();
+    let max_x = if (x + w > sw) { sw } else { x + w };
+    let max_y = if (y + h > sh) { sh } else { y + h };
+
+    for mut py in y..max_y {
+        for mut px in x..max_x {
             gfx_put_pixel_alpha(px, py, color, alpha);
         }
     }
@@ -101,40 +290,45 @@ pub fn gfx_draw_hline(x: u32, y: u32, width: u32, color: u32, alpha: u8) -> void
     gfx_fill_rect_alpha(x, y, width, 1, color, alpha);
 }
 
-// Sombra Suave Volumétrica (Drop Shadow Drop) com Gravidade (Y-Offset)
+// Sombra Suave Volumetrica (Drop Shadow) com Gravidade (Y-Offset)
 @system
 pub fn gfx_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u32, offset_y: i32, max_alpha_factor: f32) -> void {
+    let sw = gfx_get_width();
+    let sh = gfx_get_height();
     let base_y = (y as i32 + offset_y) as u32;
     let sx = if (x > blur + spread) { x - blur - spread } else { 0 };
     let sy = if (base_y > blur + spread) { base_y - blur - spread } else { 0 };
-    let ex = x + w + blur + spread;
-    let ey = base_y + h + blur + spread;
+    let ex = if (x + w + blur + spread > sw) { sw } else { x + w + blur + spread };
+    let ey = if (base_y + h + blur + spread > sh) { sh } else { base_y + h + blur + spread };
 
-    for mut py in sy .. ey {
-        for mut px in sx .. ex {
-            let qx = if (px < x) { (x - px) as f32 } else if (px > x + w) { (px - (x + w)) as f32 } else { 0.0 };
-            let qy = if (py < base_y) { (base_y - py) as f32 } else if (py > base_y + h) { (py - (base_y + h)) as f32 } else { 0.0 };
-            let dist = (qx * qx + qy * qy); // distancia squared
-            let max_dist = ((blur + spread) * (blur + spread)) as f32;
+    let total_rad = blur + spread;
+    let max_dist_sq = (total_rad * total_rad) as i32;
+    if (max_dist_sq <= 0) { return; }
+
+    for mut py in sy..ey {
+        for mut px in sx..ex {
+            let qx = if (px < x) { (x - px) as i32 } else if (px > x + w) { (px - (x + w)) as i32 } else { 0 };
+            let qy = if (py < base_y) { (base_y - py) as i32 } else if (py > base_y + h) { (py - (base_y + h)) as i32 } else { 0 };
+            let dist_sq = (qx * qx + qy * qy);
             
-            if (dist < max_dist && dist > 0.0) {
-                let falloff = 1.0 - (dist / max_dist); // Aproximacao linear do squared dist
-                let alpha = (100.0 * falloff * max_alpha_factor) as u8;
-                if (alpha > 5) {
-                    gfx_put_pixel_alpha(px, py, 0x00000000, alpha);
+            if (dist_sq < max_dist_sq && dist_sq > 0) {
+                let falloff_num = max_dist_sq - dist_sq;
+                let alpha = (((falloff_num * 90) / max_dist_sq) as u32);
+                let final_a = (((alpha as f32) * max_alpha_factor) as u8);
+                if (final_a > 4) {
+                    gfx_put_pixel_alpha(px, py, 0x00000000, final_a);
                 }
             }
         }
     }
 }
 
-// Sombra Física calculada pelo Eixo-Z
+// Sombra Fisica calculada pelo Eixo-Z
 @system
 pub fn gfx_draw_physical_shadow(x: u32, y: u32, w: u32, h: u32, elevation: u32) -> void {
     if (elevation == 0) { return; }
     let blur = elevation;
     let spread = elevation / 4;
-    // Gravidade: Objetos mais altos tem a sombra projetada mais para baixo e são mais transparentes
     let offset_y = (elevation / 3) as i32; 
     let max_alpha = 1.0 - ((elevation as f32) / 100.0);
     let final_alpha = if (max_alpha < 0.2) { 0.2 } else { max_alpha };
@@ -142,16 +336,24 @@ pub fn gfx_draw_physical_shadow(x: u32, y: u32, w: u32, h: u32, elevation: u32) 
     gfx_draw_drop_shadow(x, y, w, h, blur, spread, offset_y, final_alpha);
 }
 
-// Retângulo com vidro fosco acrílico e borda com destaque
+// Retangulo com vidro fosco acrilico, cantos arredondados e borda com destaque especular superior
 @system
 pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void {
+    let sw = gfx_get_width();
+    let sh = gfx_get_height();
+    if (x >= sw || y >= sh || w == 0 || h == 0) { return; }
+
+    let max_x = if (x + w > sw) { sw } else { x + w };
+    let max_y = if (y + h > sh) { sh } else { y + h };
     let r2 = (radius * radius) as i32;
-    let glass_a = if (alpha > 140) { 130 } else { alpha };
+    let inner_r = if (radius > 1) { radius - 1 } else { 0 };
+    let inner_r2 = (inner_r * inner_r) as i32;
+    let glass_a = if (alpha > 245) { 240 } else { alpha };
 
-    for mut py in y .. (y + h) {
-        let fy_rel = (py - y) as f32 / (if (h > 0) { h as f32 } else { 1.0 });
+    for mut py in y..max_y {
+        let rel_y_pct = ((py - y) * 255) / (if (h > 0) { h } else { 1 });
 
-        for mut px in x .. (x + w) {
+        for mut px in x..max_x {
             let mut is_corner = false;
             let mut inside = true;
 
@@ -168,19 +370,20 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
             }
 
             if (inside) {
-                let mut is_border = px == x || px == x + w - 1 || py == y || py == y + h - 1;
-                if is_corner {
+                let mut is_border = (px == x || px == x + w - 1 || py == y || py == y + h - 1);
+                if (is_corner) {
                     let dx = px as i32 - cx as i32;
                     let dy = py as i32 - cy as i32;
-                    if (dx * dx + dy * dy) >= ((radius - 1) * (radius - 1)) as i32 {
+                    if ((dx * dx + dy * dy) >= inner_r2) {
                         is_border = true;
                     }
                 }
 
                 if (is_border) {
-                    let spec_val = (1.0 - fy_rel) * 160.0;
-                    let b_col = if (spec_val > 40.0) { 0x00FFFFFF } else { border_color };
-                    let b_alpha = (120.0 + spec_val * 0.5) as u8;
+                    // Gradiente especular sutil na borda superior (Liquid Glass)
+                    let spec = (255 - rel_y_pct);
+                    let b_col = if (spec > 180) { 0x00FFFFFF } else { border_color };
+                    let b_alpha = (140 + (spec / 3)) as u8;
                     gfx_put_pixel_alpha(px, py, b_col, b_alpha);
                 } else {
                     gfx_put_pixel_alpha(px, py, bg_color, glass_a);
@@ -190,50 +393,46 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
     }
 }
 
-// Adaptador canônico para painéis líquidos usados pelo WindowManager.
+// Adaptador canonico para paineis liquidos usados pelo WindowManager.
 @system
 pub fn sdf_render_liquid_glass_panel(framebuffer: *mut u32, pitch: u32,
                                      x: u32, y: u32, w: u32, h: u32, radius: u32,
                                      bg_color: u32, alpha: u8, border_color: u32,
                                      glow: u8, outline: u32) -> void {
     if (framebuffer == (null as *mut u32) || pitch == 0) { return; }
-    // Compatibilidade com código legado, não usa mais shadow_spread manual
     gfx_draw_physical_shadow(x, y, w, h, ELEVATION_WINDOW_INACTIVE);
     gfx_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius);
-    if (outline > 1) {
+    if (outline > 1 && w > 2 && h > 2 && radius > 0) {
         gfx_draw_glass_rect(x + 1, y + 1, w - 2, h - 2, bg_color, 0, border_color, radius - 1);
     }
 }
 
-// Renderiza Materiais Inteligentes com base no Z-Axis (Elevação)
+// Renderiza Materiais Inteligentes com base no Z-Axis (Elevacao)
 @system
 pub fn gfx_draw_smart_material(x: u32, y: u32, w: u32, h: u32, material: u8, elevation: u32, radius: u32) -> void {
-    // 1. Projeta a sombra física com gravidade baseada na elevação
+    // 1. Projeta a sombra fisica com gravidade baseada na elevacao
     gfx_draw_physical_shadow(x, y, w, h, elevation);
 
     // 2. Renderiza o material correto
     if (material == MATERIAL_MICA) {
-        // Mica: Captura cor do desktop/wallpaper (Simulação opaca tintada para Dark Mode)
         let is_active = (elevation == ELEVATION_WINDOW_ACTIVE);
-        let mica_bg = if (is_active) { 0x00202020 } else { 0x001A1A1A }; // Dark Mode Mica
-        let border = if (is_active) { 0x00475569 } else { 0x00334155 };
-        gfx_draw_glass_rect(x, y, w, h, mica_bg, 250, border, radius);
+        let mica_bg = if (is_active) { 0x001E293B } else { 0x000F172A };
+        let border = if (is_active) { 0x0000E5FF } else { 0x00334155 };
+        gfx_draw_glass_rect(x, y, w, h, mica_bg, 245, border, radius);
     } else if (material == MATERIAL_ACRYLIC) {
-        // Acrylic: Translúcido com alto desfoque para superfícies transientes (Dark Mode)
-        let acrylic_bg = 0x001E1E1E; 
-        gfx_draw_glass_rect(x, y, w, h, acrylic_bg, 160, 0x00334155, radius);
+        let acrylic_bg = 0x00172232; 
+        gfx_draw_glass_rect(x, y, w, h, acrylic_bg, 180, 0x0038BDF8, radius);
     } else if (material == MATERIAL_SMOKE) {
-        // Smoke: Bloqueio imersivo (preto translúcido) atrás de modais
         gfx_fill_rect_alpha(x, y, w, h, 0x00000000, 140);
     } else {
-        // Solid
         gfx_fill_rect(x, y, w, h, 0x00FFFFFF);
     }
 }
 
-// Círculo
+// Circulo com antialiasing
 @system
 pub fn gfx_draw_circle_alpha(cx: u32, cy: u32, radius: u32, color: u32, alpha: u8) -> void {
+    if (alpha == 0) { return; }
     let r2 = (radius * radius) as i32;
     for mut dy in 0 .. (radius * 2 + 1) {
         for mut dx in 0 .. (radius * 2 + 1) {
@@ -256,34 +455,78 @@ pub fn gfx_draw_circle_button(cx: u32, cy: u32, radius: u32, color: u32) -> void
     if (radius > 2) { gfx_draw_circle_alpha(cx, cy, radius - 2, 0x00FFFFFF, 70); }
 }
 
-pub struct Glyph {
-    pub rows: [u8; 14];
-}
-
-// Desenha um caractere com suavização de bordas (Anti-Aliased)
+// Desenha um caractere com suavizacao ou bitmap fallback
 @system
 pub fn gfx_draw_char_aa(x: u32, y: u32, ch: u8, color: u32) -> void {
-    // Implementação canônica de rasterização bitmap com subpixel glow
-    let glyph_idx = ch as usize;
-    if (glyph_idx >= 256) { return; }
-    // Renderizado diretamente via backend com alpha blending
-    gfx_fill_rect_alpha(x, y, 8, 14, color, 255);
+    gfx_draw_char_atlas(x, y, ch, color, 255, 1);
+}
+
+@system
+fn gfx_draw_char_atlas(x: u32, y: u32, ch: u8, color: u32,
+                       opacity: u8, scale: u32) -> void {
+    if (opacity == 0 || scale == 0) { return; }
+    unsafe {
+        if (FONT_ALPHA != (null as *const u8) && FONT_CELL_W > 0 && FONT_CELL_H > 0) {
+            let glyph_base = (ch as u32) * FONT_CELL_W * FONT_CELL_H;
+            for mut gy in 0..FONT_CELL_H {
+                for mut gx in 0..FONT_CELL_W {
+                    let coverage = *FONT_ALPHA.add((glyph_base + gy * FONT_CELL_W + gx) as usize);
+                    if (coverage != 0) {
+                        let a = (((coverage as u32) * (opacity as u32)) / 255) as u8;
+                        gfx_fill_rect_alpha(x + gx * scale, y + gy * scale, scale, scale, color, a);
+                    }
+                }
+            }
+            return;
+        }
+
+        // Fallback 100% legivel usando tabela bitmap de alta precisao
+        if (ch >= 32 && ch <= 126) {
+            let idx = ((ch - 32) as usize) * 8;
+            for mut row in 0..8 {
+                let row_bits = FONT_FALLBACK_GLYPHS[idx + row as usize];
+                if (row_bits != 0) {
+                    for mut col in 0..8 {
+                        if ((row_bits & (0x80 >> col)) != 0) {
+                            gfx_fill_rect_alpha(x + col * scale, y + row * scale, scale, scale, color, opacity);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Caractere desconhecido / retangulo discreto
+            gfx_draw_glass_rect(x, y, 6 * scale, 8 * scale, 0x00000000, 0, color, 1);
+        }
+    }
+}
+
+@inline
+fn glyph_advance(ch: u8) -> u32 {
+    unsafe {
+        if (FONT_ADVANCES != (null as *const u8)) {
+            let a = *FONT_ADVANCES.add(ch as usize) as u32;
+            if (a > 0) { return a; }
+        }
+    }
+    return 7;
 }
 
 // Desenha uma sombra suave gaussiana multicamada baseada em SDF
 @system
 pub fn gfx_draw_smooth_shadow(x: i32, y: i32, w: i32, h: i32, radius: i32, blur: i32, max_alpha: u8) -> void {
     if (w <= 0 || h <= 0 || blur <= 0 || max_alpha == 0) { return; }
-    gfx_fill_rect_alpha(x as u32, y as u32, w as u32, h as u32, 0x00000000, max_alpha);
+    let ux = if (x < 0) { 0 } else { x as u32 };
+    let uy = if (y < 0) { 0 } else { y as u32 };
+    gfx_draw_drop_shadow(ux, uy, w as u32, h as u32, blur as u32, 0, 0, (max_alpha as f32) / 255.0);
 }
 
-// Desenha Textos usando renderização proporcional suavizada
+// Desenha Textos usando renderizacao proporcional suavizada
 @system
 pub fn gfx_draw_text_proportional(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
     gfx_draw_text(x, y, text_ptr, color);
 }
 
-// Desenha Textos usando decodificação UTF-8 nativa para PT-BR
+// Desenha Textos usando decodificacao UTF-8 nativa para Portugues, Espanhol, Alemao, etc.
 @system
 pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
     if (text_ptr == (null as *const u8)) { return; }
@@ -295,13 +538,13 @@ pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
             if (b0 == 0xC3 && *text_ptr.add(i + 1) != 0) {
                 let b1 = *text_ptr.add(i + 1);
                 let glyph_code = 128 + (b1 & 0x3F);
-                gfx_draw_char_aa(px, y, glyph_code, color);
+                gfx_draw_char_atlas(px, y, glyph_code, color, 255, 1);
                 i += 2;
-                px += 8;
+                px += glyph_advance(glyph_code);
             } else {
-                gfx_draw_char_aa(px, y, b0, color);
+                gfx_draw_char_atlas(px, y, b0, color, 255, 1);
                 i += 1;
-                px += 7;
+                px += glyph_advance(b0);
             }
         }
     }
@@ -310,18 +553,34 @@ pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
 @system
 pub fn gfx_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scale: u32, alpha: u8) -> void {
     if (alpha == 0 || scale == 0 || text_ptr == (null as *const u8)) { return; }
-    gfx_draw_text_proportional(x, y, text_ptr, color);
+    let mut px = x;
+    let mut i = 0;
+    unsafe {
+        while (*text_ptr.add(i) != 0) {
+            let b0 = *text_ptr.add(i);
+            if (b0 == 0xC3 && *text_ptr.add(i + 1) != 0) {
+                let glyph_code = 128 + (*text_ptr.add(i + 1) & 0x3F);
+                gfx_draw_char_atlas(px, y, glyph_code, color, alpha, scale);
+                px += glyph_advance(glyph_code) * scale;
+                i += 2;
+            } else {
+                gfx_draw_char_atlas(px, y, b0, color, alpha, scale);
+                px += glyph_advance(b0) * scale;
+                i += 1;
+            }
+        }
+    }
 }
 
-// Papel de parede em malha de cores do Baken OS.
+// Papel de parede em malha de cores do Baken OS
 @system
 pub fn gfx_draw_mesh_wallpaper() -> void {
     let sw = gfx_get_width();
     let sh = gfx_get_height();
 
-    for mut py in 0 .. sh {
+    for mut py in 0..sh {
         let ny = (py as f32) / (sh as f32);
-        for mut px in 0 .. sw {
+        for mut px in 0..sw {
             let nx = (px as f32) / (sw as f32);
 
             let w_cyan = (1.0 - nx) * (1.0 - ny);
@@ -343,7 +602,7 @@ pub fn gfx_draw_mesh_wallpaper() -> void {
     }
 }
 
-// Renderiza Ícones Vetoriais/SDF para os Aplicativos Soberanos do Sistema
+// Renderiza Icones Vetoriais/SDF para os Aplicativos Nativos do Sistema
 @system
 pub fn gfx_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
     let id = app_id % 6;
@@ -360,7 +619,7 @@ pub fn gfx_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
         gfx_draw_glass_rect_material(x + 9, y + 17, 14, 2, 0x00334155, 220, 0x0064748B, 1);
         gfx_draw_glass_rect_material(x + 9, y + 22, 10, 2, 0x0038BDF8, 240, 0x000284C7, 1);
     } else if (id == 2) {
-        // App 2: Ajustes (Painel índigo com sliders de ajuste)
+        // App 2: Ajustes (Painel indigo com sliders de ajuste)
         gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x006366F1, 255, 0x00A5B4FC, 6);
         gfx_draw_glass_rect_material(x + 6, y + 10, 20, 3, 0x00312E81, 255, 0x001E1B4B, 1);
         gfx_draw_glass_rect_material(x + 6, y + 19, 20, 3, 0x00312E81, 255, 0x001E1B4B, 1);
@@ -369,7 +628,7 @@ pub fn gfx_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
         gfx_draw_circle_alpha(x + 20, y + 20, 4, 0x00FFFFFF, 255);
         gfx_draw_circle_alpha(x + 20, y + 20, 2, 0x006366F1, 255);
     } else if (id == 3) {
-        // App 3: Mídia / Câmera (Chassi verde esmeralda com lente concêntrica)
+        // App 3: Midia / Camera (Chassi verde esmeralda com lente concentrica)
         gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x0010B981, 255, 0x006EE7B7, 6);
         gfx_draw_circle_alpha(x + 16, y + 16, 9, 0x00064E3B, 255);
         gfx_draw_circle_alpha(x + 16, y + 16, 6, 0x000F172A, 255);
@@ -398,18 +657,25 @@ pub fn gfx_draw_glass_rect_material(x: u32, y: u32, w: u32, h: u32, bg: u32, a: 
 
 @system
 pub fn gfx_measure_text(str: *const u8) -> u32 {
-    let mut len: u32 = 0;
+    if (str == (null as *const u8)) { return 0; }
+    let mut width: u32 = 0;
+    let mut i: usize = 0;
     unsafe {
-        while *(str + (len as usize)) != 0 {
-            len += 1;
+        while (*str.add(i) != 0) {
+            let b0 = *str.add(i);
+            if (b0 == 0xC3 && *str.add(i + 1) != 0) {
+                width += glyph_advance(128 + (*str.add(i + 1) & 0x3F));
+                i += 2;
+            } else {
+                width += glyph_advance(b0);
+                i += 1;
+            }
         }
     }
-    return len * 8;
+    return width;
 }
 
 @system
 pub fn gfx_measure_text_role(str: *const u8, role: u32) -> u32 {
     return gfx_measure_text(str);
 }
-
-

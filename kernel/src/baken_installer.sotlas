@@ -1,29 +1,44 @@
-// Baken OS - BakenInstaller Graphical Setup Wizard & OOBE
-// 100% Implementado na linguagem Sotlas (@system)
+// Baken OS — Next-Gen Aurora Graphical Setup Wizard & OOBE
+// 100% Implementado na linguagem Sotlas (@system) com Glassmorphism Real, i18n Multilingue e Zero Telemetria
 
 module kernel::baken_installer;
 
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
+import kernel::baken_oobe_screen::*;
+
+pub const TOTAL_LANGUAGES: usize = 11;
 
 pub struct InstallerState {
-    pub step: u32;              // 0: Boas-vindas, 1: Disco, 2: Instalando, 3: Usuario, 4: Concluido
-    pub selected_lang: u32;     // 0: PT-BR, 1: EN-US, 2: ES
-    pub selected_kb: u32;       // 0: ABNT2, 1: US-Intl
-    pub selected_disk: u32;     // 0: Drive 0 (NVMe/SATA 64GB)
+    pub step: u32;              // 0: Welcome, 1: Language/Keyboard, 2: Mode, 3: Disk, 4: Review, 5: Installing, 6: Complete, 7: Repair, 8: OOBE
+    pub selected_lang: u32;     // 0..10 (PT, EN, FR, IT, ES, DE, EL, ZH, JA, HI, SW)
+    pub selected_kb: u32;       // 0..10
+    pub selected_mode: u32;     // 0: Instalar Definitivamente, 1: Live Demo
+    pub selected_disk: u32;     // 0: NVMe SSD (Gravavel), 1: USB Live (Protegida)
     pub install_progress: u32;  // 0 a 100%
+    pub install_substep: u32;   // 0 a 3
     pub anim_tick: u32;
-    pub selected_theme: u32;    // 0: Vortex Dark, 1: Midnight, 2: Cyber Neon
+    pub error: u32;
+    pub oobe_step: u32;         // 0 a 6
+    pub oobe_usage: u32;        // 0: Dev, 1: Gamer, 2: Produtividade
+    pub oobe_diagnostics: u8;   // 0: Desativado (Privacidade Total)
+    pub oobe_location: u8;      // 0: Desativado
 }
 
 static mut INSTALLER: InstallerState = InstallerState {
     step: 0,
     selected_lang: 0,
     selected_kb: 0,
+    selected_mode: 0,
     selected_disk: 0,
     install_progress: 0,
+    install_substep: 0,
     anim_tick: 0,
-    selected_theme: 0,
+    error: 0,
+    oobe_step: 0,
+    oobe_usage: 0,
+    oobe_diagnostics: 0,
+    oobe_location: 0,
 };
 
 @system
@@ -32,335 +47,1348 @@ pub fn baken_installer_init() -> void {
         INSTALLER.step = 0;
         INSTALLER.selected_lang = 0;
         INSTALLER.selected_kb = 0;
+        INSTALLER.selected_mode = 0;
         INSTALLER.selected_disk = 0;
         INSTALLER.install_progress = 0;
+        INSTALLER.install_substep = 0;
         INSTALLER.anim_tick = 0;
-        INSTALLER.selected_theme = 0;
+        INSTALLER.error = 0;
+        INSTALLER.oobe_step = 0;
+        INSTALLER.oobe_usage = 0;
+        INSTALLER.oobe_diagnostics = 0;
+        INSTALLER.oobe_location = 0;
+    }
+    baken_oobe_init();
+}
+
+@inline
+fn min_u32(a: u32, b: u32) -> u32 {
+    if (a < b) { return a; }
+    return b;
+}
+
+@inline
+fn get_lang() -> usize {
+    unsafe {
+        let l = INSTALLER.selected_lang as usize;
+        if (l >= TOTAL_LANGUAGES) { return 0; }
+        return l;
     }
 }
+
+// =============================================================================
+// DICIONARIO MULTILINGUE CENTRAL (11 IDIOMAS GLOBAIS)
+// 0: Portugues (BR)
+// 1: English (US)
+// 2: Francais (FR)
+// 3: Italiano (IT)
+// 4: Espanol (ES/LatAm)
+// 5: Deutsch (DE/CH)
+// 6: Ellenika (Grego/EL)
+// 7: Zhongwen (Chines/ZH)
+// 8: Nihongo (Japones/JA)
+// 9: Hindi (Indiano/HI)
+// 10: Kiswahili (Africano/SW)
+// =============================================================================
+
+// Barra Lateral (Timeline Stepper)
+static STR_SIDEBAR_STEPS: [[*const u8; 6]; 11] = [
+    // 0: PT
+    ["1. Inicio".as_ptr(), "2. Idioma & Teclado".as_ptr(), "3. Experiencia".as_ptr(), "4. Destino de Disco".as_ptr(), "5. Revisao".as_ptr(), "6. Instalacao".as_ptr()],
+    // 1: EN
+    ["1. Start".as_ptr(), "2. Language & Keyboard".as_ptr(), "3. Experience".as_ptr(), "4. Target Disk".as_ptr(), "5. Review".as_ptr(), "6. Installation".as_ptr()],
+    // 2: FR
+    ["1. Debut".as_ptr(), "2. Langue & Clavier".as_ptr(), "3. Experience".as_ptr(), "4. Disque Cible".as_ptr(), "5. Verification".as_ptr(), "6. Installation".as_ptr()],
+    // 3: IT
+    ["1. Inizio".as_ptr(), "2. Lingua & Tastiera".as_ptr(), "3. Esperienza".as_ptr(), "4. Disco Destinazione".as_ptr(), "5. Riepilogo".as_ptr(), "6. Installazione".as_ptr()],
+    // 4: ES
+    ["1. Inicio".as_ptr(), "2. Idioma y Teclado".as_ptr(), "3. Experiencia".as_ptr(), "4. Destino de Disco".as_ptr(), "5. Revision".as_ptr(), "6. Instalacion".as_ptr()],
+    // 5: DE
+    ["1. Start".as_ptr(), "2. Sprache & Tastatur".as_ptr(), "3. Erlebnis".as_ptr(), "4. Ziellaufwerk".as_ptr(), "5. Uebersicht".as_ptr(), "6. Installation".as_ptr()],
+    // 6: EL (Grego)
+    ["1. Enarxi".as_ptr(), "2. Glossa & Pliktrologio".as_ptr(), "3. Empeiria".as_ptr(), "4. Proorismos Diskou".as_ptr(), "5. Episkopisi".as_ptr(), "6. Enkatastasi".as_ptr()],
+    // 7: ZH (Chines)
+    ["1. Kai shi".as_ptr(), "2. Yu yan yu Jian pan".as_ptr(), "3. Ti yan".as_ptr(), "4. Ci pan Mu biao".as_ptr(), "5. Shen he".as_ptr(), "6. An zhuang".as_ptr()],
+    // 8: JA (Japones)
+    ["1. Kaishi".as_ptr(), "2. Gengo to Kibo-do".as_ptr(), "3. Taiken".as_ptr(), "4. Disuku Sentaku".as_ptr(), "5. Kakunin".as_ptr(), "6. Insuto-ru".as_ptr()],
+    // 9: HI (Indiano)
+    ["1. Shuru".as_ptr(), "2. Bhasha & Keyboard".as_ptr(), "3. Anubhav".as_ptr(), "4. Disk Chunav".as_ptr(), "5. Samiksha".as_ptr(), "6. Sthapana".as_ptr()],
+    // 10: SW (Africano)
+    ["1. Mwanzo".as_ptr(), "2. Lugha & Kibodi".as_ptr(), "3. Uzoefu".as_ptr(), "4. Diski ya Kulengwa".as_ptr(), "5. Mapitio".as_ptr(), "6. Usakinishaji".as_ptr()]
+];
+
+static STR_PRIVACY_TAG: [*const u8; 11] = [
+    "Privacidade por Padrao".as_ptr(),
+    "Privacy by Default".as_ptr(),
+    "Confidentialite par Defaut".as_ptr(),
+    "Privacy per Impostazione Predefinita".as_ptr(),
+    "Privacidad por Defecto".as_ptr(),
+    "Privatsphaere als Standard".as_ptr(),
+    "Idiotikotita apo Proepilogi".as_ptr(),
+    "Mo ren Yin si Bao hu".as_ptr(),
+    "Deforuto de Puraibashi- Hogo".as_ptr(),
+    "Nijiata Pehle Se Sakriya".as_ptr(),
+    "Faragha kama Chaguo-msingi".as_ptr()
+];
+
+static STR_BTN_BACK: [*const u8; 11] = [
+    "< Voltar".as_ptr(),
+    "< Back".as_ptr(),
+    "< Retour".as_ptr(),
+    "< Indietro".as_ptr(),
+    "< Volver".as_ptr(),
+    "< Zurueck".as_ptr(),
+    "< Piso".as_ptr(),
+    "< Fan hui".as_ptr(),
+    "< Modoru".as_ptr(),
+    "< Peeche".as_ptr(),
+    "< Rudi".as_ptr()
+];
+
+static STR_BTN_CONTINUE: [*const u8; 11] = [
+    "Continuar >".as_ptr(),
+    "Continue >".as_ptr(),
+    "Continuer >".as_ptr(),
+    "Continua >".as_ptr(),
+    "Continuar >".as_ptr(),
+    "Weiter >".as_ptr(),
+    "Synecheia >".as_ptr(),
+    "Ji xu >".as_ptr(),
+    "Tsugi he >".as_ptr(),
+    "Aage Badhein >".as_ptr(),
+    "Endelea >".as_ptr()
+];
+
+// Tela 1: Idioma e Teclado
+static STR_LANG_TITLE: [*const u8; 11] = [
+    "Configuracao de Idioma & Teclado".as_ptr(),
+    "Language & Keyboard Setup".as_ptr(),
+    "Configuration de la Langue & du Clavier".as_ptr(),
+    "Configurazione Lingua & Tastiera".as_ptr(),
+    "Configuracion de Idioma y Teclado".as_ptr(),
+    "Sprach- & Tastatureinstellungen".as_ptr(),
+    "Rhythmisi Glossas & Pliktrologiou".as_ptr(),
+    "Yu yan he Jian pan She zhi".as_ptr(),
+    "Gengo to Kibo-do no Settei".as_ptr(),
+    "Bhasha aur Keyboard Vinyas".as_ptr(),
+    "Mipangilio ya Lugha na Kibodi".as_ptr()
+];
+static STR_LANG_SUB: [*const u8; 11] = [
+    "Escolha seu idioma e o layout do teclado para a instalacao.".as_ptr(),
+    "Choose your language and keyboard layout for the installation.".as_ptr(),
+    "Choisissez votre langue et disposition de clavier pour l'installation.".as_ptr(),
+    "Scegli la tua lingua e il layout della tastiera per l'installazione.".as_ptr(),
+    "Elija su idioma y la distribucion del teclado para la instalacion.".as_ptr(),
+    "Waehlen Sie Ihre Sprache und das Tastaturlayout fuer die Installation.".as_ptr(),
+    "Epilexte ti glossa sas kai ti diataksi pliktrologiou gia tin enkatastasi.".as_ptr(),
+    "Qing wei an zhuang xuan ze nin de yu yan he jian pan bu ju.".as_ptr(),
+    "Insuto-ru ni shiyou suru gengo to kibo-do reiauto wo sentaku shite kudasai.".as_ptr(),
+    "Sthapana ke liye apni bhasha aur keyboard layout chunein.".as_ptr(),
+    "Chagua lugha yako na mpangilio wa kibodi kwa ajili ya usakinishaji.".as_ptr()
+];
+static STR_LANG_COL1: [*const u8; 11] = [
+    "Idiomas Ocidentais / Globais".as_ptr(),
+    "Western & International Languages".as_ptr(),
+    "Langues Occidentales & Internationales".as_ptr(),
+    "Lingue Occidentali & Internazionali".as_ptr(),
+    "Idiomas Occidentales e Internacionales".as_ptr(),
+    "Westliche & Internationale Sprachen".as_ptr(),
+    "Dytikes & Diethneis Glosses".as_ptr(),
+    "Xi fang yu Guo ji Yu yan".as_ptr(),
+    "Seiyou oyobi Kokusai Gengo".as_ptr(),
+    "Pashchimi aur Antarrashtriya Bhashayein".as_ptr(),
+    "Lugha za Magharibi na Kimataifa".as_ptr()
+];
+static STR_LANG_COL2: [*const u8; 11] = [
+    "Idiomas Regionais & Orientais".as_ptr(),
+    "Regional & Eastern Languages".as_ptr(),
+    "Langues Regionales & Orientales".as_ptr(),
+    "Lingue Regionali & Orientali".as_ptr(),
+    "Idiomas Regionales y Orientales".as_ptr(),
+    "Regionale & Oestliche Sprachen".as_ptr(),
+    "Perifereiakes & Anatolikes Glosses".as_ptr(),
+    "Di qu yu Dong fang Yu yan".as_ptr(),
+    "Chiiki oyobi Touyou Gengo".as_ptr(),
+    "Kshetritya aur Purvi Bhashayein".as_ptr(),
+    "Lugha za Kikanda na Mashariki".as_ptr()
+];
+
+// Tela 2: Modo de Experiencia
+static STR_MODE_TITLE: [*const u8; 11] = [
+    "Como voce deseja experimentar o Baken OS?".as_ptr(),
+    "How would you like to experience Baken OS?".as_ptr(),
+    "Comment souhaitez-vous decouvrir Baken OS ?".as_ptr(),
+    "Come desideri provare Baken OS?".as_ptr(),
+    "Como desea experimentar Baken OS?".as_ptr(),
+    "Wie moechten Sie Baken OS erleben?".as_ptr(),
+    "Pos thelete na gnorisete to Baken OS?".as_ptr(),
+    "Nin xi wang ru he ti yan Baken OS?".as_ptr(),
+    "Baken OS wo dono you ni taiken shimasu ka?".as_ptr(),
+    "Aap Baken OS ka anubhav kaise karna chahte hain?".as_ptr(),
+    "Ungependa kupata uzoefu wa Baken OS vipi?".as_ptr()
+];
+static STR_MODE_SUB: [*const u8; 11] = [
+    "Escolha entre instalar definitivamente ou testar sem alterar nada.".as_ptr(),
+    "Choose between a full installation or testing safely without changes.".as_ptr(),
+    "Choisissez entre une installation complete ou un test sans modification.".as_ptr(),
+    "Scegli tra l'installazione completa o una prova sicura senza modifiche.".as_ptr(),
+    "Elija entre instalar definitivamente o probar sin modificar nada.".as_ptr(),
+    "Waehlen Sie zwischen vollstaendiger Installation oder risikolosem Testen.".as_ptr(),
+    "Epilexte metaxy plirous enkatastasis i asfalous dokimis choris allages.".as_ptr(),
+    "Zai wan quan an zhuang huo an quan ti yan zhi jian jin xing xuan ze.".as_ptr(),
+    "Kanzento na insuto-ru ka, henkou nashi no anzen na taiken ka wo sentaku.".as_ptr(),
+    "Purna sthapana ya bina kisi badlav ke surakshit testing ke beech chunein.".as_ptr(),
+    "Chagua kati ya usakinishaji kamili au kujaribu kwa usalama bila mabadiliko.".as_ptr()
+];
+static STR_MODE0_TITLE: [*const u8; 11] = [
+    "Instalar Baken OS no Computador".as_ptr(),
+    "Install Baken OS on Computer".as_ptr(),
+    "Installer Baken OS sur l'ordinateur".as_ptr(),
+    "Installa Baken OS sul Computer".as_ptr(),
+    "Instalar Baken OS en el Equipo".as_ptr(),
+    "Baken OS auf dem Computer installieren".as_ptr(),
+    "Enkatastasi Baken OS ston Ypologisti".as_ptr(),
+    "Zai Dian nao shang An zhuang Baken OS".as_ptr(),
+    "Konpyuta ni Baken OS wo Insuto-ru".as_ptr(),
+    "Computer par Baken OS Sthapit karein".as_ptr(),
+    "Sakinisha Baken OS kwenye Kompyuta".as_ptr()
+];
+static STR_MODE0_DESC: [*const u8; 11] = [
+    "Desempenho maximo com particionamento GPT, volume BakenFS e snapshots.".as_ptr(),
+    "Maximum performance with GPT partitioning, BakenFS volume and snapshots.".as_ptr(),
+    "Performances maximales avec partitionnement GPT, volume BakenFS et instantanes.".as_ptr(),
+    "Massime prestazioni con partizionamento GPT, volume BakenFS e snapshot.".as_ptr(),
+    "Rendimiento maximo con particionado GPT, volumen BakenFS y snapshots.".as_ptr(),
+    "Maximale Leistung mit GPT-Partitionierung, BakenFS-Volume und Snapshots.".as_ptr(),
+    "Megisti apodosi me diamerismo GPT, tomo BakenFS kai stigmiotypa.".as_ptr(),
+    "Tong guo GPT fen qu, BakenFS juan he kuai zhao huo de zui gao xing neng.".as_ptr(),
+    "GPT pakshon, BakenFS boryumu, sunappushotto de saikou no pafomansu.".as_ptr(),
+    "GPT vibhajan, BakenFS volume aur snapshot ke saath adhiktam performance.".as_ptr(),
+    "Utendaji wa juu zaidi na ugawaji wa GPT, juzuu ya BakenFS na picha za haraka.".as_ptr()
+];
+static STR_MODE1_TITLE: [*const u8; 11] = [
+    "Experimentar sem instalar (Live Desktop)".as_ptr(),
+    "Try without installing (Live Desktop)".as_ptr(),
+    "Essayer sans installer (Bureau Live)".as_ptr(),
+    "Prova senza installare (Desktop Live)".as_ptr(),
+    "Probar sin instalar (Live Desktop)".as_ptr(),
+    "Ausprobieren ohne Installation (Live Desktop)".as_ptr(),
+    "Dokimi choris enkatastasi (Live Desktop)".as_ptr(),
+    "Mian an zhuang Ti yan (Live Desktop)".as_ptr(),
+    "Insuto-ru sezu ni Taiken (Live Desktop)".as_ptr(),
+    "Bina sthapana ke aazmayein (Live Desktop)".as_ptr(),
+    "Jaribu bila kusakinisha (Live Desktop)".as_ptr()
+];
+static STR_MODE1_DESC: [*const u8; 11] = [
+    "Sessao rapida e segura direto da memoria USB, sem alterar nenhum arquivo.".as_ptr(),
+    "Fast and secure session directly from USB media, without altering files.".as_ptr(),
+    "Session rapide et securisee depuis la cle USB, sans modifier de fichiers.".as_ptr(),
+    "Sessione rapida e sicura da supporto USB, senza modificare alcun file.".as_ptr(),
+    "Sesion rapida y segura desde la memoria USB, sin alterar ningun archivo.".as_ptr(),
+    "Schnelle und sichere Sitzung direkt vom USB-Medium, ohne Dateiaenderungen.".as_ptr(),
+    "Grigori kai asfalis synedria kateftheian apo USB, choris allagi arxeion.".as_ptr(),
+    "Zhi jie cong USB meiti kai qi kuai jie an quan de hui hua, bu gai dong wen jian.".as_ptr(),
+    "USB media kara chokusetsu sunpao de anzen na sesshon, fairu henkou nashi.".as_ptr(),
+    "USB media se seedhe tez aur surakshit satra, bina kisi file ko badle.".as_ptr(),
+    "Kipindi cha haraka na salama kutoka kwa USB, bila kubadilisha faili yoyote.".as_ptr()
+];
+
+// Tela 3: Destino de Disco
+static STR_DISK_TITLE: [*const u8; 11] = [
+    "Destino de Instalacao & Gerenciador de Disco".as_ptr(),
+    "Installation Target & Disk Manager".as_ptr(),
+    "Disque Cible & Gestionnaire de Disque".as_ptr(),
+    "Destinazione Installazione & Gestione Dischi".as_ptr(),
+    "Destino de Instalacion y Gestor de Disco".as_ptr(),
+    "Installationsziel & Festplattenverwaltung".as_ptr(),
+    "Proorismos Enkatastasis & Diacheiristis Diskou".as_ptr(),
+    "An zhuang Mu biao yu Ci pan Guan li".as_ptr(),
+    "Insuto-ru Saki to Disuku Kanri".as_ptr(),
+    "Sthapana Lakshya aur Disk Prabandhak".as_ptr(),
+    "Lengo la Usakinishaji & Meneja wa Diski".as_ptr()
+];
+static STR_DISK_SUB: [*const u8; 11] = [
+    "A unidade de inicializacao Live USB permanece protegida contra gravacao.".as_ptr(),
+    "The Live USB boot media remains write-protected.".as_ptr(),
+    "Le support de demarrage USB Live reste protege en ecriture.".as_ptr(),
+    "L'unita di avvio USB Live rimane protetta da scrittura.".as_ptr(),
+    "La unidad de arranque Live USB permanece protegida contra escritura.".as_ptr(),
+    "Das Live-USB-Bootmedium bleibt schreibgeschuetzt.".as_ptr(),
+    "I monada ekkinisis Live USB paramenei prostatevmeni apo engrafi.".as_ptr(),
+    "Live USB qi dong pan bao chi xie bao hu zhuang tai.".as_ptr(),
+    "Live USB bu-to media wa kakikomi hogo sarete imasu.".as_ptr(),
+    "Live USB boot media lekhan-surakshit rehta hai.".as_ptr(),
+    "Kifaa cha kuanzishia cha Live USB kinabaki kulindwa dhidi ya uandishi.".as_ptr()
+];
+static STR_DISK0_TITLE: [*const u8; 11] = [
+    "NVMe SSD 0 — Unidade Alvo (64.0 GB Gravavel)".as_ptr(),
+    "NVMe SSD 0 — Target Drive (64.0 GB Writable)".as_ptr(),
+    "NVMe SSD 0 — Disque Cible (64.0 Go Inscriptible)".as_ptr(),
+    "NVMe SSD 0 — Unita Destinazione (64.0 GB Scrivibile)".as_ptr(),
+    "NVMe SSD 0 — Unidad Objetivo (64.0 GB Grabable)".as_ptr(),
+    "NVMe SSD 0 — Ziellaufwerk (64.0 GB Beschreibbar)".as_ptr(),
+    "NVMe SSD 0 — Monada Proorismou (64.0 GB Engrapsimi)".as_ptr(),
+    "NVMe SSD 0 — Mu biao Qu dong qi (64.0 GB Ke xie)".as_ptr(),
+    "NVMe SSD 0 — Ta-getto Doraibu (64.0 GB Kakikomi kano)".as_ptr(),
+    "NVMe SSD 0 — Lakshya Drive (64.0 GB Likhyayogya)".as_ptr(),
+    "NVMe SSD 0 — Diski Lengwa (64.0 GB Inaweza kuandikwa)".as_ptr()
+];
+static STR_DISK0_DESC: [*const u8; 11] = [
+    "Particionamento GPT Automatico: ESP FAT32 (41MB) + Baken Data (BakenFS)".as_ptr(),
+    "Automatic GPT Partitioning: ESP FAT32 (41MB) + Baken Data (BakenFS)".as_ptr(),
+    "Partitionnement GPT Automatique : ESP FAT32 (41Mo) + Donnees Baken (BakenFS)".as_ptr(),
+    "Partizionamento GPT Automatico: ESP FAT32 (41MB) + Dati Baken (BakenFS)".as_ptr(),
+    "Particionado GPT Automatico: ESP FAT32 (41MB) + Baken Data (BakenFS)".as_ptr(),
+    "Automatische GPT-Partitionierung: ESP FAT32 (41MB) + Baken Data (BakenFS)".as_ptr(),
+    "Aftomatos Diamerismos GPT: ESP FAT32 (41MB) + Baken Data (BakenFS)".as_ptr(),
+    "Zi dong GPT Fen qu: ESP FAT32 (41MB) + Baken Shu ju (BakenFS)".as_ptr(),
+    "Jidou GPT Pakshon: ESP FAT32 (41MB) + Baken De-ta (BakenFS)".as_ptr(),
+    "Swachalit GPT Vibhajan: ESP FAT32 (41MB) + Baken Data (BakenFS)".as_ptr(),
+    "Ugawaji Otomatiki wa GPT: ESP FAT32 (41MB) + Data ya Baken (BakenFS)".as_ptr()
+];
+static STR_DISK1_TITLE: [*const u8; 11] = [
+    "Unidade Live USB — 32.0 GB [PROTEGIDA]".as_ptr(),
+    "Live USB Drive — 32.0 GB [PROTECTED]".as_ptr(),
+    "Cle USB Live — 32.0 Go [PROTEGEE]".as_ptr(),
+    "Unita Live USB — 32.0 GB [PROTETTA]".as_ptr(),
+    "Unidad Live USB — 32.0 GB [PROTEGIDA]".as_ptr(),
+    "Live-USB-Laufwerk — 32.0 GB [GESCHUETZT]".as_ptr(),
+    "Monada Live USB — 32.0 GB [PROSTATEVMENI]".as_ptr(),
+    "Live USB Qu dong qi — 32.0 GB [SHOU BAO HU]".as_ptr(),
+    "Live USB Doraibu — 32.0 GB [HOGO SARETA]".as_ptr(),
+    "Live USB Drive — 32.0 GB [SURAKSHIT]".as_ptr(),
+    "Hifadhi ya Live USB — 32.0 GB [INAYOLINDWA]".as_ptr()
+];
+static STR_DISK1_DESC: [*const u8; 11] = [
+    "Midia de boot somente leitura. Nao sera modificada.".as_ptr(),
+    "Read-only boot media. Will not be modified.".as_ptr(),
+    "Support de demarrage en lecture seule. Ne sera pas modifie.".as_ptr(),
+    "Supporto di avvio in sola lettura. Non verra modificato.".as_ptr(),
+    "Medio de arranque de solo lectura. No sera modificado.".as_ptr(),
+    "Schreibgeschuetztes Bootmedium. Wird nicht veraendert.".as_ptr(),
+    "Meso ekkinisis mono gia anagnosi. Den tha tropopoiithei.".as_ptr(),
+    "Zhi du qi dong meiti. Bu hui bei xiu gai.".as_ptr(),
+    "Yomi-senyou bu-to media. Henkou saremasen.".as_ptr(),
+    "Kewal pathaniya boot media. Koi badlav nahi hoga.".as_ptr(),
+    "Midia ya kuanzishia ya kusoma tu. Haitarekebishwa.".as_ptr()
+];
+static STR_DISK_WARN: [*const u8; 11] = [
+    "O disco selecionado sera formatado com tabela GPT e sistema BakenFS.".as_ptr(),
+    "The selected drive will be formatted with GPT and BakenFS filesystem.".as_ptr(),
+    "Le disque selectionne sera formate avec une table GPT et BakenFS.".as_ptr(),
+    "Il disco selezionato verra formattato con tabella GPT e BakenFS.".as_ptr(),
+    "El disco seleccionado sera formateado con tabla GPT y sistema BakenFS.".as_ptr(),
+    "Das ausgewaehlte Laufwerk wird mit GPT-Tabelle und BakenFS formatiert.".as_ptr(),
+    "O epilegmenos diskos tha diamorfothei me pinaka GPT kai BakenFS.".as_ptr(),
+    "Suoxuan qu dong qi jiang ge shi hua wei GPT fen qu biao he BakenFS.".as_ptr(),
+    "Sentaku sareta doraibu wa GPT te-buru to BakenFS de fo-matto saremasu.".as_ptr(),
+    "Chuna gaya drive GPT table aur BakenFS system ke saath format hoga.".as_ptr(),
+    "Diski iliyochaguliwa itafomatiwa na jedwali la GPT na mfumo wa BakenFS.".as_ptr()
+];
+
+// Tela 4: Revisao
+static STR_REV_TITLE: [*const u8; 11] = [
+    "Tudo pronto para iniciar a instalacao".as_ptr(),
+    "Ready to start installation".as_ptr(),
+    "Pret a demarrer l'installation".as_ptr(),
+    "Tutto pronto per iniziare l'installazione".as_ptr(),
+    "Todo listo para iniciar la instalacion".as_ptr(),
+    "Bereit fuer den Installationsstart".as_ptr(),
+    "Ola etoima gia tin enarxi tis enkatastasis".as_ptr(),
+    "Yi zhun bei hao kai shi an zhuang".as_ptr(),
+    "Insuto-ru wo kaishi suru junbi ga dekimashita".as_ptr(),
+    "Sthapana shuru karne ke liye sab taiyar hai".as_ptr(),
+    "Kila kitu kiko tayari kuanza usakinishaji".as_ptr()
+];
+static STR_REV_SUB: [*const u8; 11] = [
+    "Revise suas preferencias antes de gravar no disco.".as_ptr(),
+    "Review your choices before writing to disk.".as_ptr(),
+    "Verifiez vos choix avant d'ecrire sur le disque.".as_ptr(),
+    "Rivedi le tue scelte prima di scrivere sul disco.".as_ptr(),
+    "Revise sus preferencias antes de escribir en disco.".as_ptr(),
+    "Ueberpruefen Sie Ihre Einstellungen vor dem Schreiben.".as_ptr(),
+    "Elenxte tis epiloges sas prin tin engrafi ston disko.".as_ptr(),
+    "Zai xie ru ci pan qian shen he nin de xuan ze.".as_ptr(),
+    "Disuku he no kakikomi mae ni sentaku wo kakunin shite kudasai.".as_ptr(),
+    "Disk par likhne se pehle apni pasand ki samiksha karein.".as_ptr(),
+    "Kagua chaguo zako kabla ya kuandika kwenye diski.".as_ptr()
+];
+static STR_REV_L1: [*const u8; 11] = [
+    "Idioma & Teclado:".as_ptr(), "Language & Keyboard:".as_ptr(), "Langue & Clavier :".as_ptr(),
+    "Lingua & Tastiera:".as_ptr(), "Idioma y Teclado:".as_ptr(), "Sprache & Tastatur:".as_ptr(),
+    "Glossa & Pliktrologio:".as_ptr(), "Yu yan yu Jian pan:".as_ptr(), "Gengo to Kibo-do:".as_ptr(),
+    "Bhasha & Keyboard:".as_ptr(), "Lugha & Kibodi:".as_ptr()
+];
+static STR_REV_L2: [*const u8; 11] = [
+    "Disco de Destino:".as_ptr(), "Target Disk:".as_ptr(), "Disque Cible :".as_ptr(),
+    "Disco Destinazione:".as_ptr(), "Disco de Destino:".as_ptr(), "Ziellaufwerk:".as_ptr(),
+    "Diskos Proorismou:".as_ptr(), "Mu biao Ci pan:".as_ptr(), "Ta-getto Disuku:".as_ptr(),
+    "Lakshya Disk:".as_ptr(), "Diski Lengwa:".as_ptr()
+];
+static STR_REV_L3: [*const u8; 11] = [
+    "Privacidade & Telemetria:".as_ptr(), "Privacy & Telemetry:".as_ptr(), "Confidentialite & Telemetrie :".as_ptr(),
+    "Privacy & Telemetria:".as_ptr(), "Privacidad y Telemetria:".as_ptr(), "Privatsphaere & Telemetrie:".as_ptr(),
+    "Idiotikotita & Tilemetria:".as_ptr(), "Yin si yu Yao ce:".as_ptr(), "Puraibashi- to Teremetori:".as_ptr(),
+    "Nijata aur Telemetry:".as_ptr(), "Faragha na Telemetria:".as_ptr()
+];
+static STR_REV_L3_VAL: [*const u8; 11] = [
+    "100% Privado — Zero Telemetria Ativada".as_ptr(),
+    "100% Private — Zero Telemetry Enabled".as_ptr(),
+    "100% Prive — Zero Telemetrie Activee".as_ptr(),
+    "100% Privato — Zero Telemetria Attivata".as_ptr(),
+    "100% Privado — Cero Telemetria Activada".as_ptr(),
+    "100% Privat — Keine Telemetrie Aktiviert".as_ptr(),
+    "100% Idiotiko — Mideniki Tilemetria".as_ptr(),
+    "100% Yin si — Ling Yao ce Qi yong".as_ptr(),
+    "100% Puraibe-to — Teremetori Zero".as_ptr(),
+    "100% Niji — Zero Telemetry Sakriya".as_ptr(),
+    "100% Binafsi — Hakuna Telemetria".as_ptr()
+];
+static STR_REV_L4: [*const u8; 11] = [
+    "Seguranca do Sistema:".as_ptr(), "System Security:".as_ptr(), "Securite du Systeme :".as_ptr(),
+    "Sicurezza del Sistema:".as_ptr(), "Seguridad del Sistema:".as_ptr(), "Systemsicherheit:".as_ptr(),
+    "Asfaleia Systimatos:".as_ptr(), "Xi tong An quan:".as_ptr(), "Shisutemu Sekyuriti:".as_ptr(),
+    "System Suraksha:".as_ptr(), "Usalama wa Mfumo:".as_ptr()
+];
+static STR_REV_L4_VAL: [*const u8; 11] = [
+    "Snapshot de Fabrica e Ponto de Restauracao Ativados".as_ptr(),
+    "Factory Snapshot and Restore Point Enabled".as_ptr(),
+    "Instantane d'Usine et Point de Restauration Actives".as_ptr(),
+    "Snapshot di Fabbrica e Punto di Ripristino Attivati".as_ptr(),
+    "Snapshot de Fabrica y Punto de Restauracion Activados".as_ptr(),
+    "Werksschnappschuss und Wiederherstellungspunkt Aktiviert".as_ptr(),
+    "Ergostasiako Stigmiotypo kai Simeio Epanaforas".as_ptr(),
+    "Chu chang Kuai zhao yu Hui fu dian yi Qi yong".as_ptr(),
+    "Koujou Sunappushotto to Fukugen Pointo ga Yuukou".as_ptr(),
+    "Factory Snapshot aur Restore Point Sakriya".as_ptr(),
+    "Picha ya Kiwandani na Sehemu ya Kurejesha Zimewashwa".as_ptr()
+];
+static STR_BTN_INSTALL: [*const u8; 11] = [
+    "Instalar agora >".as_ptr(),
+    "Install now >".as_ptr(),
+    "Installer maintenant >".as_ptr(),
+    "Installa ora >".as_ptr(),
+    "Instalar ahora >".as_ptr(),
+    "Jetzt installieren >".as_ptr(),
+    "Enkatastasi tora >".as_ptr(),
+    "Li ji an zhuang >".as_ptr(),
+    "Ima sugu insuto-ru >".as_ptr(),
+    "Abhi sthapit karein >".as_ptr(),
+    "Sakinisha sasa >".as_ptr()
+];
+
+// Tela 5: Progresso
+static STR_PROG_TITLE: [*const u8; 11] = [
+    "Preparando seu novo espaco no Baken OS...".as_ptr(),
+    "Preparing your new space on Baken OS...".as_ptr(),
+    "Preparation de votre nouvel espace sur Baken OS...".as_ptr(),
+    "Preparazione del tuo nuovo spazio su Baken OS...".as_ptr(),
+    "Preparando su nuevo espacio en Baken OS...".as_ptr(),
+    "Vorbereitung Ihres neuen Baken OS Systems...".as_ptr(),
+    "Proetoimasia tou neou sas chorou sto Baken OS...".as_ptr(),
+    "Zheng zai wei Baken OS zhun bei xin kong jian...".as_ptr(),
+    "Baken OS no atarashii supe-su wo junbi chuu...".as_ptr(),
+    "Baken OS par aapke naye sthan ki taiyari...".as_ptr(),
+    "Inatayarisha nafasi yako mpya kwenye Baken OS...".as_ptr()
+];
+static STR_PROG_SUB: [*const u8; 11] = [
+    "Aguarde enquanto configuramos o microkernel e o BakenFS no SSD.".as_ptr(),
+    "Please wait while microkernel and BakenFS are configured on SSD.".as_ptr(),
+    "Veuillez patienter pendant la configuration du microkernel et de BakenFS sur le SSD.".as_ptr(),
+    "Attendi la configurazione del microkernel e di BakenFS sull'SSD.".as_ptr(),
+    "Espere mientras configuramos el microkernel y BakenFS en el SSD.".as_ptr(),
+    "Bitte warten Sie, waehrend Microkernel und BakenFS eingerichtet werden.".as_ptr(),
+    "Parakalo perimenete oso rythmizetai to microkernel kai to BakenFS ston SSD.".as_ptr(),
+    "Qing shao hou, zheng zai SSD shang pei zhi wei nei he he BakenFS.".as_ptr(),
+    "SSD jou de maikuroka-neru to BakenFS wo settei chuu desu.".as_ptr(),
+    "Kripya pratiksha karein jab tak SSD par microkernel aur BakenFS vinyasit ho rahe hain.".as_ptr(),
+    "Tafadhali subiri wakati microkernel na BakenFS zinasanidiwa kwenye SSD.".as_ptr()
+];
+static STR_PROG_S1: [*const u8; 11] = [
+    "1. Criando tabela de particoes GPT e volume ESP FAT32...".as_ptr(),
+    "1. Creating GPT partition table and FAT32 ESP volume...".as_ptr(),
+    "1. Creation de la table GPT et du volume ESP FAT32...".as_ptr(),
+    "1. Creazione tabella GPT e volume ESP FAT32...".as_ptr(),
+    "1. Creando tabla de particiones GPT y volumen ESP FAT32...".as_ptr(),
+    "1. GPT-Partitionstabelle und FAT32-ESP-Volume werden erstellt...".as_ptr(),
+    "1. Dimiourgia pinaka GPT kai tomou ESP FAT32...".as_ptr(),
+    "1. Chuang jian GPT fen qu biao yu ESP FAT32 juan...".as_ptr(),
+    "1. GPT pakshon te-buru to ESP FAT32 boryumu sakusei chuu...".as_ptr(),
+    "1. GPT vibhajan table aur FAT32 ESP volume banaya ja raha hai...".as_ptr(),
+    "1. Inatengeneza jedwali la GPT na juzuu ya FAT32 ESP...".as_ptr()
+];
+static STR_PROG_S2: [*const u8; 11] = [
+    "2. Formatando volume de dados BakenFS com suporte a snapshots...".as_ptr(),
+    "2. Formatting BakenFS data volume with snapshot support...".as_ptr(),
+    "2. Formatage du volume BakenFS avec support des instantanes...".as_ptr(),
+    "2. Formattazione volume BakenFS con supporto snapshot...".as_ptr(),
+    "2. Formateando volumen de datos BakenFS con soporte de snapshots...".as_ptr(),
+    "2. BakenFS-Datenvolume wird formatiert mit Snapshot-Unterstuetzung...".as_ptr(),
+    "2. Diamorfosi tomou dedomenon BakenFS me ypostirixi stigmiotypon...".as_ptr(),
+    "2. Ge shi hua zhi chi kuai zhao de BakenFS shu ju juan...".as_ptr(),
+    "2. Sunappushotto taiou BakenFS de-ta boryumu fo-matto chuu...".as_ptr(),
+    "2. Snapshot samarthan ke saath BakenFS data volume format ho raha hai...".as_ptr(),
+    "2. Inafomati juzuu ya data ya BakenFS na msaada wa picha za haraka...".as_ptr()
+];
+static STR_PROG_S3: [*const u8; 11] = [
+    "3. Instalando microkernel Sotlas e drivers nativos...".as_ptr(),
+    "3. Installing Sotlas microkernel and native drivers...".as_ptr(),
+    "3. Installation du microkernel Sotlas et des pilotes natifs...".as_ptr(),
+    "3. Installazione microkernel Sotlas e driver nativi...".as_ptr(),
+    "3. Instalando microkernel Sotlas y controladores nativos...".as_ptr(),
+    "3. Sotlas-Microkernel und native Treiber werden installiert...".as_ptr(),
+    "3. Enkatastasi tou microkernel Sotlas kai ton ntopion odigon...".as_ptr(),
+    "3. An zhuang Sotlas wei nei he he yuan sheng qu dong cheng xu...".as_ptr(),
+    "3. Sotlas maikuroka-neru to neitibu doraiba- wo insuto-ru chuu...".as_ptr(),
+    "3. Sotlas microkernel aur native drivers sthapit ho rahe hain...".as_ptr(),
+    "3. Inasakinisha microkernel ya Sotlas na viendeshi asili...".as_ptr()
+];
+static STR_PROG_S4: [*const u8; 11] = [
+    "4. Configurando ponto de recuperacao inicial e finalizando...".as_ptr(),
+    "4. Configuring initial restore point and finalizing...".as_ptr(),
+    "4. Configuration du point de restauration initial et finalisation...".as_ptr(),
+    "4. Configurazione del punto di ripristino iniziale e completamento...".as_ptr(),
+    "4. Configurando punto de recuperacion inicial y finalizando...".as_ptr(),
+    "4. Anfangswiederherstellungspunkt wird eingerichtet und abgeschlossen...".as_ptr(),
+    "4. Dimiourgia archikou simeiou epanaforas kai oloklirosi...".as_ptr(),
+    "4. Pei zhi chu shi hui fu dian bing wan cheng...".as_ptr(),
+    "4. Shoki fukugen pointo wo seitei shite kanryou...".as_ptr(),
+    "4. Prarambhik restore point vinyasit karke samapt kiya ja raha hai...".as_ptr(),
+    "4. Inasanidi sehemu ya mwanzo ya kurejesha na kukamilisha...".as_ptr()
+];
+
+// Tela 6: Conclusao
+static STR_DONE_TITLE: [*const u8; 11] = [
+    "Baken OS foi instalado com sucesso!".as_ptr(),
+    "Baken OS has been successfully installed!".as_ptr(),
+    "Baken OS a ete installe avec succes !".as_ptr(),
+    "Baken OS e stato installato con successo!".as_ptr(),
+    "Baken OS se ha instalado con exito!".as_ptr(),
+    "Baken OS wurde erfolgreich installiert!".as_ptr(),
+    "To Baken OS enkatastathike me epitychia!".as_ptr(),
+    "Baken OS yi cheng gong an zhuang!".as_ptr(),
+    "Baken OS no insuto-ru ga seikou shimashita!".as_ptr(),
+    "Baken OS safaltapurvak sthapit ho gaya hai!".as_ptr(),
+    "Baken OS imesakinishwa kwa mafanikio!".as_ptr()
+];
+static STR_DONE_SUB: [*const u8; 11] = [
+    "Seu computador esta pronto para a primeira inicializacao.".as_ptr(),
+    "Your computer is ready for its first startup.".as_ptr(),
+    "Votre ordinateur est pret pour son premier demarrage.".as_ptr(),
+    "Il tuo computer e pronto per il primo avvio.".as_ptr(),
+    "Su equipo esta listo para el primer inicio.".as_ptr(),
+    "Ihr Computer ist bereit fuer den ersten Systemstart.".as_ptr(),
+    "O ypologistis sas einai etoimos gia tin proti ekkinisi.".as_ptr(),
+    "Nin de dian nao yi zhun bei hao di yi ci qi dong.".as_ptr(),
+    "Konpyuta wa saisho no kidou no junbi ga dekimashita.".as_ptr(),
+    "Aapka computer pehle startup ke liye taiyar hai.".as_ptr(),
+    "Kompyuta yako iko tayari kwa kuanza mara ya kwanza.".as_ptr()
+];
+static STR_DONE_BTN: [*const u8; 11] = [
+    "Reiniciar e Continuar >".as_ptr(),
+    "Restart & Continue >".as_ptr(),
+    "Redemarrer & Continuer >".as_ptr(),
+    "Riavvia & Continua >".as_ptr(),
+    "Reiniciar y Continuar >".as_ptr(),
+    "Neustarten & Weiter >".as_ptr(),
+    "Epanekkinisi & Synecheia >".as_ptr(),
+    "Zhong qi bing Ji xu >".as_ptr(),
+    "Saikidou shite Tsugi he >".as_ptr(),
+    "Restart karein aur Aage Badhein >".as_ptr(),
+    "Anzisha upya & Endelea >".as_ptr()
+];
+
+// Tela 7: Ferramentas de Reparo
+static STR_REPAIR_TITLE: [*const u8; 11] = [
+    "Ferramentas de Recuperacao Baken".as_ptr(),
+    "Baken Recovery Tools".as_ptr(),
+    "Outils de Recuperation Baken".as_ptr(),
+    "Strumenti di Ripristino Baken".as_ptr(),
+    "Herramientas de Recuperacion Baken".as_ptr(),
+    "Baken Wiederherstellungswerkzeuge".as_ptr(),
+    "Ergaleia Epanaforas Baken".as_ptr(),
+    "Baken Hui fu Gong ju".as_ptr(),
+    "Baken Fukugen Tsu-ru".as_ptr(),
+    "Baken Recovery Tools".as_ptr(),
+    "Zana za Urejeshaji za Baken".as_ptr()
+];
+static STR_REPAIR_SUB: [*const u8; 11] = [
+    "Diagnostique e repare o sistema sem perder seus arquivos.".as_ptr(),
+    "Diagnose and repair the system without losing your files.".as_ptr(),
+    "Diagnostiquez et reparez le systeme sans perdre vos fichiers.".as_ptr(),
+    "Diagnostica e ripara il sistema senza perdere i tuoi file.".as_ptr(),
+    "Diagnostique y repare el sistema sin perder sus archivos.".as_ptr(),
+    "Diagnostizieren und reparieren Sie das System ohne Datenverlust.".as_ptr(),
+    "Diagnoste kai episkevaste to systima choris apoleia arxeion.".as_ptr(),
+    "Zhen duan bing xiu fu xi tong er bu diu shi wen jian.".as_ptr(),
+    "Fairu wo ushinawazu ni shisutemu wo shindan to shuri.".as_ptr(),
+    "Apni files khoye bina system ka nidan aur marammat karein.".as_ptr(),
+    "Chunguza na urekebishe mfumo bila kupoteza faili zako.".as_ptr()
+];
+static STR_REPAIR_OPT1_T: [*const u8; 11] = [
+    "[1] Reparar Bootloader UEFI & VBR FAT32".as_ptr(),
+    "[1] Repair UEFI Bootloader & FAT32 VBR".as_ptr(),
+    "[1] Reparer le Bootloader UEFI & VBR FAT32".as_ptr(),
+    "[1] Ripara Bootloader UEFI & VBR FAT32".as_ptr(),
+    "[1] Reparar Bootloader UEFI y VBR FAT32".as_ptr(),
+    "[1] UEFI-Bootloader & FAT32-VBR reparieren".as_ptr(),
+    "[1] Episkevi UEFI Bootloader & FAT32 VBR".as_ptr(),
+    "[1] Xiu fu UEFI Bootloader yu FAT32 VBR".as_ptr(),
+    "[1] UEFI Bu-torauda- to FAT32 VBR no Shuri".as_ptr(),
+    "[1] UEFI Bootloader & FAT32 VBR ki Marammat".as_ptr(),
+    "[1] Rekebisha Bootloader ya UEFI & FAT32 VBR".as_ptr()
+];
+static STR_REPAIR_OPT1_D: [*const u8; 11] = [
+    "Restaura o arquivo BOOTX64.EFI e a integridade da particao ESP.".as_ptr(),
+    "Restores BOOTX64.EFI file and ESP partition integrity.".as_ptr(),
+    "Restaure le fichier BOOTX64.EFI et l'integrite de la partition ESP.".as_ptr(),
+    "Ripristina il file BOOTX64.EFI e l'integrita della partizione ESP.".as_ptr(),
+    "Restaura el archivo BOOTX64.EFI y la integridad de la particion ESP.".as_ptr(),
+    "Stellt die Datei BOOTX64.EFI und die Integritaet der ESP wieder her.".as_ptr(),
+    "Epanafora tou arxeiou BOOTX64.EFI kai akeraiotita tou ESP.".as_ptr(),
+    "Hui fu BOOTX64.EFI wen jian he ESP fen qu wan zheng xing.".as_ptr(),
+    "BOOTX64.EFI fairu to ESP pakshon no kanzensei wo fukugen.".as_ptr(),
+    "BOOTX64.EFI file aur ESP partition ki akhandata bahal karein.".as_ptr(),
+    "Inarejesha faili ya BOOTX64.EFI na uadilifu wa kizigeu cha ESP.".as_ptr()
+];
+static STR_REPAIR_OPT2_T: [*const u8; 11] = [
+    "[2] Restaurar Snapshot Inicial do BakenFS".as_ptr(),
+    "[2] Restore Initial BakenFS Snapshot".as_ptr(),
+    "[2] Restaurer l'Instantane Initial de BakenFS".as_ptr(),
+    "[2] Ripristina Snapshot Iniziale di BakenFS".as_ptr(),
+    "[2] Restaurar Snapshot Inicial de BakenFS".as_ptr(),
+    "[2] Anfangsschnappschuss von BakenFS wiederherstellen".as_ptr(),
+    "[2] Epanafora Archikou Stigmiotypou BakenFS".as_ptr(),
+    "[2] Hui fu Chu shi BakenFS Kuai zhao".as_ptr(),
+    "[2] Shoki BakenFS Sunappushotto no Fukugen".as_ptr(),
+    "[2] Prarambhik BakenFS Snapshot Bahal karein".as_ptr(),
+    "[2] Rejesha Picha ya Mwanzo ya BakenFS".as_ptr()
+];
+static STR_REPAIR_OPT2_D: [*const u8; 11] = [
+    "Reverte o estado do sistema operacional para a instalacao de fabrica.".as_ptr(),
+    "Reverts operating system state back to factory installation.".as_ptr(),
+    "Restaure l'etat du systeme d'exploitation a l'installation d'usine.".as_ptr(),
+    "Ripristina lo stato del sistema operativo all'installazione di fabbrica.".as_ptr(),
+    "Revierte el estado del sistema operativo a la instalacion de fabrica.".as_ptr(),
+    "Setzt den Betriebssystemzustand auf die Werksinstallation zurueck.".as_ptr(),
+    "Epanaferei tin katastasi tou leitourgikou systimatos sto ergostasio.".as_ptr(),
+    "Jiang cao zuo xi tong zhuang tai hui gun wei chu chang an zhuang.".as_ptr(),
+    "OS no joutai wo koujou shukka ji no insuto-ru ni modoshimasu.".as_ptr(),
+    "Operating system ki sthiti ko factory installation par wapas layein.".as_ptr(),
+    "Inarejesha hali ya mfumo wa uendeshaji kwenye usakinishaji wa kiwandani.".as_ptr()
+];
+static STR_BTN_HOME: [*const u8; 11] = [
+    "< Inicio".as_ptr(), "< Start".as_ptr(), "< Accueil".as_ptr(),
+    "< Inizio".as_ptr(), "< Inicio".as_ptr(), "< Start".as_ptr(),
+    "< Enarxi".as_ptr(), "< Shou ye".as_ptr(), "< Toppu".as_ptr(),
+    "< Mukhya".as_ptr(), "< Mwanzo".as_ptr()
+];
+
+// Tela 8: OOBE
+static STR_OOBE_TITLE: [*const u8; 11] = [
+    "Boas-vindas ao Baken OS — Primeiro Uso (OOBE)".as_ptr(),
+    "Welcome to Baken OS — Out of Box Experience (OOBE)".as_ptr(),
+    "Bienvenue sur Baken OS — Premiere Utilisation (OOBE)".as_ptr(),
+    "Benvenuto su Baken OS — Prima Esperienza (OOBE)".as_ptr(),
+    "Bienvenido a Baken OS — Primer Uso (OOBE)".as_ptr(),
+    "Willkommen bei Baken OS — Ersteinrichtung (OOBE)".as_ptr(),
+    "Kalosorisate sto Baken OS — Proti Chrisi (OOBE)".as_ptr(),
+    "Huan ying shi yong Baken OS — Shou ci Ti yan (OOBE)".as_ptr(),
+    "Baken OS he youkoso — Shoki Settei (OOBE)".as_ptr(),
+    "Baken OS mein Swagat hai — Pehla Anubhav (OOBE)".as_ptr(),
+    "Karibu Baken OS — Uzoefu wa Mara ya Kwanza (OOBE)".as_ptr()
+];
+static STR_OOBE_SUB: [*const u8; 11] = [
+    "Configuracao de conta local, atmosfera visual e perfil de usuario.".as_ptr(),
+    "Local account setup, visual atmosphere and user profile.".as_ptr(),
+    "Configuration du compte local, atmosphere visuelle et profil utilisateur.".as_ptr(),
+    "Configurazione dell'account locale, atmosfera visiva e profilo utente.".as_ptr(),
+    "Configuracion de cuenta local, atmosfera visual y perfil de usuario.".as_ptr(),
+    "Einrichtung des lokalen Kontos, visuelle Atmosphaere und Benutzerprofil.".as_ptr(),
+    "Rhythmisi topikou logariasmou, optiki atmosfera kai profil christi.".as_ptr(),
+    "Ben di zhang hu she zhi, shi jue fen wei he yong hu pei zhi.".as_ptr(),
+    "Ro-karu akaunto no settei, bishuaru kankyou to yu-za- purofairu.".as_ptr(),
+    "Local account vinyas, drishya vatavaran aur user profile.".as_ptr(),
+    "Mipangilio ya akaunti ya ndani, mazingira ya kuona na wasifu wa mtumiaji.".as_ptr()
+];
+static STR_OOBE_P1: [*const u8; 11] = [
+    "• Desenvolvedor Sotlas & Engenharia de Sistemas (Nativo)".as_ptr(),
+    "• Sotlas Developer & Systems Engineering (Native)".as_ptr(),
+    "• Developpeur Sotlas & Ingenierie Systeme (Natif)".as_ptr(),
+    "• Sviluppatore Sotlas & Ingegneria dei Sistemi (Nativo)".as_ptr(),
+    "• Desarrollador Sotlas e Ingenieria de Sistemas (Nativo)".as_ptr(),
+    "• Sotlas-Entwickler & Systemtechnik (Nativ)".as_ptr(),
+    "• Sotlas Developer & Michaniki Systimaton (Ntopio)".as_ptr(),
+    "• Sotlas Kai fa zhe yu Xi tong Gong cheng (Yuan sheng)".as_ptr(),
+    "• Sotlas Kaihatsusha & Shisutemu Enjiniaringu (Neitibu)".as_ptr(),
+    "• Sotlas Developer aur Systems Engineering (Native)".as_ptr(),
+    "• Msanidi wa Sotlas & Uhandisi wa Mifumo (Asili)".as_ptr()
+];
+static STR_OOBE_P2: [*const u8; 11] = [
+    "• Zero Rastreamento: Todos os dados permanecem locais".as_ptr(),
+    "• Zero Tracking: All data remains strictly local".as_ptr(),
+    "• Zero Pistage : Toutes les donnees restent strictement locales".as_ptr(),
+    "• Zero Tracciamento: Tutti i dati rimangono strettamente locali".as_ptr(),
+    "• Cero Rastreo: Todos los datos permanecen locales".as_ptr(),
+    "• Kein Tracking: Alle Daten verbleiben vollstaendig lokal".as_ptr(),
+    "• Mideniki Ichnilasi: Ola ta dedomena paramenoun topika".as_ptr(),
+    "• Ling Gen zong: Suo you shu ju bao chi zai ben di".as_ptr(),
+    "• Torakkingu Zero: Subete no de-ta wa kanzen ni ro-karu".as_ptr(),
+    "• Zero Tracking: Sabhi data poori tarah local rehta hai".as_ptr(),
+    "• Hakuna Ufuatiliaji: Data zote zinabaki ndani kabisa".as_ptr()
+];
+static STR_OOBE_P3: [*const u8; 11] = [
+    "• BakenFS Vault: Criptografia de usuario ativada".as_ptr(),
+    "• BakenFS Vault: User encryption activated".as_ptr(),
+    "• BakenFS Vault : Chiffrement utilisateur active".as_ptr(),
+    "• BakenFS Vault: Crittografia utente attivata".as_ptr(),
+    "• BakenFS Vault: Cifrado de usuario activado".as_ptr(),
+    "• BakenFS Vault: Benutzerverschluesselung aktiviert".as_ptr(),
+    "• BakenFS Vault: Krypto-grafisi christi energopoiimeni".as_ptr(),
+    "• BakenFS Vault: Yong hu jia mi yi qi yong".as_ptr(),
+    "• BakenFS Vault: Yu-za-暗号ka ga yuukou".as_ptr(),
+    "• BakenFS Vault: User encryption sakriya".as_ptr(),
+    "• BakenFS Vault: Usimbaji fiche wa mtumiaji umewashwa".as_ptr()
+];
+static STR_OOBE_BTN: [*const u8; 11] = [
+    "Iniciar Desktop Baken >".as_ptr(),
+    "Launch Baken Desktop >".as_ptr(),
+    "Lancer le Bureau Baken >".as_ptr(),
+    "Avvia Desktop Baken >".as_ptr(),
+    "Iniciar Escritorio Baken >".as_ptr(),
+    "Baken Desktop starten >".as_ptr(),
+    "Ekkinitheite sto Baken Desktop >".as_ptr(),
+    "Qi dong Baken Zhuo mian >".as_ptr(),
+    "Baken Desukutoppu wo Kidou >".as_ptr(),
+    "Baken Desktop Shuru karein >".as_ptr(),
+    "Zindua Eneo-kazi la Baken >".as_ptr()
+];
+
+
+// =============================================================================
+// RENDERIZADOR PRINCIPAL DO ASSISTENTE AURORA
+// =============================================================================
 
 @system
 pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
         INSTALLER.anim_tick = (INSTALLER.anim_tick + 1) % 3600;
+        let step = INSTALLER.step;
 
-        // Fundo do Wizard em Vidro Acrílico Profundo (Deep Acrylic Mica)
-        gfx_fill_rect_alpha(x, y, w, h, 0x000B1120, 245);
-
-        // 1. Barra Superior com Indicador de Passos (Step Indicator)
-        let header_h: u32 = 44;
-        gfx_fill_rect_alpha(x, y, w, header_h, 0x000F172A, 220);
-        gfx_draw_hline(x, y + header_h, w, 0x001E293B, 200);
-
-        let step_labels = ["1. Idioma", "2. Disco & Particoes", "3. Instalacao", "4. Personalizacao", "5. Conclusao"];
-        let step_count: u32 = 5;
-        let step_w = w / step_count;
-
-        for mut s in 0..step_count {
-            let sx = x + (s * step_w);
-            let is_cur = s == INSTALLER.step;
-            let is_past = s < INSTALLER.step;
-
-            let num_col = if is_cur { 0x0038BDF8 } else if is_past { 0x0010B981 } else { 0x00475569 };
-            let text_col = if is_cur { 0x00F8FAFC } else if is_past { 0x0094A3B8 } else { 0x00475569 };
-
-            // Ponto indicador
-            gfx_draw_circle_alpha(sx + 18, y + 22, 6, num_col, 255);
-            gfx_draw_text_alpha(sx + 30, y + 15, step_labels[s], text_col, 1, 230);
+        if (step == 0) {
+            render_welcome(x, y, w, h);
+            return;
         }
 
-        // 2. Área de Conteúdo Principal (Centralizada)
-        let body_y = y + header_h + 16;
-        let body_h = h - header_h - 70;
+        render_aurora_shell(x, y, w, h, min_u32(step, 5));
 
-        if INSTALLER.step == 0 {
-            render_step_welcome(x, body_y, w, body_h);
-        } else if INSTALLER.step == 1 {
-            render_step_disk(x, body_y, w, body_h);
-        } else if INSTALLER.step == 2 {
-            render_step_progress(x, body_y, w, body_h);
-        } else if INSTALLER.step == 3 {
-            render_step_user(x, body_y, w, body_h);
-        } else if INSTALLER.step == 4 {
-            render_step_finish(x, body_y, w, body_h);
-        }
-
-        // 3. Barra Inferior com Botões de Navegação
-        let footer_y = y + h - 50;
-        gfx_fill_rect_alpha(x, footer_y, w, 50, 0x000F172A, 230);
-        gfx_draw_hline(x, footer_y, w, 0x001E293B, 200);
-
-        // Botão Voltar
-        if INSTALLER.step > 0 && INSTALLER.step != 2 && INSTALLER.step != 4 {
-            let back_x = x + 24;
-            gfx_draw_glass_rect(back_x, footer_y + 10, 100, 30, 0x001E293B, 200, 0x00475569, 8);
-            gfx_draw_text_alpha(back_x + 24, footer_y + 18, "< Voltar", 0x0094A3B8, 1, 230);
-        }
-
-        // Botão Avançar / Instalar
-        if INSTALLER.step < 4 && INSTALLER.step != 2 {
-            let next_x = x + w - 150;
-            let btn_text = if INSTALLER.step == 1 { "Instalar Agora >" } else { "Avancar >" };
-            gfx_draw_glass_rect(next_x, footer_y + 10, 126, 30, 0x000284C7, 220, 0x0038BDF8, 8);
-            gfx_draw_text_alpha(next_x + 18, footer_y + 18, btn_text, 0x00FFFFFF, 1, 255);
-        } else if INSTALLER.step == 4 {
-            let reboot_x = x + w - 170;
-            gfx_draw_glass_rect(reboot_x, footer_y + 10, 146, 30, 0x00059669, 220, 0x0010B981, 8);
-            gfx_draw_text_alpha(reboot_x + 16, footer_y + 18, "Reiniciar Agora", 0x00FFFFFF, 1, 255);
+        if (step == 1) {
+            render_language_keyboard(x, y, w, h);
+        } else if (step == 2) {
+            render_mode_choice(x, y, w, h);
+        } else if (step == 3) {
+            render_disk_selection(x, y, w, h);
+        } else if (step == 4) {
+            render_review_confirmation(x, y, w, h);
+        } else if (step == 5) {
+            render_installing_progress(x, y, w, h);
+        } else if (step == 6) {
+            render_complete_summary(x, y, w, h);
+        } else if (step == 7) {
+            render_repair_tools(x, y, w, h);
+        } else {
+            render_oobe_experience(x, y, w, h);
         }
     }
 }
 
 @system
-fn render_step_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
+fn render_aurora_shell(x: u32, y: u32, w: u32, h: u32, active_step: u32) -> void {
+    let lang_idx = get_lang();
+    if (w >= 760) {
+        // Painel Lateral Esquerdo (Timeline Stepper) em Vidro Acrilico Translucido
+        gfx_draw_glass_rect(x + 16, y + 16, 210, h - 32, 0x000F172A, 195, 0x0038BDF8, 16);
+        gfx_draw_baken_logo(x + 32, y + 36, 32, 255);
+        gfx_draw_text_alpha(x + 72, y + 38, "BAKEN OS".as_ptr(), 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(x + 72, y + 58, "Instalacao Aurora".as_ptr(), 0x0038BDF8, 1, 230);
+
+        for mut i in 0..6 {
+            let py = y + 104 + ((i as u32) * 44);
+            let is_past_or_current = (i as u32) <= active_step;
+            let dot_color = if (is_past_or_current) { 0x0000E5FF } else { 0x00475569 };
+
+            if (i < 5) {
+                let line_c = if ((i as u32) < active_step) { 0x0000E5FF } else { 0x00334155 };
+                gfx_fill_rect_alpha(x + 47, py + 14, 2, 30, line_c, 200);
+            }
+
+            gfx_draw_circle_alpha(x + 48, py + 8, 6, dot_color, 255);
+            if (i as u32 == active_step) {
+                gfx_draw_circle_alpha(x + 48, py + 8, 10, 0x0000E5FF, 60);
+            }
+
+            let txt_c = if (is_past_or_current) { 0x00F8FAFC } else { 0x0064748B };
+            let step_label = STR_SIDEBAR_STEPS[lang_idx][i];
+            gfx_draw_text_alpha(x + 66, py, step_label, txt_c, 1, 255);
+        }
+
+        // Rodape da Barra Lateral
+        gfx_draw_circle_alpha(x + 36, y + h - 42, 4, 0x0010B981, 255);
+        gfx_draw_text_alpha(x + 48, y + h - 48, STR_PRIVACY_TAG[lang_idx], 0x0010B981, 1, 240);
+
+        // Painel Principal Direito em Vidro Fosco Translucido
+        let main_x = x + 242;
+        let main_w = w - 258;
+        gfx_draw_glass_rect(main_x, y + 16, main_w, h - 32, 0x000F172A, 185, 0x0038BDF8, 16);
+    } else {
+        // Modo Compacto para Resolucoes Menores
+        gfx_draw_glass_rect(x + 10, y + 10, w - 20, h - 20, 0x000F172A, 210, 0x0038BDF8, 14);
+        gfx_draw_text_alpha(x + 24, y + 24, "BAKEN OS / SETUP".as_ptr(), 0x0000E5FF, 1, 240);
+        let progress_w = ((w - 48) * (active_step + 1)) / 6;
+        gfx_fill_rect_alpha(x + 24, y + 46, progress_w, 3, 0x0000E5FF, 255);
+    }
+}
+
+@system
+fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
-        let center_x = x + (w / 2);
+        let cw: u32 = if (w > 720) { 660 } else { w - 32 };
+        let ch: u32 = if (h > 520) { 380 } else { h - 40 };
+        let cx = x + (w - cw) / 2;
+        let cy = y + (if (h > ch) { (h - ch) / 2 - 12 } else { 10 });
 
-        // Logo Vortex com pulso suave
-        let logo_y = y + 36;
-        let pulse = 24 + ((INSTALLER.anim_tick % 60) / 12);
-        gfx_draw_circle_alpha(center_x, logo_y, pulse, 0x0038BDF8, 50);
-        gfx_draw_circle_alpha(center_x, logo_y, 20, 0x000284C7, 180);
-        gfx_draw_circle_alpha(center_x, logo_y, 10, 0x0038BDF8, 255);
+        // Card Hero Central Flutuante em Vidro Fosco
+        gfx_draw_glass_rect(cx, cy, cw, ch, 0x000F172A, 175, 0x0038BDF8, 20);
 
-        // Título e Boas-Vindas
-        let t1 = "Bem-vindo ao Baken OS Sovereign";
+        let logo_x = cx + (cw / 2);
+        let logo_y = cy + 68;
+        let pulse = 24 + ((INSTALLER.anim_tick % 30) / 6);
+        gfx_draw_circle_alpha(logo_x, logo_y, pulse + 14, 0x000284C7, 30);
+        gfx_draw_circle_alpha(logo_x, logo_y, pulse + 4, 0x0000E5FF, 60);
+
+        gfx_draw_baken_logo(logo_x - 36, logo_y - 36, 72, 255);
+
+        let t1 = "BAKEN OS";
         let t1_w = gfx_measure_text(t1.as_ptr());
-        gfx_draw_text_alpha(center_x - (t1_w / 2), logo_y + 32, t1.as_ptr(), 0x00F8FAFC, 1, 255);
+        gfx_draw_text_alpha(logo_x - (t1_w / 2), logo_y + 44, t1.as_ptr(), 0x00FFFFFF, 1, 255);
 
-        let t2 = "Escolha o idioma de instalacao e o layout do seu teclado:";
+        // Ciclo de Boas-Vindas nos 11 Idiomas Suportados
+        let g_welcome = [
+            "Bem-vindo, obrigado por escolher o Baken OS",
+            "Welcome, thank you for choosing Baken OS",
+            "Bienvenue, merci d'avoir choisi Baken OS",
+            "Benvenuto, grazie per aver scelto Baken OS",
+            "Bienvenido, gracias por elegir Baken OS",
+            "Willkommen, danke dass Sie Baken OS gewaehlt haben",
+            "Kalosorisate, efcharistoume pou epilexate to Baken OS",
+            "Huan ying, gan xie nin xuan ze Baken OS",
+            "Yokoso, Baken OS wo erande itadaki arigatou gozaimasu",
+            "Swagat hai, Baken OS chunne ke liye dhanyavad",
+            "Karibu, asante kwa kuchagua Baken OS"
+        ];
+
+        let g_buttons = [
+            "Comecar agora >",
+            "Get Started >",
+            "Commencer maintenant >",
+            "Inizia ora >",
+            "Comenzar ahora >",
+            "Jetzt starten >",
+            "Xekiniste tora >",
+            "Li ji kai shi >",
+            "Ima sugu hajimeru >",
+            "Abhi shuru karein >",
+            "Anza sasa >"
+        ];
+
+        let g_settings = [
+            "Configuracoes",
+            "Settings",
+            "Parametres",
+            "Impostazioni",
+            "Configuracion",
+            "Einstellungen",
+            "Rythmiseis",
+            "She zhi",
+            "Settei",
+            "Settings",
+            "Mipangilio"
+        ];
+
+        let g_repair = [
+            "Restaurar ou Reparar Computador",
+            "Restore or Repair Computer",
+            "Restaurer ou Reparer l'ordinateur",
+            "Ripristina o Ripara Computer",
+            "Restaurar o Reparar Computadora",
+            "Computer Wiederherstellen oder Reparieren",
+            "Epanafora i Episkevi Ypologisti",
+            "Hui fu huo Xiu fu Dian nao",
+            "Konpyuta no Fukugen matawa Shuri",
+            "Computer Restore ya Repair karein",
+            "Rejesha au Rekebisha Kompyuta"
+        ];
+
+        let msg_idx = ((INSTALLER.anim_tick / 75) % 11) as usize;
+        
+        // 1. Subtitulo Traduzido em Tempo Real
+        let t2 = g_welcome[msg_idx];
         let t2_w = gfx_measure_text(t2.as_ptr());
-        gfx_draw_text_alpha(center_x - (t2_w / 2), logo_y + 54, t2.as_ptr(), 0x0094A3B8, 1, 220);
+        gfx_draw_text_alpha(logo_x - (t2_w / 2), logo_y + 72, t2.as_ptr(), 0x00E0F2FE, 1, 255);
 
-        // Cartões de Seleção de Idioma (3 opções)
-        let card_y = logo_y + 84;
-        let card_w: u32 = 150;
-        let card_h: u32 = 48;
-        let languages = ["Portugues (Brasil)", "English (US)", "Espanol"];
+        // 2. Botao Central Traduzido em Sincronia
+        let start_w: u32 = 300;
+        let start_h: u32 = 50;
+        let start_x = logo_x - (start_w / 2);
+        let start_y = logo_y + 116;
+        gfx_draw_glass_rect(start_x, start_y, start_w, start_h, 0x000284C7, 240, 0x0000E5FF, 14);
+        let btn_txt = g_buttons[msg_idx];
+        let btn_w = gfx_measure_text(btn_txt.as_ptr());
+        gfx_draw_text_alpha(start_x + (start_w - btn_w) / 2, start_y + 15, btn_txt.as_ptr(), 0x00FFFFFF, 1, 255);
 
-        for mut i in 0..3 {
-            let cx = center_x - 240 + (i * (card_w + 15)) as u32;
-            let is_sel = i == INSTALLER.selected_lang;
-            let bg_c = if is_sel { 0x001E293B } else { 0x000F172A };
-            let border_c = if is_sel { 0x0038BDF8 } else { 0x00334155 };
+        // 3. Links Traduzidos no Canto Inferior Esquerdo
+        let link_y = if (h > 50) { h - 40 } else { 10 };
+        let set_txt = g_settings[msg_idx];
+        let set_w = gfx_measure_text(set_txt.as_ptr());
+        gfx_draw_text_alpha(28, link_y + 8, set_txt.as_ptr(), 0x00E0F2FE, 1, 240);
+        
+        let sep_x = 28 + set_w + 14;
+        gfx_draw_text_alpha(sep_x, link_y + 8, "|".as_ptr(), 0x00475569, 1, 200);
+        
+        let rep_txt = g_repair[msg_idx];
+        gfx_draw_text_alpha(sep_x + 16, link_y + 8, rep_txt.as_ptr(), 0x00E0F2FE, 1, 240);
 
-            gfx_draw_glass_rect(cx, card_y, card_w, card_h, bg_c, 210, border_c, 8);
-            let check_col = if is_sel { 0x0038BDF8 } else { 0x00475569 };
-            gfx_draw_circle_alpha(cx + 18, card_y + 24, 6, check_col, 255);
-            gfx_draw_text_alpha(cx + 32, card_y + 18, languages[i], 0x00F8FAFC, 1, 230);
+        // 4. Rodape Canto Inferior Direito
+        let brand = "Baken OS - TasteTrack Systems LTDA";
+        let brand_w = gfx_measure_text(brand.as_ptr());
+        let brand_x = if (w > brand_w + 34) { w - brand_w - 28 } else { 10 };
+        gfx_draw_text_alpha(brand_x, link_y + 8, brand.as_ptr(), 0x0094A3B8, 1, 200);
+    }
+}
+
+@system
+fn render_language_keyboard(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
+
+        gfx_draw_text_alpha(cx, y + 36, STR_LANG_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_LANG_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        let col_w = (cw - 20) / 2;
+
+        // Lista de 11 Idiomas e Teclados Nativos
+        let langs = [
+            "[1] Portugues (Brasil) • ABNT2",
+            "[2] English (US) • US-Intl",
+            "[3] Francais (France) • AZERTY",
+            "[4] Italiano (Italia) • QWERTY",
+            "[5] Espanol (LatAm) • ISO Latin",
+            "[6] Deutsch (DE/CH) • QWERTZ",
+            "[7] Ellenika (Grego) • Greek",
+            "[8] Zhongwen (Chines) • Pinyin",
+            "[9] Nihongo (Japones) • JIS/Romaji",
+            "[10] Hindi (Indiano) • Inscript",
+            "[11] Kiswahili (Africano) • Std"
+        ];
+
+        // Coluna 1 (Idiomas 0 a 5)
+        gfx_draw_text_alpha(cx, y + 90, STR_LANG_COL1[lang_idx], 0x0038BDF8, 1, 240);
+        for mut i in 0..6 {
+            let ly = y + 112 + (i * 38) as u32;
+            let sel = (INSTALLER.selected_lang == i);
+            gfx_draw_glass_rect(cx, ly, col_w, 32, if (sel) { 0x00132338 } else { 0x001E293B }, if (sel) { 240 } else { 160 }, if (sel) { 0x0010B981 } else { 0x00334155 }, 8);
+            gfx_draw_circle_alpha(cx + 14, ly + 16, 5, if (sel) { 0x0010B981 } else { 0x0064748B }, 255);
+            gfx_draw_text_alpha(cx + 26, ly + 8, langs[i as usize].as_ptr(), if (sel) { 0x00FFFFFF } else { 0x00CBD5E1 }, 1, 255);
         }
 
-        // Seleção de Layout de Teclado
-        let kb_y = card_y + card_h + 20;
-        gfx_draw_text_alpha(center_x - 120, kb_y, "Layout do Teclado:", 0x00CBD5E1, 1, 220);
+        // Coluna 2 (Idiomas 6 a 10)
+        let col2_x = cx + col_w + 20;
+        gfx_draw_text_alpha(col2_x, y + 90, STR_LANG_COL2[lang_idx], 0x0038BDF8, 1, 240);
+        for mut j in 6..11 {
+            let idx_offset = (j - 6) as u32;
+            let ly = y + 112 + (idx_offset * 38) as u32;
+            let sel = (INSTALLER.selected_lang == j);
+            gfx_draw_glass_rect(col2_x, ly, col_w, 32, if (sel) { 0x00132338 } else { 0x001E293B }, if (sel) { 240 } else { 160 }, if (sel) { 0x0000E5FF } else { 0x00334155 }, 8);
+            gfx_draw_circle_alpha(col2_x + 14, ly + 16, 5, if (sel) { 0x0000E5FF } else { 0x0064748B }, 255);
+            gfx_draw_text_alpha(col2_x + 26, ly + 8, langs[j as usize].as_ptr(), if (sel) { 0x00FFFFFF } else { 0x00CBD5E1 }, 1, 255);
+        }
 
-        let kb_names = ["ABNT2 (Brasil)", "US-International"];
-        for mut k in 0..2 {
-            let kx = center_x - 120 + (k * 140) as u32;
-            let is_sel = k == INSTALLER.selected_kb;
-            let border_c = if is_sel { 0x0038BDF8 } else { 0x00334155 };
+        // Botoes Inferiores
+        let bot_y = y + h - 68;
+        gfx_draw_glass_rect(cx, bot_y, 110, 38, 0x001E293B, 200, 0x00475569, 8);
+        gfx_draw_text_alpha(cx + 26, bot_y + 11, STR_BTN_BACK[lang_idx], 0x0094A3B8, 1, 240);
 
-            gfx_draw_glass_rect(kx, kb_y + 18, 125, 32, 0x000F172A, 200, border_c, 6);
-            gfx_draw_text_alpha(kx + 10, kb_y + 27, kb_names[k], 0x00F8FAFC, 1, 230);
+        gfx_draw_glass_rect(cx + cw - 150, bot_y, 150, 38, 0x000284C7, 240, 0x0000E5FF, 8);
+        gfx_draw_text_alpha(cx + cw - 126, bot_y + 11, STR_BTN_CONTINUE[lang_idx], 0x00FFFFFF, 1, 255);
+    }
+}
+
+@system
+fn render_mode_choice(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
+
+        gfx_draw_text_alpha(cx, y + 36, STR_MODE_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_MODE_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        let sel0 = (INSTALLER.selected_mode == 0);
+        gfx_draw_glass_rect(cx, y + 96, cw, 68, if (sel0) { 0x00132338 } else { 0x001E293B }, if (sel0) { 240 } else { 160 }, if (sel0) { 0x0000E5FF } else { 0x00334155 }, 10);
+        gfx_draw_circle_alpha(cx + 24, y + 130, 7, if (sel0) { 0x0000E5FF } else { 0x00475569 }, 255);
+        gfx_draw_text_alpha(cx + 42, y + 108, STR_MODE0_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx + 42, y + 132, STR_MODE0_DESC[lang_idx], 0x0038BDF8, 1, 230);
+
+        let sel1 = (INSTALLER.selected_mode == 1);
+        gfx_draw_glass_rect(cx, y + 176, cw, 68, if (sel1) { 0x00132338 } else { 0x001E293B }, if (sel1) { 240 } else { 160 }, if (sel1) { 0x0010B981 } else { 0x00334155 }, 10);
+        gfx_draw_circle_alpha(cx + 24, y + 210, 7, if (sel1) { 0x0010B981 } else { 0x00475569 }, 255);
+        gfx_draw_text_alpha(cx + 42, y + 188, STR_MODE1_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx + 42, y + 212, STR_MODE1_DESC[lang_idx], 0x0010B981, 1, 230);
+
+        // Botoes Inferiores
+        let bot_y = y + h - 68;
+        gfx_draw_glass_rect(cx, bot_y, 110, 38, 0x001E293B, 200, 0x00475569, 8);
+        gfx_draw_text_alpha(cx + 26, bot_y + 11, STR_BTN_BACK[lang_idx], 0x0094A3B8, 1, 240);
+
+        gfx_draw_glass_rect(cx + cw - 150, bot_y, 150, 38, 0x000284C7, 240, 0x0000E5FF, 8);
+        gfx_draw_text_alpha(cx + cw - 126, bot_y + 11, STR_BTN_CONTINUE[lang_idx], 0x00FFFFFF, 1, 255);
+    }
+}
+
+@system
+fn render_disk_selection(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
+
+        gfx_draw_text_alpha(cx, y + 36, STR_DISK_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_DISK_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        // Disco 0 (Alvo)
+        let sel0 = (INSTALLER.selected_disk == 0);
+        gfx_draw_glass_rect(cx, y + 92, cw, 58, if (sel0) { 0x00132338 } else { 0x001E293B }, 220, if (sel0) { 0x0000E5FF } else { 0x00334155 }, 8);
+        gfx_draw_circle_alpha(cx + 20, y + 121, 6, if (sel0) { 0x0000E5FF } else { 0x00475569 }, 255);
+        gfx_draw_text_alpha(cx + 36, y + 102, STR_DISK0_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx + 36, y + 124, STR_DISK0_DESC[lang_idx], 0x0038BDF8, 1, 220);
+
+        // Disco 1 (Protegido)
+        gfx_draw_glass_rect(cx, y + 160, cw, 58, 0x001E293B, 160, 0x00F59E0B, 8);
+        gfx_draw_circle_alpha(cx + 20, y + 189, 6, 0x00F59E0B, 255);
+        gfx_draw_text_alpha(cx + 36, y + 170, STR_DISK1_TITLE[lang_idx], 0x00F59E0B, 1, 255);
+        gfx_draw_text_alpha(cx + 36, y + 192, STR_DISK1_DESC[lang_idx], 0x0094A3B8, 1, 210);
+
+        // Alerta Ambar
+        gfx_draw_glass_rect(cx, y + 230, cw, 42, 0x002A2112, 210, 0x00F59E0B, 8);
+        gfx_draw_text_alpha(cx + 16, y + 242, STR_DISK_WARN[lang_idx], 0x00FDE68A, 1, 240);
+
+        // Botoes Inferiores
+        let bot_y = y + h - 68;
+        gfx_draw_glass_rect(cx, bot_y, 110, 38, 0x001E293B, 200, 0x00475569, 8);
+        gfx_draw_text_alpha(cx + 26, bot_y + 11, STR_BTN_BACK[lang_idx], 0x0094A3B8, 1, 240);
+
+        gfx_draw_glass_rect(cx + cw - 150, bot_y, 150, 38, 0x000284C7, 240, 0x0000E5FF, 8);
+        gfx_draw_text_alpha(cx + cw - 126, bot_y + 11, STR_BTN_CONTINUE[lang_idx], 0x00FFFFFF, 1, 255);
+    }
+}
+
+@system
+fn render_review_confirmation(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
+
+        gfx_draw_text_alpha(cx, y + 36, STR_REV_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_REV_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        gfx_draw_glass_rect(cx, y + 92, cw, 170, 0x001E293B, 220, 0x00334155, 12);
+
+        let langs_summary = [
+            "Portugues (Brasil) • Teclado ABNT2",
+            "English (US) • US-International",
+            "Francais (France) • Clavier AZERTY",
+            "Italiano (Italia) • Tastiera QWERTY",
+            "Espanol (LatAm) • Teclado ISO Latin",
+            "Deutsch (DE) • QWERTZ Tastatur",
+            "Ellenika (Grego) • Elliniko Pliktrologio",
+            "Zhongwen (Chines) • Pinyin Standard",
+            "Nihongo (Japones) • JIS / Romaji",
+            "Hindi (Indiano) • Inscript Keyboard",
+            "Kiswahili (Africano) • Swahili Standard"
+        ];
+
+        gfx_draw_text_alpha(cx + 20, y + 108, STR_REV_L1[lang_idx], 0x0094A3B8, 1, 230);
+        gfx_draw_text_alpha(cx + 170, y + 108, langs_summary[lang_idx].as_ptr(), 0x00FFFFFF, 1, 255);
+        gfx_draw_hline(cx + 20, y + 132, cw - 40, 0x00334155, 180);
+
+        gfx_draw_text_alpha(cx + 20, y + 144, STR_REV_L2[lang_idx], 0x0094A3B8, 1, 230);
+        gfx_draw_text_alpha(cx + 170, y + 144, "NVMe SSD 0 (64.0 GB) — GPT + BakenFS".as_ptr(), 0x0038BDF8, 1, 255);
+        gfx_draw_hline(cx + 20, y + 168, cw - 40, 0x00334155, 180);
+
+        gfx_draw_text_alpha(cx + 20, y + 180, STR_REV_L3[lang_idx], 0x0094A3B8, 1, 230);
+        gfx_draw_text_alpha(cx + 170, y + 180, STR_REV_L3_VAL[lang_idx], 0x0010B981, 1, 255);
+        gfx_draw_hline(cx + 20, y + 204, cw - 40, 0x00334155, 180);
+
+        gfx_draw_text_alpha(cx + 20, y + 216, STR_REV_L4[lang_idx], 0x0094A3B8, 1, 230);
+        gfx_draw_text_alpha(cx + 170, y + 216, STR_REV_L4_VAL[lang_idx], 0x0000E5FF, 1, 255);
+
+        // Botoes Inferiores
+        let bot_y = y + h - 68;
+        gfx_draw_glass_rect(cx, bot_y, 110, 38, 0x001E293B, 200, 0x00475569, 8);
+        gfx_draw_text_alpha(cx + 26, bot_y + 11, STR_BTN_BACK[lang_idx], 0x0094A3B8, 1, 240);
+
+        gfx_draw_glass_rect(cx + cw - 180, bot_y, 180, 38, 0x000284C7, 240, 0x0000E5FF, 8);
+        gfx_draw_text_alpha(cx + cw - 156, bot_y + 11, STR_BTN_INSTALL[lang_idx], 0x00FFFFFF, 1, 255);
+    }
+}
+
+@system
+fn render_installing_progress(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
+
+        gfx_draw_text_alpha(cx, y + 36, STR_PROG_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_PROG_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        // Barra de Progresso com Pulso Ciano
+        gfx_draw_glass_rect(cx, y + 104, cw, 16, 0x001E293B, 255, 0x00334155, 8);
+        let cur_prog = INSTALLER.install_progress;
+        if (cur_prog > 0) {
+            let fill_w = ((cw - 4) * cur_prog) / 100;
+            gfx_fill_rect_alpha(cx + 2, y + 106, fill_w, 12, 0x0000E5FF, 255);
+        }
+
+        let substeps = [
+            STR_PROG_S1[lang_idx],
+            STR_PROG_S2[lang_idx],
+            STR_PROG_S3[lang_idx],
+            STR_PROG_S4[lang_idx]
+        ];
+
+        for mut s in 0..4 {
+            let sy = y + 144 + (s * 30) as u32;
+            let is_s_cur = (s == INSTALLER.install_substep);
+            let c_dot = if (is_s_cur) { 0x0000E5FF } else { 0x0010B981 };
+            gfx_draw_circle_alpha(cx + 12, sy + 7, 5, c_dot, 255);
+            gfx_draw_text_alpha(cx + 28, sy, substeps[s], if (is_s_cur) { 0x00FFFFFF } else { 0x0094A3B8 }, 1, 240);
         }
     }
 }
 
 @system
-fn render_step_disk(x: u32, y: u32, w: u32, h: u32) -> void {
+fn render_complete_summary(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
-        let content_x = x + 36;
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        gfx_draw_text_alpha(content_x, y + 10, "Destino de Instalacao & Particionamento", 0x00F8FAFC, 1, 255);
-        gfx_draw_text_alpha(content_x, y + 30, "Selecione a unidade de disco para gravar o Baken OS Sovereign:", 0x0094A3B8, 1, 220);
+        gfx_draw_circle_alpha(cx + (cw / 2), y + 68, 32, 0x0010B981, 240);
+        gfx_draw_baken_logo(cx + (cw / 2) - 18, y + 50, 36, 255);
 
-        // Card do Disco Selecionado
-        let disk_card_y = y + 54;
-        let card_w = w - 72;
-        gfx_draw_glass_rect(content_x, disk_card_y, card_w, 64, 0x001E293B, 220, 0x0038BDF8, 10);
+        let t = STR_DONE_TITLE[lang_idx];
+        let tw = gfx_measure_text(t);
+        gfx_draw_text_alpha(cx + (cw - tw) / 2, y + 116, t, 0x00FFFFFF, 1, 255);
 
-        gfx_draw_circle_alpha(content_x + 28, disk_card_y + 32, 12, 0x0038BDF8, 200);
-        gfx_draw_text_alpha(content_x + 52, disk_card_y + 16, "Disco 0: Unidade Virtual NVMe / SATA (64.0 GB)", 0x00F8FAFC, 1, 255);
-        gfx_draw_text_alpha(content_x + 52, disk_card_y + 36, "Tabela de Particoes: GPT (GUID Partition Table) | Espaco Livre: 64.0 GB", 0x0064748B, 1, 220);
+        let sub = STR_DONE_SUB[lang_idx];
+        let sw = gfx_measure_text(sub);
+        gfx_draw_text_alpha(cx + (cw - sw) / 2, y + 142, sub, 0x0038BDF8, 1, 230);
 
-        // Layout Gráfico de Partições Proporcionais
-        let part_title_y = disk_card_y + 80;
-        gfx_draw_text_alpha(content_x, part_title_y, "Estrutura de Particoes a Ser Criada:", 0x00E2E8F0, 1, 240);
-
-        let bar_y = part_title_y + 24;
-        let bar_w = card_w;
-        let bar_h: u32 = 36;
-
-        // Bloco 1: ESP (512 MB - Ciano)
-        let esp_w: u32 = (bar_w * 15) / 100;
-        gfx_fill_rect_alpha(content_x, bar_y, esp_w, bar_h, 0x000284C7, 240);
-        gfx_draw_glass_rect(content_x, bar_y, esp_w, bar_h, 0x000284C7, 100, 0x0038BDF8, 4);
-        gfx_draw_text_alpha(content_x + 6, bar_y + 12, "ESP FAT32 (512 MB)", 0x00FFFFFF, 1, 230);
-
-        // Bloco 2: BakenFS Root (63.5 GB - Azul Marinho / Indigo)
-        let root_w = bar_w - esp_w;
-        gfx_fill_rect_alpha(content_x + esp_w, bar_y, root_w, bar_h, 0x001E3A8A, 240);
-        gfx_draw_glass_rect(content_x + esp_w, bar_y, root_w, bar_h, 0x001E3A8A, 100, 0x0060A5FA, 4);
-        gfx_draw_text_alpha(content_x + esp_w + 14, bar_y + 12, "BakenFS Root Sovereign Partition (63.5 GB) - Sistema & Apps", 0x0093C5FD, 1, 240);
-
-        // Aviso de Formatação Segura
-        let warn_y = bar_y + bar_h + 20;
-        gfx_draw_text_alpha(content_x, warn_y, "* O instalador formatara o disco em GPT e criara a ESP com BOOTX64.EFI nativo.", 0x0010B981, 1, 230);
+        let bot_y = y + h - 68;
+        let btn_w: u32 = 260;
+        let btn_x = cx + (cw - btn_w) / 2;
+        gfx_draw_glass_rect(btn_x, bot_y, btn_w, 42, 0x000284C7, 240, 0x0000E5FF, 10);
+        let r_txt = STR_DONE_BTN[lang_idx];
+        let rw = gfx_measure_text(r_txt);
+        gfx_draw_text_alpha(btn_x + (btn_w - rw) / 2, bot_y + 12, r_txt, 0x00FFFFFF, 1, 255);
     }
 }
 
 @system
-fn render_step_progress(x: u32, y: u32, w: u32, h: u32) -> void {
+fn render_repair_tools(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
-        let center_x = x + (w / 2);
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        // Atualização contínua do progresso simulado
-        if INSTALLER.install_progress < 100 {
-            if INSTALLER.anim_tick % 3 == 0 {
-                INSTALLER.install_progress += 1;
+        gfx_draw_text_alpha(cx, y + 36, STR_REPAIR_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_REPAIR_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        gfx_draw_glass_rect(cx, y + 96, cw, 58, 0x001E293B, 220, 0x0038BDF8, 8);
+        gfx_draw_text_alpha(cx + 20, y + 106, STR_REPAIR_OPT1_T[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx + 20, y + 128, STR_REPAIR_OPT1_D[lang_idx], 0x0038BDF8, 1, 220);
+
+        gfx_draw_glass_rect(cx, y + 166, cw, 58, 0x001E293B, 220, 0x0038BDF8, 8);
+        gfx_draw_text_alpha(cx + 20, y + 176, STR_REPAIR_OPT2_T[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx + 20, y + 198, STR_REPAIR_OPT2_D[lang_idx], 0x0010B981, 1, 220);
+
+        let bot_y = y + h - 68;
+        gfx_draw_glass_rect(cx, bot_y, 110, 38, 0x001E293B, 200, 0x00475569, 8);
+        gfx_draw_text_alpha(cx + 26, bot_y + 11, STR_BTN_HOME[lang_idx], 0x0094A3B8, 1, 240);
+    }
+}
+
+@system
+fn render_oobe_experience(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let lang_idx = get_lang();
+        let cx = if (w >= 760) { x + 258 } else { x + 24 };
+        let cw = if (w >= 760) { w - 288 } else { w - 48 };
+
+        gfx_draw_text_alpha(cx, y + 36, STR_OOBE_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx, y + 60, STR_OOBE_SUB[lang_idx], 0x0094A3B8, 1, 235);
+
+        gfx_draw_glass_rect(cx, y + 96, cw, 160, 0x001E293B, 220, 0x00334155, 10);
+        gfx_draw_text_alpha(cx + 20, y + 112, "Perfil de Utilizacao Recomendado:".as_ptr(), 0x0038BDF8, 1, 240);
+        gfx_draw_text_alpha(cx + 20, y + 138, STR_OOBE_P1[lang_idx], 0x00FFFFFF, 1, 255);
+        gfx_draw_text_alpha(cx + 20, y + 162, STR_OOBE_P2[lang_idx], 0x0010B981, 1, 240);
+        gfx_draw_text_alpha(cx + 20, y + 186, STR_OOBE_P3[lang_idx], 0x0000E5FF, 1, 240);
+
+        let bot_y = y + h - 68;
+        gfx_draw_glass_rect(cx + cw - 200, bot_y, 200, 38, 0x000284C7, 240, 0x0000E5FF, 8);
+        gfx_draw_text_alpha(cx + cw - 176, bot_y + 11, STR_OOBE_BTN[lang_idx], 0x00FFFFFF, 1, 255);
+    }
+}
+
+// Tick para avanco suave da instalacao
+@system
+pub fn baken_installer_tick() -> void {
+    unsafe {
+        if (INSTALLER.step != 5 || INSTALLER.error != 0) { return; }
+        if (INSTALLER.install_progress < 100) {
+            INSTALLER.install_progress += 1;
+            INSTALLER.install_substep = min_u32(INSTALLER.install_progress / 26, 3);
+        } else {
+            INSTALLER.step = 6;
+        }
+    }
+}
+
+// =============================================================================
+// TRATAMENTO REATIVO DE INTERACAO (MOUSE E TECLADO)
+// =============================================================================
+
+@system
+pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
+    unsafe {
+        // Tela 0: Welcome
+        if (INSTALLER.step == 0) {
+            let ch: i32 = if (h > 520) { 380 } else { (h - 40) as i32 };
+            let cy: i32 = if (h as i32 > ch) { (h as i32 - ch) / 2 - 12 } else { 10 };
+            let start_y = cy + 68 + 116;
+
+            // Botao Central Iniciar
+            if (ry >= start_y && ry <= start_y + 50) {
+                INSTALLER.step = 1;
+            } else if (ry > (h as i32) - 52 && rx < 180) {
+                INSTALLER.step = 1; // Configuracoes
+            } else if (ry > (h as i32) - 52 && rx >= 180 && rx < 520) {
+                INSTALLER.step = 7; // Reparo
             }
-        } else {
-            INSTALLER.step = 3; // Avança para personalização ao atingir 100%
+            return;
         }
 
-        let p_y = y + 36;
-        let p_text = "Instalando o Baken OS Sovereign...";
-        let p_w = gfx_measure_text(p_text.as_ptr());
-        gfx_draw_text_alpha(center_x - (p_w / 2), p_y, p_text.as_ptr(), 0x00F8FAFC, 1, 255);
+        let cx: i32 = if (w >= 760) { 258 } else { 24 };
+        let cw: i32 = if (w >= 760) { (w - 288) as i32 } else { (w - 48) as i32 };
 
-        // Mensagem de Status Conforme a Faixa de Progresso
-        let status_msg = if INSTALLER.install_progress < 25 {
-            "Criando tabela de particoes GPT e formatando BakenFS..."
-        } else if INSTALLER.install_progress < 60 {
-            "Extraindo Micro-Core e Modulos Nativos da Linguagem Sotlas..."
-        } else if INSTALLER.install_progress < 85 {
-            "Gravando executavel UEFI BOOTX64.EFI e Atlas de Fontes..."
-        } else {
-            "Finalizando configuracoes do DesktopShell e Compositor..."
-        };
-
-        let sm_w = gfx_measure_text(status_msg.as_ptr());
-        gfx_draw_text_alpha(center_x - (sm_w / 2), p_y + 24, status_msg.as_ptr(), 0x0038BDF8, 1, 230);
-
-        // Barra de Progresso com Efeito Glow
-        let bar_x = center_x - 220;
-        let bar_y = p_y + 60;
-        let bar_w: u32 = 440;
-        let bar_h: u32 = 16;
-
-        gfx_draw_glass_rect(bar_x, bar_y, bar_w, bar_h, 0x000F172A, 220, 0x00334155, 8);
-
-        let fill_w = (bar_w * INSTALLER.install_progress) / 100;
-        gfx_fill_rect_alpha(bar_x, bar_y, fill_w, bar_h, 0x000284C7, 240);
-        gfx_draw_glass_rect(bar_x, bar_y, fill_w, bar_h, 0x0038BDF8, 120, 0x0038BDF8, 8);
-
-        // Texto com Porcentagem
-        let pct_y = bar_y + bar_h + 10;
-        gfx_draw_text_alpha(center_x - 15, pct_y, "75%", 0x00E2E8F0, 1, 240);
-
-        // Card com Destaque de Tecnologia (Slide Rotativo)
-        let slide_y = pct_y + 36;
-        let slide_w: u32 = 440;
-        gfx_draw_glass_rect(bar_x, slide_y, slide_w, 64, 0x00131E32, 200, 0x001E293B, 10);
-        gfx_draw_text_alpha(bar_x + 16, slide_y + 14, "100% Escrito em Sotlas Native", 0x0010B981, 1, 255);
-        gfx_draw_text_alpha(bar_x + 16, slide_y + 34, "Desempenho freestanding barecore com tipagem estatica segura.", 0x0094A3B8, 1, 220);
-    }
-}
-
-@system
-fn render_step_user(x: u32, y: u32, w: u32, h: u32) -> void {
-    unsafe {
-        let content_x = x + 40;
-
-        gfx_draw_text_alpha(content_x, y + 10, "Personalizacao do Usuario & Tema", 0x00F8FAFC, 1, 255);
-        gfx_draw_text_alpha(content_x, y + 30, "Configure o perfil padrao do sistema e a aparencia inicial:", 0x0094A3B8, 1, 220);
-
-        // Campo Nome do Usuário
-        let f1_y = y + 60;
-        gfx_draw_text_alpha(content_x, f1_y, "Nome da Conta:", 0x00CBD5E1, 1, 230);
-        gfx_draw_glass_rect(content_x + 130, f1_y - 4, 180, 26, 0x000F172A, 200, 0x0038BDF8, 6);
-        gfx_draw_text_alpha(content_x + 140, f1_y + 2, "root", 0x00F8FAFC, 1, 255);
-
-        // Campo Nome do Computador
-        let f2_y = f1_y + 36;
-        gfx_draw_text_alpha(content_x, f2_y, "Nome do Host:", 0x00CBD5E1, 1, 230);
-        gfx_draw_glass_rect(content_x + 130, f2_y - 4, 180, 26, 0x000F172A, 200, 0x00334155, 6);
-        gfx_draw_text_alpha(content_x + 140, f2_y + 2, "baken-workstation", 0x0094A3B8, 1, 230);
-
-        // Seletor de Tema Inicial
-        let theme_title_y = f2_y + 46;
-        gfx_draw_text_alpha(content_x, theme_title_y, "Selecione a Aparencia Inicial do Desktop:", 0x00E2E8F0, 1, 240);
-
-        let t_y = theme_title_y + 24;
-        let t_w: u32 = 130;
-        let t_h: u32 = 60;
-        let t_names = ["Vortex Dark (Mica)", "Midnight Eclipse", "Cyber Neon"];
-        let t_colors = [0x000F172A, 0x00030712, 0x001E1B4B];
-
-        for mut ti in 0..3 {
-            let tx = content_x + (ti * (t_w + 14)) as u32;
-            let is_sel = ti == INSTALLER.selected_theme;
-            let border_c = if is_sel { 0x0038BDF8 } else { 0x00334155 };
-
-            gfx_draw_glass_rect(tx, t_y, t_w, t_h, t_colors[ti], 230, border_c, 8);
-            gfx_draw_text_alpha(tx + 8, t_y + 22, t_names[ti], 0x00F8FAFC, 1, 230);
-        }
-    }
-}
-
-@system
-fn render_step_finish(x: u32, y: u32, w: u32, h: u32) -> void {
-    unsafe {
-        let center_x = x + (w / 2);
-        let icon_y = y + 40;
-
-        // Ícone de Sucesso Esmeralda
-        gfx_draw_circle_alpha(center_x, icon_y, 30, 0x0010B981, 60);
-        gfx_draw_circle_alpha(center_x, icon_y, 22, 0x00059669, 200);
-        gfx_draw_circle_alpha(center_x, icon_y, 12, 0x0010B981, 255);
-
-        let f1 = "Instalacao Concluida com Sucesso!";
-        let f1_w = gfx_measure_text(f1.as_ptr());
-        gfx_draw_text_alpha(center_x - (f1_w / 2), icon_y + 36, f1.as_ptr(), 0x00F8FAFC, 1, 255);
-
-        let f2 = "O Baken OS Sovereign Edition esta pronto para ser utilizado.";
-        let f2_w = gfx_measure_text(f2.as_ptr());
-        gfx_draw_text_alpha(center_x - (f2_w / 2), icon_y + 58, f2.as_ptr(), 0x0094A3B8, 1, 220);
-
-        let f3 = "Remova a midia de instalacao (ISO/Live-CD) e clique em Reiniciar.";
-        let f3_w = gfx_measure_text(f3.as_ptr());
-        gfx_draw_text_alpha(center_x - (f3_w / 2), icon_y + 78, f3.as_ptr(), 0x0064748B, 1, 200);
-    }
-}
-
-@system
-pub fn baken_installer_handle_click(rel_x: i32, rel_y: i32) -> void {
-    unsafe {
-        // Navegação pelos botões inferiores
-        if rel_y > 330 {
-            if rel_x > 380 {
-                // Botão Avançar / Instalar / Reiniciar
-                if INSTALLER.step < 4 {
-                    INSTALLER.step += 1;
+        // Tela 1: Selecao de Idioma e Teclado (11 Idiomas)
+        if (INSTALLER.step == 1) {
+            let col_w = (cw - 20) / 2;
+            
+            // Coluna 1 (Idiomas 0 a 5)
+            for mut i in 0..6 {
+                let ly = 112 + (i * 38);
+                if (ry >= ly && ry < ly + 32 && rx >= cx && rx < cx + col_w) {
+                    INSTALLER.selected_lang = i as u32;
+                    INSTALLER.selected_kb = i as u32;
+                    return;
                 }
-            } else if rel_x < 140 && INSTALLER.step > 0 && INSTALLER.step != 2 {
-                // Botão Voltar
-                INSTALLER.step -= 1;
+            }
+            
+            // Coluna 2 (Idiomas 6 a 10)
+            let col2_x = cx + col_w + 20;
+            for mut j in 6..11 {
+                let ly = 112 + ((j - 6) * 38);
+                if (ry >= ly && ry < ly + 32 && rx >= col2_x && rx < col2_x + col_w) {
+                    INSTALLER.selected_lang = j as u32;
+                    INSTALLER.selected_kb = j as u32;
+                    return;
+                }
             }
         }
 
-        // Seleção de Idioma no Passo 0
-        if INSTALLER.step == 0 && rel_y > 150 && rel_y < 210 {
-            if rel_x < 180 { INSTALLER.selected_lang = 0; }
-            else if rel_x < 340 { INSTALLER.selected_lang = 1; }
-            else { INSTALLER.selected_lang = 2; }
+        // Tela 2: Selecao de Modo
+        if (INSTALLER.step == 2) {
+            if (ry >= 96 && ry < 96 + 68 && rx >= cx && rx < cx + cw) {
+                INSTALLER.selected_mode = 0;
+                return;
+            }
+            if (ry >= 176 && ry < 176 + 68 && rx >= cx && rx < cx + cw) {
+                INSTALLER.selected_mode = 1;
+                return;
+            }
         }
 
-        // Seleção de Tema no Passo 3
-        if INSTALLER.step == 3 && rel_y > 200 && rel_y < 270 {
-            if rel_x < 180 { INSTALLER.selected_theme = 0; }
-            else if rel_x < 330 { INSTALLER.selected_theme = 1; }
-            else { INSTALLER.selected_theme = 2; }
+        // Tela 3: Selecao de Disco
+        if (INSTALLER.step == 3) {
+            if (ry >= 92 && ry < 92 + 58 && rx >= cx && rx < cx + cw) {
+                INSTALLER.selected_disk = 0;
+                return;
+            }
+        }
+
+        // Tela 7: Reparo
+        if (INSTALLER.step == 7) {
+            if (ry > (h as i32) - 76 && rx < cx + 140) {
+                INSTALLER.step = 0;
+                return;
+            }
+        }
+
+        // Botoes Inferiores de Navegacao (Voltar e Continuar)
+        if (ry > (h as i32) - 76) {
+            if (rx < cx + 140 && INSTALLER.step > 0) {
+                INSTALLER.step -= 1;
+                return;
+            }
+            if (rx > (cx + cw - 210)) {
+                if (INSTALLER.step < 6) {
+                    if (INSTALLER.step == 4) {
+                        INSTALLER.step = 5;
+                        INSTALLER.install_progress = 0;
+                    } else {
+                        INSTALLER.step += 1;
+                    }
+                } else if (INSTALLER.step == 6) {
+                    INSTALLER.step = 8; // OOBE
+                } else if (INSTALLER.step == 8) {
+                    INSTALLER.step = 0; // Concluido
+                }
+            }
+        }
+    }
+}
+
+@system
+pub fn baken_installer_handle_key(key: u32) -> void {
+    unsafe {
+        if (key == 27 && INSTALLER.step > 0) {
+            INSTALLER.step -= 1;
+        } else if (key == 13 && INSTALLER.step < 6) {
+            if (INSTALLER.step == 4) {
+                INSTALLER.step = 5;
+                INSTALLER.install_progress = 0;
+            } else {
+                INSTALLER.step += 1;
+            }
+        } else if (key >= 49 && key <= 57 && INSTALLER.step == 1) {
+            // Teclas '1'..'9'
+            INSTALLER.selected_lang = key - 49;
+            INSTALLER.selected_kb = key - 49;
         }
     }
 }

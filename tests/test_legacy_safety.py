@@ -24,6 +24,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/app_terminal.sotlas",
         "kernel/src/app_about.sotlas",
         "kernel/src/baken_installer.sotlas",
+        "kernel/src/baken_oobe_screen.sotlas",
     }
 
     def test_sotlas_tree_contains_only_the_canonical_desktop_route(self):

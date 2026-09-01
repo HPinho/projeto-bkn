@@ -14,7 +14,7 @@ class MockBakenFS:
             {"name": "/home/docs", "kind": 1, "size": 0, "lba": 0},
         ]
         self.files = {
-            "/home/notas.txt": "Notas importantes do Baken OS Sovereign.",
+            "/home/notas.txt": "Notas importantes do Baken OS.",
             "/config/theme.cfg": "dark_theme=1",
         }
 
@@ -72,7 +72,7 @@ class ShellInteractiveTests(unittest.TestCase):
             {"title": "Notas Rapidas", "sub": "Editor de texto persistente", "app_id": 6},
             {"title": "Central de Ajustes", "sub": "Configuracoes de Hardware", "app_id": 10},
             {"title": "Terminal Sotlas", "sub": "Interpretador de Comandos Sotlas", "app_id": 9},
-            {"title": "Assistente Q-HAL AI", "sub": "Inteligencia Artificial Soberana", "app_id": 4},
+            {"title": "Assistente Q-HAL AI", "sub": "Inteligencia Artificial Local", "app_id": 4},
             {"title": "Instalar Baken OS", "sub": "Assistente de Instalacao UEFI", "app_id": 14},
         ]
         self.fs = MockBakenFS()
@@ -114,7 +114,7 @@ class ShellInteractiveTests(unittest.TestCase):
         self.assertEqual(self.fs.find("/home/temp.txt"), -1)
 
     def test_bakenfs_write_and_read_file(self):
-        text = "Baken OS Sovereign Persistent File System Test"
+        text = "Baken OS Persistent File System Test"
         self.assertTrue(self.fs.write_file("/home/teste.txt", text))
         read_back = self.fs.read_file("/home/teste.txt")
         self.assertEqual(read_back, text)

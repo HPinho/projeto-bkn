@@ -43,7 +43,7 @@ pub fn app_terminal_render(x: u32, y: u32, w: u32, h: u32) -> void {
         // Logo ASCII e Informações
         let logo_y = start_y + line_h + 4;
         gfx_draw_text_alpha(text_x, logo_y, "   /\\___/\\   ", 0x0038BDF8, 1, 255);
-        gfx_draw_text_alpha(text_x + 120, logo_y, "OS: Baken OS Sovereign Edition (x86_64)", 0x00F8FAFC, 1, 240);
+        gfx_draw_text_alpha(text_x + 120, logo_y, "OS: Baken OS Desktop Edition (x86_64)", 0x00F8FAFC, 1, 240);
 
         gfx_draw_text_alpha(text_x, logo_y + line_h, "  (  o   o  )  ", 0x0038BDF8, 1, 255);
         gfx_draw_text_alpha(text_x + 120, logo_y + line_h, "Kernel: Sotlas Modular Micro-Core 0.2.0", 0x0094A3B8, 1, 220);
