@@ -11,6 +11,7 @@ import kernel::app_notes::*;
 import kernel::app_settings::*;
 import kernel::app_terminal::*;
 import kernel::app_about::*;
+import kernel::baken_installer::*;
 
 pub const MAX_WINDOWS: usize = 16;
 pub const TITLE_BAR_HEIGHT: u32 = 36;
@@ -186,6 +187,7 @@ pub fn wm_handle_mouse_down(mx: i32, my: i32) -> bool {
             else if win.id == 3 { app_settings_handle_click(rel_x, rel_y); }
             else if win.id == 4 { app_about_handle_click(rel_x, rel_y); }
             else if win.id == 5 { app_terminal_handle_click(rel_x, rel_y); }
+            else if win.id == 6 { baken_installer_handle_click(rel_x, rel_y); }
         }
         return true;
     }
@@ -288,5 +290,7 @@ fn wm_render_single_window(win: &Window) -> void {
         app_about_render(content_x, content_y, content_w, content_h);
     } else if win.id == 5 {
         app_terminal_render(content_x, content_y, content_w, content_h);
+    } else if win.id == 6 {
+        baken_installer_render(content_x, content_y, content_w, content_h);
     }
 }

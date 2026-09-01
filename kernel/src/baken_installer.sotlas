@@ -1,0 +1,366 @@
+// Baken OS - BakenInstaller Graphical Setup Wizard & OOBE
+// 100% Implementado na linguagem Sotlas (@system)
+
+module kernel::baken_installer;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+
+pub struct InstallerState {
+    pub step: u32;              // 0: Boas-vindas, 1: Disco, 2: Instalando, 3: Usuario, 4: Concluido
+    pub selected_lang: u32;     // 0: PT-BR, 1: EN-US, 2: ES
+    pub selected_kb: u32;       // 0: ABNT2, 1: US-Intl
+    pub selected_disk: u32;     // 0: Drive 0 (NVMe/SATA 64GB)
+    pub install_progress: u32;  // 0 a 100%
+    pub anim_tick: u32;
+    pub selected_theme: u32;    // 0: Vortex Dark, 1: Midnight, 2: Cyber Neon
+}
+
+static mut INSTALLER: InstallerState = InstallerState {
+    step: 0,
+    selected_lang: 0,
+    selected_kb: 0,
+    selected_disk: 0,
+    install_progress: 0,
+    anim_tick: 0,
+    selected_theme: 0,
+};
+
+@system
+pub fn baken_installer_init() -> void {
+    unsafe {
+        INSTALLER.step = 0;
+        INSTALLER.selected_lang = 0;
+        INSTALLER.selected_kb = 0;
+        INSTALLER.selected_disk = 0;
+        INSTALLER.install_progress = 0;
+        INSTALLER.anim_tick = 0;
+        INSTALLER.selected_theme = 0;
+    }
+}
+
+@system
+pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        INSTALLER.anim_tick = (INSTALLER.anim_tick + 1) % 3600;
+
+        // Fundo do Wizard em Vidro Acrílico Profundo (Deep Acrylic Mica)
+        gfx_fill_rect_alpha(x, y, w, h, 0x000B1120, 245);
+
+        // 1. Barra Superior com Indicador de Passos (Step Indicator)
+        let header_h: u32 = 44;
+        gfx_fill_rect_alpha(x, y, w, header_h, 0x000F172A, 220);
+        gfx_draw_hline(x, y + header_h, w, 0x001E293B, 200);
+
+        let step_labels = ["1. Idioma", "2. Disco & Particoes", "3. Instalacao", "4. Personalizacao", "5. Conclusao"];
+        let step_count: u32 = 5;
+        let step_w = w / step_count;
+
+        for mut s in 0..step_count {
+            let sx = x + (s * step_w);
+            let is_cur = s == INSTALLER.step;
+            let is_past = s < INSTALLER.step;
+
+            let num_col = if is_cur { 0x0038BDF8 } else if is_past { 0x0010B981 } else { 0x00475569 };
+            let text_col = if is_cur { 0x00F8FAFC } else if is_past { 0x0094A3B8 } else { 0x00475569 };
+
+            // Ponto indicador
+            gfx_draw_circle_alpha(sx + 18, y + 22, 6, num_col, 255);
+            gfx_draw_text_alpha(sx + 30, y + 15, step_labels[s], text_col, 1, 230);
+        }
+
+        // 2. Área de Conteúdo Principal (Centralizada)
+        let body_y = y + header_h + 16;
+        let body_h = h - header_h - 70;
+
+        if INSTALLER.step == 0 {
+            render_step_welcome(x, body_y, w, body_h);
+        } else if INSTALLER.step == 1 {
+            render_step_disk(x, body_y, w, body_h);
+        } else if INSTALLER.step == 2 {
+            render_step_progress(x, body_y, w, body_h);
+        } else if INSTALLER.step == 3 {
+            render_step_user(x, body_y, w, body_h);
+        } else if INSTALLER.step == 4 {
+            render_step_finish(x, body_y, w, body_h);
+        }
+
+        // 3. Barra Inferior com Botões de Navegação
+        let footer_y = y + h - 50;
+        gfx_fill_rect_alpha(x, footer_y, w, 50, 0x000F172A, 230);
+        gfx_draw_hline(x, footer_y, w, 0x001E293B, 200);
+
+        // Botão Voltar
+        if INSTALLER.step > 0 && INSTALLER.step != 2 && INSTALLER.step != 4 {
+            let back_x = x + 24;
+            gfx_draw_glass_rect(back_x, footer_y + 10, 100, 30, 0x001E293B, 200, 0x00475569, 8);
+            gfx_draw_text_alpha(back_x + 24, footer_y + 18, "< Voltar", 0x0094A3B8, 1, 230);
+        }
+
+        // Botão Avançar / Instalar
+        if INSTALLER.step < 4 && INSTALLER.step != 2 {
+            let next_x = x + w - 150;
+            let btn_text = if INSTALLER.step == 1 { "Instalar Agora >" } else { "Avancar >" };
+            gfx_draw_glass_rect(next_x, footer_y + 10, 126, 30, 0x000284C7, 220, 0x0038BDF8, 8);
+            gfx_draw_text_alpha(next_x + 18, footer_y + 18, btn_text, 0x00FFFFFF, 1, 255);
+        } else if INSTALLER.step == 4 {
+            let reboot_x = x + w - 170;
+            gfx_draw_glass_rect(reboot_x, footer_y + 10, 146, 30, 0x00059669, 220, 0x0010B981, 8);
+            gfx_draw_text_alpha(reboot_x + 16, footer_y + 18, "Reiniciar Agora", 0x00FFFFFF, 1, 255);
+        }
+    }
+}
+
+@system
+fn render_step_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let center_x = x + (w / 2);
+
+        // Logo Vortex com pulso suave
+        let logo_y = y + 36;
+        let pulse = 24 + ((INSTALLER.anim_tick % 60) / 12);
+        gfx_draw_circle_alpha(center_x, logo_y, pulse, 0x0038BDF8, 50);
+        gfx_draw_circle_alpha(center_x, logo_y, 20, 0x000284C7, 180);
+        gfx_draw_circle_alpha(center_x, logo_y, 10, 0x0038BDF8, 255);
+
+        // Título e Boas-Vindas
+        let t1 = "Bem-vindo ao Baken OS Sovereign";
+        let t1_w = gfx_measure_text(t1.as_ptr());
+        gfx_draw_text_alpha(center_x - (t1_w / 2), logo_y + 32, t1.as_ptr(), 0x00F8FAFC, 1, 255);
+
+        let t2 = "Escolha o idioma de instalacao e o layout do seu teclado:";
+        let t2_w = gfx_measure_text(t2.as_ptr());
+        gfx_draw_text_alpha(center_x - (t2_w / 2), logo_y + 54, t2.as_ptr(), 0x0094A3B8, 1, 220);
+
+        // Cartões de Seleção de Idioma (3 opções)
+        let card_y = logo_y + 84;
+        let card_w: u32 = 150;
+        let card_h: u32 = 48;
+        let languages = ["Portugues (Brasil)", "English (US)", "Espanol"];
+
+        for mut i in 0..3 {
+            let cx = center_x - 240 + (i * (card_w + 15)) as u32;
+            let is_sel = i == INSTALLER.selected_lang;
+            let bg_c = if is_sel { 0x001E293B } else { 0x000F172A };
+            let border_c = if is_sel { 0x0038BDF8 } else { 0x00334155 };
+
+            gfx_draw_glass_rect(cx, card_y, card_w, card_h, bg_c, 210, border_c, 8);
+            let check_col = if is_sel { 0x0038BDF8 } else { 0x00475569 };
+            gfx_draw_circle_alpha(cx + 18, card_y + 24, 6, check_col, 255);
+            gfx_draw_text_alpha(cx + 32, card_y + 18, languages[i], 0x00F8FAFC, 1, 230);
+        }
+
+        // Seleção de Layout de Teclado
+        let kb_y = card_y + card_h + 20;
+        gfx_draw_text_alpha(center_x - 120, kb_y, "Layout do Teclado:", 0x00CBD5E1, 1, 220);
+
+        let kb_names = ["ABNT2 (Brasil)", "US-International"];
+        for mut k in 0..2 {
+            let kx = center_x - 120 + (k * 140) as u32;
+            let is_sel = k == INSTALLER.selected_kb;
+            let border_c = if is_sel { 0x0038BDF8 } else { 0x00334155 };
+
+            gfx_draw_glass_rect(kx, kb_y + 18, 125, 32, 0x000F172A, 200, border_c, 6);
+            gfx_draw_text_alpha(kx + 10, kb_y + 27, kb_names[k], 0x00F8FAFC, 1, 230);
+        }
+    }
+}
+
+@system
+fn render_step_disk(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let content_x = x + 36;
+
+        gfx_draw_text_alpha(content_x, y + 10, "Destino de Instalacao & Particionamento", 0x00F8FAFC, 1, 255);
+        gfx_draw_text_alpha(content_x, y + 30, "Selecione a unidade de disco para gravar o Baken OS Sovereign:", 0x0094A3B8, 1, 220);
+
+        // Card do Disco Selecionado
+        let disk_card_y = y + 54;
+        let card_w = w - 72;
+        gfx_draw_glass_rect(content_x, disk_card_y, card_w, 64, 0x001E293B, 220, 0x0038BDF8, 10);
+
+        gfx_draw_circle_alpha(content_x + 28, disk_card_y + 32, 12, 0x0038BDF8, 200);
+        gfx_draw_text_alpha(content_x + 52, disk_card_y + 16, "Disco 0: Unidade Virtual NVMe / SATA (64.0 GB)", 0x00F8FAFC, 1, 255);
+        gfx_draw_text_alpha(content_x + 52, disk_card_y + 36, "Tabela de Particoes: GPT (GUID Partition Table) | Espaco Livre: 64.0 GB", 0x0064748B, 1, 220);
+
+        // Layout Gráfico de Partições Proporcionais
+        let part_title_y = disk_card_y + 80;
+        gfx_draw_text_alpha(content_x, part_title_y, "Estrutura de Particoes a Ser Criada:", 0x00E2E8F0, 1, 240);
+
+        let bar_y = part_title_y + 24;
+        let bar_w = card_w;
+        let bar_h: u32 = 36;
+
+        // Bloco 1: ESP (512 MB - Ciano)
+        let esp_w: u32 = (bar_w * 15) / 100;
+        gfx_fill_rect_alpha(content_x, bar_y, esp_w, bar_h, 0x000284C7, 240);
+        gfx_draw_glass_rect(content_x, bar_y, esp_w, bar_h, 0x000284C7, 100, 0x0038BDF8, 4);
+        gfx_draw_text_alpha(content_x + 6, bar_y + 12, "ESP FAT32 (512 MB)", 0x00FFFFFF, 1, 230);
+
+        // Bloco 2: BakenFS Root (63.5 GB - Azul Marinho / Indigo)
+        let root_w = bar_w - esp_w;
+        gfx_fill_rect_alpha(content_x + esp_w, bar_y, root_w, bar_h, 0x001E3A8A, 240);
+        gfx_draw_glass_rect(content_x + esp_w, bar_y, root_w, bar_h, 0x001E3A8A, 100, 0x0060A5FA, 4);
+        gfx_draw_text_alpha(content_x + esp_w + 14, bar_y + 12, "BakenFS Root Sovereign Partition (63.5 GB) - Sistema & Apps", 0x0093C5FD, 1, 240);
+
+        // Aviso de Formatação Segura
+        let warn_y = bar_y + bar_h + 20;
+        gfx_draw_text_alpha(content_x, warn_y, "* O instalador formatara o disco em GPT e criara a ESP com BOOTX64.EFI nativo.", 0x0010B981, 1, 230);
+    }
+}
+
+@system
+fn render_step_progress(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let center_x = x + (w / 2);
+
+        // Atualização contínua do progresso simulado
+        if INSTALLER.install_progress < 100 {
+            if INSTALLER.anim_tick % 3 == 0 {
+                INSTALLER.install_progress += 1;
+            }
+        } else {
+            INSTALLER.step = 3; // Avança para personalização ao atingir 100%
+        }
+
+        let p_y = y + 36;
+        let p_text = "Instalando o Baken OS Sovereign...";
+        let p_w = gfx_measure_text(p_text.as_ptr());
+        gfx_draw_text_alpha(center_x - (p_w / 2), p_y, p_text.as_ptr(), 0x00F8FAFC, 1, 255);
+
+        // Mensagem de Status Conforme a Faixa de Progresso
+        let status_msg = if INSTALLER.install_progress < 25 {
+            "Criando tabela de particoes GPT e formatando BakenFS..."
+        } else if INSTALLER.install_progress < 60 {
+            "Extraindo Micro-Core e Modulos Nativos da Linguagem Sotlas..."
+        } else if INSTALLER.install_progress < 85 {
+            "Gravando executavel UEFI BOOTX64.EFI e Atlas de Fontes..."
+        } else {
+            "Finalizando configuracoes do DesktopShell e Compositor..."
+        };
+
+        let sm_w = gfx_measure_text(status_msg.as_ptr());
+        gfx_draw_text_alpha(center_x - (sm_w / 2), p_y + 24, status_msg.as_ptr(), 0x0038BDF8, 1, 230);
+
+        // Barra de Progresso com Efeito Glow
+        let bar_x = center_x - 220;
+        let bar_y = p_y + 60;
+        let bar_w: u32 = 440;
+        let bar_h: u32 = 16;
+
+        gfx_draw_glass_rect(bar_x, bar_y, bar_w, bar_h, 0x000F172A, 220, 0x00334155, 8);
+
+        let fill_w = (bar_w * INSTALLER.install_progress) / 100;
+        gfx_fill_rect_alpha(bar_x, bar_y, fill_w, bar_h, 0x000284C7, 240);
+        gfx_draw_glass_rect(bar_x, bar_y, fill_w, bar_h, 0x0038BDF8, 120, 0x0038BDF8, 8);
+
+        // Texto com Porcentagem
+        let pct_y = bar_y + bar_h + 10;
+        gfx_draw_text_alpha(center_x - 15, pct_y, "75%", 0x00E2E8F0, 1, 240);
+
+        // Card com Destaque de Tecnologia (Slide Rotativo)
+        let slide_y = pct_y + 36;
+        let slide_w: u32 = 440;
+        gfx_draw_glass_rect(bar_x, slide_y, slide_w, 64, 0x00131E32, 200, 0x001E293B, 10);
+        gfx_draw_text_alpha(bar_x + 16, slide_y + 14, "100% Escrito em Sotlas Native", 0x0010B981, 1, 255);
+        gfx_draw_text_alpha(bar_x + 16, slide_y + 34, "Desempenho freestanding barecore com tipagem estatica segura.", 0x0094A3B8, 1, 220);
+    }
+}
+
+@system
+fn render_step_user(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let content_x = x + 40;
+
+        gfx_draw_text_alpha(content_x, y + 10, "Personalizacao do Usuario & Tema", 0x00F8FAFC, 1, 255);
+        gfx_draw_text_alpha(content_x, y + 30, "Configure o perfil padrao do sistema e a aparencia inicial:", 0x0094A3B8, 1, 220);
+
+        // Campo Nome do Usuário
+        let f1_y = y + 60;
+        gfx_draw_text_alpha(content_x, f1_y, "Nome da Conta:", 0x00CBD5E1, 1, 230);
+        gfx_draw_glass_rect(content_x + 130, f1_y - 4, 180, 26, 0x000F172A, 200, 0x0038BDF8, 6);
+        gfx_draw_text_alpha(content_x + 140, f1_y + 2, "root", 0x00F8FAFC, 1, 255);
+
+        // Campo Nome do Computador
+        let f2_y = f1_y + 36;
+        gfx_draw_text_alpha(content_x, f2_y, "Nome do Host:", 0x00CBD5E1, 1, 230);
+        gfx_draw_glass_rect(content_x + 130, f2_y - 4, 180, 26, 0x000F172A, 200, 0x00334155, 6);
+        gfx_draw_text_alpha(content_x + 140, f2_y + 2, "baken-workstation", 0x0094A3B8, 1, 230);
+
+        // Seletor de Tema Inicial
+        let theme_title_y = f2_y + 46;
+        gfx_draw_text_alpha(content_x, theme_title_y, "Selecione a Aparencia Inicial do Desktop:", 0x00E2E8F0, 1, 240);
+
+        let t_y = theme_title_y + 24;
+        let t_w: u32 = 130;
+        let t_h: u32 = 60;
+        let t_names = ["Vortex Dark (Mica)", "Midnight Eclipse", "Cyber Neon"];
+        let t_colors = [0x000F172A, 0x00030712, 0x001E1B4B];
+
+        for mut ti in 0..3 {
+            let tx = content_x + (ti * (t_w + 14)) as u32;
+            let is_sel = ti == INSTALLER.selected_theme;
+            let border_c = if is_sel { 0x0038BDF8 } else { 0x00334155 };
+
+            gfx_draw_glass_rect(tx, t_y, t_w, t_h, t_colors[ti], 230, border_c, 8);
+            gfx_draw_text_alpha(tx + 8, t_y + 22, t_names[ti], 0x00F8FAFC, 1, 230);
+        }
+    }
+}
+
+@system
+fn render_step_finish(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        let center_x = x + (w / 2);
+        let icon_y = y + 40;
+
+        // Ícone de Sucesso Esmeralda
+        gfx_draw_circle_alpha(center_x, icon_y, 30, 0x0010B981, 60);
+        gfx_draw_circle_alpha(center_x, icon_y, 22, 0x00059669, 200);
+        gfx_draw_circle_alpha(center_x, icon_y, 12, 0x0010B981, 255);
+
+        let f1 = "Instalacao Concluida com Sucesso!";
+        let f1_w = gfx_measure_text(f1.as_ptr());
+        gfx_draw_text_alpha(center_x - (f1_w / 2), icon_y + 36, f1.as_ptr(), 0x00F8FAFC, 1, 255);
+
+        let f2 = "O Baken OS Sovereign Edition esta pronto para ser utilizado.";
+        let f2_w = gfx_measure_text(f2.as_ptr());
+        gfx_draw_text_alpha(center_x - (f2_w / 2), icon_y + 58, f2.as_ptr(), 0x0094A3B8, 1, 220);
+
+        let f3 = "Remova a midia de instalacao (ISO/Live-CD) e clique em Reiniciar.";
+        let f3_w = gfx_measure_text(f3.as_ptr());
+        gfx_draw_text_alpha(center_x - (f3_w / 2), icon_y + 78, f3.as_ptr(), 0x0064748B, 1, 200);
+    }
+}
+
+@system
+pub fn baken_installer_handle_click(rel_x: i32, rel_y: i32) -> void {
+    unsafe {
+        // Navegação pelos botões inferiores
+        if rel_y > 330 {
+            if rel_x > 380 {
+                // Botão Avançar / Instalar / Reiniciar
+                if INSTALLER.step < 4 {
+                    INSTALLER.step += 1;
+                }
+            } else if rel_x < 140 && INSTALLER.step > 0 && INSTALLER.step != 2 {
+                // Botão Voltar
+                INSTALLER.step -= 1;
+            }
+        }
+
+        // Seleção de Idioma no Passo 0
+        if INSTALLER.step == 0 && rel_y > 150 && rel_y < 210 {
+            if rel_x < 180 { INSTALLER.selected_lang = 0; }
+            else if rel_x < 340 { INSTALLER.selected_lang = 1; }
+            else { INSTALLER.selected_lang = 2; }
+        }
+
+        // Seleção de Tema no Passo 3
+        if INSTALLER.step == 3 && rel_y > 200 && rel_y < 270 {
+            if rel_x < 180 { INSTALLER.selected_theme = 0; }
+            else if rel_x < 330 { INSTALLER.selected_theme = 1; }
+            else { INSTALLER.selected_theme = 2; }
+        }
+    }
+}

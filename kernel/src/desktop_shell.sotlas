@@ -80,10 +80,11 @@ pub fn render_top_bar() -> void {
         gfx_draw_text(118, 10, "Arquivo", 0x00334155);
         gfx_draw_text(184, 10, "Editar", 0x00334155);
 
-        // Estado honesto da sessão: serviços não integrados não aparecem
-        // como disponíveis no shell.
-        gfx_draw_glass_rect(sw - 300, 5, 88, 25, 0xAA8B5CF6, 200, 0xFF00E5FF, 12);
-        gfx_draw_text(sw - 290, 9, "Sessao", 0x00FFFFFF);
+        // Botão de Instalação do Baken OS
+        let inst_w: u32 = 110;
+        let inst_x = sw - 280;
+        gfx_draw_glass_rect(inst_x, 5, inst_w, 26, 0x000284C7, 220, 0x0038BDF8, 8);
+        gfx_draw_text(inst_x + 14, 9, "Instalar OS", 0x00FFFFFF);
 
         gfx_draw_text(sw - 140, 10, "Modo visual", 0x000F172A);
     }
@@ -98,19 +99,15 @@ pub fn render_cursor() -> void {
         static const CURSOR_MASK: [u8; 16] = [
             0x80, 0xC0, 0xE0, 0xF0,
             0xF8, 0xFC, 0xFE, 0xFF,
-            0xF8, 0xD8, 0x8C, 0x0C,
-            0x06, 0x06, 0x00, 0x00
+            0xF0, 0xD8, 0x98, 0x0C,
+            0x0C, 0x06, 0x06, 0x00
         ];
-        for mut y in 0 .. 16 {
-            let row = CURSOR_MASK[y as usize];
-            for mut x in 0 .. 8 {
-                if ((row >> (7 - x)) & 1) != 0 {
-                    gfx_put_pixel_alpha(mx + x + 2, my + y + 2, 0x00000000, 90);
-                    if (x == 0 || y == 0 || x == 7 || ((row >> (6 - x)) & 1) == 0 || y == 15) {
-                        gfx_put_pixel_alpha(mx + x, my + y, 0x00FFFFFF, 255);
-                    } else {
-                        gfx_put_pixel_alpha(mx + x, my + y, 0x000F172A, 255);
-                    }
+        for mut row in 0..16 {
+            let mask = CURSOR_MASK[row];
+            for mut col in 0..8 {
+                if (mask & (0x80 >> col)) != 0 {
+                    gfx_put_pixel_alpha(mx + col, my + (row as u32), 0x00000000, 255);
+                    gfx_put_pixel_alpha(mx + col + 1, my + (row as u32) + 1, 0x0038BDF8, 255);
                 }
             }
         }
@@ -131,6 +128,14 @@ pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
     unsafe {
         let sw = SHELL.screen_w;
         let sh = SHELL.screen_h;
+
+        // Clique no botão "Instalar OS" na top bar
+        if my <= 36 && mx >= (sw - 280) as i32 && mx <= (sw - 170) as i32 {
+            wm_create_window(6, "Assistente de Instalacao - Baken OS", (sw / 2 - 300) as i32, (sh / 2 - 200) as i32, 600, 400, 0x000B1120, 245, 0x0038BDF8);
+            wm_bring_to_front(6);
+            return;
+        }
+
         let dock_w = MAIN_DOCK.item_count * 56 + 20;
         let dock_x = if sw > dock_w { (sw - dock_w) / 2 } else { 0 };
         let dock_y = if sh > 64 { sh - 64 } else { 0 };
@@ -156,7 +161,7 @@ pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
             }
         }
 
-        // Se o clique não foi na doca, despacha para o Window Manager
+        // Se o clique não foi na doca nem na top bar, despacha para o Window Manager
         wm_handle_mouse_down(mx, my);
     }
 }
