@@ -1,0 +1,13 @@
+[tool.pyrefly]
+# Só analisar código Python do projeto
+project_includes = ["tools/**/*.py", "tests/**/*.py"]
+
+# Excluir código C gerado, build artifacts e arquivos Sotlas
+project_excludes = [
+    "build/**",
+    "bknc/**",
+    "kernel/**",
+    "boot/**",
+    "bootstrap/**",
+    "assets/**",
+]
