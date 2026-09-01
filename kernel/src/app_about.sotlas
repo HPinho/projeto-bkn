@@ -1,0 +1,87 @@
+// Baken OS - BakenAbout System Info Card
+// 100% Implementado na linguagem Sotlas (@system)
+
+module kernel::app_about;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+
+pub struct AboutState {
+    pub pulse_phase: u32;
+}
+
+static mut ABOUT_STATE: AboutState = AboutState {
+    pulse_phase: 0,
+};
+
+@system
+pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        ABOUT_STATE.pulse_phase = (ABOUT_STATE.pulse_phase + 1) % 120;
+
+        // Fundo com material Fluent Mica
+        gfx_fill_rect_alpha(x, y, w, h, 0x000F172A, 245);
+
+        // 1. Cabeçalho Central com Logo Vortex
+        let center_x = x + (w / 2);
+        let logo_y = y + 42;
+
+        // Anéis concêntricos do logotipo Vortex com pulso suave
+        let glow_r = 32 + ((ABOUT_STATE.pulse_phase % 60) / 10);
+        gfx_draw_circle_alpha(center_x, logo_y, glow_r, 0x0038BDF8, 40);
+        gfx_draw_circle_alpha(center_x, logo_y, 28, 0x000284C7, 120);
+        gfx_draw_circle_alpha(center_x, logo_y, 20, 0x0038BDF8, 220);
+        gfx_draw_circle_alpha(center_x, logo_y, 10, 0x00FFFFFF, 255);
+
+        // Título e Versão
+        let title_y = y + 84;
+        let title = "Baken OS Sovereign Edition";
+        let title_w = gfx_measure_text(title.as_ptr());
+        gfx_draw_text_alpha(center_x - (title_w / 2), title_y, title.as_ptr(), 0x00F8FAFC, 1, 255);
+
+        let ver = "Versao 0.2.0 (Build 2026.09 - Sotlas Native)";
+        let ver_w = gfx_measure_text(ver.as_ptr());
+        gfx_draw_text_alpha(center_x - (ver_w / 2), title_y + 18, ver.as_ptr(), 0x0038BDF8, 1, 230);
+
+        // Linha Divisória
+        gfx_draw_hline(x + 24, title_y + 40, w - 48, 0x001E293B, 200);
+
+        // 2. Tabela de Especificações do Sistema
+        let grid_x = x + 32;
+        let grid_y = title_y + 54;
+        let row_h: u32 = 22;
+
+        gfx_draw_text_alpha(grid_x, grid_y, "Arquitetura:", 0x0094A3B8, 1, 220);
+        gfx_draw_text_alpha(grid_x + 110, grid_y, "x86_64 SMP (UEFI 64-bit)", 0x00E2E8F0, 1, 240);
+
+        gfx_draw_text_alpha(grid_x, grid_y + row_h, "Kernel:", 0x0094A3B8, 1, 220);
+        gfx_draw_text_alpha(grid_x + 110, grid_y + row_h, "Modular Micro-Core em Sotlas (@system)", 0x00E2E8F0, 1, 240);
+
+        gfx_draw_text_alpha(grid_x, grid_y + row_h * 2, "Linguagem:", 0x0094A3B8, 1, 220);
+        gfx_draw_text_alpha(grid_x + 110, grid_y + row_h * 2, "Sotlas Unified Toolchain v0.2.0", 0x0038BDF8, 1, 240);
+
+        gfx_draw_text_alpha(grid_x, grid_y + row_h * 3, "Compositor:", 0x0094A3B8, 1, 220);
+        gfx_draw_text_alpha(grid_x + 110, grid_y + row_h * 3, "BakenFX SDF Glassmorphism (Double-Buffered)", 0x00E2E8F0, 1, 240);
+
+        gfx_draw_text_alpha(grid_x, grid_y + row_h * 4, "Memoria RAM:", 0x0094A3B8, 1, 220);
+        gfx_draw_text_alpha(grid_x + 110, grid_y + row_h * 4, "4096 MB DDR4", 0x0010B981, 1, 240);
+
+        // 3. Botões de Ação no Rodapé
+        let btn_y = y + h - 42;
+        let btn_w: u32 = 140;
+        let btn_h: u32 = 28;
+
+        let b1_x = center_x - btn_w - 8;
+        gfx_draw_glass_rect(b1_x, btn_y, btn_w, btn_h, 0x001E293B, 200, 0x0038BDF8, 8);
+        gfx_draw_text_alpha(b1_x + 14, btn_y + 7, "Checar Atualizacoes", 0x0038BDF8, 1, 255);
+
+        let b2_x = center_x + 8;
+        gfx_draw_glass_rect(b2_x, btn_y, btn_w, btn_h, 0x001E293B, 200, 0x00475569, 8);
+        gfx_draw_text_alpha(b2_x + 32, btn_y + 7, "Licenca MIT", 0x0094A3B8, 1, 220);
+    }
+}
+
+@system
+pub fn app_about_handle_click(rel_x: i32, rel_y: i32) -> void {
+    // Ações de clique nos botões
+}

@@ -50,11 +50,15 @@ pub fn desktop_shell_init(w: u32, h: u32) -> void {
         MAIN_DOCK.add_item("Arquivos");
         MAIN_DOCK.add_item("Notas");
         MAIN_DOCK.add_item("Ajustes");
+        MAIN_DOCK.add_item("Terminal");
         MAIN_DOCK.add_item("Sobre");
 
-        // O shell não fabrica janelas. Toda janela que vier a ser aberta
-        // pertence ao gerente canônico e recebe conteúdo por serviços reais.
         wm_init();
+
+        // Abre as janelas principais dos aplicativos nativos no layout inicial
+        wm_create_window(1, "Arquivos - BakenFS", 80, 80, 560, 360, 0x000F172A, 230, 0x0038BDF8);
+        wm_create_window(2, "Notas - kernel_main.sotlas", 220, 130, 580, 380, 0x00090D16, 235, 0x00818CF8);
+        wm_create_window(4, "BakenTerminal - /home/root", 360, 200, 520, 320, 0x00050811, 240, 0x0010B981);
     }
 }
 
@@ -118,6 +122,7 @@ pub fn desktop_shell_set_cursor(x: i32, y: i32) -> void {
     unsafe {
         SHELL.cursor_x = x;
         SHELL.cursor_y = y;
+        wm_handle_mouse_move(x, y);
     }
 }
 
@@ -136,17 +141,23 @@ pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
             if item_idx < MAIN_DOCK.item_count {
                 let win_id = item_idx + 1;
                 if win_id == 1 {
-                    wm_create_window(1, "Arquivos — BakenFS", (sw / 2 - 240) as i32, (sh / 2 - 160) as i32, 480, 320, 0x000F172A, 240, 0x0038BDF8);
+                    wm_create_window(1, "Arquivos - BakenFS", (sw / 2 - 280) as i32, (sh / 2 - 180) as i32, 560, 360, 0x000F172A, 230, 0x0038BDF8);
                 } else if win_id == 2 {
-                    wm_create_window(2, "Notas — /home/notas.txt", (sw / 2 - 220) as i32, (sh / 2 - 140) as i32, 440, 280, 0x000F172A, 240, 0x0038BDF8);
+                    wm_create_window(2, "Notas - kernel_main.sotlas", (sw / 2 - 290) as i32, (sh / 2 - 190) as i32, 580, 380, 0x00090D16, 235, 0x00818CF8);
                 } else if win_id == 3 {
-                    wm_create_window(3, "Central de Ajustes & Hardware", (sw / 2 - 250) as i32, (sh / 2 - 150) as i32, 500, 300, 0x000F172A, 240, 0x0038BDF8);
+                    wm_create_window(3, "Central de Ajustes & Hardware", (sw / 2 - 280) as i32, (sh / 2 - 170) as i32, 560, 340, 0x000F172A, 230, 0x0038BDF8);
                 } else if win_id == 4 {
-                    wm_create_window(4, "Sobre o Baken OS Sovereign", (sw / 2 - 200) as i32, (sh / 2 - 120) as i32, 400, 240, 0x000F172A, 240, 0x0038BDF8);
+                    wm_create_window(4, "BakenTerminal - /home/root", (sw / 2 - 260) as i32, (sh / 2 - 160) as i32, 520, 320, 0x00050811, 240, 0x0010B981);
+                } else if win_id == 5 {
+                    wm_create_window(5, "Sobre o Baken OS Sovereign", (sw / 2 - 230) as i32, (sh / 2 - 160) as i32, 460, 320, 0x000F172A, 240, 0x0038BDF8);
                 }
                 wm_bring_to_front(win_id);
+                return;
             }
         }
+
+        // Se o clique não foi na doca, despacha para o Window Manager
+        wm_handle_mouse_down(mx, my);
     }
 }
 

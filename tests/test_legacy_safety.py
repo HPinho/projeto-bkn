@@ -18,6 +18,11 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/window_manager.sotlas",
         "kernel/src/desktop_shell.sotlas",
         "kernel/src/desktop_compositor.sotlas",
+        "kernel/src/app_files.sotlas",
+        "kernel/src/app_notes.sotlas",
+        "kernel/src/app_settings.sotlas",
+        "kernel/src/app_terminal.sotlas",
+        "kernel/src/app_about.sotlas",
     }
 
     def test_sotlas_tree_contains_only_the_canonical_desktop_route(self):

@@ -267,13 +267,32 @@ def parse_st_type(raw_type: str) -> SotlasType:
     return SotlasType(raw)
 
 def _top_level_offsets(text: str) -> set:
-    """Retorna offsets fora de corpos de tipos/funções, ignorando comentários."""
+    """Retorna offsets fora de corpos de tipos/funções, ignorando comentários e strings."""
     result, depth, index = set(), 0, 0
-    in_line_comment = False
     while index < len(text):
         if text.startswith("//", index):
             end = text.find("\n", index)
             index = len(text) if end < 0 else end
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = len(text) if end < 0 else end + 2
+            continue
+        if text[index] == '"':
+            index += 1
+            while index < len(text) and text[index] != '"':
+                if text[index] == '\\':
+                    index += 1
+                index += 1
+            index += 1
+            continue
+        if text[index] == "'":
+            index += 1
+            while index < len(text) and text[index] != "'":
+                if text[index] == '\\':
+                    index += 1
+                index += 1
+            index += 1
             continue
         ch = text[index]
         if ch == "{": depth += 1
@@ -284,12 +303,32 @@ def _top_level_offsets(text: str) -> set:
     return result
 
 def _matching_brace(text: str, opening: int) -> int:
-    """Encontra o fim do bloco, respeitando comentários de linha."""
+    """Encontra o fim do bloco, respeitando comentários e strings."""
     depth, index = 0, opening
     while index < len(text):
         if text.startswith("//", index):
             end = text.find("\n", index)
             index = len(text) if end < 0 else end
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            index = len(text) if end < 0 else end + 2
+            continue
+        if text[index] == '"':
+            index += 1
+            while index < len(text) and text[index] != '"':
+                if text[index] == '\\':
+                    index += 1
+                index += 1
+            index += 1
+            continue
+        if text[index] == "'":
+            index += 1
+            while index < len(text) and text[index] != "'":
+                if text[index] == '\\':
+                    index += 1
+                index += 1
+            index += 1
             continue
         if text[index] == "{": depth += 1
         elif text[index] == "}":
@@ -450,6 +489,8 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
         language_calls = {"if", "while", "for", "loop", "return", "unsafe", "sizeof"}
         for fn in ast.functions:
             body = re.sub(r"//[^\n]*", "", fn.body)
+            body = re.sub(r'"[^"]*"', '""', body)
+            body = re.sub(r"'[^']*'", "''", body)
             for call in re.finditer(r"(?<![.A-Za-z0-9_])([A-Za-z_][A-Za-z0-9_]*)\s*\(", body):
                 name = call.group(1)
                 if name not in callable_names and name not in language_calls:
