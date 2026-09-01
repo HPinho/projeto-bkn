@@ -24,13 +24,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso
 
-      - name: Verify Sotlas Compile module graph
+      - name: Run Sotlas Compiler Bootstrap Test Suite
         run: |
-          python3 tools/sotlas_compile/compiler.py check kernel/src/main.st --manifest build/sotlas-main.manifest.json
+          python3 -m unittest tests.test_sotlas_lexer tests.test_sotlas_parser tests.test_sotlas_sema tests.test_sotlas_codegen -v
 
-      - name: Compile Baken OS Kernel & Bootloader
+      - name: Verify Sotlas CLI — check kernel entry point
         run: |
-          echo "Checking Baken OS Kernel in Sotlas (@system)..."
+          python3 tools/sotlas/cli.py check kernel/src/main.sotlas
+
+      - name: Compile Baken OS Kernel (dry-run)
+        run: |
+          echo "Baken OS Kernel fonte: kernel/src/main.sotlas"
           mkdir -p build
 
       - name: Build UEFI ISO Image
