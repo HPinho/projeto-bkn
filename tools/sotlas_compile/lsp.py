@@ -156,7 +156,7 @@ class SotlasLanguageServer:
         root = current_file.parent
         while root.parent != root and not (root / "core").is_dir():
             root = root.parent
-        for path in root.rglob("*.st"):
+        for path in list(root.rglob("*.sotlas")) + list(root.rglob("*.sth")) + list(root.rglob("*.st")):
             try:
                 text = path.read_text(encoding="utf-8")
                 try:

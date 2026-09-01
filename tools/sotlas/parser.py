@@ -207,6 +207,9 @@ class Parser:
         base = None
         if self._consume(TK.COLON):
             base = self._expect(TK.IDENT).value
+        elif self._match(TK.IDENT) and self._cur().value == "extends":
+            self._advance()
+            base = self._expect(TK.IDENT).value
         adopts = self._parse_adopts()
         self._expect(TK.LBRACE)
         members = []
@@ -261,15 +264,15 @@ class Parser:
         while not self._match(TK.RBRACE, TK.EOF):
             vs = self._span()
             vname = self._expect(TK.IDENT).value
-            vparams = []
+            params = []
             if self._consume(TK.LPAREN):
-                vparams = self._parse_param_list()
+                params = self._parse_param_list()
                 self._expect(TK.RPAREN)
-            vval = None
+            discriminant = None
             if self._consume(TK.ASSIGN):
-                vval = self._parse_expr()
+                discriminant = self._parse_expr()
             self._consume(TK.COMMA)
-            variants.append(EnumVariantNode(vs, vname, vparams, vval))
+            variants.append(EnumVariantNode(vs, vname, params, discriminant))
         self._expect(TK.RBRACE)
         return EnumDeclNode(span, directives, is_pub, name, backing, variants)
 
@@ -285,18 +288,22 @@ class Parser:
 
     def _parse_static_decl(self, span, directives, is_pub) -> StaticDeclNode:
         self._expect(TK.KW_STATIC)
-        modifier = None
+        shielded = nvkeep = seal = False
         if self._match(*FIELD_MOD_TOKENS):
-            modifier = self._advance().kind
-        is_var = self._cur().kind == TK.KW_VAR
-        self._advance()
+            m = self._advance().kind
+            shielded = m == TK.KW_SHIELDED
+            nvkeep = m == TK.KW_NVKEEP
+            seal = m == TK.KW_SEAL
+        is_var = self._cur().kind in (TK.KW_VAR, TK.KW_MUT)
+        if self._match(TK.KW_VAR, TK.KW_LET, TK.KW_MUT, TK.KW_CONST_MOD):
+            self._advance()
         name = self._expect(TK.IDENT).value
         self._expect(TK.COLON)
         typ = self._parse_type()
         self._expect(TK.ASSIGN)
         val = self._parse_expr()
         self._expect(TK.SEMICOLON)
-        return StaticDeclNode(span, directives, is_pub, modifier, is_var, name, typ, val)
+        return StaticDeclNode(span, directives, is_pub, None, is_var, name, typ, val)
 
     def _parse_fn_decl(self, span, directives, is_pub,
                        moldable=False, reshape=False, signature_only=False) -> FnDeclNode:
@@ -311,21 +318,11 @@ class Parser:
         ret = None
         if self._consume(TK.ARROW):
             ret = self._parse_type()
-        body = None
-        if not signature_only:
-            if self._match(TK.FAT_ARROW):
-                self._advance()
-                expr = self._parse_expr()
-                self._expect(TK.SEMICOLON)
-                body = [ReturnNode(span, expr)]
-            elif self._match(TK.LBRACE):
-                body = self._parse_block()
-            else:
-                self._expect(TK.SEMICOLON)
-        else:
+        if signature_only:
             self._expect(TK.SEMICOLON)
-        return FnDeclNode(span, directives, is_pub, irqfree, async_, moldable, reshape,
-                          name, generics, params, ret, body)
+            return FnDeclNode(span, directives, is_pub, irqfree, async_, moldable, reshape, name, generics, params, ret, None)
+        body = self._parse_block()
+        return FnDeclNode(span, directives, is_pub, irqfree, async_, moldable, reshape, name, generics, params, ret, body)
 
     def _parse_trapfn_decl(self, span, directives, is_pub) -> TrapFnDeclNode:
         self._expect(TK.KW_TRAPFN)
@@ -383,6 +380,9 @@ class Parser:
             return self._parse_init_decl(span, vis)
         moldable = self._consume(TK.KW_MOLDABLE)
         reshape = self._consume(TK.KW_RESHAPE)
+        if not reshape and self._match(TK.IDENT) and self._cur().value == "override":
+            self._advance()
+            reshape = True
         if self._match(TK.KW_FN, TK.KW_IRQFREE, TK.KW_ASYNC):
             return self._parse_fn_decl(span, directives, vis == TK.KW_PUB,
                                        moldable=moldable, reshape=reshape)
@@ -395,8 +395,10 @@ class Parser:
             shielded = m == TK.KW_SHIELDED
             nvkeep = m == TK.KW_NVKEEP
             seal = m == TK.KW_SEAL
-        is_var = self._cur().kind == TK.KW_VAR
-        self._advance()  # consume let/var
+        is_var = False
+        if self._match(TK.KW_VAR, TK.KW_LET, TK.KW_MUT):
+            is_var = self._cur().kind in (TK.KW_VAR, TK.KW_MUT)
+            self._advance()
         name = self._expect(TK.IDENT).value
         self._expect(TK.COLON)
         typ = self._parse_type()
@@ -486,17 +488,52 @@ class Parser:
             else:
                 # *mut T — ponteiro mutável simples
                 topology_ptr = TK.KW_MUT
+        elif self._match(TK.LAND):
+            self._advance()
+            topology_mut = self._consume(TK.KW_MUT)
+            topology_ptr = TK.KW_MUT if topology_mut else TK.KW_CONST_MOD
 
-        # Array type [T; N] ou [T]
+        # Tuple type (T1, T2, ...) ou ()
+        if self._match(TK.LPAREN):
+            self._advance()
+            elements = []
+            if not self._match(TK.RPAREN):
+                elements.append(self._parse_type())
+                while self._consume(TK.COMMA):
+                    if self._match(TK.RPAREN):
+                        break
+                    elements.append(self._parse_type())
+            self._expect(TK.RPAREN)
+            if len(elements) == 0:
+                return TypeNode(span, ownership, topology_ptr, topology_mut,
+                                TK.KW_VOID, "()", False, False, None, None, None, [],
+                                is_slice=False, inner_type=None, tuple_elements=[])
+            if len(elements) == 1:
+                elem = elements[0]
+                elem.ownership = ownership or elem.ownership
+                elem.topology_ptr = topology_ptr or elem.topology_ptr
+                elem.topology_mut = topology_mut or elem.topology_mut
+                return elem
+            return TypeNode(span, ownership, topology_ptr, topology_mut,
+                            None, None, False, False, None, None, None, [],
+                            is_slice=False, inner_type=None, tuple_elements=elements)
+
+        # Array type [T; N] ou Slice type [T]
         if self._match(TK.LBRACKET):
             self._advance()
             inner = self._parse_type()
             size_expr = None
+            is_array = False
+            is_slice = False
             if self._consume(TK.SEMICOLON):
                 size_expr = self._parse_expr()
+                is_array = True
+            else:
+                is_slice = True
             self._expect(TK.RBRACKET)
             return TypeNode(span, ownership, topology_ptr, topology_mut,
-                            None, None, False, True, size_expr, None, None)
+                            None, None, False, is_array, size_expr, None, None, [],
+                            is_slice=is_slice, inner_type=inner)
 
         # Tipo primitivo ou identificador
         primitive = None
@@ -513,6 +550,10 @@ class Parser:
                 self._expect(TK.DOTDOT)
                 bounded_hi = self._parse_expr()
                 self._expect(TK.RBRACKET)
+        elif self._match(TK.NOT):
+            self._advance()
+            name = "!"
+            primitive = TK.KW_VOID
         elif self._match(TK.IDENT):
             name = self._advance().value
             if self._match(TK.LT):
@@ -549,7 +590,7 @@ class Parser:
         span = self._span()
         cur = self._cur().kind
 
-        if cur in FIELD_MOD_TOKENS or cur in (TK.KW_LET, TK.KW_VAR):
+        if cur in FIELD_MOD_TOKENS or cur in (TK.KW_LET, TK.KW_VAR, TK.KW_CONST_MOD, TK.KW_STATIC):
             return self._parse_local_var_decl(span)
         if cur == TK.KW_HANDOVER:
             self._advance()
@@ -579,6 +620,9 @@ class Parser:
             return self._parse_match(span)
         if cur == TK.KW_WHILE:
             return self._parse_while(span)
+        if cur == TK.KW_LOOP:
+            self._advance()
+            return WhileNode(span, LiteralNode(span, TK.KW_TRUE, "true"), self._parse_block())
         if cur == TK.KW_FOR:
             return self._parse_for(span)
         if cur == TK.KW_UNSAFE:
@@ -603,19 +647,38 @@ class Parser:
             self._advance()
             self._expect(TK.SEMICOLON)
             return ContinueNode(span)
+        if cur == TK.KW_DEFER:
+            self._advance()
+            if self._match(TK.LBRACE):
+                body = self._parse_block()
+                return DeferNode(span, None, body)
+            expr = self._parse_expr()
+            self._expect(TK.SEMICOLON)
+            return DeferNode(span, expr, None)
 
         # Assignment ou ExprStmt
         return self._parse_assignment_or_expr_stmt(span)
 
     def _parse_local_var_decl(self, span) -> LocalVarDeclNode:
+        if self._consume(TK.KW_STATIC):
+            pass
+        if self._consume(TK.KW_CONST_MOD):
+            pass
         shielded = nvkeep = seal = False
         if self._match(*FIELD_MOD_TOKENS):
             m = self._advance().kind
             shielded = m == TK.KW_SHIELDED
             nvkeep = m == TK.KW_NVKEEP
             seal = m == TK.KW_SEAL
-        is_var = self._cur().kind == TK.KW_VAR
-        self._advance()
+        is_var = False
+        if self._match(TK.KW_VAR, TK.KW_MUT):
+            is_var = True
+            self._advance()
+        elif self._consume(TK.KW_LET):
+            if self._consume(TK.KW_MUT):
+                is_var = True
+        elif self._consume(TK.KW_CONST_MOD):
+            is_var = False
         name = self._expect(TK.IDENT).value
         typ = None
         if self._consume(TK.COLON):
@@ -739,9 +802,16 @@ class Parser:
 
     def _parse_for(self, span) -> ForNode:
         self._advance()
+        if self._match(TK.KW_MUT, TK.KW_VAR, TK.KW_LET):
+            self._advance()
         var = self._expect(TK.IDENT).value
         self._expect(TK.KW_IN)
-        iterable = self._parse_expr()
+        start = self._parse_expr()
+        if self._consume(TK.DOTDOT):
+            end = self._parse_expr()
+            iterable = BinaryExprNode(span, TK.DOTDOT, start, end)
+        else:
+            iterable = start
         body = self._parse_block()
         return ForNode(span, var, iterable, body)
 
@@ -782,6 +852,8 @@ class Parser:
         cur = self._cur().kind
         if cur in (TK.NOT, TK.MINUS, TK.TILDE, TK.STAR, TK.LAND, TK.KW_AWAIT):
             op = self._advance().kind
+            if op == TK.LAND and self._consume(TK.KW_MUT):
+                pass
             return UnaryExprNode(span, op, self._parse_unary())
         return self._parse_postfix()
 
@@ -808,6 +880,9 @@ class Parser:
                 elif self._match(TK.KW_STRAND):
                     self._advance()
                     expr = BitStrandExprNode(span, expr)
+                elif self._match(TK.INT_LIT):
+                    idx_val = int(self._advance().value)
+                    expr = TupleIndexExprNode(span, expr, idx_val)
                 else:
                     name = self._expect(TK.IDENT).value
                     if self._match(TK.LPAREN):
@@ -819,9 +894,20 @@ class Parser:
                         expr = FieldExprNode(span, expr, name)
             elif self._match(TK.LBRACKET):
                 self._advance()
-                idx = self._parse_expr()
-                self._expect(TK.RBRACKET)
-                expr = IndexExprNode(span, expr, idx)
+                if self._match(TK.DOTDOT):
+                    self._advance()
+                    hi = self._parse_expr() if not self._match(TK.RBRACKET) else None
+                    self._expect(TK.RBRACKET)
+                    expr = SliceExprNode(span, expr, None, hi)
+                else:
+                    lo = self._parse_expr()
+                    if self._consume(TK.DOTDOT):
+                        hi = self._parse_expr() if not self._match(TK.RBRACKET) else None
+                        self._expect(TK.RBRACKET)
+                        expr = SliceExprNode(span, expr, lo, hi)
+                    else:
+                        self._expect(TK.RBRACKET)
+                        expr = IndexExprNode(span, expr, lo)
             elif self._match(TK.LPAREN):
                 self._advance()
                 args = self._parse_arg_list()
@@ -861,25 +947,76 @@ class Parser:
                 path.append(self._advance().value)
             name = path[-1]
             prefix = path[:-1]
+            if self._match(TK.LBRACE):
+                p1 = self._peek(1)
+                p2 = self._peek(2)
+                if p1.kind == TK.RBRACE or (p1.kind == TK.IDENT and p2.kind == TK.COLON):
+                    self._advance()  # consume {
+                    fields = []
+                    while not self._match(TK.RBRACE, TK.EOF):
+                        fs = self._span()
+                        fname = self._expect(TK.IDENT).value
+                        self._expect(TK.COLON)
+                        fval = self._parse_expr()
+                        self._consume(TK.COMMA)
+                        fields.append(StructLitFieldNode(fs, fname, fval))
+                    self._expect(TK.RBRACE)
+                    return StructLitExprNode(span, name, prefix, fields)
             return IdentNode(span, name, prefix)
 
         if cur.kind == TK.LPAREN:
             self._advance()
-            expr = self._parse_expr()
+            if self._match(TK.RPAREN):
+                self._advance()
+                return TupleLitExprNode(span, [])  # unit ()
+            first = self._parse_expr()
+            if self._consume(TK.COMMA):
+                elements = [first]
+                while not self._match(TK.RPAREN, TK.EOF):
+                    elements.append(self._parse_expr())
+                    if not self._consume(TK.COMMA):
+                        break
+                self._expect(TK.RPAREN)
+                return TupleLitExprNode(span, elements)
             self._expect(TK.RPAREN)
-            return expr
+            return first
 
         if cur.kind == TK.LBRACKET:
             self._advance()
             elements = []
             if not self._match(TK.RBRACKET):
-                elements.append(self._parse_expr())
+                first = self._parse_expr()
+                if self._consume(TK.SEMICOLON):
+                    count_expr = self._parse_expr()
+                    self._expect(TK.RBRACKET)
+                    if isinstance(count_expr, LiteralNode) and count_expr.kind == TK.INT_LIT:
+                        n = int(count_expr.value)
+                        elements = [first] * n
+                    else:
+                        elements = [first]
+                    return ArrayLitExprNode(span, elements)
+                elements.append(first)
                 while self._consume(TK.COMMA):
                     if self._match(TK.RBRACKET):
                         break
                     elements.append(self._parse_expr())
             self._expect(TK.RBRACKET)
             return ArrayLitExprNode(span, elements)
+
+        if cur.kind == TK.KW_IF:
+            self._advance()
+            cond = self._parse_expr()
+            self._expect(TK.LBRACE)
+            then_expr = self._parse_expr()
+            self._expect(TK.RBRACE)
+            self._expect(TK.KW_ELSE)
+            if self._match(TK.KW_IF):
+                else_expr = self._parse_primary()
+            else:
+                self._expect(TK.LBRACE)
+                else_expr = self._parse_expr()
+                self._expect(TK.RBRACE)
+            return IfExprNode(span, cond, then_expr, else_expr)
 
         if cur.kind == TK.LBRACE:
             self._advance()

@@ -133,12 +133,14 @@ class TK(Enum):
     KW_IF        = auto()   # if
     KW_ELSE      = auto()   # else
     KW_WHILE     = auto()   # while
+    KW_LOOP      = auto()   # loop
     KW_FOR       = auto()   # for
     KW_IN        = auto()   # in
     KW_MATCH     = auto()   # match
     KW_RETURN    = auto()   # return
     KW_BREAK     = auto()   # break
     KW_CONTINUE  = auto()   # continue
+    KW_DEFER     = auto()   # defer
     KW_GUARD     = auto()   # guard
 
     # -------------------------------------------------------------------------
@@ -294,6 +296,24 @@ KEYWORDS: dict[str, TK] = {
     "Char":       TK.KW_CHAR,
     "String":     TK.KW_STRING,
     "Void":       TK.KW_VOID,
+    "u8":         TK.KW_UINT8,
+    "u16":        TK.KW_UINT16,
+    "u32":        TK.KW_UINT32,
+    "u64":        TK.KW_UINT64,
+    "usize":      TK.KW_USIZE,
+    "uint":       TK.KW_UINT,
+    "i8":         TK.KW_INT8,
+    "i16":        TK.KW_INT16,
+    "i32":        TK.KW_INT32,
+    "i64":        TK.KW_INT64,
+    "isize":      TK.KW_ISIZE,
+    "int":        TK.KW_INT,
+    "f32":        TK.KW_FLOAT32,
+    "f64":        TK.KW_FLOAT64,
+    "bool":       TK.KW_BOOL,
+    "char":       TK.KW_CHAR,
+    "string":     TK.KW_STRING,
+    "void":       TK.KW_VOID,
     "rawphys":    TK.KW_RAWPHYS,
     "virtmap":    TK.KW_VIRTMAP,
     "portwire":   TK.KW_PORTWIRE,
@@ -302,17 +322,21 @@ KEYWORDS: dict[str, TK] = {
     "if":         TK.KW_IF,
     "else":       TK.KW_ELSE,
     "while":      TK.KW_WHILE,
+    "loop":       TK.KW_LOOP,
     "for":        TK.KW_FOR,
     "in":         TK.KW_IN,
     "match":      TK.KW_MATCH,
     "return":     TK.KW_RETURN,
     "break":      TK.KW_BREAK,
     "continue":   TK.KW_CONTINUE,
+    "defer":      TK.KW_DEFER,
     "guard":      TK.KW_GUARD,
     "true":       TK.KW_TRUE,
     "false":      TK.KW_FALSE,
     "nil":        TK.KW_NIL,
+    "null":       TK.KW_NIL,
     "self":       TK.KW_SELF,
+    "this":       TK.KW_SELF,
     "super":      TK.KW_SUPER,
     "slit":       TK.KW_SLIT,
     "notch":      TK.KW_NOTCH,

@@ -5,10 +5,6 @@ module kernel::baken_rasterizer;
 
 import kernel::graphics_engine::*;
 
-// FONT_8X8: Fonte Minúscula 8x8 Integrada (Somente caracteres visíveis ASCII 32 a 126)
-// Cada byte = 1 linha de 8 pixels, 8 linhas por caractere.
-static const FONT_8X8: [u8; 760] = [
-
 // --- Constantes Físicas do Baken OS (Fluent/HIG) ---
 pub const ELEVATION_WALLPAPER: u32 = 0;
 pub const ELEVATION_DESKTOP: u32 = 1;
@@ -23,14 +19,16 @@ pub const MATERIAL_ACRYLIC: u8 = 1;
 pub const MATERIAL_SMOKE: u8 = 2;
 pub const MATERIAL_SOLID: u8 = 3;
 // ----------------------------------------------------
+
+// FONT_8X8: Fonte Minúscula 8x8 Integrada (Somente caracteres visíveis ASCII 32 a 126)
+// Cada byte = 1 linha de 8 pixels, 8 linhas por caractere.
+static const FONT_8X8: [u8; 32] = [
     // Espaço (32)
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // Exclamação ! (33)
     0x18, 0x3C, 0x3C, 0x18, 0x18, 0x00, 0x18, 0x00,
     // Aspas " (34)
     0x66, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00,
-    // (Apenas um subset ilustrativo - O rasterizador original carregaria isso de disco ou macro expandida)
-    // Para simplificar, vou criar uma rotina de fallback de fonte.
     // 'A' (65)
     0x18, 0x3C, 0x66, 0x66, 0x7E, 0x66, 0x66, 0x00
 ];
@@ -170,17 +168,19 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
             }
 
             if (inside) {
-                let is_border = px == x || px == x + w - 1 || py == y || py == y + h - 1 ||
-                               (is_corner && {
-                                   let dx = px as i32 - cx as i32;
-                                   let dy = py as i32 - cy as i32;
-                                   (dx * dx + dy * dy) >= ((radius - 1) * (radius - 1)) as i32
-                               });
+                let mut is_border = px == x || px == x + w - 1 || py == y || py == y + h - 1;
+                if is_corner {
+                    let dx = px as i32 - cx as i32;
+                    let dy = py as i32 - cy as i32;
+                    if (dx * dx + dy * dy) >= ((radius - 1) * (radius - 1)) as i32 {
+                        is_border = true;
+                    }
+                }
 
                 if (is_border) {
-                    let spec = (1.0 - fy_rel) * 160.0;
-                    let b_col = if (spec > 40.0) { 0x00FFFFFF } else { border_color };
-                    let b_alpha = (120.0 + spec * 0.5) as u8;
+                    let spec_val = (1.0 - fy_rel) * 160.0;
+                    let b_col = if (spec_val > 40.0) { 0x00FFFFFF } else { border_color };
+                    let b_alpha = (120.0 + spec_val * 0.5) as u8;
                     gfx_put_pixel_alpha(px, py, b_col, b_alpha);
                 } else {
                     gfx_put_pixel_alpha(px, py, bg_color, glass_a);
@@ -399,8 +399,10 @@ pub fn gfx_draw_glass_rect_material(x: u32, y: u32, w: u32, h: u32, bg: u32, a: 
 @system
 pub fn gfx_measure_text(str: *const u8) -> u32 {
     let mut len: u32 = 0;
-    while unsafe { *(str.offset(len as isize)) } != 0 {
-        len += 1;
+    unsafe {
+        while *(str + (len as usize)) != 0 {
+            len += 1;
+        }
     }
     return len * 8;
 }

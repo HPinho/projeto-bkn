@@ -49,7 +49,7 @@ def discover_units(root):
     for source_root in (root / "kernel", root / "libbkn", root / "boot", root / "apps"):
         if not source_root.is_dir():
             continue
-        for ext in ("*.st",):
+        for ext in ("*.sotlas", "*.sth", "*.st"):
             for path in source_root.rglob(ext):
                 text = path.read_text(encoding="utf-8")
                 declarations = list(MODULE_RE.finditer(text))
@@ -552,6 +552,16 @@ void gfx_put_pixel_alpha(uint32_t x, uint32_t y, uint32_t c, uint8_t a);
 #include "baken_motion_icons_atlas.h"
 #include "baken_color_lut.h"
 #include "baken_design_tokens.h"
+
+typedef CqMaterialIconAtlas SotlasMaterialIconAtlas;
+typedef CqBakenAppIconAtlas SotlasBakenAppIconAtlas;
+typedef CqBakenMotionIconAtlas SotlasBakenMotionIconAtlas;
+#define sotlas_material_icon_atlases cq_material_icon_atlases
+#define SOTLAS_MATERIAL_ICON_ATLAS_COUNT (sizeof(cq_material_icon_atlases)/sizeof(cq_material_icon_atlases[0]))
+#define sotlas_baken_app_icon_atlases cq_baken_app_icon_atlases
+#define SOTLAS_BAKEN_APP_ICON_ATLAS_COUNT (sizeof(cq_baken_app_icon_atlases)/sizeof(cq_baken_app_icon_atlases[0]))
+#define sotlas_baken_motion_icon_atlases cq_baken_motion_icon_atlases
+#define SOTLAS_BAKEN_MOTION_ICON_ATLAS_COUNT (sizeof(cq_baken_motion_icon_atlases)/sizeof(cq_baken_motion_icon_atlases[0]))
 
 static uint32_t g_baken_ui_scale_percent = 0; /* 0 = automático */
 static uint32_t g_baken_display_density_dpi = 0; /* 0 = indisponível */
@@ -5674,7 +5684,7 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
     for mod_name in manifest["compile_order"]:
         module_id = _c_identifier(mod_name)
         header = emit_c_header(asts[mod_name], generated_dir / f"{module_id}.h")
-        interface = emit_interface_manifest(asts[mod_name], generated_dir / f"{module_id}.sti.json")
+        interface = emit_interface_manifest(asts[mod_name], generated_dir / f"{module_id}.soti.json")
         generated = emit_c_module(asts[mod_name], generated_dir / f"{module_id}.c", header)
         obj = obj_dir / f"{module_id}.o"
         res = subprocess.run([str(gcc), *common_flags, str(generated), "-o", str(obj)],

@@ -81,7 +81,66 @@ class Sema:
     # Passagem 1: Coleta de Símbolos Globais
     # ------------------------------------------------------------------
 
+    def _collect_imported_symbols(self) -> None:
+        if not self._ast.imports:
+            return
+        from pathlib import Path
+        from .lexer import Lexer
+        from .parser import Parser
+
+        cur_file = Path(self._fn).resolve() if self._fn and self._fn != "<stdin>" else Path.cwd()
+        search_dirs = [cur_file.parent]
+        for parent in cur_file.parents:
+            search_dirs.append(parent)
+            search_dirs.append(parent / "src")
+            search_dirs.append(parent / "kernel" / "src")
+            search_dirs.append(parent / "libbkn" / "src")
+            search_dirs.append(parent / "boot")
+
+        visited_files = set()
+        for imp in self._ast.imports:
+            mod_name = imp.path[-1]
+            mod_path_str = "/".join(imp.path)
+            target_file = None
+            for d in search_dirs:
+                if not d.is_dir():
+                    continue
+                candidates = [
+                    d / f"{mod_name}.sotlas",
+                    d / f"{mod_name}.st",
+                    d / f"{mod_path_str}.sotlas",
+                    d / f"{mod_path_str}.st",
+                ]
+                for c in candidates:
+                    if c.is_file():
+                        target_file = c
+                        break
+                if target_file:
+                    break
+
+            if target_file and target_file not in visited_files:
+                visited_files.add(target_file)
+                try:
+                    text = target_file.read_text(encoding="utf-8")
+                    imported_ast = Parser(Lexer(text, str(target_file)).tokenize(), str(target_file)).parse()
+                    for decl in imported_ast.decls:
+                        if isinstance(decl, (StructDeclNode, ClassDeclNode, MeshDeclNode,
+                                             SpecDeclNode, EnumDeclNode)):
+                            self._global.define(Symbol(decl.name, "type", None, decl.span))
+                        elif isinstance(decl, (FnDeclNode, TrapFnDeclNode)):
+                            self._global.define(Symbol(decl.name, "fn", None, decl.span))
+                        elif isinstance(decl, ConstDeclNode):
+                            self._global.define(Symbol(decl.name, "let", decl.type_ann, decl.span))
+                        elif isinstance(decl, StaticDeclNode):
+                            self._global.define(Symbol(decl.name, "var" if decl.is_var else "let",
+                                                       decl.type_ann, decl.span))
+                        elif isinstance(decl, TypeAliasDeclNode):
+                            self._global.define(Symbol(decl.name, "type", decl.alias, decl.span))
+                except Exception:
+                    pass
+
     def _pass1_collect(self) -> None:
+        self._collect_imported_symbols()
         for decl in self._ast.decls:
             if isinstance(decl, (StructDeclNode, ClassDeclNode, MeshDeclNode,
                                  SpecDeclNode, EnumDeclNode)):
@@ -236,7 +295,12 @@ class Sema:
     def _check_type(self, t: TypeNode, span: Span) -> None:
         if t.is_topology_ptr:
             self._check_topology_ptr(t, span)
-        if t.name and not t.is_primitive:
+        if t.is_tuple:
+            for elem in t.tuple_elements:
+                self._check_type(elem, span)
+        if t.is_slice and t.inner_type:
+            self._check_type(t.inner_type, span)
+        if t.name and not t.is_primitive and t.name != "()" and t.name != "!":
             if not self._global.lookup(t.name):
                 self._err(f"tipo '{t.name}' não declarado", span)
 
@@ -320,6 +384,13 @@ class Sema:
         elif isinstance(stmt, ReturnNode):
             if stmt.value:
                 self._check_expr(stmt.value, scope)
+        elif isinstance(stmt, DeferNode):
+            if stmt.expr:
+                self._check_expr(stmt.expr, scope)
+            if stmt.body:
+                s = scope.child()
+                for st in stmt.body:
+                    self._check_stmt(st, s)
         elif isinstance(stmt, ExprStmtNode):
             self._check_expr(stmt.expr, scope)
 
@@ -441,6 +512,26 @@ class Sema:
         elif isinstance(expr, ArrayLitExprNode):
             for el in expr.elements:
                 self._check_expr(el, scope)
+        elif isinstance(expr, TupleLitExprNode):
+            for el in expr.elements:
+                self._check_expr(el, scope)
+        elif isinstance(expr, TupleIndexExprNode):
+            self._check_expr(expr.base, scope)
+        elif isinstance(expr, SliceExprNode):
+            self._check_expr(expr.base, scope)
+            if expr.lo:
+                self._check_expr(expr.lo, scope)
+            if expr.hi:
+                self._check_expr(expr.hi, scope)
+        elif isinstance(expr, TryExprNode):
+            self._check_expr(expr.expr, scope)
+        elif isinstance(expr, IfExprNode):
+            self._check_expr(expr.condition, scope)
+            self._check_expr(expr.then_expr, scope)
+            self._check_expr(expr.else_expr, scope)
+        elif isinstance(expr, StructLitExprNode):
+            for f in expr.fields:
+                self._check_expr(f.value, scope)
         elif isinstance(expr, ClosureExprNode):
             s = scope.child()
             for p in expr.params:

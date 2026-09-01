@@ -47,7 +47,7 @@ pub fn emit_c_from_tokens(tokens: *const Token, tok_count: usize, out_buf: *mut 
                 continue;
             }
 
-            // Ignora 'pub', 'unsafe', '@system', '@export', '@inline'
+            // Ignora 'pub', 'unsafe', '@system', '@export', '@inline', '@inline'
             if str_eq(txt, "pub") || str_eq(txt, "unsafe") || str_eq(txt, "@system") || str_eq(txt, "@export") || str_eq(txt, "@inline") {
                 i = i + 1;
                 continue;
@@ -104,6 +104,45 @@ pub fn emit_c_from_tokens(tokens: *const Token, tok_count: usize, out_buf: *mut 
                     str_concat(out_buf, var_name, max_len);
                 }
                 str_concat(out_buf, " ", max_len);
+                continue;
+            }
+
+            // defer -> ignorar por agora (requer análise de escopo para implementação correta)
+            if str_eq(txt, "defer") {
+                // TODO: Implementar defer corretamente com rastreamento de escopo
+                // Por enquanto, apenas ignoramos o keyword
+                i = i + 1;
+                continue;
+            }
+
+            // loop -> while (true)
+            if str_eq(txt, "loop") {
+                str_concat(out_buf, "while (true) ", max_len);
+                i = i + 1;
+                continue;
+            }
+
+            // break
+            if str_eq(txt, "break") {
+                str_concat(out_buf, "break; ", max_len);
+                i = i + 1;
+                continue;
+            }
+
+            // continue
+            if str_eq(txt, "continue") {
+                str_concat(out_buf, "continue; ", max_len);
+                i = i + 1;
+                continue;
+            }
+
+            // match -> POR IMPLEMENTAR (complexo)
+            if str_eq(txt, "match") {
+                // TODO: Implementar match corretamente
+                // Por enquanto, tratamos como identificador para não quebrar
+                str_concat(out_buf, txt, max_len);
+                str_concat(out_buf, " ", max_len);
+                i = i + 1;
                 continue;
             }
 

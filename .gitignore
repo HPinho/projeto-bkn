@@ -25,6 +25,7 @@ tools/bin/
 # IDE & Editor files
 .vscode/
 .idea/
+.claude/
 *.swp
 *.tmp
 .figma-baken-state.json

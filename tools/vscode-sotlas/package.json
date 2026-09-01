@@ -22,7 +22,8 @@
           "sotlas"
         ],
         "extensions": [
-          ".sotlas"
+          ".sotlas",
+          ".sth"
         ],
         "configuration": "./language-configuration.json",
         "icon": {

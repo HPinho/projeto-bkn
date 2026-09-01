@@ -13,13 +13,7 @@ import re
 
 
 class SotlasBootstrapError(Exception):
-    pass
-
-# Alias de compatibilidade
-Cq01Error = SotlasBootstrapError
-
-class _Placeholder:
-    def __init__(self, message: str, line: int, column: int, file: str | None = None, source: str | None = None):
+    def __init__(self, message: str, line: int = 1, column: int = 1, file: str | None = None, source: str | None = None):
         self.message = message
         self.line = line
         self.column = column
@@ -34,6 +28,9 @@ class _Placeholder:
                 pointer = " " * (max(0, column - 1)) + "^"
                 snippet = f"\n  {src_line}\n  {pointer}"
         super().__init__(f"{loc}: {message}{snippet}")
+
+# Alias de compatibilidade
+Cq01Error = SotlasBootstrapError
 
 
 @dataclass(frozen=True)
@@ -206,7 +203,15 @@ class Unsafe(Stmt): body: list[Stmt]
 @dataclass
 class Expression(Stmt): value: Expr
 @dataclass
-class Defer(Stmt): value: Expr
+class Defer(Stmt):
+    value: Expr | None = None
+    body: list[Stmt] | None = None
+
+    def __post_init__(self):
+        if self.value is None and self.body is None:
+            raise ValueError("Defer must have either value or body")
+        if self.value is not None and self.body is not None:
+            raise ValueError("Defer cannot have both value and body")
 
 @dataclass
 class FieldDef: name: str; type: Type
@@ -460,13 +465,20 @@ class Parser:
         if self.accept("while"): return While(token, self.expression(), self.block())
         if self.accept("unsafe"): return Unsafe(token, self.block())
         if self.accept("defer"):
-            expr = self.expression()
-            if self.accept("="):
-                value = self.expression()
+            if self.accept("{"):
+                # defer { block }
+                body = self.block()
+                self.expect("}")
+                return Defer(token, body=body)
+            else:
+                # defer expression;
+                expr = self.expression()
+                if self.accept("="):
+                    value = self.expression()
+                    self.expect(";")
+                    return Defer(token, Assign(token, expr, value))
                 self.expect(";")
-                return Defer(token, Assign(token, expr, value))
-            self.expect(";")
-            return Defer(token, expr)
+                return Defer(token, expr)
 
         # Expressão ou Atribuição (pode ser atribuição a identificador ou membro/índice)
         expr = self.expression()
@@ -965,19 +977,28 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
                         out.append(f"{pad}return {val_str};")
                 else:
                     for d in all_defers:
-                        out.append(_emit_defer_action(d, pad))
+                        if d.body is not None:
+                            out.extend(emit_statements(d.body, depth, defer_scopes, loop_scope_depth, ret_type))
+                        else:
+                            out.append(_emit_defer_action(d, pad))
                     out.append(f"{pad}return;")
             elif isinstance(item, Break):
                 if loop_scope_depth is not None:
                     loop_defers = [d for scope in reversed(defer_scopes[loop_scope_depth:]) for d in reversed(scope)]
                     for d in loop_defers:
-                        out.append(_emit_defer_action(d, pad))
+                        if d.body is not None:
+                            out.extend(emit_statements(d.body, depth, defer_scopes, loop_scope_depth, ret_type))
+                        else:
+                            out.append(_emit_defer_action(d, pad))
                 out.append(f"{pad}break;")
             elif isinstance(item, Continue):
                 if loop_scope_depth is not None:
                     loop_defers = [d for scope in reversed(defer_scopes[loop_scope_depth:]) for d in reversed(scope)]
                     for d in loop_defers:
-                        out.append(_emit_defer_action(d, pad))
+                        if d.body is not None:
+                            out.extend(emit_statements(d.body, depth, defer_scopes, loop_scope_depth, ret_type))
+                        else:
+                            out.append(_emit_defer_action(d, pad))
                 out.append(f"{pad}continue;")
             elif isinstance(item, Expression):
                 out.append(f"{pad}{_emit_expr(item.value, prefix)};")
@@ -997,7 +1018,10 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
                     out.append(f"{pad}}}")
         current_defers = defer_scopes.pop()
         for d in reversed(current_defers):
-            out.append(_emit_defer_action(d, pad))
+            if d.body is not None:
+                out.extend(emit_statements(d.body, depth, defer_scopes, loop_scope_depth, ret_type))
+            else:
+                out.append(_emit_defer_action(d, pad))
         return out
 
     # Forward declarations das funções
@@ -1036,7 +1060,7 @@ def compile_project(entry: Path) -> list[Module]:
     while root.parent != root and not (root / "core").is_dir():
         root = root.parent
     units: dict[str, Module] = {}
-    for path in list(root.rglob("*.st")) + list(root.rglob("*.st")):
+    for path in list(root.rglob("*.sotlas")) + list(root.rglob("*.sth")) + list(root.rglob("*.st")):
         if "tests" in path.parts or "fixtures" in path.parts or ".git" in path.parts:
             continue
         try:

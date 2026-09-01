@@ -62,6 +62,7 @@ class CodegenC:
         self._out = StringIO()
         self._indent = 0
         self._vtables: List[str] = []   # vtables de métodos moldable
+        self._defer_stack: List[DeferNode] = []
 
     def emit(self) -> str:
         a = self._ast
@@ -128,27 +129,32 @@ class CodegenC:
                 return f"{inner} {name}[{sz}]" if name else f"{inner}[]"
             return f"{inner}*"
 
+        bare = self._emit_bare_type(t)
         if t.is_topology_ptr:
-            inner = self._emit_bare_type(t)
-            mod = ""
-            if t.topology_mut:
-                mod = ""
-            else:
-                mod = " const"
+            mod = "" if t.topology_mut else " const"
             topo = {
-                TK.KW_RAWPHYS: f"volatile {inner}*{mod}",
-                TK.KW_VIRTMAP: f"volatile {inner}*{mod}",
-                TK.KW_PORTWIRE: f"volatile {inner}*{mod} __attribute__((io_port))",
-                TK.KW_DMAZONE: f"{inner}* __attribute__((aligned(64)))",
+                TK.KW_RAWPHYS: f"volatile {bare}*{mod}",
+                TK.KW_VIRTMAP: f"volatile {bare}*{mod}",
+                TK.KW_PORTWIRE: f"volatile {bare}*{mod} __attribute__((io_port))",
+                TK.KW_DMAZONE: f"{bare}* __attribute__((aligned(64)))",
                 TK.KW_VOIDZERO: "void*",
-                TK.KW_MUT: f"{inner}*",
-                TK.KW_CONST_MOD: f"const {inner}*",
+                TK.KW_MUT: f"{bare}*",
+                TK.KW_CONST_MOD: f"const {bare}*",
             }
-            return topo.get(t.topology_ptr, f"{inner}*")
+            res = topo.get(t.topology_ptr, f"{bare}*")
+            return f"{res} {name}".strip() if name else res
 
-        return self._emit_bare_type(t)
+        return f"{bare} {name}".strip() if name else bare
 
     def _emit_bare_type(self, t: TypeNode) -> str:
+        if t.is_tuple:
+            if not t.tuple_elements:
+                return "void"
+            fields = " ".join(f"{self._emit_type(elem, f'_{i}')};" for i, elem in enumerate(t.tuple_elements))
+            return f"struct {{ {fields} }}"
+        if t.is_slice:
+            inner = self._emit_bare_type(t.inner_type) if t.inner_type else "void"
+            return f"struct {{ {inner}* data; size_t len; }}"
         if t.primitive is not None:
             if t.is_bounded:
                 # Bounded type → tipo primitivo C com comentário de range
@@ -158,6 +164,10 @@ class CodegenC:
                 return f"{c_type} /* bound[{lo}..{hi}] */"
             return PRIMITIVE_C_MAP.get(t.primitive, "int")
         if t.name:
+            if t.name == "()":
+                return "void"
+            if t.name == "!":
+                return "void"
             return t.name
         return "void"
 
@@ -315,8 +325,17 @@ class CodegenC:
         ) or "void"
         self._w(f"{ret}{attrs} {decl.name}({params}) {{\n")
         self._indent_inc()
+        old_defers = list(self._defer_stack)
+        self._defer_stack = []
         for stmt in decl.body:
             self._emit_stmt(stmt)
+        for d in reversed(self._defer_stack):
+            if d.expr:
+                self._line(f"{self._emit_expr(d.expr)};")
+            elif d.body:
+                for st in d.body:
+                    self._emit_stmt(st)
+        self._defer_stack = old_defers
         self._indent_dec()
         self._w("}\n\n")
 
@@ -381,24 +400,55 @@ class CodegenC:
             self._indent_dec()
             self._line("}")
         elif isinstance(stmt, ForNode):
-            it = self._emit_expr(stmt.iterable)
-            self._line(f"/* for {stmt.var} in {it} */")
-            self._line(f"for (size_t _sotlas_i = 0; _sotlas_i < sizeof({it})/sizeof(*{it}); ++_sotlas_i) {{")
-            self._indent_inc()
-            self._line(f"__typeof__(*{it}) {stmt.var} = {it}[_sotlas_i];")
-            for st in stmt.body:
-                self._emit_stmt(st)
-            self._indent_dec()
-            self._line("}")
+            if isinstance(stmt.iterable, BinaryExprNode) and stmt.iterable.op == TK.DOTDOT:
+                start = self._emit_expr(stmt.iterable.left)
+                end = self._emit_expr(stmt.iterable.right)
+                self._line(f"for (size_t {stmt.var} = ({start}); {stmt.var} < ({end}); ++{stmt.var}) {{")
+                self._indent_inc()
+                for st in stmt.body:
+                    self._emit_stmt(st)
+                self._indent_dec()
+                self._line("}")
+            else:
+                it = self._emit_expr(stmt.iterable)
+                self._line(f"/* for {stmt.var} in {it} */")
+                self._line(f"for (size_t _sotlas_i = 0; _sotlas_i < sizeof({it})/sizeof(*{it}); ++_sotlas_i) {{")
+                self._indent_inc()
+                self._line(f"__typeof__(*{it}) {stmt.var} = {it}[_sotlas_i];")
+                for st in stmt.body:
+                    self._emit_stmt(st)
+                self._indent_dec()
+                self._line("}")
         elif isinstance(stmt, UnsafeBlockNode):
             self._line("/* unsafe */")
             for st in stmt.body:
                 self._emit_stmt(st)
+        elif isinstance(stmt, DeferNode):
+            self._defer_stack.append(stmt)
         elif isinstance(stmt, ReturnNode):
-            if stmt.value:
-                self._line(f"return {self._emit_expr(stmt.value)};")
-            else:
+            if stmt.value and self._defer_stack:
+                val_str = self._emit_expr(stmt.value)
+                self._line(f"__typeof__({val_str}) _ret_val = {val_str};")
+                for d in reversed(self._defer_stack):
+                    if d.expr:
+                        self._line(f"{self._emit_expr(d.expr)};")
+                    elif d.body:
+                        for st in d.body:
+                            self._emit_stmt(st)
+                self._line("return _ret_val;")
+            elif self._defer_stack:
+                for d in reversed(self._defer_stack):
+                    if d.expr:
+                        self._line(f"{self._emit_expr(d.expr)};")
+                    elif d.body:
+                        for st in d.body:
+                            self._emit_stmt(st)
                 self._line("return;")
+            else:
+                if stmt.value:
+                    self._line(f"return {self._emit_expr(stmt.value)};")
+                else:
+                    self._line("return;")
         elif isinstance(stmt, ReboundNode):
             # rebound → iret / eret dependendo da arquitetura
             self._line("/* rebound */ __asm__ volatile(\"iretq\");")
@@ -545,11 +595,34 @@ class CodegenC:
         if isinstance(expr, CastExprNode):
             c_type = self._emit_type(expr.target_type)
             return f"(({c_type})({self._emit_expr(expr.expr)}))"
-        if isinstance(expr, (OptionalChainExprNode, ForceUnwrapExprNode)):
+        if isinstance(expr, ForceUnwrapExprNode):
             return self._emit_expr(expr.expr)
         if isinstance(expr, ArrayLitExprNode):
             elems = ", ".join(self._emit_expr(e) for e in expr.elements)
             return f"{{{elems}}}"
+        if isinstance(expr, StructLitExprNode):
+            fields_str = ", ".join(f".{f.name} = {self._emit_expr(f.value)}" for f in expr.fields)
+            return f"({expr.struct_name}){{ {fields_str} }}"
+        if isinstance(expr, TupleLitExprNode):
+            if not expr.elements:
+                return "0"
+            fields_str = ", ".join(f"._{i} = {self._emit_expr(e)}" for i, e in enumerate(expr.elements))
+            return f"{{ {fields_str} }}"
+        if isinstance(expr, TupleIndexExprNode):
+            return f"{self._emit_expr(expr.base)}._{expr.index}"
+        if isinstance(expr, SliceExprNode):
+            base_str = self._emit_expr(expr.base)
+            lo_str = self._emit_expr(expr.lo) if expr.lo else "0"
+            hi_str = self._emit_expr(expr.hi) if expr.hi else f"(sizeof({base_str})/sizeof(*({base_str})))"
+            return f"({{ __typeof__({base_str}) _b = ({base_str}); struct {{ __typeof__(*_b) *data; size_t len; }} _s = {{ .data = _b + ({lo_str}), .len = (size_t)(({hi_str}) - ({lo_str})) }}; _s; }})"
+        if isinstance(expr, TryExprNode):
+            inner_str = self._emit_expr(expr.expr)
+            return f"({{ __typeof__({inner_str}) _res = ({inner_str}); if (_res.status != 0) return _res; _res.value; }})"
+        if isinstance(expr, IfExprNode):
+            c = self._emit_expr(expr.condition)
+            t = self._emit_expr(expr.then_expr)
+            e = self._emit_expr(expr.else_expr)
+            return f"(({c}) ? ({t}) : ({e}))"
         if isinstance(expr, ClosureExprNode):
             return "/* closure */(void*)0"
         if isinstance(expr, ArgNode):

@@ -39,6 +39,9 @@ class TypeNode:
     bounded_lo: Optional["ExprNode"]  # PrimitiveType.bound[lo..hi]
     bounded_hi: Optional["ExprNode"]
     generic_args: List["TypeNode"] = field(default_factory=list)
+    is_slice: bool = False            # [T] fatia dinâmica
+    inner_type: Optional["TypeNode"] = None
+    tuple_elements: List["TypeNode"] = field(default_factory=list)
 
     @property
     def is_topology_ptr(self) -> bool:
@@ -51,6 +54,10 @@ class TypeNode:
     @property
     def is_bounded(self) -> bool:
         return self.bounded_lo is not None
+
+    @property
+    def is_tuple(self) -> bool:
+        return len(self.tuple_elements) > 0
 
 
 @dataclass
@@ -65,6 +72,12 @@ class FunctionTypeNode:
 class TupleTypeNode:
     span: Span
     elements: List[TypeNode]
+
+
+@dataclass
+class SliceTypeNode:
+    span: Span
+    element_type: TypeNode
 
 
 # ---------------------------------------------------------------------------
@@ -187,12 +200,61 @@ class ClosureExprNode:
     body: List["StmtNode"]
 
 
+@dataclass
+class StructLitFieldNode:
+    span: Span
+    name: str
+    value: "ExprNode"
+
+
+@dataclass
+class StructLitExprNode:
+    span: Span
+    struct_name: str
+    prefix: List[str]
+    fields: List[StructLitFieldNode]
+
+
+@dataclass
+class TupleLitExprNode:
+    span: Span
+    elements: List["ExprNode"]
+
+
+@dataclass
+class TupleIndexExprNode:
+    span: Span
+    base: "ExprNode"
+    index: int
+
+
+@dataclass
+class SliceExprNode:
+    span: Span
+    base: "ExprNode"
+    lo: Optional["ExprNode"]
+    hi: Optional["ExprNode"]
+
+
+@dataclass
+class IfExprNode:
+    span: Span
+    condition: "ExprNode"
+    then_expr: "ExprNode"
+    else_expr: "ExprNode"
+
+
+# TryExprNode é alias de OptionalChainExprNode (operador postfix '?')
+TryExprNode = OptionalChainExprNode
+
+
 # Union type para todas as expressões
 ExprNode = Union[
     LiteralNode, IdentNode, BinaryExprNode, UnaryExprNode, CallExprNode,
     IndexExprNode, FieldExprNode, BitSliceExprNode, BitNotchExprNode,
     BitStrandExprNode, CastExprNode, OptionalChainExprNode, ForceUnwrapExprNode,
-    ArrayLitExprNode, ClosureExprNode, ArgNode,
+    ArrayLitExprNode, ClosureExprNode, StructLitExprNode, TupleLitExprNode,
+    TupleIndexExprNode, SliceExprNode, TryExprNode, IfExprNode, ArgNode,
 ]
 
 
@@ -347,11 +409,18 @@ class ExprStmtNode:
     expr: ExprNode
 
 
+@dataclass
+class DeferNode:
+    span: Span
+    expr: Optional[ExprNode] = None
+    body: Optional[List["StmtNode"]] = None
+
+
 StmtNode = Union[
     LocalVarDeclNode, AssignmentNode, HandoverNode, QuarantineNode,
     ClinchNode, QuenchNode, GateNode, EmitNode, GuardNode,
     IfNode, MatchNode, WhileNode, ForNode, UnsafeBlockNode,
-    ReturnNode, ReboundNode, BreakNode, ContinueNode, ExprStmtNode,
+    ReturnNode, ReboundNode, BreakNode, ContinueNode, DeferNode, ExprStmtNode,
 ]
 
 

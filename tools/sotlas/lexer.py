@@ -82,13 +82,25 @@ class Lexer:
             elif ch == "/" and self._peek(1) == "/":
                 while self._pos < len(self._src) and self._peek() != "\n":
                     self._advance()
-            elif ch == "(" and self._peek(1) == "*":
-                self._advance(); self._advance()  # consume (*
+            elif ch == "/" and self._peek(1) == "*":
+                self._advance(); self._advance()  # consume /*
                 while self._pos < len(self._src):
-                    if self._peek() == "*" and self._peek(1) == ")":
-                        self._advance(); self._advance()  # consume *)
+                    if self._peek() == "*" and self._peek(1) == "/":
+                        self._advance(); self._advance()  # consume */
                         break
                     self._advance()
+            elif ch == "(" and self._peek(1) == "*":
+                end_pos = self._src.find("*)", self._pos + 2)
+                if end_pos != -1 and ")" not in self._src[self._pos + 2 : end_pos]:
+                    inner = self._src[self._pos + 2 : end_pos]
+                    self._pos = end_pos + 2
+                    self._line += inner.count("\n")
+                    if "\n" in inner:
+                        self._col = len(inner) - inner.rfind("\n") + 1
+                    else:
+                        self._col += len(inner) + 4
+                else:
+                    break
             else:
                 break
 

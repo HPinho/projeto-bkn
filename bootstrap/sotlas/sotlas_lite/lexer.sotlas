@@ -130,7 +130,10 @@ pub fn lex_source(src: *const u8, tokens: *mut Token, max_tokens: usize) -> usiz
                    str_eq(txt_ptr, "else") || str_eq(txt_ptr, "while") ||
                    str_eq(txt_ptr, "unsafe") || str_eq(txt_ptr, "const") ||
                    str_eq(txt_ptr, "static") || str_eq(txt_ptr, "as") ||
-                   str_eq(txt_ptr, "null") || str_eq(txt_ptr, "true") || str_eq(txt_ptr, "false") {
+                   str_eq(txt_ptr, "null") || str_eq(txt_ptr, "true") || str_eq(txt_ptr, "false") ||
+                   str_eq(txt_ptr, "match") || str_eq(txt_ptr, "loop") ||
+                   str_eq(txt_ptr, "break") || str_eq(txt_ptr, "continue") ||
+                   str_eq(txt_ptr, "defer") {
                     tok.kind = TokenKind::Keyword;
                 }
                 tokens[tok_count] = tok;
