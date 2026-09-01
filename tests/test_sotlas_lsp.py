@@ -38,7 +38,7 @@ pub fn run_app(cfg: *mut Config) -> bool {
 class SotlasLspServerTests(unittest.TestCase):
     def setUp(self):
         self.server = lsp.SotlasLanguageServer()
-        self.entry_path = ROOT / "bootstrap" / "sotlas" / "kernel" / "main.st"
+        self.entry_path = ROOT / "bootstrap" / "sotlas" / "kernel" / "main.sotlas"
         self.entry_uri = lsp.path_to_uri(self.entry_path)
 
     def test_validate_publishes_no_diagnostics_on_valid_source(self):
@@ -46,13 +46,13 @@ class SotlasLspServerTests(unittest.TestCase):
         self.assertEqual(len(diagnostics), 0)
 
     def test_validate_publishes_diagnostic_on_syntax_error(self):
-        bad_uri = "file:///test/bad.st"
+        bad_uri = "file:///test/bad.sotlas"
         diagnostics = self.server.validate(bad_uri, "module bad; fn invalid() { return @; }")
         self.assertGreater(len(diagnostics), 0)
         self.assertIn("caractere léxico inválido", diagnostics[0]["message"])
 
     def test_completion_returns_keywords_and_types(self):
-        uri = "file:///test/comp.st"
+        uri = "file:///test/comp.sotlas"
         self.server.validate(uri, "module test::comp;\nfn test() {\n    \n}")
         items = self.server.completion(uri, line=2, character=4)
         labels = [item["label"] for item in items]
@@ -62,7 +62,7 @@ class SotlasLspServerTests(unittest.TestCase):
         self.assertIn("usize", labels)
 
     def test_completion_suggests_attributes_on_at(self):
-        uri = "file:///test/attr.st"
+        uri = "file:///test/attr.sotlas"
         self.server.validate(uri, "module test::attr;\n@")
         items = self.server.completion(uri, line=1, character=1)
         labels = [item["label"] for item in items]
@@ -72,7 +72,7 @@ class SotlasLspServerTests(unittest.TestCase):
         self.assertIn("@export", labels)
 
     def test_completion_suggests_enum_variants_on_double_colon(self):
-        uri = "file:///test/enum_comp.st"
+        uri = "file:///test/enum_comp.sotlas"
         source = "module test::enum_comp;\npub enum Status { Active = 1, Inactive = 0 }\nfn run() { Status::\n}"
         self.server.validate(uri, source)
         items = self.server.completion(uri, line=2, character=19)
@@ -92,7 +92,7 @@ class SotlasLspServerTests(unittest.TestCase):
         self.assertIn("rgb", labels)
 
     def test_hover_on_functions_structs_and_enums(self):
-        uri = "file:///test/hover.st"
+        uri = "file:///test/hover.sotlas"
         self.server.validate(uri, SAMPLE_SOURCE)
 
         # Hover em função (linha 15, col 8: run_app)
@@ -121,10 +121,10 @@ class SotlasLspServerTests(unittest.TestCase):
 
         target = self.server.definition(self.entry_uri, serial_line_idx, serial_char_idx)
         self.assertIsNotNone(target)
-        self.assertIn("serial.st", target["uri"])
+        self.assertIn("serial.sotlas", target["uri"])
 
     def test_document_symbols_extracts_tree(self):
-        uri = "file:///test/symbols.st"
+        uri = "file:///test/symbols.sotlas"
         self.server.validate(uri, SAMPLE_SOURCE)
         symbols = self.server.document_symbols(uri)
         names = [s["name"] for s in symbols]

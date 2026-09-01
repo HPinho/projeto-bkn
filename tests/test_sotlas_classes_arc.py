@@ -64,7 +64,7 @@ class SotlasClassesAndArcTests(unittest.TestCase):
         self.assertIn("Point_get_x(&(p))", emitted)
 
     def test_core_arc_compiles_and_links_cleanly(self):
-        entry = ROOT / "bootstrap" / "sotlas" / "core" / "arc.st"
+        entry = ROOT / "bootstrap" / "sotlas" / "core" / "arc.sotlas"
         bootstrap.emit_c_project(entry, self.output_c)
         self.assertTrue(self.output_c.exists())
 
@@ -76,7 +76,7 @@ class SotlasClassesAndArcTests(unittest.TestCase):
         self.assertEqual(res.returncode, 0, f"Erro GCC core::arc: {res.stderr}")
 
     def test_core_option_and_result_compile_cleanly(self):
-        for subpath in ["option.st", "result.st"]:
+        for subpath in ["option.sotlas", "result.sotlas"]:
             entry = ROOT / "bootstrap" / "sotlas" / "core" / subpath
             bootstrap.emit_c_project(entry, self.output_c)
             gcc = sotlas_compile.find_gcc(ROOT)
@@ -87,7 +87,7 @@ class SotlasClassesAndArcTests(unittest.TestCase):
             self.assertEqual(res.returncode, 0, f"Erro GCC core::{subpath}: {res.stderr}")
 
     def test_runtime_class_and_arc_execution(self):
-        test_source = ROOT / "bootstrap" / "sotlas" / "test_runtime_app.st"
+        test_source = ROOT / "bootstrap" / "sotlas" / "test_runtime_app.sotlas"
         test_source.write_text("""
         module app::test;
         import core::mem::*;

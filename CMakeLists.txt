@@ -10,7 +10,7 @@ enable_testing()
 
 add_custom_target(sotlas_check
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sotlas_compile/compiler.py
-            check ${CMAKE_SOURCE_DIR}/kernel/src/main.st
+            check ${CMAKE_SOURCE_DIR}/kernel/src/main.sotlas
             --manifest ${CMAKE_BINARY_DIR}/sotlas-main.manifest.json
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Validando o grafo modular Sotlas"
@@ -18,7 +18,7 @@ add_custom_target(sotlas_check
 
 add_custom_target(sotlas_build
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tools/sotlas_compile/compiler.py
-            build ${CMAKE_SOURCE_DIR}/kernel/src/main.st
+            build ${CMAKE_SOURCE_DIR}/kernel/src/main.sotlas
             -o ${CMAKE_SOURCE_DIR}/build/cmake-sotlas/BOOTX64.EFI
             --manifest ${CMAKE_BINARY_DIR}/sotlas-main.manifest.json
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}

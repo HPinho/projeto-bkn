@@ -5,7 +5,7 @@ O compilador resolve o grafo Sotlas, valida sua interface pública e emite uma
 unidade C isolada para cada módulo. A entrada do kernel e a linkedição
 pertencem integralmente ao grafo Sotlas.
 
-Extensões suportadas: .st (Sotlas source) / .sth (Sotlas headers)
+Extensão oficial: .sotlas
 """
 import argparse
 import json
@@ -5687,7 +5687,7 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
         compiled_objects.append(obj)
 
     # Compila o bootloader UEFI Sotlas.
-    bootloader_src = root / "boot" / "uefi_bootloader.st"
+    bootloader_src = root / "boot" / "uefi_bootloader.sotlas"
     if bootloader_src.exists():
         bootloader_obj = obj_dir / "uefi_bootloader.o"
         cmd = [str(gcc), *common_flags, "-x", "c", str(bootloader_src), "-o", str(bootloader_obj)]

@@ -1,13 +1,22 @@
 (* =============================================================================
    Sotlas Unified Specification — Gramática Formal Consolidada
-   Barecore, SRG Memory Graph, Topology Pointers, Hardware & Applications
+   Perfis de destino, SRG Memory Graph, Topology Pointers, Hardware & Applications
    ============================================================================= *)
 
 SourceFile
-    ::= [ BarecoreHeader ] ModuleDeclaration { ImportDeclaration } { TopLevelDeclaration } EOF ;
+    ::= [ TargetDeclaration ] ModuleDeclaration { ImportDeclaration } { TopLevelDeclaration } EOF ;
 
-BarecoreHeader
-    ::= "barecore" ";" ;
+(* O perfil seleciona as APIs e restrições sem alterar a linguagem-base. *)
+TargetDeclaration
+    ::= "target" TargetProfile ";"
+    |   "barecore" ";" (* Forma transitória equivalente a "target barecore;" *)
+    ;
+
+TargetProfile
+    ::= "barecore" (* Firmware, kernel, drivers e ambientes freestanding. *)
+    |   "native"   (* Aplicações hospedadas no sistema operacional. *)
+    |   "web"      (* Aplicações compiladas para ambiente web. *)
+    ;
 
 ModuleDeclaration
     ::= "module" QualifiedIdentifier ";" ;
@@ -73,6 +82,8 @@ EnumDeclaration
 EnumVariant
     ::= Identifier [ "(" ParameterList ")" ] [ "=" Expression ] [ "," ] ;
 
+(* Uma spec é o contrato verificável de uma API. Não há arquivo header Sotlas:
+   structs e classes usam "adopts" para declarar que o implementam. *)
 SpecDeclaration
     ::= "spec" Identifier [ GenericParams ] "{" { SpecMember } "}" ;
 
@@ -120,7 +131,20 @@ MeshMember
     ::= Identifier ":" Type [ "align" "(" IntegerLiteral ")" ] ";" ;
 
 SpecMember
-    ::= [ "irqfree" ] [ "async" ] "fn" Identifier "(" [ ParameterList ] ")" [ "->" Type ] ";" ;
+    ::= SpecFunctionDeclaration
+    |   SpecTypeDeclaration
+    |   SpecConstDeclaration
+    ;
+
+SpecFunctionDeclaration
+    ::= [ "irqfree" ] [ "async" ] "fn" Identifier [ GenericParams ]
+        "(" [ ParameterList ] ")" [ "->" Type ] ";" ;
+
+SpecTypeDeclaration
+    ::= "type" Identifier [ ":" Type ] ";" ;
+
+SpecConstDeclaration
+    ::= "const" Identifier ":" Type ";" ;
 
 (* --- Funções e Rotinas de Interrupção --- *)
 FunctionDeclaration
@@ -190,7 +214,7 @@ BoundedType
     ::= PrimitiveType "." "bound" "[" Expression ".." Expression "]" ;
 
 ArrayType
-    ::= "[" Type ( ";" Expression | "]" ) ;
+    ::= "[" Type [ ";" Expression ] "]" ;
 
 FunctionType
     ::= "(" [ TypeList ] ")" [ "async" ] "->" Type ;
@@ -308,16 +332,41 @@ Block
 (* ============================================================================ *)
 
 Expression
-    ::= BinaryExpr ;
+    ::= NullCoalesceExpr ;
 
-BinaryExpr
-    ::= UnaryExpr { BinaryOp UnaryExpr } ;
+(* Precedência: ??, ||, &&, bitwise, comparação, shift, soma, produto, unário. *)
+NullCoalesceExpr
+    ::= LogicalOrExpr [ "??" NullCoalesceExpr ] ;
 
-BinaryOp
-    ::= "==" | "!=" | "&&" | "||" | "&" | "|" | "^"
-    |   "<<" | ">>" | "<" | "<=" | ">" | ">="
-    |   "+" | "-" | "*" | "/" | "%" | "??"
-    ;
+LogicalOrExpr
+    ::= LogicalAndExpr { "||" LogicalAndExpr } ;
+
+LogicalAndExpr
+    ::= BitwiseOrExpr { "&&" BitwiseOrExpr } ;
+
+BitwiseOrExpr
+    ::= BitwiseXorExpr { "|" BitwiseXorExpr } ;
+
+BitwiseXorExpr
+    ::= BitwiseAndExpr { "^" BitwiseAndExpr } ;
+
+BitwiseAndExpr
+    ::= EqualityExpr { "&" EqualityExpr } ;
+
+EqualityExpr
+    ::= ComparisonExpr { ( "==" | "!=" ) ComparisonExpr } ;
+
+ComparisonExpr
+    ::= ShiftExpr { ( "<" | "<=" | ">" | ">=" ) ShiftExpr } ;
+
+ShiftExpr
+    ::= AdditiveExpr { ( "<<" | ">>" ) AdditiveExpr } ;
+
+AdditiveExpr
+    ::= MultiplicativeExpr { ( "+" | "-" ) MultiplicativeExpr } ;
+
+MultiplicativeExpr
+    ::= UnaryExpr { ( "*" | "/" | "%" ) UnaryExpr } ;
 
 UnaryExpr
     ::= ( "!" | "-" | "~" | "*" | "&" | "await" ) UnaryExpr
@@ -428,6 +477,20 @@ HexDigit
 
 (* ============================================================================ *)
 (* Semântica Normativa — Sotlas 0.1                                             *)
+(*                                                                               *)
+(* Perfis de destino:                                                           *)
+(*  - target barecore: ambiente freestanding; libera primitivas de hardware.  *)
+(*  - target native: aplicações hospedadas; APIs do SO vêm por bibliotecas.   *)
+(*  - target web: aplicações para o ambiente web.                              *)
+(*  - O perfil restringe APIs e geração de código; não altera módulos, tipos  *)
+(*    nem a sintaxe-base de Sotlas.                                             *)
+(*                                                                               *)
+(* Specs:                                                                       *)
+(*  - Uma spec pública é o contrato de uma API Sotlas.                         *)
+(*  - Uma declaração "adopts" deve satisfazer todas as funções, tipos e       *)
+(*    constantes da spec com assinaturas compatíveis.                           *)
+(*  - O compilador pode materializar e hashear essa superfície pública para    *)
+(*    builds incrementais, sem arquivos header Sotlas.                          *)
 (*                                                                               *)
 (* SRG (Scoped Reference Graph):                                                *)
 (*  - sole:     Posse única; destruição imediata ao sair do escopo; custo zero. *)

@@ -299,7 +299,7 @@ class TestParserErrors(unittest.TestCase):
 
 class TestParserFixtures(unittest.TestCase):
     def test_sample_counter(self):
-        path = ROOT / "tests" / "fixtures" / "sample_counter.st"
+        path = ROOT / "tests" / "fixtures" / "sample_counter.sotlas"
         ast = parse(path.read_text(encoding="utf-8"))
         self.assertEqual(ast.module.path, ["core", "counter"])
         struct_names = [d.name for d in ast.decls if isinstance(d, StructDeclNode)]
@@ -308,7 +308,7 @@ class TestParserFixtures(unittest.TestCase):
         self.assertIn("sum", fn_names)
 
     def test_barecore_vga(self):
-        path = ROOT / "tests" / "fixtures" / "barecore_vga.st"
+        path = ROOT / "tests" / "fixtures" / "barecore_vga.sotlas"
         ast = parse(path.read_text(encoding="utf-8"))
         self.assertTrue(ast.is_barecore)
         self.assertEqual(ast.module.path, ["hal", "vga"])
@@ -317,7 +317,7 @@ class TestParserFixtures(unittest.TestCase):
         self.assertEqual(trapfns[0].name, "keyboard_isr")
 
     def test_srg_scope(self):
-        path = ROOT / "tests" / "fixtures" / "srg_scope.st"
+        path = ROOT / "tests" / "fixtures" / "srg_scope.sotlas"
         ast = parse(path.read_text(encoding="utf-8"))
         fn_names = [d.name for d in ast.decls if isinstance(d, FnDeclNode)]
         self.assertIn("create_node", fn_names)

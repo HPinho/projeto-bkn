@@ -13,7 +13,7 @@ import compiler as sotlas_compile
 
 class SotlasLiteTests(unittest.TestCase):
     def setUp(self):
-        self.entry_path = ROOT / "bootstrap" / "sotlas" / "sotlas_lite" / "main.st"
+        self.entry_path = ROOT / "bootstrap" / "sotlas" / "sotlas_lite" / "main.sotlas"
         self.output_c = ROOT / "build" / "test_sotlas_lite_build.c"
         self.output_o = ROOT / "build" / "test_sotlas_lite_build.o"
 

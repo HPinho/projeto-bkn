@@ -240,7 +240,7 @@ class TestLexerErrors(unittest.TestCase):
 
 class TestLexerFixtures(unittest.TestCase):
     def test_sample_counter_tokenizes(self):
-        path = ROOT / "tests" / "fixtures" / "sample_counter.st"
+        path = ROOT / "tests" / "fixtures" / "sample_counter.sotlas"
         text = path.read_text(encoding="utf-8")
         tks = lex(text)
         self.assertTrue(any(t.kind == TK.KW_MODULE for t in tks))
@@ -248,7 +248,7 @@ class TestLexerFixtures(unittest.TestCase):
         self.assertTrue(any(t.kind == TK.KW_FN for t in tks))
 
     def test_barecore_vga_tokenizes(self):
-        path = ROOT / "tests" / "fixtures" / "barecore_vga.st"
+        path = ROOT / "tests" / "fixtures" / "barecore_vga.sotlas"
         text = path.read_text(encoding="utf-8")
         tks = lex(text)
         self.assertTrue(any(t.kind == TK.KW_BARECORE for t in tks))
@@ -261,7 +261,7 @@ class TestLexerFixtures(unittest.TestCase):
         self.assertTrue(any(t.kind == TK.KW_REVERT for t in tks))
 
     def test_srg_scope_tokenizes(self):
-        path = ROOT / "tests" / "fixtures" / "srg_scope.st"
+        path = ROOT / "tests" / "fixtures" / "srg_scope.sotlas"
         text = path.read_text(encoding="utf-8")
         tks = lex(text)
         self.assertTrue(any(t.kind == TK.KW_CO_OWNED for t in tks))

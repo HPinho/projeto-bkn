@@ -104,7 +104,7 @@ class PackagingContractTests(unittest.TestCase):
         build = (ROOT / "tools/build_uefi_desktop.ps1").read_text(encoding="utf-8")
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
         self.assertIn("$sotlasCompiler", build)
-        self.assertIn("kernel\\src\\main.st", build)
+        self.assertIn("kernel\\src\\main.sotlas", build)
         self.assertIn("generate_baken_app_icons.py", build)
         self.assertIn("baken_app_icons_atlas.h", build)
         self.assertIn("generate_motion_icons.py", build)

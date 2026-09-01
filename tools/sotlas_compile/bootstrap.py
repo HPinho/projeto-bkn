@@ -13,6 +13,12 @@ import re
 
 
 class SotlasBootstrapError(Exception):
+    pass
+
+# Alias de compatibilidade
+Cq01Error = SotlasBootstrapError
+
+class _Placeholder:
     def __init__(self, message: str, line: int, column: int, file: str | None = None, source: str | None = None):
         self.message = message
         self.line = line

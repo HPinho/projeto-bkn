@@ -1,4 +1,10 @@
-"""Sotlas CLI — Driver de compilação da toolchain Sotlas."""
+"""Sotlas CLI — Driver de compilação da toolchain Sotlas.
+
+Uso:
+    sotlas compile arquivo.sotlas [-o saída] [--target x86_64-freestanding] [--emit-c]
+    sotlas check   arquivo.sotlas
+    sotlas version
+"""
 from __future__ import annotations
 import argparse
 import sys
@@ -14,6 +20,9 @@ from sotlas.lexer import SotlasLexError
 from sotlas.parser import SotlasParseError
 from sotlas.sema import SotlasSemaError
 
+# Extensão oficial da linguagem Sotlas
+SOTLAS_EXT = ".sotlas"
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -22,9 +31,9 @@ def main() -> int:
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # sotlas compile <arquivo.st> [-o saída] [--target] [--emit-c]
-    cp = sub.add_parser("compile", help="Compila um arquivo .st para binário ou C99")
-    cp.add_argument("source", help="Arquivo fonte .st")
+    # sotlas compile <arquivo.sotlas> [-o saída] [--target] [--emit-c]
+    cp = sub.add_parser("compile", help=f"Compila um arquivo {SOTLAS_EXT} para binário ou C99")
+    cp.add_argument("source", help=f"Arquivo fonte {SOTLAS_EXT}")
     cp.add_argument("-o", "--output", default=None, help="Arquivo de saída")
     cp.add_argument(
         "--target",
@@ -46,9 +55,9 @@ def main() -> int:
     # sotlas version
     sub.add_parser("version", help="Exibe a versão do compilador")
 
-    # sotlas check <arquivo.st> — apenas análise léxica, sintática e semântica
+    # sotlas check <arquivo.sotlas> — apenas análise léxica, sintática e semântica
     chk = sub.add_parser("check", help="Verifica o arquivo sem gerar código")
-    chk.add_argument("source", help="Arquivo fonte .st")
+    chk.add_argument("source", help=f"Arquivo fonte {SOTLAS_EXT}")
 
     args = parser.parse_args()
 
@@ -70,6 +79,9 @@ def _run_check(source_path: str) -> int:
     if not src.exists():
         print(f"sotlas: erro: arquivo não encontrado: {source_path}", file=sys.stderr)
         return 1
+    # Aceita .sotlas (oficial) e .st (legado)
+    if src.suffix not in (SOTLAS_EXT, ".st"):
+        print(f"sotlas: aviso: extensão não reconhecida '{src.suffix}' (esperado {SOTLAS_EXT})", file=sys.stderr)
     text = src.read_text(encoding="utf-8")
     try:
         from sotlas.lexer import Lexer

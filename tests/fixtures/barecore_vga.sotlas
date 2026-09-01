@@ -1,5 +1,5 @@
 // Fixture: Driver VGA Barecore em Sotlas
-// Demonstra: barecore, *portwire, .slit, .notch, .strand, trapfn, clinch/revert
+// Demonstra: barecore, *portwire, .slit, .notch, .sotlasrand, trapfn, clinch/revert
 barecore;
 module hal::vga;
 

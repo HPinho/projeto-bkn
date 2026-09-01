@@ -219,12 +219,12 @@ class TestSemaSpecs(unittest.TestCase):
 
 class TestSemaFixtures(unittest.TestCase):
     def test_sample_counter_passes_sema(self):
-        path = ROOT / "tests" / "fixtures" / "sample_counter.st"
+        path = ROOT / "tests" / "fixtures" / "sample_counter.sotlas"
         text = path.read_text(encoding="utf-8")
         parse_check(text)
 
     def test_srg_scope_passes_sema(self):
-        path = ROOT / "tests" / "fixtures" / "srg_scope.st"
+        path = ROOT / "tests" / "fixtures" / "srg_scope.sotlas"
         text = path.read_text(encoding="utf-8")
         parse_check(text)
 

@@ -278,13 +278,13 @@ class TestCodegenWhileIf(unittest.TestCase):
 
 class TestCodegenFixtures(unittest.TestCase):
     def test_sample_counter_compiles(self):
-        path = ROOT / "tests" / "fixtures" / "sample_counter.st"
+        path = ROOT / "tests" / "fixtures" / "sample_counter.sotlas"
         c = compile_source(path.read_text(encoding="utf-8"), str(path))
         self.assertIn("int64_t sum(int64_t limit)", c)
         self.assertIn("while", c)
 
     def test_barecore_vga_compiles(self):
-        path = ROOT / "tests" / "fixtures" / "barecore_vga.st"
+        path = ROOT / "tests" / "fixtures" / "barecore_vga.sotlas"
         c = compile_source(path.read_text(encoding="utf-8"), str(path))
         self.assertIn("__attribute__((interrupt))", c)
         self.assertIn("volatile", c)

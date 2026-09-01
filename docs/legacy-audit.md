@@ -42,7 +42,7 @@ aplicativo, driver ou serviço oculto fora da rota oficial.
 - `Sotlas build` agora falha explicitamente até o backend gerar objetos de
   todos os módulos e realizar o link; a antiga transpiração isolada foi
   removida para não mascarar falhas de compilação.
-- A antiga ponte `libbkn/src/bkn_bridge.st` foi removida: não era importada nem
+- A antiga ponte `libbkn/src/bkn_bridge.sotlas` foi removida: não era importada nem
   construída, simulava telemetria/processos/chaves e executava código via
   caminhos antigos fora do workspace.
 - A rede agora começa desligada: os esqueletos Intel/Realtek não fazem mais

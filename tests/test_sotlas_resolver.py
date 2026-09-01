@@ -15,10 +15,10 @@ SPEC.loader.exec_module(sotlas_compile)
 
 class SotlasResolverTests(unittest.TestCase):
     def fixture(self, name):
-        return ROOT / "tests" / "fixtures" / "sotlas" / name / "kernel" / "src" / "main.st"
+        return ROOT / "tests" / "fixtures" / "sotlas" / name / "kernel" / "src" / "main.sotlas"
 
     def test_real_kernel_graph_has_single_entry_and_graphical_compositor(self):
-        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.st")
+        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
         self.assertEqual(manifest["entry"], "kernel::main")
         self.assertEqual(manifest["audited_modules"], len(manifest["compile_order"]))
         self.assertIn("kernel::desktop_compositor", manifest["compile_order"])
@@ -32,29 +32,29 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertEqual(manifest["orphan_roots"], [])
 
     def test_missing_import_is_reported(self):
-        source = ROOT / "tests" / "fixtures" / "sotlas" / "missing" / "kernel" / "src" / "main.st"
+        source = ROOT / "tests" / "fixtures" / "sotlas" / "missing" / "kernel" / "src" / "main.sotlas"
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.analyze(source)
 
     def test_circular_import_is_reported(self):
-        source = ROOT / "tests" / "fixtures" / "sotlas" / "cycle" / "kernel" / "src" / "main.st"
+        source = ROOT / "tests" / "fixtures" / "sotlas" / "cycle" / "kernel" / "src" / "main.sotlas"
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.analyze(source)
 
     def test_kernel_graph_requires_one_exported_entry(self):
-        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.st")
+        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
         self.assertIn("kernel::main::baken_kernel_main", manifest["exports"])
 
     def test_build_modular_compiles_and_links_kernel_objects(self):
         output = ROOT / "build" / "test_modular_bootx64.efi"
-        result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.st", output)
+        result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas", output)
         self.assertIn("compiled_objects", result)
         self.assertEqual(len(result["compiled_objects"]), 9)
         self.assertEqual(len(result["generated_sources"]), 8)
         self.assertEqual(len(result["generated_headers"]), 8)
         self.assertTrue(all(Path(path).is_file() for path in result["generated_headers"]))
         self.assertEqual(len(result["generated_interfaces"]), 8)
-        main_interface = next(Path(path) for path in result["generated_interfaces"] if path.endswith("kernel__main.sti.json"))
+        main_interface = next(Path(path) for path in result["generated_interfaces"] if path.endswith("kernel__main.soti.json"))
         self.assertEqual(json.loads(main_interface.read_text(encoding="utf-8"))["module"], "kernel::main")
         graphics_c = next(Path(path) for path in result["generated_sources"] if path.endswith("kernel__graphics_engine.c"))
         self.assertIn("void gfx_init", graphics_c.read_text(encoding="utf-8"))
@@ -64,14 +64,14 @@ class SotlasResolverTests(unittest.TestCase):
         output.unlink(missing_ok=True)
 
     def test_self_import_is_reported(self):
-        source = ROOT / "tests" / "fixtures" / "sotlas" / "self_import" / "kernel" / "src" / "main.st"
+        source = ROOT / "tests" / "fixtures" / "sotlas" / "self_import" / "kernel" / "src" / "main.sotlas"
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.analyze(source)
 
     def test_module_cannot_hide_c_preprocessor_directives(self):
         units = {
             "kernel::bad": {
-                "path": ROOT / "kernel" / "src" / "bad.st",
+                "path": ROOT / "kernel" / "src" / "bad.sotlas",
                 "text": "module kernel::bad;\n#include <stdio.h>\n",
             }
         }
@@ -91,7 +91,7 @@ class SotlasResolverTests(unittest.TestCase):
             sotlas_compile.analyze(self.fixture("two_entries"))
 
     def test_ast_parsing_and_typechecking(self):
-        source = (ROOT / "kernel" / "src" / "main.st").read_text(encoding="utf-8")
+        source = (ROOT / "kernel" / "src" / "main.sotlas").read_text(encoding="utf-8")
         ast = sotlas_compile.parse_module_ast(source)
         self.assertEqual(ast.name, "kernel::main")
         self.assertIn("kernel::graphics_engine", ast.imports)
@@ -128,7 +128,7 @@ class SotlasResolverTests(unittest.TestCase):
             sotlas_compile.typecheck_ast(ast)
 
     def test_class_parser_collects_public_class_fields(self):
-        source = (ROOT / "kernel" / "src" / "baken_ui_oop.st").read_text(encoding="utf-8")
+        source = (ROOT / "kernel" / "src" / "baken_ui_oop.sotlas").read_text(encoding="utf-8")
         ast = sotlas_compile.parse_module_ast(source)
         dock = next((item for item in ast.classes if item.name == "DesktopDock"), None)
         self.assertIsNotNone(dock)
