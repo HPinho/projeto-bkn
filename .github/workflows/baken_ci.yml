@@ -48,10 +48,16 @@ jobs:
 
       - name: Run Headless QEMU Boot Smoke Test
         run: |
+          OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
+          test -n "$OVMF_CODE"
+          OVMF_VARS="${OVMF_CODE/CODE/VARS}"
+          test -f "$OVMF_VARS"
+          cp "$OVMF_VARS" build/OVMF_VARS.fd
           set +e
           timeout 15s qemu-system-x86_64 \
             -machine q35 -m 512M -no-reboot \
-            -bios /usr/share/OVMF/OVMF_CODE.fd \
+            -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+            -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
             -cdrom build/baken_os.iso \
             -display none -serial stdio
           status=$?
