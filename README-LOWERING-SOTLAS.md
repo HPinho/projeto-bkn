@@ -70,7 +70,7 @@ Em Linux/ELF, a geração e compilação de todos os objetos pode ser verificada
 mas o link final esperado falha se o `ld` local não oferecer `--subsystem,10`.
 Isso é uma limitação do linker escolhido, não do lowering dos módulos.
 
-Nesta auditoria, a suíte executou 270 testes e o link estrutural dos 17 objetos
+Nesta auditoria, a suíte executou 272 testes e o link estrutural dos 17 objetos
 (15 módulos, adaptador e bootloader) passou com símbolos indefinidos proibidos.
 
 O GitHub Actions usa o mesmo resolvedor modular para conferir `main.sotlas`,
