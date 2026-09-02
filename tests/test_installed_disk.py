@@ -15,6 +15,10 @@ spec.loader.exec_module(installed_disk)
 
 
 class InstalledDiskTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        (ROOT / "build").mkdir(parents=True, exist_ok=True)
+
     def test_builder_creates_bootable_gpt_fat32_layout(self):
         efi = ROOT / "build" / "installed-disk-contract.efi"
         output = ROOT / "build" / "installed-disk-contract.img"
