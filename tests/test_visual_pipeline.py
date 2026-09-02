@@ -45,6 +45,20 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("safe_dt", animation)
         self.assertIn("ease_smooth_surface", animation)
 
+    def test_visual_fixes_are_connected_to_the_executable_route(self):
+        boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
+        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
+
+        # Firmware escolhe o modo antes do handoff; não é apenas um helper órfão.
+        self.assertIn("choose_high_density_gop_mode(gop, bs);", boot)
+        # Efeitos otimizados são chamados pelo material e pelo frame do shell.
+        self.assertIn("gfx_draw_backdrop_blur(x, y, w, h, blur_radius, radius)", compiler)
+        self.assertIn("gfx_draw_mesh_wallpaper();", compiler)
+        # O dt medido alcança o dock, e o installer nativo alcança o fullscreen.
+        self.assertIn("spring_update(&dock->item_springs[i], dt);", compiler)
+        self.assertIn("baken_installer_render(0, 0, sw, sh);", compiler)
+        self.assertIn("installer_render_fullscreen(g_shell.screen_w, g_shell.screen_h);", compiler)
+
 
 if __name__ == "__main__":
     unittest.main()
