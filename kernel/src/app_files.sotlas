@@ -49,28 +49,28 @@ pub fn app_files_init() -> void {
             FILES_STATE.current_path[i] = *path.add(i);
         }
 
-        copy_str(&mut ITEMS[0].name, "Documentos");
-        copy_str(&mut ITEMS[0].size_str, "4 itens");
+        copy_str(ITEMS[0].name.as_ptr(), "Documentos");
+        copy_str(ITEMS[0].size_str.as_ptr(), "4 itens");
         ITEMS[0].is_dir = true; ITEMS[0].icon_id = 8;
 
-        copy_str(&mut ITEMS[1].name, "Projetos_Sotlas");
-        copy_str(&mut ITEMS[1].size_str, "12 itens");
+        copy_str(ITEMS[1].name.as_ptr(), "Projetos_Sotlas");
+        copy_str(ITEMS[1].size_str.as_ptr(), "12 itens");
         ITEMS[1].is_dir = true; ITEMS[1].icon_id = 8;
 
-        copy_str(&mut ITEMS[2].name, "Imagens");
-        copy_str(&mut ITEMS[2].size_str, "8 itens");
+        copy_str(ITEMS[2].name.as_ptr(), "Imagens");
+        copy_str(ITEMS[2].size_str.as_ptr(), "8 itens");
         ITEMS[2].is_dir = true; ITEMS[2].icon_id = 10;
 
-        copy_str(&mut ITEMS[3].name, "kernel_main.sotlas");
-        copy_str(&mut ITEMS[3].size_str, "4.2 KB");
+        copy_str(ITEMS[3].name.as_ptr(), "kernel_main.sotlas");
+        copy_str(ITEMS[3].size_str.as_ptr(), "4.2 KB");
         ITEMS[3].is_dir = false; ITEMS[3].icon_id = 6;
 
-        copy_str(&mut ITEMS[4].name, "notas_sistema.txt");
-        copy_str(&mut ITEMS[4].size_str, "1.8 KB");
+        copy_str(ITEMS[4].name.as_ptr(), "notas_sistema.txt");
+        copy_str(ITEMS[4].size_str.as_ptr(), "1.8 KB");
         ITEMS[4].is_dir = false; ITEMS[4].icon_id = 6;
 
-        copy_str(&mut ITEMS[5].name, "wallpaper_aurora.png");
-        copy_str(&mut ITEMS[5].size_str, "2.4 MB");
+        copy_str(ITEMS[5].name.as_ptr(), "wallpaper_aurora.png");
+        copy_str(ITEMS[5].size_str.as_ptr(), "2.4 MB");
         ITEMS[5].is_dir = false; ITEMS[5].icon_id = 10;
 
         FILES_STATE.item_count = 6;
@@ -79,11 +79,11 @@ pub fn app_files_init() -> void {
 }
 
 @inline
-fn copy_str(dst: *mut [u8; 32], src: *const u8) -> void {
+fn copy_str(dst: *mut u8, src: *const u8) -> void {
     unsafe {
         for mut i in 0..31 {
             let ch = *src.add(i);
-            (*dst)[i] = ch;
+            dst[i] = ch;
             if ch == 0 { break; }
         }
     }

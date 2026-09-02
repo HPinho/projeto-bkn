@@ -24,11 +24,26 @@ fn abs_i32(x: i32) -> i32 {
     return x;
 }
 
+@inline
+pub fn animation_clamp01(t: f32) -> f32 {
+    if (t < 0.0) { return 0.0; }
+    if (t > 1.0) { return 1.0; }
+    return t;
+}
+
+// Curva quintica com velocidade e aceleracao nulas nas duas extremidades.
+// Evita o pequeno tranco visual que curvas apenas cubicas deixam no encontro.
+@system
+pub fn ease_smootherstep(t: f32) -> f32 {
+    let x = animation_clamp01(t);
+    return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+}
+
 // Fluent Design Easing: Fast Out, Slow In (Entrada) - cubic-bezier(0, 0, 0, 1)
 // Aproximação polinomial para t em [0, 1]
 @system
 pub fn ease_fast_out_slow_in(t: f32) -> f32 {
-    let inv = 1.0 - t;
+    let inv = 1.0 - animation_clamp01(t);
     return 1.0 - (inv * inv * inv * inv); // 1 - (1-t)^4 (Fricção forte no final)
 }
 
@@ -36,18 +51,23 @@ pub fn ease_fast_out_slow_in(t: f32) -> f32 {
 // Aproximação polinomial para t em [0, 1]
 @system
 pub fn ease_slow_out_fast_in(t: f32) -> f32 {
-    return t * t * t * t; // t^4 (Acelera rapidamente no final)
+    let x = animation_clamp01(t);
+    return x * x * x * x; // t^4 (Acelera rapidamente no final)
 }
 
 @system
 pub fn spring_update(spring: *mut SpringState, dt: f32) -> f32 {
     unsafe {
-        let force = -(*spring).stiffness * ((*spring).current_val - (*spring).target_val);
-        let damping_force = -(*spring).damping * (*spring).velocity;
-        let acceleration = force + damping_force;
-
-        (*spring).velocity += acceleration * dt;
-        (*spring).current_val += (*spring).velocity * dt;
+        // Subpassos mantem a mola estavel em quadros atrasados no QEMU.
+        let safe_dt = if (dt < 0.0) { 0.0 } else if (dt > 0.05) { 0.05 } else { dt };
+        let step = safe_dt / 4.0;
+        for mut i in 0..4 {
+            let force = -(*spring).stiffness * ((*spring).current_val - (*spring).target_val);
+            let damping_force = -(*spring).damping * (*spring).velocity;
+            let acceleration = force + damping_force;
+            (*spring).velocity += acceleration * step;
+            (*spring).current_val += (*spring).velocity * step;
+        }
         return (*spring).current_val;
     }
 }

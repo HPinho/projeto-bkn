@@ -20,6 +20,31 @@ pub const MATERIAL_SMOKE: u8 = 2;
 pub const MATERIAL_SOLID: u8 = 3;
 // ----------------------------------------------------
 
+// Interpolador inteiro para efeitos do rasterizador sem depender de libm.
+// Retorna smoothstep(phase / duration) no intervalo 0..255.
+@inline
+pub fn gfx_smoothstep_u8(phase: u32, duration: u32) -> u8 {
+    if (duration == 0 || phase >= duration) { return 255; }
+    let t = (phase * 255) / duration;
+    return ((t * t * (765 - 2 * t)) / 65025) as u8;
+}
+
+// Onda senoidal/triangular suave em aritmética inteira no intervalo [-amp, +amp]
+@inline
+pub fn gfx_wave_i32(phase: u32, period: u32, amp: i32) -> i32 {
+    if (period == 0 || amp == 0) { return 0; }
+    let p = phase % period;
+    let half = period / 2;
+    if (half == 0) { return 0; }
+    if (p < half) {
+        let s = gfx_smoothstep_u8(p, half) as i32;
+        return -amp + ((2 * amp * s) / 255);
+    } else {
+        let s = gfx_smoothstep_u8(p - half, half) as i32;
+        return amp - ((2 * amp * s) / 255);
+    }
+}
+
 // Atlas de fonte e logotipo vinculados dinamicamente pela ponte de assets do kernel.
 static mut FONT_ADVANCES: *const u8 = null as *const u8;
 static mut FONT_ALPHA: *const u8 = null as *const u8;
@@ -599,6 +624,47 @@ pub fn gfx_draw_mesh_wallpaper() -> void {
             let color = (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
             gfx_put_pixel(px, py, color);
         }
+    }
+}
+
+// Fundo Espacial com Gradiente Aurora Dinamico e Orbes em Parallax
+@system
+pub fn gfx_draw_aurora_parallax_bg(x: u32, y: u32, w: u32, h: u32, tick: u32) -> void {
+    // 1. Base Profunda Midnight Slate
+    gfx_fill_rect_alpha(x, y, w, h, 0x00070B14, 255);
+
+    // 2. Orbe 1: Ciano Polar em Orbita (Superior Esquerdo)
+    let ox1 = (x as i32) + (w as i32 / 4) + gfx_wave_i32(tick, 260, (w / 14) as i32);
+    let oy1 = (y as i32) + (h as i32 / 3) + gfx_wave_i32(tick + 70, 220, (h / 12) as i32);
+    if (ox1 > 0 && oy1 > 0) {
+        gfx_draw_circle_alpha(ox1 as u32, oy1 as u32, 160, 0x000284C7, 36);
+        gfx_draw_circle_alpha(ox1 as u32, oy1 as u32, 95, 0x0038BDF8, 55);
+        gfx_draw_circle_alpha(ox1 as u32, oy1 as u32, 40, 0x0000E5FF, 80);
+    }
+
+    // 3. Orbe 2: Violeta Aurora Nebular em Orbita (Superior Direito)
+    let ox2 = (x as i32) + ((w as i32 * 3) / 4) + gfx_wave_i32(tick + 130, 300, (w / 12) as i32);
+    let oy2 = (y as i32) + (h as i32 / 4) + gfx_wave_i32(tick + 20, 240, (h / 10) as i32);
+    if (ox2 > 0 && oy2 > 0) {
+        gfx_draw_circle_alpha(ox2 as u32, oy2 as u32, 175, 0x004F46E5, 32);
+        gfx_draw_circle_alpha(ox2 as u32, oy2 as u32, 110, 0x007C6CFF, 48);
+        gfx_draw_circle_alpha(ox2 as u32, oy2 as u32, 50, 0x00A855F7, 70);
+    }
+
+    // 4. Orbe 3: Esmeralda Suave em Parallax (Inferior Esquerdo/Centro)
+    let ox3 = (x as i32) + (w as i32 / 3) + gfx_wave_i32(tick + 190, 280, (w / 10) as i32);
+    let oy3 = (y as i32) + ((h as i32 * 3) / 4) + gfx_wave_i32(tick + 110, 230, (h / 14) as i32);
+    if (ox3 > 0 && oy3 > 0) {
+        gfx_draw_circle_alpha(ox3 as u32, oy3 as u32, 140, 0x00065F46, 28);
+        gfx_draw_circle_alpha(ox3 as u32, oy3 as u32, 80, 0x0010B981, 45);
+    }
+
+    // 5. Orbe 4: Ciano Brilhante (Inferior Direito)
+    let ox4 = (x as i32) + ((w as i32 * 4) / 5) + gfx_wave_i32(tick + 50, 200, (w / 16) as i32);
+    let oy4 = (y as i32) + ((h as i32 * 2) / 3) + gfx_wave_i32(tick + 150, 210, (h / 15) as i32);
+    if (ox4 > 0 && oy4 > 0) {
+        gfx_draw_circle_alpha(ox4 as u32, oy4 as u32, 120, 0x000369A1, 30);
+        gfx_draw_circle_alpha(ox4 as u32, oy4 as u32, 65, 0x0038BDF8, 50);
     }
 }
 

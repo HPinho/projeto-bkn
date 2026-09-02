@@ -344,6 +344,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     if (!SystemTable || !SystemTable->BootServices) return EFI_INVALID_PARAMETER;
 
     EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
+    /* O runtime gráfico continua usando GOP e entrada UEFI. Desliga o watchdog
+       padrão do firmware para que animações longas/OOBE não reiniciem a VM. */
+    if (bs->SetWatchdogTimer) {
+        ((EFI_STATUS (*)(UINTN, uint64_t, UINTN, CHAR16*))bs->SetWatchdogTimer)(0, 0, 0, NULL);
+    }
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
     void *pointer = NULL;
     void *block_io = NULL;
