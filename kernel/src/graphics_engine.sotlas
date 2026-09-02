@@ -6,6 +6,13 @@
 
 module kernel::graphics_engine;
 
+const GFX_MAX_WIDTH: u32 = 1920;
+const GFX_MAX_HEIGHT: u32 = 1200;
+const GFX_BUFFER_PIXELS: usize = 2304000;
+
+static mut BACKBUFFER_STORAGE: [u32; GFX_BUFFER_PIXELS] = [0; GFX_BUFFER_PIXELS];
+static mut TRANSITION_SNAPSHOT: [u32; GFX_BUFFER_PIXELS] = [0; GFX_BUFFER_PIXELS];
+
 
 pub struct FramebufferConfig {
     pub base: *mut u32;
@@ -33,8 +40,8 @@ pub fn gfx_init(base: *mut u32, width: u32, height: u32, pitch: u32) -> void {
         FB.height = height;
         FB.pitch = pitch;
 
-        FB.backbuffer = base;
-        FB.use_double_buffering = false;
+        FB.use_double_buffering = width <= GFX_MAX_WIDTH && height <= GFX_MAX_HEIGHT && pitch <= GFX_MAX_WIDTH;
+        FB.backbuffer = if FB.use_double_buffering { BACKBUFFER_STORAGE.as_ptr() } else { base };
     }
 }
 
@@ -72,12 +79,41 @@ pub fn gfx_swap_buffers() -> void {
     unsafe {
         if (!FB.use_double_buffering || FB.backbuffer == null as *mut u32 || FB.base == null as *mut u32) { return; }
         
-        let total_u64 = (FB.width * FB.height * 4 / 8) as usize;
+        let total_u64 = (FB.pitch * FB.height * 4 / 8) as usize;
         let src_u64 = FB.backbuffer as *const u64;
         let dst_u64 = FB.base as *mut u64;
 
         for mut i in 0 .. total_u64 {
             *(dst_u64 + i) = *(src_u64 + i);
+        }
+    }
+}
+
+@system
+pub fn gfx_transition_capture() -> void {
+    unsafe {
+        if !FB.use_double_buffering || FB.backbuffer == (null as *mut u32) { return; }
+        let total = (FB.pitch * FB.height) as usize;
+        for mut i in 0..total { TRANSITION_SNAPSHOT[i] = *(FB.backbuffer + i); }
+    }
+}
+
+@system
+pub fn gfx_transition_composite(old_alpha: u8, slide_x: i32) -> void {
+    unsafe {
+        if old_alpha == 0 || !FB.use_double_buffering || FB.backbuffer == (null as *mut u32) { return; }
+        let inv = 255 - old_alpha as u32;
+        for mut y in 0..FB.height {
+            for mut x in 0..FB.width {
+                let sx = x as i32 - slide_x;
+                if sx >= 0 && sx < FB.width as i32 {
+                    let old = TRANSITION_SNAPSHOT[(y * FB.pitch + sx as u32) as usize];
+                    let now = *(FB.backbuffer + (y * FB.pitch + x) as usize);
+                    let rb = ((((old & 0x00FF00FF) * old_alpha as u32) + ((now & 0x00FF00FF) * inv)) >> 8) & 0x00FF00FF;
+                    let green = ((((old & 0x0000FF00) * old_alpha as u32) + ((now & 0x0000FF00) * inv)) >> 8) & 0x0000FF00;
+                    *(FB.backbuffer + (y * FB.pitch + x) as usize) = rb | green;
+                }
+            }
         }
     }
 }

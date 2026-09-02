@@ -1,6 +1,5 @@
-// Baken OS - UI Components (BakenFX)
-// Implementação Orientada a Objetos para Elementos Visuais do Desktop
-// 100% Implementado na linguagem Sotlas (@system) - Sem dados falsos nem placeholders
+// Baken OS - componentes de interface usados pela rota executavel.
+// A implementacao permanece em Sotlas; o compilador apenas reduz a AST.
 
 module kernel::baken_ui_oop;
 
@@ -8,402 +7,133 @@ import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::baken_animation::*;
 
-// ==========================================
-// 1. CLASSE BASE: UIElement
-// ==========================================
-pub class UIElement {
-    pub mut x: i32 = 0;
-    pub mut y: i32 = 0;
-    pub mut width: u32 = 0;
-    pub mut height: u32 = 0;
-    pub mut is_visible: bool = true;
-    pub mut is_enabled: bool = true;
+pub const DOCK_MAX_ITEMS: usize = 10;
 
-    pub fn draw() -> void {
-        // Método virtual base
-    }
-
-    pub fn contains(mx: i32, my: i32) -> bool {
-        if (!this.is_visible) { return false; }
-        return (mx >= this.x && mx <= this.x + (this.width as i32) &&
-                my >= this.y && my <= this.y + (this.height as i32));
-    }
+pub struct DesktopDock {
+    pub y_offset: u32;
+    pub icon_size: u32;
+    pub item_count: u32;
+    pub item_labels: [*const u8; DOCK_MAX_ITEMS];
+    pub item_springs: [SpringState; DOCK_MAX_ITEMS];
+    pub bounce_springs: [SpringState; DOCK_MAX_ITEMS];
 }
 
-// ==========================================
-// 2. BOTÃO INTERATIVO: Button
-// ==========================================
-pub class Button extends UIElement {
-    pub mut text: *const u8 = null as *const u8;
-    pub mut bg_color: u32 = 0x001E293B;
-    pub mut hover_color: u32 = 0x000284C7;
-    pub mut text_color: u32 = 0x00F8FAFC;
-    pub mut border_color: u32 = 0x0038BDF8;
-    pub mut radius: u32 = 8;
-    pub mut is_hovered: bool = false;
-    pub mut is_pressed: bool = false;
-
-    pub override fn draw() -> void {
-        if (!this.is_visible) { return; }
-
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-
-        let cur_bg = if (!this.is_enabled) {
-            0x000F172A
-        } else if (this.is_pressed) {
-            0x000369A1
-        } else if (this.is_hovered) {
-            this.hover_color
-        } else {
-            this.bg_color
-        };
-
-        let cur_border = if (this.is_hovered && this.is_enabled) {
-            0x007DD3FC
-        } else {
-            this.border_color
-        };
-
-        let alpha: u8 = if (this.is_enabled) { 230 } else { 120 };
-        gfx_draw_glass_rect(draw_x, draw_y, this.width, this.height, cur_bg, alpha, cur_border, this.radius);
-
-        if (this.text != (null as *const u8)) {
-            let tw = gfx_measure_text(this.text);
-            let tx = if (this.width > tw) { draw_x + ((this.width - tw) / 2) } else { draw_x + 8 };
-            let ty = draw_y + ((this.height) / 2) - 4;
-            gfx_draw_text_alpha(tx, ty, this.text, this.text_color, 1, alpha);
-        }
-    }
-
-    pub fn set_hover(hovered: bool) -> void {
-        this.is_hovered = hovered;
-    }
-
-    pub fn set_pressed(pressed: bool) -> void {
-        this.is_pressed = pressed;
-    }
+pub struct BakenDockLayout {
+    pub x: u32;
+    pub y: u32;
+    pub width: u32;
+    pub height: u32;
+    pub pitch: u32;
+    pub icon: u32;
+    pub pad: u32;
 }
 
-// ==========================================
-// 3. CAMPO DE ENTRADA DE TEXTO: TextInput
-// ==========================================
-pub class TextInput extends UIElement {
-    pub mut text: [u8; 64] = [0; 64];
-    pub mut text_len: u32 = 0;
-    pub mut placeholder: *const u8 = null as *const u8;
-    pub mut is_focused: bool = false;
-    pub mut blink_tick: u32 = 0;
-
-    pub override fn draw() -> void {
-        if (!this.is_visible) { return; }
-
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-        this.blink_tick = (this.blink_tick + 1) % 60;
-
-        let border_c = if (this.is_focused) { 0x0038BDF8 } else { 0x00334155 };
-        gfx_draw_glass_rect(draw_x, draw_y, this.width, this.height, 0x000F172A, 220, border_c, 6);
-
-        let content_y = draw_y + (this.height / 2) - 4;
-
-        if (this.text_len > 0) {
-            let str_ptr = this.text.as_ptr();
-            gfx_draw_text_alpha(draw_x + 10, content_y, str_ptr, 0x00F8FAFC, 1, 255);
-            if (this.is_focused && this.blink_tick < 35) {
-                let tw = this.text_len * 8;
-                gfx_fill_rect(draw_x + 10 + tw, content_y, 2, 12, 0x0038BDF8);
-            }
-        } else if (this.placeholder != (null as *const u8)) {
-            gfx_draw_text_alpha(draw_x + 10, content_y, this.placeholder, 0x0064748B, 1, 200);
-            if (this.is_focused && this.blink_tick < 35) {
-                gfx_fill_rect(draw_x + 10, content_y, 2, 12, 0x0038BDF8);
-            }
-        }
-    }
-
-    pub fn insert_char(ch: u8) -> void {
-        if (this.text_len < 63 && ch >= 32 && ch <= 126) {
-            this.text[this.text_len as usize] = ch;
-            this.text_len += 1;
-            this.text[this.text_len as usize] = 0;
-        }
-    }
-
-    pub fn backspace() -> void {
-        if (this.text_len > 0) {
-            this.text_len -= 1;
-            this.text[this.text_len as usize] = 0;
-        }
-    }
-
-    pub fn clear() -> void {
-        this.text_len = 0;
-        this.text[0] = 0;
-    }
-}
-
-// ==========================================
-// 4. BARRA DE PROGRESSO REAL: ProgressBar
-// ==========================================
-pub class ProgressBar extends UIElement {
-    pub mut min_val: u32 = 0;
-    pub mut max_val: u32 = 100;
-    pub mut current_val: u32 = 0;
-    pub mut bar_color: u32 = 0x0038BDF8;
-    pub mut bg_color: u32 = 0x000F172A;
-
-    pub override fn draw() -> void {
-        if (!this.is_visible) { return; }
-
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-
-        gfx_draw_glass_rect(draw_x, draw_y, this.width, this.height, this.bg_color, 220, 0x00334155, 6);
-
-        let range = if (this.max_val > this.min_val) { this.max_val - this.min_val } else { 1 };
-        let clamped_val = if (this.current_val > this.max_val) { this.max_val } else { this.current_val };
-        let fill_w = (this.width * (clamped_val - this.min_val)) / range;
-
-        if (fill_w > 0) {
-            gfx_fill_rect_alpha(draw_x, draw_y, fill_w, this.height, this.bar_color, 240);
-            gfx_draw_glass_rect(draw_x, draw_y, fill_w, this.height, this.bar_color, 80, 0x007DD3FC, 6);
-        }
-    }
-
-    pub fn set_progress(val: u32) -> void {
-        this.current_val = val;
-    }
-}
-
-// ==========================================
-// 5. SELETOR DESLIZANTE: Slider
-// ==========================================
-pub class Slider extends UIElement {
-    pub mut min_val: u32 = 0;
-    pub mut max_val: u32 = 100;
-    pub mut current_val: u32 = 50;
-    pub mut is_dragging: bool = false;
-
-    pub override fn draw() -> void {
-        if (!this.is_visible) { return; }
-
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-        let track_h: u32 = 6;
-        let track_y = draw_y + ((this.height - track_h) / 2);
-
-        // Trilho de fundo
-        gfx_draw_glass_rect(draw_x, track_y, this.width, track_h, 0x001E293B, 220, 0x00334155, 3);
-
-        // Trilho preenchido
-        let range = if (this.max_val > this.min_val) { this.max_val - this.min_val } else { 1 };
-        let fill_w = (this.width * (this.current_val - this.min_val)) / range;
-        if (fill_w > 0) {
-            gfx_fill_rect_alpha(draw_x, track_y, fill_w, track_h, 0x0038BDF8, 255);
-        }
-
-        // Knob circular
-        let knob_x = draw_x + fill_w;
-        let knob_y = draw_y + (this.height / 2);
-        let knob_r: u32 = 8;
-        gfx_draw_circle_alpha(knob_x, knob_y, knob_r + 2, 0x00000000, 100);
-        gfx_draw_circle_alpha(knob_x, knob_y, knob_r, 0x00FFFFFF, 255);
-        gfx_draw_circle_alpha(knob_x, knob_y, knob_r - 3, 0x000284C7, 255);
-    }
-
-    pub fn handle_drag(mx: i32) -> void {
-        let rel_x = mx - this.x;
-        if (rel_x <= 0) {
-            this.current_val = this.min_val;
-        } else if ((rel_x as u32) >= this.width) {
-            this.current_val = this.max_val;
-        } else {
-            let range = this.max_val - this.min_val;
-            this.current_val = this.min_val + ((rel_x as u32 * range) / this.width);
-        }
-    }
-}
-
-// ==========================================
-// 6. INTERRUPTOR DE ESTADO: ToggleSwitch
-// ==========================================
-pub class ToggleSwitch extends UIElement {
-    pub mut is_on: bool = false;
-    pub mut active_color: u32 = 0x0010B981;
-
-    pub override fn draw() -> void {
-        if (!this.is_visible) { return; }
-
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-        let track_w: u32 = 44;
-        let track_h: u32 = 24;
-
-        let bg_col = if (this.is_on) { this.active_color } else { 0x001E293B };
-        let border_col = if (this.is_on) { 0x0034D399 } else { 0x00475569 };
-
-        gfx_draw_glass_rect(draw_x, draw_y, track_w, track_h, bg_col, 220, border_col, 12);
-
-        // Posição do Knob
-        let knob_r: u32 = 8;
-        let knob_x = if (this.is_on) { draw_x + track_w - 14 } else { draw_x + 14 };
-        let knob_y = draw_y + 12;
-
-        gfx_draw_circle_alpha(knob_x, knob_y, knob_r, 0x00FFFFFF, 255);
-    }
-
-    pub fn toggle() -> void {
-        this.is_on = !this.is_on;
-    }
-}
-
-// ==========================================
-// 7. BARRA DE ABAS: TabBar
-// ==========================================
-pub class TabBar extends UIElement {
-    pub mut tab_count: u32 = 0;
-    pub mut tab_labels: [*const u8; 6] = [null as *const u8; 6];
-    pub mut active_tab: u32 = 0;
-
-    pub fn add_tab(label: *const u8) -> void {
-        if (this.tab_count < 6) {
-            this.tab_labels[this.tab_count as usize] = label;
-            this.tab_count += 1;
-        }
-    }
-
-    pub override fn draw() -> void {
-        if (!this.is_visible || this.tab_count == 0) { return; }
-
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-        let tab_w = this.width / this.tab_count;
-
-        for mut i in 0..this.tab_count {
-            let tx = draw_x + (i * tab_w);
-            let is_active = i == this.active_tab;
-
-            if (is_active) {
-                gfx_draw_glass_rect(tx + 2, draw_y + 2, tab_w - 4, this.height - 4, 0x000284C7, 200, 0x0038BDF8, 8);
-            }
-
-            let lbl = this.tab_labels[i as usize];
-            if (lbl != (null as *const u8)) {
-                let tw = gfx_measure_text(lbl);
-                let text_x = if (tab_w > tw) { tx + ((tab_w - tw) / 2) } else { tx + 4 };
-                let col = if (is_active) { 0x00FFFFFF } else { 0x0094A3B8 };
-                gfx_draw_text_alpha(text_x, draw_y + (this.height / 2) - 4, lbl, col, 1, 240);
-            }
-        }
-    }
-
-    pub fn handle_click(mx: i32, my: i32) -> i32 {
-        if (!this.contains(mx, my) || this.tab_count == 0) { return -1; }
-        let rel_x = (mx - this.x) as u32;
-        let tab_w = this.width / this.tab_count;
-        let clicked_idx = rel_x / tab_w;
-        if (clicked_idx < this.tab_count) {
-            this.active_tab = clicked_idx;
-            return clicked_idx as i32;
-        }
-        return -1;
-    }
-}
-
-// ==========================================
-// 8. CARTÃO ELEVADO: CardView
-// ==========================================
-pub class CardView extends UIElement {
-    pub mut elevation: u32 = ELEVATION_CARD;
-    pub mut bg_color: u32 = 0x001E293B;
-    pub mut border_color: u32 = 0x00334155;
-    pub mut radius: u32 = 10;
-
-    pub override fn draw() -> void {
-        if (!this.is_visible) { return; }
-        let draw_x = this.x as u32;
-        let draw_y = this.y as u32;
-        gfx_draw_physical_shadow(draw_x, draw_y, this.width, this.height, this.elevation);
-        gfx_draw_glass_rect(draw_x, draw_y, this.width, this.height, this.bg_color, 230, this.border_color, this.radius);
-    }
-}
-
-// ==========================================
-// 9. DOCK DO DESKTOP
-// ==========================================
-pub class DesktopDock {
-    pub mut y_offset: u32 = 20;
-    pub mut icon_size: u32 = 48;
-    pub mut item_count: u32 = 0;
-    
-    pub mut item_labels: [*const u8; 10] = [null as *const u8; 10];
-    pub mut item_springs: [SpringState; 10] = [SpringState {
-        current_val: 1.0,
-        target_val: 1.0,
-        velocity: 0.0,
-        stiffness: 150.0,
-        damping: 10.0
-    }; 10];
-
-    pub fn add_item(label: *const u8) -> void {
-        if (this.item_count < 10) {
-            this.item_labels[this.item_count as usize] = label;
-            this.item_count += 1;
-        }
-    }
-
-    pub fn update(dt: f32, mouse_x: i32, mouse_y: i32) -> void {
+@system
+pub fn baken_dock_layout(item_count: u32, out: *mut BakenDockLayout) -> void {
+    if out == (null as *mut BakenDockLayout) { return; }
+    unsafe {
         let sw = gfx_get_width();
         let sh = gfx_get_height();
-        let dock_width = this.item_count * (this.icon_size + 15) + 15;
-        let start_x = (sw - dock_width) / 2;
-        let dock_y = sh - this.icon_size - this.y_offset;
+        (*out).pitch = 50;
+        (*out).height = 58;
+        (*out).icon = 40;
+        (*out).pad = 10;
+        (*out).width = item_count * (*out).pitch + (*out).pad * 2;
+        if (*out).width > sw { (*out).width = sw; }
+        (*out).x = if sw > (*out).width { (sw - (*out).width) / 2 } else { 0 };
+        (*out).y = if sh > (*out).height + 14 { sh - (*out).height - 14 } else { 0 };
+    }
+}
 
-        for mut i in 0 .. this.item_count {
-            let item_x = start_x + 15 + i * (this.icon_size + 15);
-            let center_x = (item_x + this.icon_size / 2) as i32;
-            let center_y = (dock_y + this.icon_size / 2) as i32;
-
-            let mag = calculate_dock_magnify(mouse_x, center_x, 150);
-            
-            let dist_y = abs_i32(mouse_y - center_y);
-            let final_mag = if (dist_y > 100) { 1.0 } else { mag };
-
-            this.item_springs[i as usize].target_val = final_mag;
-            spring_update(&mut this.item_springs[i as usize], dt);
+@system
+pub fn dock_init(dock: *mut DesktopDock) -> void {
+    if dock == (null as *mut DesktopDock) { return; }
+    unsafe {
+        (*dock).y_offset = 14;
+        (*dock).icon_size = 40;
+        (*dock).item_count = 0;
+        for mut i in 0..DOCK_MAX_ITEMS {
+            (*dock).item_labels[i] = null as *const u8;
+            (*dock).item_springs[i] = SpringState {
+                current_val: 1.0, target_val: 1.0, velocity: 0.0,
+                stiffness: 150.0, damping: 10.0
+            };
+            (*dock).bounce_springs[i] = SpringState {
+                current_val: 0.0, target_val: 0.0, velocity: 0.0,
+                stiffness: 180.0, damping: 12.0
+            };
         }
     }
+}
 
-    pub fn draw() -> void {
-        let sw = gfx_get_width();
-        let sh = gfx_get_height();
-        
-        if (this.item_count == 0) { return; }
+@system
+pub fn dock_add_item(dock: *mut DesktopDock, label: *const u8) -> void {
+    if dock == (null as *mut DesktopDock) || label == (null as *const u8) { return; }
+    unsafe {
+        if (*dock).item_count >= DOCK_MAX_ITEMS as u32 { return; }
+        let i = (*dock).item_count as usize;
+        (*dock).item_labels[i] = label;
+        (*dock).item_springs[i] = SpringState {
+            current_val: 1.0, target_val: 1.0, velocity: 0.0,
+            stiffness: 150.0, damping: 10.0
+        };
+        (*dock).bounce_springs[i] = SpringState {
+            current_val: 0.0, target_val: 0.0, velocity: 0.0,
+            stiffness: 180.0, damping: 12.0
+        };
+        (*dock).item_count += 1;
+    }
+}
 
-        let dock_width = this.item_count * (this.icon_size + 15) + 15;
-        let dock_height = this.icon_size + 15;
-        let dock_x = (sw - dock_width) / 2;
-        let dock_y = sh - dock_height - 5;
+@system
+pub fn dock_trigger_bounce(dock: *mut DesktopDock, index: u32) -> void {
+    if dock == (null as *mut DesktopDock) { return; }
+    unsafe {
+        if index >= (*dock).item_count { return; }
+        (*dock).bounce_springs[index as usize].current_val = -6.0;
+        (*dock).bounce_springs[index as usize].velocity = -50.0;
+    }
+}
 
-        gfx_draw_smart_material(dock_x, dock_y, dock_width, dock_height, MATERIAL_ACRYLIC, ELEVATION_DOCK, dock_height / 2);
+@system
+pub fn dock_update(dock: *mut DesktopDock, dt: f32, cursor_x: i32, cursor_y: i32) -> void {
+    if dock == (null as *mut DesktopDock) { return; }
+    unsafe {
+        if (*dock).item_count == 0 { return; }
+        let mut geo = BakenDockLayout { x: 0, y: 0, width: 0, height: 0, pitch: 0, icon: 0, pad: 0 };
+        baken_dock_layout((*dock).item_count, &mut geo);
+        let inside = cursor_x >= geo.x as i32 && cursor_x <= (geo.x + geo.width) as i32 &&
+                     cursor_y >= geo.y as i32 && cursor_y <= (geo.y + geo.height) as i32;
+        for mut i in 0..(*dock).item_count {
+            let center = (geo.x + geo.pad + i * geo.pitch + geo.pitch / 2) as i32;
+            (*dock).item_springs[i as usize].target_val = if inside {
+                calculate_dock_magnify(cursor_x, center, 68)
+            } else { 1.0 };
+            spring_update(&mut (*dock).item_springs[i as usize], dt);
+            spring_update(&mut (*dock).bounce_springs[i as usize], dt);
+        }
+    }
+}
 
-        let icon_bg_colors: [u32; 6] = [0x0038BDF8, 0x000284C7, 0x00818CF8, 0x000EA5E9, 0x0010B981, 0x00F59E0B];
-
-        for mut i in 0 .. this.item_count {
-            let scale = this.item_springs[i as usize].current_val;
-            let current_size = (this.icon_size as f32 * scale) as u32;
-            
-            let item_x = dock_x + 15 + i * (this.icon_size + 15) + (this.icon_size - current_size) / 2;
-            let item_y = dock_y + 7 + (this.icon_size - current_size);
-
-            let bg_col = icon_bg_colors[i as usize % 6];
-            let icon_elevation = (ELEVATION_CARD as f32 * scale) as u32;
-
-            gfx_draw_physical_shadow(item_x, item_y, current_size, current_size, icon_elevation);
-            gfx_draw_glass_rect(item_x, item_y, current_size, current_size, bg_col, 230, 0x00FFFFFF, 12);
-            let icon_pad = if (current_size > 32) { (current_size - 32) / 2 } else { 0 };
-            gfx_draw_app_icon(item_x + icon_pad, item_y + icon_pad, 32, i);
+@system
+pub fn dock_draw(dock: *const DesktopDock) -> void {
+    if dock == (null as *const DesktopDock) { return; }
+    unsafe {
+        if (*dock).item_count == 0 { return; }
+        let mut geo = BakenDockLayout { x: 0, y: 0, width: 0, height: 0, pitch: 0, icon: 0, pad: 0 };
+        baken_dock_layout((*dock).item_count, &mut geo);
+        gfx_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x00111A2E, 220, 0x44FFFFFF, geo.height / 2);
+        for mut i in 0..(*dock).item_count {
+            let scale = (*dock).item_springs[i as usize].current_val;
+            let bounce = (*dock).bounce_springs[i as usize].current_val;
+            let icon = ((geo.icon as f32) * scale) as u32;
+            let base_x = geo.x + geo.pad + i * geo.pitch + (geo.pitch - geo.icon) / 2;
+            let ix = base_x - (icon - geo.icon) / 2;
+            let iy = ((geo.y + (geo.height - geo.icon) / 2 - (icon - geo.icon) / 2) as f32 + bounce) as u32;
+            if scale > 1.02 {
+                gfx_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 4, 0x00FFFFFF, 45);
+            }
+            gfx_draw_app_icon_hd(ix, iy, icon, i);
         }
     }
 }

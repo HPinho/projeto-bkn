@@ -1,6 +1,6 @@
 # Rota de build canônica do Baken OS via toolchain Sotlas.
 # O driver Sotlas Compile resolve kernel::main, emite um objeto
-# por módulo .st e faz o link com o bootloader UEFI.
+# por módulo .sotlas e faz o link com o bootloader UEFI.
 # A entrada pública e o desktop pertencem ao grafo Sotlas.
 
 param(
@@ -28,7 +28,7 @@ if (-not (Test-Path -LiteralPath $gcc)) {
     throw "Toolchain GCC nao encontrado: $gcc"
 }
 if (-not (Test-Path -LiteralPath $sotlasCompiler) -or -not (Test-Path -LiteralPath $entry) -or -not (Test-Path -LiteralPath $font_packer) -or -not (Test-Path -LiteralPath $icon_packer) -or -not (Test-Path -LiteralPath $app_icon_packer) -or -not (Test-Path -LiteralPath $motion_icon_packer) -or -not (Test-Path -LiteralPath $color_lut_packer)) {
-    throw "Sotlas Compile, empacotador de ativos ou entrada kernel::main.st nao encontrados."
+    throw "Sotlas Compile, empacotador de ativos ou entrada kernel::main.sotlas nao encontrados."
 }
 
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null

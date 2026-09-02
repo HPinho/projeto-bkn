@@ -11,6 +11,9 @@ As correções de nitidez, double buffering, frame pacing e transições do
 installer/OOBE estão documentadas em
 [README_AUDITORIA_VISUAL.md](README_AUDITORIA_VISUAL.md).
 
+A remoção da UI embutida no compilador e o lowering nativo dos módulos estão
+documentados em [README-LOWERING-SOTLAS.md](README-LOWERING-SOTLAS.md).
+
 A limpeza do código legado e os limites honestos desta etapa estão em
 [docs/legacy-audit.md](docs/legacy-audit.md). A próxima ISO permanece adiada
 até as integrações indicadas ali serem concluídas.

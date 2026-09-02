@@ -68,7 +68,9 @@ decodifica UTF-8, preservando acentos no renderer suavizado.
 | `boot/uefi_bootloader.sotlas` | Seleção GOP determinística dentro do orçamento. |
 | `kernel/src/baken_animation.sotlas` | Curvas limitadas, smoothstep e molas com subpassos. |
 | `kernel/src/baken_rasterizer.sotlas` | Reamostragem bilinear do logotipo. |
-| `tools/sotlas_compile/compiler.py` | Runtime efetivo: relógio, cache, blur linear, UTF-8, molas e bilinear. |
+| `tools/sotlas_compile/compiler.py` | Orquestra o lowering genérico; não contém implementação visual. |
+| `tools/sotlas_compile/bootstrap.py` | Lexer, AST, análise semântica e emissão C11 genérica dos módulos. |
+| `kernel/src/baken_runtime.c` | Traduz entrada UEFI, mede o frame e vincula os atlas, sem desenhar UI. |
 | `kernel/src/baken_installer.sotlas` | Transição de etapas nativa preservada e verificada. |
 | `kernel/src/baken_oobe_screen.sotlas` | Navegação OOBE com slide suavizado verificada. |
 | `tests/test_visual_pipeline.py` | Contratos contra regressão visual e temporal. |
@@ -76,10 +78,9 @@ decodifica UTF-8, preservando acentos no renderer suavizado.
 | `CMakeLists.txt` | Registro da suíte `visual_pipeline`. |
 | `docs/architecture.md` | Orçamento de frame e rota de apresentação. |
 
-O commit mais recente migrou installer e OOBE para Sotlas nativo. Esta auditoria
-foi reconciliada sobre essa arquitetura: não reintroduz o renderer C anterior e
-mantém `compiler.py` responsável apenas pelo runtime e pelo lowering necessários
-à imagem EFI.
+Installer, OOBE e desktop pertencem agora à rota Sotlas nativa. Esta auditoria
+foi reconciliada sobre essa arquitetura: o renderer C anterior foi removido e
+`compiler.py` apenas resolve o grafo e coordena o lowering e o build.
 
 ## Validação
 

@@ -18,6 +18,10 @@ pub const MATERIAL_MICA: u8 = 0;
 pub const MATERIAL_ACRYLIC: u8 = 1;
 pub const MATERIAL_SMOKE: u8 = 2;
 pub const MATERIAL_SOLID: u8 = 3;
+const WALLPAPER_CACHE_PIXELS: usize = 2304000;
+static mut WALLPAPER_CACHE: [u32; WALLPAPER_CACHE_PIXELS] = [0; WALLPAPER_CACHE_PIXELS];
+static mut WALLPAPER_CACHE_W: u32 = 0;
+static mut WALLPAPER_CACHE_H: u32 = 0;
 // ----------------------------------------------------
 
 // Interpolador inteiro para efeitos do rasterizador sem depender de libm.
@@ -56,7 +60,7 @@ static mut LOGO_PIXELS: *const u32 = null as *const u32;
 static mut LOGO_SIZE: u32 = 0;
 
 // Fonte 8x8 de Fallback para inicializacao bare-metal quando atlas nao estiver vinculado
-static const FONT_FALLBACK_GLYPHS: [u8; 96 * 8] = [
+const FONT_FALLBACK_GLYPHS: [u8; 768] = [
     // 32: Space
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     // 33: !
@@ -550,7 +554,7 @@ fn gfx_draw_char_atlas(x: u32, y: u32, ch: u8, color: u32,
 fn glyph_advance(ch: u8) -> u32 {
     unsafe {
         if (FONT_ADVANCES != (null as *const u8)) {
-            let a = *FONT_ADVANCES.add(ch as usize) as u32;
+            let a = (*FONT_ADVANCES.add(ch as usize)) as u32;
             if (a > 0) { return a; }
         }
     }
@@ -624,6 +628,21 @@ pub fn gfx_draw_mesh_wallpaper() -> void {
     let sw = gfx_get_width();
     let sh = gfx_get_height();
 
+    // O gradiente com ponto flutuante é calculado uma vez. Nos quadros
+    // seguintes, uma cópia linear restaura o fundo sem picos de frame time.
+    unsafe {
+        if WALLPAPER_CACHE_W == sw && WALLPAPER_CACHE_H == sh {
+            let target = gfx_get_backbuffer();
+            let pitch = gfx_get_pitch();
+            for mut cache_y in 0..sh {
+                for mut cache_x in 0..sw {
+                    *(target + (cache_y * pitch + cache_x) as usize) = WALLPAPER_CACHE[(cache_y * sw + cache_x) as usize];
+                }
+            }
+            return;
+        }
+    }
+
     for mut py in 0..sh {
         let ny = (py as f32) / (sh as f32);
         for mut px in 0..sw {
@@ -644,8 +663,10 @@ pub fn gfx_draw_mesh_wallpaper() -> void {
 
             let color = (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
             gfx_put_pixel(px, py, color);
+            unsafe { WALLPAPER_CACHE[(py * sw + px) as usize] = color; }
         }
     }
+    unsafe { WALLPAPER_CACHE_W = sw; WALLPAPER_CACHE_H = sh; }
 }
 
 // Fundo Espacial com Gradiente Aurora Dinamico e Orbes em Parallax

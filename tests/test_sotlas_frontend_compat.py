@@ -129,7 +129,7 @@ class SotlasFrontendCompatTests(unittest.TestCase):
         self.assertTrue(module.globals[1].is_mut)
         bootstrap.check(module)
         emitted = bootstrap.emit_c(module)
-        self.assertIn("static const size_t MAX_CAPACITY = 4096;", emitted)
+        self.assertIn("#define MAX_CAPACITY ((size_t)(4096))", emitted)
         self.assertIn("static uint64_t G_TICKS = 0;", emitted)
 
     def test_attributes_and_packed_structs(self):
@@ -373,4 +373,3 @@ class SotlasFrontendCompatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

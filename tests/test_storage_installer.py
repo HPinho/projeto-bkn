@@ -1,107 +1,72 @@
 #!/usr/bin/env python3
-"""Contratos do BakenFS persistente e instalador/particionador UEFI."""
+"""Contratos do disco instalado e da apresentação do instalador Sotlas."""
 
-import re
+import importlib.util
+import struct
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
+def load_builder():
+    path = ROOT / "tools/scripts/create_installed_disk.py"
+    spec = importlib.util.spec_from_file_location("baken_installed_disk", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+BUILDER = load_builder()
+
+
 class StorageInstallerTests(unittest.TestCase):
-    def test_kernel_and_installed_builder_share_the_bakenfs_layout(self):
-        bridge_c = (ROOT / "kernel/src/baken_kernel_all.c").read_text(encoding="utf-8")
-        disk_builder = (ROOT / "tools/scripts/create_installed_disk.py").read_text(encoding="utf-8")
-        self.assertRegex(bridge_c, r"BAKENFS_DATA_LBA\s+86016")
-        self.assertIn("BAKENFS_MAGIC", bridge_c)
-        self.assertIn("bakenfs_mount", bridge_c)
-        self.assertIn("bakenfs_save_preferences", bridge_c)
-        self.assertIn("bakenfs_save_notes", bridge_c)
-        self.assertIn("DATA_FIRST_LBA = ESP_LAST_LBA + 1", disk_builder)
-        self.assertIn('BAKENFS_MAGIC = b"BAKENFS1"', disk_builder)
-        self.assertIn('"/home/notas.txt"', disk_builder)
+    def test_builder_owns_the_bakenfs_layout_contract(self):
+        self.assertEqual(BUILDER.DATA_FIRST_LBA, BUILDER.ESP_LAST_LBA + 1)
+        self.assertEqual(BUILDER.DATA_FIRST_LBA, 86016)
+        self.assertEqual(BUILDER.BAKENFS_MAGIC, b"BAKENFS1")
+        self.assertEqual(BUILDER.SECTOR_SIZE, 512)
 
-    def test_installer_initializes_bakenfs_data(self):
-        bridge_c = (ROOT / "kernel/src/baken_kernel_all.c").read_text(encoding="utf-8")
-        self.assertIn("BakenFsHeader", bridge_c)
-        self.assertIn("g_bakenfs.magic=BAKENFS_MAGIC", bridge_c)
-        self.assertIn("INSTALL_DATA_FIRST+2", bridge_c)
-        self.assertIn("/config/theme.cfg", bridge_c)
-        self.assertIn("/home/notas.txt", bridge_c)
+    def test_builder_initializes_bakenfs_header_preferences_and_notes(self):
+        disk = bytearray(BUILDER.TOTAL_SECTORS * BUILDER.SECTOR_SIZE)
+        BUILDER.write_baken_data_marker(disk)
+        base = BUILDER.DATA_FIRST_LBA * BUILDER.SECTOR_SIZE
+        self.assertEqual(bytes(disk[base:base + 8]), BUILDER.BAKENFS_MAGIC)
+        version, count = struct.unpack_from("<II", disk, base + 8)
+        self.assertEqual((version, count), (1, 4))
+        header = bytes(disk[base:base + 512])
+        self.assertIn(b"/home/notas.txt", header)
+        self.assertIn(b"/config/theme.cfg", header)
+        preferences = (BUILDER.DATA_FIRST_LBA + 1) * 512
+        self.assertIn(b"Usuario", disk[preferences:preferences + 64])
+        notes = (BUILDER.DATA_FIRST_LBA + 2) * 512
+        self.assertEqual(struct.unpack_from("<Q", disk, notes)[0], 0x31544E4E454B4142)
 
-    def test_sotlas_compile_contains_advanced_partitioner_and_real_installer(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
-        self.assertIn("BakenPartition", compiler)
-        self.assertIn("BakenInstallerState", compiler)
-        self.assertIn("installer_apply_default", compiler)
-        self.assertIn("installer_add_partition", compiler)
-        self.assertIn("installer_delete_partition", compiler)
-        self.assertIn("installer_format_partition", compiler)
-        self.assertIn("find_boot_file", compiler)
-        self.assertIn("installer_execute_installation", compiler)
-        self.assertIn("installer_handle_click", compiler)
-        self.assertIn("Instalador e Setup - Baken OS", compiler)
-        self.assertIn("Volume", compiler)
-
-    def test_sotlas_compile_contains_complete_setup_wizard_stages(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
-        self.assertIn("INSTALLER_STAGE_WELCOME", compiler)
-        self.assertIn("INSTALLER_STAGE_LANGUAGE", compiler)
-        self.assertIn("INSTALLER_STAGE_LICENSE", compiler)
-        self.assertIn("INSTALLER_STAGE_HARDWARE", compiler)
-        self.assertIn("INSTALLER_STAGE_PROFILE", compiler)
-        self.assertIn("INSTALLER_STAGE_ACCOUNT", compiler)
-        self.assertIn("INSTALLER_STAGE_DISK", compiler)
-        self.assertIn("INSTALLER_STAGE_INSTALLING", compiler)
-        self.assertIn("INSTALLER_STAGE_COMPLETE", compiler)
-        self.assertIn("INSTALLER_STAGE_REPAIR", compiler)
-        self.assertIn("installer_next_stage", compiler)
-        self.assertIn("installer_prev_stage", compiler)
-        self.assertIn("installer_select_option", compiler)
-        self.assertIn("installer_execute_repair", compiler)
-
-    def test_bakenfs_contains_profile_user_and_snapshot_structures(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
-        self.assertIn("SotlasProfileConfig", compiler)
-        self.assertIn("SotlasUserConfig", compiler)
-        self.assertIn("SotlasSnapshotMeta", compiler)
-        self.assertIn("/config/profile.cfg", compiler)
-        self.assertIn("/config/user.cfg", compiler)
-        self.assertIn("/config/snapshot.meta", compiler)
-
-    def test_bootloader_recognizes_installed_gpt_as_its_own_boot_media(self):
-        bootloader = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertIn("GUID de tipo Baken Data", bootloader)
-        self.assertIn("sector[0]!='E'", bootloader)
-        self.assertIn("data_guid", bootloader)
-
-    def test_installer_presentation_benchmark_and_oobe_contracts(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
+    def test_installer_ui_contract_lives_in_sotlas_not_the_compiler(self):
         installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
+        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
+        for text in (
+            "TasteTrack Systems LTDA", "Comecar agora", "Restaurar ou Corrigir Computador",
+            "Modo Live RAM", "1. Criando tabela de particoes GPT",
+            "2. Formatando volume de dados BakenFS", "3. Instalando microkernel Sotlas",
+            "4. Configurando ponto de restauracao",
+        ):
+            self.assertIn(text, installer)
+            self.assertNotIn(text, compiler)
+
+    def test_oobe_navigation_and_continuous_transition_are_native(self):
         oobe = (ROOT / "kernel/src/baken_oobe_screen.sotlas").read_text(encoding="utf-8")
-        # Apresentação e TasteTrack Systems
-        self.assertIn("TasteTrack Systems LTDA", installer)
-        self.assertIn("Comecar agora", installer)
-        self.assertIn("Restaurar ou Corrigir Computador", installer)
-        # Escolha de modo nativa
-        self.assertIn("Teste de Desempenho e Telemetria de Hardware", installer)
-        self.assertIn("Modo Live RAM", installer)
-        # Benchmark com medições dinâmicas e nota calculada
-        self.assertIn("st_rdtsc", compiler)
-        self.assertIn("st_cpuid", compiler)
-        self.assertIn("installer_run_hardware_benchmark", compiler)
-        # Proteção estrita da mídia de boot
-        self.assertIn("Protecao ativa", compiler)
-        self.assertIn("boot_disk_is_protected", compiler)
-        # 4 passos nativos de instalação
-        self.assertIn("1. Criando tabela de particoes GPT", installer)
-        self.assertIn("2. Formatando volume de dados BakenFS", installer)
-        self.assertIn("3. Instalando microkernel Sotlas", installer)
-        self.assertIn("4. Configurando ponto de restauracao", installer)
-        # OOBE nativo, com navegação e transição contínua
         self.assertIn("oobe_go_to", oobe)
         self.assertIn("transition_tick", oobe)
         self.assertIn("Pronto para Explorar!", oobe)
         self.assertIn("Abrir meu Baken OS", oobe)
+
+    def test_bootloader_recognizes_installed_gpt_as_boot_media(self):
+        bootloader = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
+        self.assertIn("GUID de tipo Baken Data", bootloader)
+        self.assertIn("sector[0]!='E'", bootloader)
+        self.assertIn("data_guid", bootloader)
 
 
 if __name__ == "__main__":

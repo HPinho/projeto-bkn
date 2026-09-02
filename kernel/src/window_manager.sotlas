@@ -69,6 +69,7 @@ pub fn wm_init() -> void {
             WINDOWS[i].id = 0; WINDOWS[i].is_open = false; WINDOWS[i].is_focused = false;
             WINDOWS[i].is_minimized = false; WINDOWS[i].is_maximized = false; WINDOWS[i].title = [0; 48];
         }
+        baken_installer_init();
     }
 }
 

@@ -6,8 +6,8 @@ Há **uma única rota executável de interface**. O firmware UEFI só prepara o
 hardware; nenhuma camada de boot desenha janelas, dock ou widgets.
 
 ```text
-boot/uefi_bootloader.st
-    -> Sotlas Compile: kernel/src/main.st + módulos Sotlas
+boot/uefi_bootloader.sotlas
+    -> Sotlas Compile: kernel/src/main.sotlas + módulos Sotlas
     -> framebuffer GOP
     -> desktop Baken OS
 ```
@@ -34,9 +34,9 @@ LLVM IR textual preliminar; ele não assina, empacota nem instala executáveis.
 O emissor legado, que preenchia uma assinatura fictícia, foi removido para que
 artefatos de teste não sejam apresentados como seguros.
 
-O BakenFS mínimo é montado no volume `Baken Data` da instalação virtual e
-mantém arquivos, diretórios, preferências e notas após o boot. Não há registro
-fixo `INSTALL1`/`BAKENSYS` na rota ativa.
+O gerador de disco instalado grava um layout BakenFS mínimo no volume
+`Baken Data`. A montagem e escrita desse volume pelo kernel ainda exigem um
+serviço de armazenamento Sotlas separado; a UI não simula essa persistência.
 
 ## Mídia de instalação virtual
 
@@ -55,7 +55,7 @@ subsystems só poderão retornar depois de um carregador e isolamento verificáv
 Antes de qualquer geração de binário, valide o grafo Sotlas com:
 
 ```powershell
-python tools/sotlas_compile/compiler.py check kernel/src/main.st --manifest build/sotlas-main.manifest.json
+python tools/sotlas_compile/compiler.py check kernel/src/main.sotlas --manifest build/sotlas-main.manifest.json
 ```
 
 Esse comando resolve a entrada e audita todos os módulos Sotlas conhecidos: detecta
@@ -116,9 +116,10 @@ kernel::main
     -> aplicações e widgets
 ```
 
-Os oito arquivos Sotlas canônicos fazem parte do EFI: o Sotlas Compile valida o grafo,
+Os quinze módulos Sotlas canônicos fazem parte do EFI: o Sotlas Compile valida o grafo,
 emite um objeto por módulo, gera interfaces e executa o link. A entrada pública
-é `kernel::main`; não há runtime C de desktop na rota oficial.
+é `kernel::main`; não há runtime C de desktop na rota oficial. O pequeno
+`baken_runtime.c` traduz entrada/tempo do firmware e liga os atlas, sem desenhar UI.
 
 `kernel::desktop_compositor` é a fachada gráfica canônica e é a única função
 de composição chamada por `kernel::main`. Ela inicializa o desktop shell, que
@@ -139,7 +140,7 @@ serviços e persistência reais.
 ## Limites claros de cada camada
 
 - **Bootloader**: GOP, mouse/teclado UEFI e handoff. Sem interface de desktop.
-- **Formato de vídeo do bridge**: GOP BGR de 32 bits; outros formatos ficam
+- **Formato de vídeo**: GOP BGR de 32 bits; outros formatos ficam
   bloqueados até o compositor ter conversão de pixel testada.
 - **Orçamento de vídeo**: o boot seleciona o maior modo BGRX de até 1920×1200.
   Esse teto mantém o backbuffer ativo e evita desenho parcial visível em modos
@@ -158,15 +159,18 @@ serviços e persistência reais.
 - **Apps**: desenham somente no contexto recebido do compositor; não escrevem
   diretamente no framebuffer.
 
-## Critério para remover a ponte C atual
+## Ponte monolítica removida
 
-`baken_kernel_all.c` permanece apenas como referência histórica fora do build.
-O build Sotlas atende aos critérios de substituição:
+`baken_kernel_all.c` foi removido. O build Sotlas atende aos critérios estruturais
+de substituição:
 
 1. resolver importações transitivas;
 2. gerar objetos separados por módulo;
 3. detectar símbolos duplicados no link;
 4. vincular `kernel::main` como a única entrada do kernel;
-5. produzir o mesmo `BOOTX64.EFI` validado em QEMU/VirtualBox.
+5. produzir `BOOTX64.EFI` com o toolchain PE/COFF do projeto.
 
-Ele não participa da ISO, do disco instalado nem do alvo `sotlas_build`.
+Os quatro primeiros itens são cobertos pela suíte e pelo link estrutural sem
+símbolos indefinidos. O quinto exige o toolchain UEFI e continua seguido de boot
+em QEMU/VirtualBox antes de uma imagem ser publicada. O histórico permanece no
+Git; nenhum teste ou alvo de build lê a antiga ponte.

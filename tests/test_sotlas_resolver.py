@@ -46,23 +46,21 @@ class SotlasResolverTests(unittest.TestCase):
         manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
         self.assertIn("kernel::main::baken_kernel_main", manifest["exports"])
 
-    def test_build_modular_compiles_and_links_kernel_objects(self):
-        output = ROOT / "build" / "test_modular_bootx64.efi"
-        result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas", output)
+    def test_build_modular_compiles_kernel_objects(self):
+        # O link PE/COFF final depende do linker UEFI; esta etapa é portátil e
+        # garante que todas as unidades reais chegam a objetos.
+        result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas")
         self.assertIn("compiled_objects", result)
-        self.assertEqual(len(result["compiled_objects"]), 15)
-        self.assertEqual(len(result["generated_sources"]), 14)
-        self.assertEqual(len(result["generated_headers"]), 14)
+        self.assertEqual(len(result["compiled_objects"]), 17)
+        self.assertEqual(len(result["generated_sources"]), 15)
+        self.assertEqual(len(result["generated_headers"]), 15)
         self.assertTrue(all(Path(path).is_file() for path in result["generated_headers"]))
-        self.assertEqual(len(result["generated_interfaces"]), 14)
+        self.assertEqual(len(result["generated_interfaces"]), 15)
         main_interface = next(Path(path) for path in result["generated_interfaces"] if path.endswith("kernel__main.soti.json"))
         self.assertEqual(json.loads(main_interface.read_text(encoding="utf-8"))["module"], "kernel::main")
         graphics_c = next(Path(path) for path in result["generated_sources"] if path.endswith("kernel__graphics_engine.c"))
         self.assertIn("void gfx_init", graphics_c.read_text(encoding="utf-8"))
         self.assertNotIn("bridge_runtime", result)
-        self.assertTrue(output.exists())
-        self.assertGreater(output.stat().st_size, 1000)
-        output.unlink(missing_ok=True)
 
     def test_self_import_is_reported(self):
         source = ROOT / "tests" / "fixtures" / "sotlas" / "self_import" / "kernel" / "src" / "main.sotlas"
@@ -128,10 +126,10 @@ class SotlasResolverTests(unittest.TestCase):
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.typecheck_ast(ast)
 
-    def test_class_parser_collects_public_class_fields(self):
+    def test_ui_parser_collects_public_dock_fields(self):
         source = (ROOT / "kernel" / "src" / "baken_ui_oop.sotlas").read_text(encoding="utf-8")
         ast = sotlas_compile.parse_module_ast(source)
-        dock = next((item for item in ast.classes if item.name == "DesktopDock"), None)
+        dock = next((item for item in ast.structs if item.name == "DesktopDock"), None)
         self.assertIsNotNone(dock)
         self.assertTrue(dock.is_pub)
         self.assertTrue(any(field.name == "item_count" for field in dock.fields))

@@ -49,7 +49,7 @@ typedef struct {
     uint32_t PixelsPerScanLine;
 } EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
 
-/* O bridge C usa pixels 0x00RRGGBB em memória little-endian, isto é,
+/* O compositor usa pixels 0x00RRGGBB em memória little-endian, isto é,
  * PixelBlueGreenRedReserved8BitPerColor no GOP. Outros formatos exigem um
  * conversor no compositor e não podem ser aceitos silenciosamente. */
 #define PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR 1U
@@ -317,24 +317,24 @@ static void *find_pointer_protocol(EFI_BOOT_SERVICES *bs) {
     if (!bs) return NULL;
     void *ptr = NULL;
     if (bs->LocateProtocol) {
-        if (bs->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
         if (bs->LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
+        if (bs->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
     }
     if (bs->LocateHandleBuffer && bs->HandleProtocol) {
         EFI_HANDLE *handles = NULL;
         UINTN count = 0;
         EFI_LOCATE_HANDLE_BUFFER locate = (EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
         EFI_HANDLE_PROTOCOL hp = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
-        if (locate(BY_PROTOCOL, &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
+        if (locate(BY_PROTOCOL, &EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
             for (UINTN i = 0; i < count; ++i) {
-                if (hp(handles[i], &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
+                if (hp(handles[i], &EFI_SIMPLE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
             }
             if (handles && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(handles);
             if (ptr) return ptr;
         }
-        if (locate(BY_PROTOCOL, &EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
+        if (locate(BY_PROTOCOL, &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
             for (UINTN i = 0; i < count; ++i) {
-                if (hp(handles[i], &EFI_SIMPLE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
+                if (hp(handles[i], &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
             }
             if (handles && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(handles);
         }

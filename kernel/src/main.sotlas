@@ -1,8 +1,6 @@
-// Baken OS - entrada futura do kernel modular em Sotlas (@system).
-//
-// Esta é a única entrada planejada após o linker Sotlas resolver o grafo de
-// módulos. Até lá, a ISO usa a ponte documentada em docs/architecture.md;
-// não adicione outra função baken_kernel_main a módulos auxiliares.
+// Baken OS - entrada canônica do kernel modular em Sotlas (@system).
+// O frontend reduz o grafo para objetos independentes; nenhum módulo auxiliar
+// deve declarar outra função baken_kernel_main.
 
 module kernel::main;
 
@@ -41,12 +39,13 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         boot_info.screen_height,
         boot_info.pixels_per_scanline
     );
+    baken_runtime_init_assets();
 
     // A composição é dona do ciclo visual; nenhum aplicativo grava no GOP.
     desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
 
-    // Até o escalonador estar integrado, a composição permanece cooperativa.
-    loop {
-        desktop_compositor_render_frame();
-    }
+    // O adaptador UEFI entrega entrada e tempo; a composição continua sendo
+    // a única dona da renderização.
+    baken_runtime_run(boot_info as *const void, boot_info.screen_width, boot_info.screen_height);
+    loop {}
 }

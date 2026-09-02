@@ -43,7 +43,7 @@ class Token:
 
 KEYWORDS = {"module", "import", "pub", "struct", "class", "enum", "fn", "let", "mut",
             "const", "static", "return", "break", "continue", "if", "else", "while", "for", "in",
-            "unsafe", "true", "false", "as", "null", "defer"}
+            "unsafe", "true", "false", "as", "null", "defer", "loop"}
 MULTI = ("::", "->", "==", "!=", "<=", ">=", "+=", "-=", "*=", "/=", "&=", "|=", "^=", "<<=", ">>=", "&&", "||", "<<", ">>", "..")
 SINGLE = set(";,:{}()[]=+-*/%!<>&|^~.")
 PRIMITIVES = {"void", "bool", "u8", "u16", "u32", "u64", "usize",
@@ -239,6 +239,8 @@ class Break(Stmt): pass
 @dataclass
 class Continue(Stmt): pass
 @dataclass
+class Loop(Stmt): body: list[Stmt]
+@dataclass
 class If(Stmt): condition: Expr; then_body: list[Stmt]; else_body: list[Stmt]
 @dataclass
 class While(Stmt): condition: Expr; body: list[Stmt]
@@ -353,6 +355,8 @@ class Parser:
         return "::".join(parts)
 
     def type(self) -> Type:
+        if self.accept("!"):
+            return Type("void")
         # Array fixo: [T; N]
         if self.accept("["):
             elem_type = self.type()
@@ -537,6 +541,7 @@ class Parser:
                     else_body = self.block()
             return If(token, condition, then_body, else_body)
         if self.accept("while"): return While(token, self.expression(), self.block())
+        if self.accept("loop"): return Loop(token, self.block())
         if self.accept("for"):
             is_mut = bool(self.accept("mut"))
             var_name = self.ident()
@@ -747,6 +752,8 @@ def assignable(actual: Type, expected: Type) -> bool:
             return True
         if actual.name in integers and (expected.is_array or expected.name not in PRIMITIVES):
             return True
+        if actual.name in {"f32", "f64"} and expected.name in {"f32", "f64"}:
+            return True
     if actual.name == "null" and expected.pointer:
         return True
     if actual.pointer and expected.pointer and (actual.name == expected.name or actual.name == "void" or expected.name == "void"):
@@ -760,6 +767,8 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "__cli": Function("__cli", [], Type("void"), [], public=True, attributes=["@system"]),
     "__sti": Function("__sti", [], Type("void"), [], public=True, attributes=["@system"]),
     "__hlt": Function("__hlt", [], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_runtime_init_assets": Function("baken_runtime_init_assets", [], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_runtime_run": Function("baken_runtime_run", [("boot_info", Type("void", pointer=True)), ("width", Type("u32")), ("height", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
 }
 
 
@@ -796,26 +805,40 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
         if isinstance(expr, NullLit):
             return Type("null", pointer=True)
         if isinstance(expr, ArrayLit):
+            for element in expr.elements:
+                expr_type(element, scope, in_unsafe, is_system_fn)
             if expr.is_repeat:
                 inner = expr_type(expr.elements[0], scope, in_unsafe, is_system_fn)
                 return Type(inner.name, pointer=inner.pointer, is_array=True, array_size=expr.repeat_size, elem_type=inner)
             inner = expr_type(expr.elements[0], scope, in_unsafe, is_system_fn) if expr.elements else Type("void")
             return Type(inner.name, pointer=inner.pointer, is_array=True, array_size=len(expr.elements), elem_type=inner)
         if isinstance(expr, StructLit):
+            for _, value in expr.fields:
+                expr_type(value, scope, in_unsafe, is_system_fn)
             return Type(expr.struct_name)
         if isinstance(expr, IfExpr):
+            expr_type(expr.condition, scope, in_unsafe, is_system_fn)
+            expr_type(expr.else_expr, scope, in_unsafe, is_system_fn)
             return expr_type(expr.then_expr, scope, in_unsafe, is_system_fn)
         if isinstance(expr, Name):
             if expr.value in scope:
                 return scope[expr.value]
             if expr.value in global_map:
                 return global_map[expr.value].type
-            return Type("u32")
+            raise SotlasBootstrapError(
+                f"símbolo não declarado: {expr.value}", expr.token.line,
+                expr.token.column, filename, source,
+            )
         if isinstance(expr, EnumAccess):
             return Type(expr.enum_name)
         if isinstance(expr, Unary):
             inner = expr_type(expr.value, scope, in_unsafe, is_system_fn)
             if expr.op == "*":
+                if not in_unsafe and not is_system_fn:
+                    raise SotlasBootstrapError(
+                        "desreferenciamento de ponteiro exige bloco unsafe ou função @system",
+                        expr.token.line, expr.token.column, filename, source,
+                    )
                 return Type(inner.name, pointer=False, mutable=inner.mutable)
             if expr.op == "&":
                 return Type(inner.name, pointer=True, mutable=inner.mutable)
@@ -824,14 +847,21 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
             return inner
         if isinstance(expr, Binary):
             left = expr_type(expr.left, scope, in_unsafe, is_system_fn)
+            expr_type(expr.right, scope, in_unsafe, is_system_fn)
             return Type("bool") if expr.op in ("==", "!=", "<", "<=", ">", ">=", "&&", "||") else left
         if isinstance(expr, Call):
+            for argument in expr.args:
+                expr_type(argument, scope, in_unsafe, is_system_fn)
             function = functions.get(expr.callee)
             if function:
                 return function.result
-            return Type("void")
+            raise SotlasBootstrapError(
+                f"função não declarada: {expr.callee}", expr.token.line,
+                expr.token.column, filename, source,
+            )
         if isinstance(expr, Index):
             target_t = expr_type(expr.target, scope, in_unsafe, is_system_fn)
+            expr_type(expr.index, scope, in_unsafe, is_system_fn)
             if target_t.is_array and target_t.elem_type:
                 return target_t.elem_type
             return Type(target_t.name, pointer=False, mutable=target_t.mutable)
@@ -845,6 +875,8 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
             return Type("u32")
         if isinstance(expr, MethodCall):
             target_t = expr_type(expr.target, scope, in_unsafe, is_system_fn)
+            for argument in expr.args:
+                expr_type(argument, scope, in_unsafe, is_system_fn)
             expr.target_type = target_t
             if expr.method == "as_ptr":
                 return Type(target_t.name if not target_t.is_array else (target_t.elem_type.name if target_t.elem_type else "u8"), pointer=True)
@@ -852,8 +884,16 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 return target_t
             if expr.method == "add":
                 return target_t
-            return Type("void")
+            method = functions.get(f"{target_t.name}_{expr.method}")
+            if method:
+                expr.pass_by_ref = bool(method.params and method.params[0][1].pointer and not target_t.pointer)
+                return method.result
+            raise SotlasBootstrapError(
+                f"método não declarado: {target_t.name}.{expr.method}",
+                expr.token.line, expr.token.column, filename, source,
+            )
         if isinstance(expr, Cast):
+            expr_type(expr.expr, scope, in_unsafe, is_system_fn)
             return expr.target_type
         raise AssertionError(type(expr))
 
@@ -864,16 +904,33 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 declared = item.type or actual
                 scope[item.name] = declared
             elif isinstance(item, Assign):
-                pass
+                target_type = expr_type(item.target, scope, in_unsafe, is_system_fn)
+                value_type = expr_type(item.value, scope, in_unsafe, is_system_fn)
+                if not assignable(value_type, target_type):
+                    raise SotlasBootstrapError(
+                        "atribuição incompatível", item.token.line,
+                        item.token.column, filename, source,
+                    )
             elif isinstance(item, Return):
-                pass
+                if item.value is not None:
+                    actual = expr_type(item.value, scope, in_unsafe, is_system_fn)
+                    if not assignable(actual, expected_return):
+                        raise SotlasBootstrapError(
+                            "retorno incompatível", item.token.line,
+                            item.token.column, filename, source,
+                        )
             elif isinstance(item, (Break, Continue)):
                 continue
             elif isinstance(item, (If, While)):
+                expr_type(item.condition, scope, in_unsafe, is_system_fn)
                 statements(item.then_body if isinstance(item, If) else item.body, dict(scope), expected_return, in_unsafe, is_system_fn)
                 if isinstance(item, If) and item.else_body:
                     statements(item.else_body, dict(scope), expected_return, in_unsafe, is_system_fn)
+            elif isinstance(item, Loop):
+                statements(item.body, dict(scope), expected_return, in_unsafe, is_system_fn)
             elif isinstance(item, For):
+                expr_type(item.start, scope, in_unsafe, is_system_fn)
+                expr_type(item.end, scope, in_unsafe, is_system_fn)
                 for_scope = dict(scope)
                 for_scope[item.var_name] = Type("usize")
                 statements(item.body, for_scope, expected_return, in_unsafe, is_system_fn)
@@ -882,7 +939,13 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
             elif isinstance(item, Expression):
                 expr_type(item.value, scope, in_unsafe, is_system_fn)
             elif isinstance(item, Defer):
-                pass
+                if item.body is not None:
+                    statements(item.body, dict(scope), expected_return, in_unsafe, is_system_fn)
+                elif isinstance(item.value, Assign):
+                    expr_type(item.value.target, scope, in_unsafe, is_system_fn)
+                    expr_type(item.value.value, scope, in_unsafe, is_system_fn)
+                elif item.value is not None:
+                    expr_type(item.value, scope, in_unsafe, is_system_fn)
 
     for function in module.functions:
         is_system = "@system" in function.attributes or "@inline" in function.attributes
@@ -957,29 +1020,8 @@ PREAMBLE = """/* Gerado pelo frontend Sotlas Bootstrap. */
 #include <stddef.h>
 #include <stdbool.h>
 
-#include "baken_design_tokens.h"
-
-// Forward declarations de funções gráficas e do kernel
-extern void gfx_draw_aurora_parallax_bg(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t tick);
-extern uint8_t gfx_smoothstep_u8(uint32_t phase, uint32_t duration);
-extern int32_t gfx_wave_i32(uint32_t tick, uint32_t period, int32_t amplitude);
-extern void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
-extern void gfx_draw_glass_rect_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t bg, uint8_t a, uint32_t border, uint32_t radius);
-extern void gfx_draw_smart_material(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t material, uint32_t elevation, uint32_t radius);
-extern void gfx_draw_circle_alpha(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c, uint8_t a);
-extern void gfx_draw_circle_button(uint32_t cx, uint32_t cy, uint32_t r, uint32_t c);
-extern void gfx_draw_baken_logo(uint32_t x, uint32_t y, uint32_t size, uint8_t alpha);
-extern void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c, uint8_t scale, uint8_t a);
-extern void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str, uint32_t color, uint32_t role);
-extern void gfx_draw_text_proportional(uint32_t x, uint32_t y, const char *str, uint32_t color);
-extern void gfx_fill_rect_alpha(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color, uint8_t alpha);
-extern void gfx_draw_hline(uint32_t x, uint32_t y, uint32_t width, uint32_t color, uint8_t alpha);
-extern uint32_t gfx_measure_text(const uint8_t *s);
-extern void baken_oobe_init(void);
-extern void baken_oobe_render(uint32_t x, uint32_t y, uint32_t w, uint32_t h);
-extern void baken_oobe_handle_click(int32_t rx, int32_t ry, uint32_t w, uint32_t h);
-extern void baken_oobe_handle_key(uint32_t key);
-extern void gfx_fill_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color);
+extern void baken_runtime_init_assets(void);
+extern void baken_runtime_run(const void *boot_info, uint32_t width, uint32_t height);
 
 static inline void __outb(uint16_t port, uint8_t val) {
 #if defined(__x86_64__) || defined(__i386__)
@@ -1019,9 +1061,22 @@ static inline void __hlt(void) {
 """
 
 
-def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) -> str:
+def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True,
+           include_import_headers: bool = False) -> str:
     prefix = f"{_c_ident(module.name)}__" if mangle else ""
     lines = [PREAMBLE] if include_preamble else []
+    if include_import_headers:
+        lines.extend(f'#include "{_c_ident(name)}.h"' for name in module.imports)
+        if module.imports:
+            lines.append("")
+
+    # Constantes escalares precisam existir antes de tipos que as usam como
+    # tamanho de array (em C, static const não é uma expressão integral constante).
+    for g in module.globals:
+        if g.is_const and not g.type.is_array:
+            lines.append(f"#define {g.name} (({g.type.c()})({_emit_expr(g.value, prefix)}))")
+    if any(g.is_const and not g.type.is_array for g in module.globals):
+        lines.append("")
 
     # Enums
     for enum_obj in module.enums:
@@ -1034,14 +1089,15 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
     # Structs
     for struct in module.structs:
         pack_attr = " __attribute__((packed))" if "@packed" in struct.attributes else ""
-        lines.append(f"typedef struct{pack_attr} {struct.name} {struct.name};")
-        lines.append(f"struct{pack_attr} {struct.name} {{")
+        lines.append(f"typedef struct{pack_attr} {struct.name} {{")
         for fld in struct.fields:
             lines.append(f"    {fld.type.c_decl(fld.name)};")
-        lines.append(f"}};\n")
+        lines.append(f"}} {struct.name};\n")
 
     # Globals / Consts
     for g in module.globals:
+        if g.is_const and not g.type.is_array:
+            continue
         specifier = "static const" if g.is_const else "static"
         if g.type.is_array and not g.type.pointer and isinstance(g.value, Number) and g.value.value == "0":
             lines.append(f"{specifier} {g.type.c_decl(g.name)} = {{0}};")
@@ -1089,7 +1145,11 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
                         out.append(f"{pad}__auto_type {item.name} = {_emit_expr(item.value, prefix)};")
             elif isinstance(item, Assign):
                 target_str = _emit_expr(item.target, prefix) if isinstance(item.target, Expr) else str(item.target)
-                out.append(f"{pad}{target_str} = {_emit_expr(item.value, prefix)};")
+                if (isinstance(item.value, ArrayLit) and item.value.is_repeat and
+                        isinstance(item.value.elements[0], Number) and item.value.elements[0].value == "0"):
+                    out.append(f"{pad}__builtin_memset(&({target_str}), 0, sizeof({target_str}));")
+                else:
+                    out.append(f"{pad}{target_str} = {_emit_expr(item.value, prefix)};")
             elif isinstance(item, Defer):
                 defer_scopes[-1].append(item)
             elif isinstance(item, Return):
@@ -1137,6 +1197,10 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
                 out.append(f"{pad}while ({_emit_expr(item.condition, prefix)}) {{")
                 out.extend(emit_statements(item.body, depth + 1, defer_scopes, loop_scope_depth=len(defer_scopes), ret_type=ret_type))
                 out.append(f"{pad}}}")
+            elif isinstance(item, Loop):
+                out.append(f"{pad}for (;;) {{")
+                out.extend(emit_statements(item.body, depth + 1, defer_scopes, loop_scope_depth=len(defer_scopes), ret_type=ret_type))
+                out.append(f"{pad}}}")
             elif isinstance(item, For):
                 start_str = _emit_expr(item.start, prefix)
                 end_str = _emit_expr(item.end, prefix)
@@ -1164,7 +1228,7 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
         is_export = "@export" in function.attributes or function.public
         fname = function.name if (is_export or not mangle) else f"{prefix}{function.name}"
         parameters = ", ".join(f"{typ.c_decl(name)}" for name, typ in function.params) or "void"
-        inline_attr = "static inline " if "@inline" in function.attributes else ""
+        inline_attr = "static inline " if "@inline" in function.attributes and not is_export else ""
         lines.append(f"{inline_attr}{function.result.c()} {fname}({parameters});")
     if module.functions: lines.append("")
 
@@ -1172,17 +1236,82 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True) 
         is_export = "@export" in function.attributes or function.public
         fname = function.name if (is_export or not mangle) else f"{prefix}{function.name}"
         parameters = ", ".join(f"{typ.c_decl(name)}" for name, typ in function.params) or "void"
-        inline_attr = "static inline " if "@inline" in function.attributes else ""
+        inline_attr = "static inline " if "@inline" in function.attributes and not is_export else ""
         lines.append(f"{inline_attr}{function.result.c()} {fname}({parameters}) {{")
         lines.extend(emit_statements(function.body, 1, defer_scopes=[], loop_scope_depth=None, ret_type=function.result))
         lines.append("}\n")
     return "\n".join(lines)
 
 
-def compile_source(source: str, filename: str | None = None) -> str:
+def _public_import_maps(imported_modules: list[Module] | None) -> tuple[dict, dict, dict, dict]:
+    functions: dict[str, Function] = {}
+    structs: dict[str, Struct] = {}
+    enums: dict[str, Enum] = {}
+    globals_: dict[str, Global] = {}
+    for dependency in imported_modules or []:
+        functions.update({fn.name: fn for fn in dependency.functions if fn.public})
+        structs.update({item.name: item for item in dependency.structs if item.public})
+        enums.update({item.name: item for item in dependency.enums if item.public})
+        globals_.update({item.name: item for item in dependency.globals if item.public})
+    return functions, structs, enums, globals_
+
+
+def emit_header(module: Module) -> str:
+    """Emite a ABI C pública de um módulo, derivada apenas do AST Sotlas."""
+    module_id = _c_ident(module.name)
+    guard = f"SOTLAS_GENERATED_{module_id.upper()}_H"
+    lines = [
+        "/* Interface gerada do AST Sotlas. Não edite. */",
+        f"#ifndef {guard}",
+        f"#define {guard}",
+        "#include <stdint.h>",
+        "#include <stddef.h>",
+        "#include <stdbool.h>",
+    ]
+    lines.extend(f'#include "{_c_ident(name)}.h"' for name in module.imports)
+
+    for global_ in module.globals:
+        if global_.public and global_.is_const and not global_.type.is_array:
+            lines.append(f"#define {global_.name} (({global_.type.c()})({_emit_expr(global_.value)}))")
+
+    for enum_obj in module.enums:
+        if not enum_obj.public:
+            continue
+        lines.append(f"typedef enum {enum_obj.name} {{")
+        for variant in enum_obj.variants:
+            value = f" = {variant.value}" if variant.value is not None else ""
+            lines.append(f"    {enum_obj.name}_{variant.name}{value},")
+        lines.append(f"}} {enum_obj.name};")
+
+    for struct in module.structs:
+        if not struct.public:
+            continue
+        pack_attr = " __attribute__((packed))" if "@packed" in struct.attributes else ""
+        lines.append(f"typedef struct{pack_attr} {struct.name} {{")
+        lines.extend(f"    {field.type.c_decl(field.name)};" for field in struct.fields)
+        lines.append(f"}} {struct.name};")
+
+    for function in module.functions:
+        if not function.public and "@export" not in function.attributes:
+            continue
+        parameters = ", ".join(typ.c_decl(name) for name, typ in function.params) or "void"
+        lines.append(f"{function.result.c()} {function.name}({parameters});")
+    lines.extend(("", f"#endif /* {guard} */", ""))
+    return "\n".join(lines)
+
+
+def compile_module(module: Module, imported_modules: list[Module] | None = None,
+                   include_import_headers: bool = False) -> str:
+    imported = _public_import_maps(imported_modules)
+    check(module, *imported)
+    return emit_c(module, include_import_headers=include_import_headers)
+
+
+def compile_source(source: str, filename: str | None = None,
+                   imported_modules: list[Module] | None = None,
+                   include_import_headers: bool = False) -> str:
     module = parse(source, filename=filename)
-    check(module)
-    return emit_c(module)
+    return compile_module(module, imported_modules, include_import_headers)
 
 
 def compile_file(source: Path, output: Path) -> None:

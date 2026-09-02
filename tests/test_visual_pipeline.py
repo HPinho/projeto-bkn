@@ -14,17 +14,28 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("VerticalResolution <= 1200", boot)
 
     def test_runtime_uses_real_frame_time_and_not_cpu_dependent_spin_delay(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
-        self.assertIn("cycles_per_us", compiler)
-        self.assertIn("desktop_shell_set_frame_delta(frame_dt)", compiler)
-        self.assertIn("frame_stall(16667u - work_us)", compiler)
-        self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", compiler)
+        runtime = (ROOT / "kernel/src/baken_runtime.c").read_text(encoding="utf-8")
+        self.assertIn("cycles_per_us", runtime)
+        self.assertIn("desktop_shell_set_frame_delta(dt)", runtime)
+        self.assertIn("stall(16667 - work_us)", runtime)
+        self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", runtime)
+
+    def test_runtime_supports_simple_and_absolute_uefi_pointers(self):
+        boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
+        runtime = (ROOT / "kernel/src/baken_runtime.c").read_text(encoding="utf-8")
+        simple = boot.index("LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID")
+        absolute = boot.index("LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID")
+        self.assertLess(simple, absolute)
+        self.assertIn("EfiSimplePointerState", runtime)
+        self.assertIn("EfiAbsolutePointerState", runtime)
+        self.assertIn("boot_services->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID", runtime)
+        self.assertIn("raw_x > range_x", runtime)
 
     def test_expensive_background_and_blur_are_bounded(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
-        self.assertIn("g_wallpaper_cache", compiler)
-        self.assertIn("janela deslizante", compiler)
-        self.assertIn("estritamente O(w*h)", compiler)
+        rasterizer = (ROOT / "kernel/src/baken_rasterizer.sotlas").read_text(encoding="utf-8")
+        self.assertIn("WALLPAPER_CACHE", rasterizer)
+        self.assertIn("calculado uma vez", rasterizer)
+        self.assertIn("uma cópia linear restaura o fundo", rasterizer)
 
     def test_installer_and_oobe_have_continuous_transitions(self):
         installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
@@ -37,27 +48,30 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("gfx_smoothstep_u8", oobe)
 
     def test_resampling_and_springs_tolerate_fractional_scale_and_slow_frames(self):
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
         animation = (ROOT / "kernel/src/baken_animation.sotlas").read_text(encoding="utf-8")
         rasterizer = (ROOT / "kernel/src/baken_rasterizer.sotlas").read_text(encoding="utf-8")
-        self.assertIn("BKN_BILERP_CH", compiler)
         self.assertIn("bilerp_channel", rasterizer)
         self.assertIn("safe_dt", animation)
         self.assertIn("ease_smooth_surface", animation)
 
     def test_visual_fixes_are_connected_to_the_executable_route(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
+        main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
+        shell = (ROOT / "kernel/src/desktop_shell.sotlas").read_text(encoding="utf-8")
+        dock = (ROOT / "kernel/src/baken_ui_oop.sotlas").read_text(encoding="utf-8")
+        windows = (ROOT / "kernel/src/window_manager.sotlas").read_text(encoding="utf-8")
 
         # Firmware escolhe o modo antes do handoff; não é apenas um helper órfão.
         self.assertIn("choose_high_density_gop_mode(gop, bs);", boot)
         # Efeitos otimizados são chamados pelo material e pelo frame do shell.
-        self.assertIn("gfx_draw_backdrop_blur(x, y, w, h, blur_radius, radius)", compiler)
-        self.assertIn("gfx_draw_mesh_wallpaper();", compiler)
-        # O dt medido alcança o dock, e o installer nativo alcança o fullscreen.
-        self.assertIn("spring_update(&dock->item_springs[i], dt);", compiler)
-        self.assertIn("baken_installer_render(0, 0, sw, sh);", compiler)
-        self.assertIn("installer_render_fullscreen(g_shell.screen_w, g_shell.screen_h);", compiler)
+        self.assertIn("baken_runtime_init_assets();", main)
+        self.assertIn("baken_runtime_run(", main)
+        self.assertIn("gfx_draw_mesh_wallpaper();", shell)
+        # O dt medido alcança as molas do dock e o installer é despachado pelo WM.
+        self.assertIn("desktop_shell_update(SHELL.frame_delta)", shell)
+        self.assertIn("dock_update(&mut MAIN_DOCK, dt", shell)
+        self.assertIn("spring_update(&mut (*dock).item_springs", dock)
+        self.assertIn("baken_installer_render(content_x, content_y", windows)
 
 
 if __name__ == "__main__":

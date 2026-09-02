@@ -13,6 +13,7 @@ pub struct DesktopShellState {
     pub screen_w: u32;
     pub screen_h: u32;
     pub time_tick: u32;
+    pub frame_delta: f32;
     pub cursor_x: i32;
     pub cursor_y: i32;
 }
@@ -21,6 +22,7 @@ static mut SHELL: DesktopShellState = DesktopShellState {
     screen_w: 1920,
     screen_h: 1080,
     time_tick: 0,
+    frame_delta: 0.0166667,
     cursor_x: 960,
     cursor_y: 540
 };
@@ -32,6 +34,9 @@ static mut MAIN_DOCK: DesktopDock = DesktopDock {
     item_labels: [null as *const u8; 10],
     item_springs: [SpringState {
         current_val: 1.0, target_val: 1.0, velocity: 0.0, stiffness: 150.0, damping: 10.0
+    }; 10],
+    bounce_springs: [SpringState {
+        current_val: 0.0, target_val: 0.0, velocity: 0.0, stiffness: 180.0, damping: 12.0
     }; 10]
 };
 
@@ -41,17 +46,18 @@ pub fn desktop_shell_init(w: u32, h: u32) -> void {
         SHELL.screen_w = w;
         SHELL.screen_h = h;
         SHELL.time_tick = 0;
+        SHELL.frame_delta = 0.0166667;
         SHELL.cursor_x = (w / 2) as i32;
         SHELL.cursor_y = (h / 2) as i32;
         MAIN_DOCK.item_count = 0;
 
-        // Os itens são apenas o layout do dock nesta fase; o lançador de
-        // aplicativos ainda não foi conectado e não deve simular abertura.
-        MAIN_DOCK.add_item("Arquivos");
-        MAIN_DOCK.add_item("Notas");
-        MAIN_DOCK.add_item("Ajustes");
-        MAIN_DOCK.add_item("Terminal");
-        MAIN_DOCK.add_item("Sobre");
+        // O dock compartilha o mesmo estado do shell e encaminha os cliques ao
+        // window manager; o efeito de mola permanece independente da abertura.
+        dock_add_item(&mut MAIN_DOCK, "Arquivos");
+        dock_add_item(&mut MAIN_DOCK, "Notas");
+        dock_add_item(&mut MAIN_DOCK, "Ajustes");
+        dock_add_item(&mut MAIN_DOCK, "Terminal");
+        dock_add_item(&mut MAIN_DOCK, "Sobre");
 
         wm_init();
 
@@ -96,7 +102,7 @@ pub fn render_cursor() -> void {
         let mx = SHELL.cursor_x as u32;
         let my = SHELL.cursor_y as u32;
         // Máscara bitmap 16x8 de alta definição com contorno branco e sombra
-        static const CURSOR_MASK: [u8; 16] = [
+        const CURSOR_MASK: [u8; 16] = [
             0x80, 0xC0, 0xE0, 0xF0,
             0xF8, 0xFC, 0xFE, 0xFF,
             0xF0, 0xD8, 0x98, 0x0C,
@@ -145,6 +151,7 @@ pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
             let item_idx = ((mx - dock_x as i32 - 10) / 56) as u32;
             if item_idx < MAIN_DOCK.item_count {
                 let win_id = item_idx + 1;
+                dock_trigger_bounce(&mut MAIN_DOCK, item_idx);
                 if win_id == 1 {
                     wm_create_window(1, "Arquivos - BakenFS", (sw / 2 - 280) as i32, (sh / 2 - 180) as i32, 560, 360, 0x000F172A, 230, 0x0038BDF8);
                 } else if win_id == 2 {
@@ -167,9 +174,16 @@ pub fn desktop_shell_handle_click(mx: i32, my: i32) -> void {
 }
 
 @system
+pub fn desktop_shell_set_frame_delta(dt: f32) -> void {
+    unsafe {
+        SHELL.frame_delta = if dt < 0.001 { 0.001 } else if dt > 0.05 { 0.05 } else { dt };
+    }
+}
+
+@system
 pub fn desktop_shell_update(dt: f32) -> void {
     unsafe {
-        MAIN_DOCK.update(dt, SHELL.cursor_x, SHELL.cursor_y);
+        dock_update(&mut MAIN_DOCK, dt, SHELL.cursor_x, SHELL.cursor_y);
     }
 }
 
@@ -177,6 +191,7 @@ pub fn desktop_shell_update(dt: f32) -> void {
 pub fn desktop_shell_render_frame() -> void {
     unsafe {
         SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
+        desktop_shell_update(SHELL.frame_delta);
 
         // 1. Papel de parede com gradiente de malha colorido.
         gfx_draw_mesh_wallpaper();
@@ -188,7 +203,7 @@ pub fn desktop_shell_render_frame() -> void {
         wm_render_windows();
 
         // 4. Doca flutuante.
-        MAIN_DOCK.draw();
+        dock_draw(&MAIN_DOCK);
 
         // 5. Cursor
         render_cursor();
