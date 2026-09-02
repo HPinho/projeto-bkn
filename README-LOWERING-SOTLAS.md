@@ -72,3 +72,8 @@ Isso é uma limitação do linker escolhido, não do lowering dos módulos.
 
 Nesta auditoria, a suíte executou 270 testes e o link estrutural dos 17 objetos
 (15 módulos, adaptador e bootloader) passou com símbolos indefinidos proibidos.
+
+O GitHub Actions usa o mesmo resolvedor modular para conferir `main.sotlas`,
+compila o PE/COFF com MinGW, exige uma ISO não vazia e só aceita o smoke test
+QEMU quando a VM permanece executando até o timeout esperado. Falhas de build,
+empacotamento ou QEMU não são mais ocultadas por `|| true`.

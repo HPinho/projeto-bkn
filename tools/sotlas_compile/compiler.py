@@ -180,6 +180,13 @@ def analyze(entry):
 
 def find_gcc(root: Path) -> Path:
     import shutil
+    configured = os.environ.get("SOTLAS_CC")
+    if configured:
+        configured_path = Path(configured)
+        resolved = configured_path if configured_path.exists() else shutil.which(configured)
+        if resolved:
+            return Path(resolved)
+        raise SotlasError(f"compilador configurado em SOTLAS_CC não encontrado: {configured}")
     candidates = [
         root / "tools" / "w64devkit" / "bin" / "gcc.exe",
         Path(r"C:\Projetos\projeto-bkn\tools\w64devkit\bin\gcc.exe"),
@@ -187,7 +194,7 @@ def find_gcc(root: Path) -> Path:
     for c in candidates:
         if c.exists():
             return c
-    which_gcc = shutil.which("gcc")
+    which_gcc = shutil.which("x86_64-w64-mingw32-gcc") or shutil.which("gcc")
     if which_gcc:
         return Path(which_gcc)
     raise SotlasError("compilador GCC do toolchain w64devkit não encontrado")

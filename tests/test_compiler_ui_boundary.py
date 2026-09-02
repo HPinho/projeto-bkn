@@ -31,6 +31,13 @@ class CompilerUiBoundaryTests(unittest.TestCase):
     def test_monolithic_bridge_is_absent(self):
         self.assertFalse((ROOT / "kernel/src/baken_kernel_all.c").exists())
 
+    def test_ci_uses_the_canonical_modular_compiler_and_fails_closed(self):
+        workflow = (ROOT / ".github/workflows/baken_ci.yml").read_text(encoding="utf-8")
+        self.assertIn("tools/sotlas_compile/compiler.py check kernel/src/main.sotlas", workflow)
+        self.assertNotIn("tools/sotlas/cli.py check kernel/src/main.sotlas", workflow)
+        self.assertIn("SOTLAS_CC=x86_64-w64-mingw32-gcc", workflow)
+        self.assertNotIn("|| true", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()

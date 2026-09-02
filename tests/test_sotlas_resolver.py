@@ -3,7 +3,10 @@
 
 import importlib.util
 import json
+import os
+import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -17,6 +20,10 @@ SPEC.loader.exec_module(sotlas_compile)
 class SotlasResolverTests(unittest.TestCase):
     def fixture(self, name):
         return ROOT / "tests" / "fixtures" / "sotlas" / name / "kernel" / "src" / "main.sotlas"
+
+    def test_configured_cross_compiler_is_honored(self):
+        with patch.dict(os.environ, {"SOTLAS_CC": sys.executable}):
+            self.assertEqual(sotlas_compile.find_gcc(ROOT), Path(sys.executable))
 
     def test_real_kernel_graph_has_single_entry_and_graphical_compositor(self):
         manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")

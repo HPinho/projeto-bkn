@@ -22,26 +22,38 @@ jobs:
       - name: Install System Dependencies & QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64
 
-      - name: Run Sotlas Compiler Bootstrap Test Suite
+      - name: Run Complete Test Suite
         run: |
-          python3 -m unittest tests.test_sotlas_lexer tests.test_sotlas_parser tests.test_sotlas_sema tests.test_sotlas_codegen -v
+          python3 -m unittest discover -s tests
 
-      - name: Verify Sotlas CLI — check kernel entry point
+      - name: Verify Modular Sotlas Kernel Graph
         run: |
-          python3 tools/sotlas/cli.py check kernel/src/main.sotlas
+          python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
-      - name: Compile Baken OS Kernel (dry-run)
+      - name: Build Native Sotlas UEFI Kernel
         run: |
-          echo "Baken OS Kernel fonte: kernel/src/main.sotlas"
-          mkdir -p build
+          mkdir -p build/iso_root/EFI/BOOT
+          SOTLAS_CC=x86_64-w64-mingw32-gcc python3 tools/sotlas_compile/compiler.py build \
+            kernel/src/main.sotlas \
+            --manifest build/sotlas-main.manifest.json \
+            --output build/iso_root/EFI/BOOT/BOOTX64.EFI
+          test "$(head -c 2 build/iso_root/EFI/BOOT/BOOTX64.EFI)" = "MZ"
 
       - name: Build UEFI ISO Image
         run: |
-          python3 tools/scripts/create_uefi_iso.py || true
+          python3 tools/scripts/create_uefi_iso.py
+          test -s build/baken_os.iso
 
-      - name: Run Headless QEMU Stress & Boot Test
+      - name: Run Headless QEMU Boot Smoke Test
         run: |
-          echo "Launching Baken OS in headless QEMU for self-test validation..."
-          timeout 15s qemu-system-x86_64 -display none -serial stdio || true
+          set +e
+          timeout 15s qemu-system-x86_64 \
+            -machine q35 -m 512M -no-reboot \
+            -bios /usr/share/OVMF/OVMF_CODE.fd \
+            -cdrom build/baken_os.iso \
+            -display none -serial stdio
+          status=$?
+          set -e
+          test "$status" -eq 124
