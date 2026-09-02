@@ -62,6 +62,12 @@ add_test(
 set_tests_properties(installed_disk PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_test(
+    NAME visual_pipeline
+    COMMAND ${Python3_EXECUTABLE} -m unittest tests/test_visual_pipeline.py
+)
+set_tests_properties(visual_pipeline PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+add_test(
     NAME sotlas_compiler
     COMMAND ${Python3_EXECUTABLE} -m unittest discover -s tests -p "test_sotlas_*.py"
 )

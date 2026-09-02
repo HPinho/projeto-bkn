@@ -39,6 +39,12 @@ pub fn ease_smootherstep(t: f32) -> f32 {
     return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
 }
 
+// Alias semantico usado por superficies, paineis e transicoes de tela.
+@system
+pub fn ease_smooth_surface(t: f32) -> f32 {
+    return ease_smootherstep(t);
+}
+
 // Fluent Design Easing: Fast Out, Slow In (Entrada) - cubic-bezier(0, 0, 0, 1)
 // Aproximação polinomial para t em [0, 1]
 @system
@@ -67,6 +73,13 @@ pub fn spring_update(spring: *mut SpringState, dt: f32) -> f32 {
             let acceleration = force + damping_force;
             (*spring).velocity += acceleration * step;
             (*spring).current_val += (*spring).velocity * step;
+        }
+        // Encerra a cauda subpixel da mola para evitar repinturas eternas e
+        // tremor de um pixel perto do alvo.
+        if (abs_i32((((*spring).target_val - (*spring).current_val) * 10000.0) as i32) <= 1 &&
+            abs_i32(((*spring).velocity * 10000.0) as i32) <= 1) {
+            (*spring).current_val = (*spring).target_val;
+            (*spring).velocity = 0.0;
         }
         return (*spring).current_val;
     }

@@ -76,36 +76,32 @@ class StorageInstallerTests(unittest.TestCase):
 
     def test_installer_presentation_benchmark_and_oobe_contracts(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
+        installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
+        oobe = (ROOT / "kernel/src/baken_oobe_screen.sotlas").read_text(encoding="utf-8")
         # Apresentação e TasteTrack Systems
-        self.assertIn("TasteTrack Systems LTDA", compiler)
-        self.assertIn("Comecar agora", compiler)
-        self.assertIn("Restaurar ou Corrigir Computador", compiler)
-        # Hub Central & Propaganda / Showcase
-        self.assertIn("Diferenciais do Baken OS", compiler)
-        self.assertIn("Testar BakenOS", compiler)
-        self.assertIn("Instalar agora", compiler)
-        self.assertIn("Teste de Desempenho", compiler)
+        self.assertIn("TasteTrack Systems LTDA", installer)
+        self.assertIn("Comecar agora", installer)
+        self.assertIn("Restaurar ou Corrigir Computador", installer)
+        # Escolha de modo nativa
+        self.assertIn("Teste de Desempenho e Telemetria de Hardware", installer)
+        self.assertIn("Modo Live RAM", installer)
         # Benchmark com medições dinâmicas e nota calculada
         self.assertIn("st_rdtsc", compiler)
         self.assertIn("st_cpuid", compiler)
         self.assertIn("installer_run_hardware_benchmark", compiler)
-        self.assertIn("Nota Geral do Computador:", compiler)
-        self.assertIn("Nivel Ouro", compiler)
         # Proteção estrita da mídia de boot
         self.assertIn("Protecao ativa", compiler)
         self.assertIn("boot_disk_is_protected", compiler)
-        # 4 Passos normativos de instalação
-        self.assertIn("1. Copiando Arquivos do Sistema...", compiler)
-        self.assertIn("2. Verificando atualizacoes...", compiler)
-        self.assertIn("3. Instalando atualizacoes...", compiler)
-        self.assertIn("4. Finalizando Instalacao...", compiler)
-        # OOBE primeiro boot e gradiente
-        self.assertIn("Iniciando operadores...", compiler)
-        self.assertIn("Configurando tudo para voce...", compiler)
-        self.assertIn("INSTALLER_STAGE_OOBE_BOOT", compiler)
-        self.assertIn("INSTALLER_STAGE_OOBE_WIZARD", compiler)
-        self.assertIn("INSTALLER_STAGE_OOBE_FINISH", compiler)
-        self.assertIn("O futuro do seu computador comeca agora.", compiler)
+        # 4 passos nativos de instalação
+        self.assertIn("1. Criando tabela de particoes GPT", installer)
+        self.assertIn("2. Formatando volume de dados BakenFS", installer)
+        self.assertIn("3. Instalando microkernel Sotlas", installer)
+        self.assertIn("4. Configurando ponto de restauracao", installer)
+        # OOBE nativo, com navegação e transição contínua
+        self.assertIn("oobe_go_to", oobe)
+        self.assertIn("transition_tick", oobe)
+        self.assertIn("Pronto para Explorar!", oobe)
+        self.assertIn("Abrir meu Baken OS", oobe)
 
 
 if __name__ == "__main__":

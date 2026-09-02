@@ -207,6 +207,14 @@ pub fn gfx_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
     return 1;
 }
 
+@inline
+fn bilerp_channel(p00: u32, p10: u32, p01: u32, p11: u32,
+                  shift: u32, wx: u32, wy: u32) -> u32 {
+    let a = ((((p00 >> shift) & 255) * (256 - wx)) + (((p10 >> shift) & 255) * wx)) >> 8;
+    let b = ((((p01 >> shift) & 255) * (256 - wx)) + (((p11 >> shift) & 255) * wx)) >> 8;
+    return ((a * (256 - wy)) + (b * wy)) >> 8;
+}
+
 @system
 pub fn gfx_draw_baken_logo(x: u32, y: u32, size: u32, opacity: u8) -> void {
     if (size == 0 || opacity == 0) { return; }
@@ -220,15 +228,28 @@ pub fn gfx_draw_baken_logo(x: u32, y: u32, size: u32, opacity: u8) -> void {
             gfx_draw_circle_alpha(x + r, y + r, r / 3, 0x000F172A, opacity);
             return;
         }
+        let denom = if (size > 1) { size - 1 } else { 1 };
         for mut dy in 0..size {
-            let sy = (dy * LOGO_SIZE) / size;
+            let fy = (dy * (LOGO_SIZE - 1) * 256) / denom;
+            let sy = fy >> 8;
+            let wy = fy & 255;
+            let sy1 = if (sy + 1 < LOGO_SIZE) { sy + 1 } else { sy };
             for mut dx in 0..size {
-                let sx = (dx * LOGO_SIZE) / size;
-                let argb = *LOGO_PIXELS.add((sy * LOGO_SIZE + sx) as usize);
-                let src_a = ((argb >> 24) & 0xFF) as u8;
+                let fx = (dx * (LOGO_SIZE - 1) * 256) / denom;
+                let sx = fx >> 8;
+                let wx = fx & 255;
+                let sx1 = if (sx + 1 < LOGO_SIZE) { sx + 1 } else { sx };
+                let p00 = *LOGO_PIXELS.add((sy * LOGO_SIZE + sx) as usize);
+                let p10 = *LOGO_PIXELS.add((sy * LOGO_SIZE + sx1) as usize);
+                let p01 = *LOGO_PIXELS.add((sy1 * LOGO_SIZE + sx) as usize);
+                let p11 = *LOGO_PIXELS.add((sy1 * LOGO_SIZE + sx1) as usize);
+                let src_a = bilerp_channel(p00, p10, p01, p11, 24, wx, wy) as u8;
                 if (src_a != 0) {
                     let final_a = (((src_a as u32) * (opacity as u32)) / 255) as u8;
-                    gfx_put_pixel_alpha(x + dx, y + dy, argb & 0x00FFFFFF, final_a);
+                    let rgb = (bilerp_channel(p00, p10, p01, p11, 16, wx, wy) << 16) |
+                              (bilerp_channel(p00, p10, p01, p11, 8, wx, wy) << 8) |
+                               bilerp_channel(p00, p10, p01, p11, 0, wx, wy);
+                    gfx_put_pixel_alpha(x + dx, y + dy, rgb, final_a);
                 }
             }
         }

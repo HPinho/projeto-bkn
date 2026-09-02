@@ -287,23 +287,30 @@ static void choose_high_density_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
     if (!gop || !gop->Mode || !gop->Mode->Info || !gop->QueryMode || !gop->SetMode) return;
     EFI_GOP_QUERY_MODE query = (EFI_GOP_QUERY_MODE)gop->QueryMode;
     uint32_t best_mode = gop->Mode->Mode;
-    uint64_t best_area = (uint64_t)gop->Mode->Info->HorizontalResolution * gop->Mode->Info->VerticalResolution;
+    uint64_t best_area = 0;
+    uint8_t found_budget_mode = 0;
 
     for (uint32_t mode = 0; mode < gop->Mode->MaxMode; ++mode) {
         UINTN info_size = 0;
         EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
         if (query(gop, mode, &info_size, &info) != EFI_SUCCESS || !info) continue;
-        
+
         uint64_t area = (uint64_t)info->HorizontalResolution * info->VerticalResolution;
+        /* O renderer EFI e software. 1920x1200 e o teto que preserva texto
+         * nativo e double buffering sem transformar cada quadro em uma copia
+         * 4K de dezenas de MiB. A selecao anterior iniciava best_area com o
+         * modo corrente: se o firmware abrisse em 4K, nenhum modo dentro do
+         * teto poderia vence-lo e o sistema permanecia no caminho sem buffer. */
         if (info->PixelFormat == PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR &&
-            info->HorizontalResolution <= 1920 && info->VerticalResolution <= 1080 &&
+            info->HorizontalResolution <= 1920 && info->VerticalResolution <= 1200 &&
             area >= best_area) {
             best_mode = mode;
             best_area = area;
+            found_budget_mode = 1;
         }
         if (bs && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(info);
     }
-    if (best_mode != gop->Mode->Mode) (void)gop->SetMode(gop, best_mode);
+    if (found_budget_mode && best_mode != gop->Mode->Mode) (void)gop->SetMode(gop, best_mode);
 }
 
 static void *find_pointer_protocol(EFI_BOOT_SERVICES *bs) {

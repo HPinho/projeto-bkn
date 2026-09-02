@@ -712,17 +712,22 @@ void gfx_draw_baken_logo(uint32_t x, uint32_t y, uint32_t size) {
     for (uint32_t r = 0; r < size; ++r) {
         int32_t py = (int32_t)y + (int32_t)r;
         if (py < 0 || py >= gh) continue;
-        uint32_t sr = (r * asize) / size;
+        uint32_t fy = (r * (asize - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
+        uint32_t sy = fy >> 8, wy = fy & 255u, sy1 = sy + 1u < asize ? sy + 1u : sy;
         for (uint32_t c = 0; c < size; ++c) {
             int32_t px = (int32_t)x + (int32_t)c;
             if (px < 0 || px >= gw) continue;
-            uint32_t sc = (c * asize) / size;
-            uint32_t pixel = pixels[sr * asize + sc];
-            uint8_t alpha = (pixel >> 24) & 0xFF;
+            uint32_t fx = (c * (asize - 1u) * 256u) / (size > 1u ? size - 1u : 1u);
+            uint32_t sx = fx >> 8, wx = fx & 255u, sx1 = sx + 1u < asize ? sx + 1u : sx;
+            uint32_t p00=pixels[sy*asize+sx], p10=pixels[sy*asize+sx1];
+            uint32_t p01=pixels[sy1*asize+sx], p11=pixels[sy1*asize+sx1];
+#define BKN_BILERP_CH(S) ((uint32_t)((((((p00>>(S))&255u)*(256u-wx)+((p10>>(S))&255u)*wx)>>8)*(256u-wy)+((((p01>>(S))&255u)*(256u-wx)+((p11>>(S))&255u)*wx)>>8)*wy)>>8))
+            uint8_t alpha = (uint8_t)BKN_BILERP_CH(24);
             if (alpha > 0) {
-                uint32_t rgb = pixel & 0x00FFFFFF;
+                uint32_t rgb = (BKN_BILERP_CH(16)<<16)|(BKN_BILERP_CH(8)<<8)|BKN_BILERP_CH(0);
                 gfx_put_pixel_alpha((uint32_t)px, (uint32_t)py, rgb, alpha);
             }
+#undef BKN_BILERP_CH
         }
     }
 }
@@ -874,16 +879,35 @@ static void gfx_draw_backdrop_blur(uint32_t x, uint32_t y, uint32_t w, uint32_t 
     uint32_t bw = x1 - x0, bh = y1 - y0;
     if (bw > BKN_BLUR_MAX_W || bh > BKN_BLUR_MAX_H) return;
     for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) st_blur_source[py*bw+px]=fb[(uint64_t)(y0+py)*pitch+x0+px];
-    /* Box blur separável: duas passagens, custo linear e aspecto suave. */
-    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) {
-        uint32_t rr=0,gg=0,bb=0,n=0; uint32_t lo=px>blur_radius?px-blur_radius:0, hi=px+blur_radius+1<bw?px+blur_radius+1:bw;
-        for(uint32_t sx=lo;sx<hi;++sx){uint32_t c=st_blur_source[py*bw+sx];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
-        st_blur_pass[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+    /* Box blur separavel com janela deslizante. A versao anterior reabria a
+     * vizinhanca inteira para cada pixel: O(w*h*raio), suficiente para causar
+     * pausas perceptiveis ao abrir cards. Esta mantem somas incrementais e e
+     * estritamente O(w*h). */
+    for (uint32_t py=0; py<bh; ++py) {
+        uint32_t rr=0,gg=0,bb=0;
+        uint32_t hi=blur_radius+1u < bw ? blur_radius+1u : bw;
+        for(uint32_t sx=0;sx<hi;++sx){uint32_t c=st_blur_source[py*bw+sx];rr+=(c>>16)&255u;gg+=(c>>8)&255u;bb+=c&255u;}
+        for (uint32_t px=0; px<bw; ++px) {
+            uint32_t lo=px>blur_radius?px-blur_radius:0;
+            hi=px+blur_radius+1u<bw?px+blur_radius+1u:bw;
+            uint32_t n=hi-lo;
+            st_blur_pass[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+            if (lo < px + 1u && px + 1u > blur_radius) { uint32_t c=st_blur_source[py*bw+lo];rr-=(c>>16)&255u;gg-=(c>>8)&255u;bb-=c&255u; }
+            if (hi < bw) { uint32_t c=st_blur_source[py*bw+hi];rr+=(c>>16)&255u;gg+=(c>>8)&255u;bb+=c&255u; }
+        }
     }
-    for (uint32_t py=0; py<bh; ++py) for (uint32_t px=0; px<bw; ++px) {
-        uint32_t rr=0,gg=0,bb=0,n=0; uint32_t lo=py>blur_radius?py-blur_radius:0, hi=py+blur_radius+1<bh?py+blur_radius+1:bh;
-        for(uint32_t sy=lo;sy<hi;++sy){uint32_t c=st_blur_pass[sy*bw+px];rr+=(c>>16)&255;gg+=(c>>8)&255;bb+=c&255;n++;}
-        st_blur_source[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+    for (uint32_t px=0; px<bw; ++px) {
+        uint32_t rr=0,gg=0,bb=0;
+        uint32_t hi=blur_radius+1u < bh ? blur_radius+1u : bh;
+        for(uint32_t sy=0;sy<hi;++sy){uint32_t c=st_blur_pass[sy*bw+px];rr+=(c>>16)&255u;gg+=(c>>8)&255u;bb+=c&255u;}
+        for (uint32_t py=0; py<bh; ++py) {
+            uint32_t lo=py>blur_radius?py-blur_radius:0;
+            hi=py+blur_radius+1u<bh?py+blur_radius+1u:bh;
+            uint32_t n=hi-lo;
+            st_blur_source[py*bw+px]=0xFF000000|((rr/n)<<16)|((gg/n)<<8)|(bb/n);
+            if (lo < py + 1u && py + 1u > blur_radius) { uint32_t c=st_blur_pass[lo*bw+px];rr-=(c>>16)&255u;gg-=(c>>8)&255u;bb-=c&255u; }
+            if (hi < bh) { uint32_t c=st_blur_pass[hi*bw+px];rr+=(c>>16)&255u;gg+=(c>>8)&255u;bb+=c&255u; }
+        }
     }
     /* O blur só é escrito dentro do mesmo rounded-rect do material. Antes,
      * o retângulo de amostragem vazava uma faixa borrada entre cartões. */
@@ -1066,8 +1090,13 @@ void gfx_draw_glass_rect(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_
 
 static uint8_t g_dark_theme = 0;
 static uint32_t g_mesh_time_tick = 0;
+#define BKN_WALLPAPER_MAX_WIDTH 1920u
+#define BKN_WALLPAPER_MAX_HEIGHT 1200u
+static uint32_t g_wallpaper_cache[BKN_WALLPAPER_MAX_WIDTH * BKN_WALLPAPER_MAX_HEIGHT];
+static uint32_t g_wallpaper_cache_w = 0, g_wallpaper_cache_h = 0;
+static uint8_t g_wallpaper_cache_theme = 255u;
 
-void desktop_shell_toggle_theme(void) { g_dark_theme = !g_dark_theme; }
+void desktop_shell_toggle_theme(void) { g_dark_theme = !g_dark_theme; g_wallpaper_cache_w = 0; }
 uint8_t desktop_shell_is_dark_theme(void) { return g_dark_theme; }
 void gfx_set_mesh_time_tick(uint32_t t) { g_mesh_time_tick = t; }
 
@@ -1329,7 +1358,7 @@ void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *s, uint32_t c, u
     const SotlasFontAtlas *font = st_select_font(target_px);
     const uint8_t *cursor = s;
     while (*cursor) {
-        uint8_t ch = *cursor++;
+        uint8_t ch = st_decode_utf8_char(&cursor);
         /* O caminho com alpha legada mantém a mesma geometria do texto
          * proporcional, mas aplica opacidade depois da cobertura. */
         draw_char_aa(x, y, ch, c, font, target_px, a);
@@ -1417,6 +1446,21 @@ void gfx_draw_mesh_wallpaper(void) {
     uint32_t w = gfx_get_width(), h = gfx_get_height();
     if (w == 0 || h == 0) return;
 
+    uint32_t *fb = gfx_get_backbuffer(), pitch = gfx_get_pitch();
+    uint8_t cacheable = fb && w <= BKN_WALLPAPER_MAX_WIDTH && h <= BKN_WALLPAPER_MAX_HEIGHT;
+    if (cacheable && g_wallpaper_cache_w == w && g_wallpaper_cache_h == h &&
+        g_wallpaper_cache_theme == g_dark_theme) {
+        /* A composicao volta ao canvas em uma copia linear previsivel. O
+         * wallpaper anterior recalculava blooms, grain e divisoes para cada
+         * pixel de cada quadro, consumindo o orcamento das animacoes. */
+        for (uint32_t y = 0; y < h; ++y) {
+            uint32_t *dst = fb + (uint64_t)y * pitch;
+            const uint32_t *src = g_wallpaper_cache + (uint64_t)y * w;
+            for (uint32_t x = 0; x < w; ++x) dst[x] = src[x];
+        }
+        return;
+    }
+
     int32_t t = (int32_t)g_mesh_time_tick;
     int32_t shift_x1 = (int32_t)(((t % 360) < 180 ? (t % 180) - 90 : 270 - (t % 180)) / 10);
     int32_t shift_y1 = (int32_t)(((t % 240) < 120 ? (t % 120) - 60 : 180 - (t % 120)) / 10);
@@ -1484,8 +1528,15 @@ void gfx_draw_mesh_wallpaper(void) {
             if (g < 0) { g = 0; }
             if (b > 255) { b = 255; }
             if (b < 0) { b = 0; }
-            gfx_put_pixel(x, y, (r << 16) | (g << 8) | b);
+            uint32_t color = (r << 16) | (g << 8) | b;
+            gfx_put_pixel(x, y, color);
+            if (cacheable) g_wallpaper_cache[(uint64_t)y * w + x] = 0xFF000000u | color;
         }
+    }
+    if (cacheable) {
+        g_wallpaper_cache_w = w;
+        g_wallpaper_cache_h = h;
+        g_wallpaper_cache_theme = g_dark_theme;
     }
 }
 
@@ -1830,7 +1881,11 @@ void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id) {
             '#include "baken_design_tokens.h"',
             "typedef struct { float current_val, target_val, velocity, stiffness, damping; } SotlasSpringState;",
             "static int32_t st_abs_i32(int32_t value) { return value < 0 ? -value : value; }",
-            "float spring_update(SotlasSpringState *spring, float dt) { if (!spring) return 0.0f; float force=-spring->stiffness*(spring->current_val-spring->target_val); float damping=-spring->damping*spring->velocity; spring->velocity+=(force+damping)*dt; spring->current_val+=spring->velocity*dt; return spring->current_val; }",
+            "static float st_clamp01(float t) { return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t); }",
+            "float ease_fast_out_slow_in(float t) { float u=st_clamp01(t), inv=1.0f-u; return 1.0f-inv*inv*inv*inv; }",
+            "float ease_slow_out_fast_in(float t) { float u=st_clamp01(t); return u*u*u*u; }",
+            "float ease_smooth_surface(float t) { float u=st_clamp01(t); return u*u*u*(u*(u*6.0f-15.0f)+10.0f); }",
+            "float spring_update(SotlasSpringState *spring, float dt) { if (!spring) return 0.0f; if (dt<0.0f) dt=0.0f; if (dt>0.05f) dt=0.05f; int steps=dt>0.025f?3:(dt>0.0125f?2:1); float h=dt/(float)steps; for(int i=0;i<steps;++i){ float force=-spring->stiffness*(spring->current_val-spring->target_val); float damping=-spring->damping*spring->velocity; spring->velocity+=(force+damping)*h; spring->current_val+=spring->velocity*h; } float err=spring->target_val-spring->current_val; if(err<0.0f)err=-err; float vel=spring->velocity<0.0f?-spring->velocity:spring->velocity; if(err<0.0001f&&vel<0.0001f){spring->current_val=spring->target_val;spring->velocity=0.0f;} return spring->current_val; }",
             "void baken_motion_init_spring(SotlasSpringState *spring) { if (!spring) return; *spring=(SotlasSpringState){1.0f,1.0f,0.0f,BKN_MOTION_SPRING_STIFFNESS,BKN_MOTION_SPRING_DAMPING}; }",
             "float calculate_dock_magnify(int32_t cursor_x, int32_t icon_center_x, int32_t max_radius) { int32_t dist=st_abs_i32(cursor_x-icon_center_x); if (max_radius<=0 || dist>=max_radius) return 1.0f; float ratio=(float)(max_radius-dist)/(float)max_radius; return 1.0f+ratio*ratio*0.45f; }",
         ))
@@ -1963,6 +2018,7 @@ extern void gfx_draw_app_icon_hd(uint32_t x, uint32_t y, uint32_t size, uint32_t
 extern void gfx_draw_app_icon(uint32_t x, uint32_t y, uint32_t size, uint32_t app_id);
 extern void gfx_draw_text_proportional(uint32_t x, uint32_t y, const char *str, uint32_t color);
 extern void gfx_draw_text_role(uint32_t x, uint32_t y, const char *str, uint32_t color, uint32_t role);
+extern void gfx_draw_text_alpha(uint32_t x, uint32_t y, const uint8_t *str, uint32_t color, uint32_t scale, uint8_t alpha);
 extern void gfx_draw_text_ellipsis(uint32_t x, uint32_t y, uint32_t max_width, const char *str, uint32_t color);
 extern uint32_t gfx_draw_text_wrap_role(uint32_t x, uint32_t y, uint32_t max_width, uint32_t max_lines, const char *str, uint32_t color, uint32_t role);
 extern uint32_t gfx_measure_text(const char *str);
@@ -3891,6 +3947,14 @@ typedef struct {
 
 static DesktopShellState g_shell = {1920, 1080, 0, 960, 540, -1, 0, 0, 0, 0, 0, 0, 0, {0}, 0, {0, 6, 10, 9}, 4};
 static uint8_t g_loc_permission = 0; /* 0 = PENDING, 1 = GRANTED, 2 = DENIED */
+static float g_frame_dt_seconds = 1.0f / 60.0f;
+static float g_frame_tick_accumulator = 0.0f;
+
+void desktop_shell_set_frame_delta(float dt) {
+    if (dt < 0.001f) dt = 0.001f;
+    if (dt > 0.05f) dt = 0.05f;
+    g_frame_dt_seconds = dt;
+}
 
 uint8_t desktop_shell_get_location_permission(void) { return g_loc_permission; }
 void desktop_shell_set_location_permission(uint8_t perm) { g_loc_permission = perm; }
@@ -5195,9 +5259,13 @@ void desktop_shell_update(float dt) {
 }
 
 void desktop_shell_render_frame(void) {
-    g_shell.time_tick = (g_shell.time_tick + 1) % 3600;
+    g_frame_tick_accumulator += g_frame_dt_seconds * 60.0f;
+    while (g_frame_tick_accumulator >= 1.0f) {
+        g_shell.time_tick = (g_shell.time_tick + 1) % 3600;
+        g_frame_tick_accumulator -= 1.0f;
+    }
     gfx_set_mesh_time_tick(g_shell.time_tick);
-    desktop_shell_update(0.016f);
+    desktop_shell_update(g_frame_dt_seconds);
     gfx_draw_mesh_wallpaper();
 
     if (!installer_is_boot_mode_live()) {
@@ -5533,6 +5601,7 @@ typedef struct {
 extern void gfx_init(uint32_t *base, uint32_t width, uint32_t height, uint32_t pitch);
 extern void desktop_compositor_init(uint32_t screen_w, uint32_t screen_h);
 extern void desktop_compositor_render_frame(void);
+extern void desktop_shell_set_frame_delta(float dt);
 extern void desktop_shell_set_cursor(int32_t x, int32_t y);
 extern void desktop_shell_handle_click(int32_t mx, int32_t my);
 extern void desktop_shell_launch_app(uint32_t app_id);
@@ -5732,7 +5801,27 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
     int32_t mouse_y = (int32_t)(height / 2);
     uint8_t left_down = 0;
 
+    /* O antigo atraso de 40000 iteracoes variava com CPU/TCG e fazia a mesma
+     * animacao acelerar ou engasgar entre maquinas. Calibramos o TSC uma vez
+     * com o Stall UEFI e passamos tempo real, limitado, ao compositor. */
+    typedef uint64_t (*EFI_STALL_FN)(uint64_t microseconds);
+    EFI_STALL_FN frame_stall = (st && st->BootServices && st->BootServices->Stall)
+        ? (EFI_STALL_FN)st->BootServices->Stall : NULL;
+    uint64_t cycles_per_us = 0;
+    if (frame_stall) {
+        uint32_t lo0, hi0, lo1, hi1;
+        __asm__ volatile ("rdtsc" : "=a"(lo0), "=d"(hi0));
+        frame_stall(10000u);
+        __asm__ volatile ("rdtsc" : "=a"(lo1), "=d"(hi1));
+        uint64_t c0=((uint64_t)hi0<<32)|lo0, c1=((uint64_t)hi1<<32)|lo1;
+        if (c1 > c0) cycles_per_us = (c1 - c0) / 10000u;
+    }
+    float frame_dt = 1.0f / 60.0f;
+
     for (;;) {
+        uint32_t fs_lo, fs_hi;
+        __asm__ volatile ("rdtsc" : "=a"(fs_lo), "=d"(fs_hi));
+        uint64_t frame_start_cycles=((uint64_t)fs_hi<<32)|fs_lo;
         if (keyboard && keyboard->ReadKeyStroke) {
             EFI_INPUT_KEY key;
             while (keyboard->ReadKeyStroke(keyboard, &key) == 0) {
@@ -5809,13 +5898,23 @@ void baken_kernel_main(const BakenBootInfo *boot_info) {
             }
         }
 
+        desktop_shell_set_frame_delta(frame_dt);
         desktop_compositor_render_frame();
-        /* Cadencia deterministica: o antigo busy-loop variava com a CPU/QEMU e
-         * transformava easing em saltos. Stall trabalha em microssegundos. */
-        if (boot_services && boot_services->Stall) {
-            ((uint64_t (*)(uint64_t))boot_services->Stall)(16667u);
+
+        /* Mantem o quadro proximo de 60 Hz sem depender da velocidade da CPU.
+         * O tempo medido, incluindo a espera, alimenta as molas no quadro
+         * seguinte; picos sao limitados no setter para evitar saltos. */
+        uint32_t fe_lo, fe_hi;
+        __asm__ volatile ("rdtsc" : "=a"(fe_lo), "=d"(fe_hi));
+        uint64_t frame_end_cycles=((uint64_t)fe_hi<<32)|fe_lo;
+        if (frame_stall && cycles_per_us && frame_end_cycles > frame_start_cycles) {
+            uint64_t work_us = (frame_end_cycles - frame_start_cycles) / cycles_per_us;
+            if (work_us < 16667u) frame_stall(16667u - work_us);
+            __asm__ volatile ("rdtsc" : "=a"(fe_lo), "=d"(fe_hi));
+            frame_end_cycles=((uint64_t)fe_hi<<32)|fe_lo;
+            frame_dt = (float)((frame_end_cycles - frame_start_cycles) / cycles_per_us) / 1000000.0f;
         } else {
-            for (volatile int d = 0; d < 40000; ++d) { }
+            frame_dt = 1.0f / 60.0f;
         }
     }
 }

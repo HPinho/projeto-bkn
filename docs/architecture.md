@@ -141,6 +141,16 @@ serviços e persistência reais.
 - **Bootloader**: GOP, mouse/teclado UEFI e handoff. Sem interface de desktop.
 - **Formato de vídeo do bridge**: GOP BGR de 32 bits; outros formatos ficam
   bloqueados até o compositor ter conversão de pixel testada.
+- **Orçamento de vídeo**: o boot seleciona o maior modo BGRX de até 1920×1200.
+  Esse teto mantém o backbuffer ativo e evita desenho parcial visível em modos
+  4K que o compositor por software ainda não consegue sustentar.
+- **Cadência**: o TSC é calibrado com o timer UEFI, o compositor recebe `dt`
+  real limitado e o loop é cadenciado a aproximadamente 60 Hz quando o custo
+  do quadro permite. Esperas ocupadas dependentes da CPU não fazem parte da
+  rota.
+- **Canvas e efeitos**: o wallpaper é armazenado por resolução/tema; blurs usam
+  passagens separáveis com janela deslizante. O frame só chega ao GOP depois da
+  composição completa no backbuffer.
 - **Kernel/renderizador**: memória de vídeo, composição de quadros e entrada.
 - **Desktop shell**: topbar, papel de parede, dock e encaminhamento de janelas.
 - **Window manager**: estado e interação de janelas; não inicializa outro
