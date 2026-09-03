@@ -6,9 +6,31 @@ module kernel::baken_cursor;
 
 import kernel::baken_rasterizer::*;
 
+static mut G_CURSOR_X: i32 = 960;
+static mut G_CURSOR_Y: i32 = 540;
+
+@system
+pub fn baken_cursor_set_pos(x: i32, y: i32) -> void {
+    unsafe {
+        G_CURSOR_X = x;
+        G_CURSOR_Y = y;
+    }
+}
+
+@system
+pub fn baken_cursor_get_x() -> i32 {
+    unsafe { return G_CURSOR_X; }
+}
+
+@system
+pub fn baken_cursor_get_y() -> i32 {
+    unsafe { return G_CURSOR_Y; }
+}
+
 // Seta do Cursor de Alta Precisão estilo macOS (12x19) com Contorno Nítido e Sombra Suave
 @system
 pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
+    baken_cursor_set_pos(cx, cy);
     if (cx < 0 || cy < 0) { return; }
     let x = cx as u32;
     let y = cy as u32;

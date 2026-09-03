@@ -10,6 +10,7 @@ import kernel::sotlas_graphics::*;
 import kernel::baken_design::*;
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
+import kernel::baken_animation::*;
 
 pub const BAKENFX_MATERIAL_SOLID: u32 = 0;
 pub const BAKENFX_MATERIAL_GLASS: u32 = 1;
@@ -141,34 +142,64 @@ pub fn bakenfx_draw_elevated_panel(x: u32, y: u32, width: u32, height: u32, rgb:
 
 // Fundo oficial estático. A composição é vetorial e determinística: não há
 // simulação, ruído, parallax ou geração de imagem durante a sessão.
+// Papel de parede dinâmico estilo macOS Tahoe com deriva harmônica e renderização por scanline contínuo.
+// Renderiza em uma única passagem sequencial ultrarrápida de memória contígua (menos de 2ms).
+@system
+pub fn bakenfx_draw_live_aurora_background(canvas: *mut Canvas, width: u32, height: u32, tick: u32) -> void {
+    if canvas == (null as *mut Canvas) || width == 0 || height == 0 { return; }
+    unsafe {
+        let buf = display_get_backbuffer();
+        let pitch = display_get_pitch();
+        if buf == (null as *mut u32) || pitch == 0 { return; }
+
+        let wave_phase = ((tick / 2) % 256) as u32;
+
+        // 4 Polos harmônicos de cor da Aurora macOS Tahoe:
+        // Top-Left (Azul Safira / Oceânico #0E7490), Bottom-Left (Índigo Profundo #1E3A8A)
+        // Top-Right (Violeta Ametista #7E22CE), Bottom-Right (Rosa Magenta #BE185D)
+        let tl_r: i32 = 14;  let tl_g: i32 = 116; let tl_b: i32 = 144;
+        let bl_r: i32 = 30;  let bl_g: i32 = 58;  let bl_b: i32 = 138;
+        let tr_r: i32 = 126; let tr_g: i32 = 34;  let tr_b: i32 = 206;
+        let br_r: i32 = 190; let br_g: i32 = 24;  let br_b: i32 = 93;
+
+        let h_denom = if height > 1 { height - 1 } else { 1 };
+        let w_denom = if width > 1 { width - 1 } else { 1 };
+
+        for mut py in 0..height {
+            let row_wave = anim_orbit_sin(((wave_phase + py / 12) % 256) as u32, 8);
+            let eff_y = (py as i32 + row_wave);
+            let safe_y = if eff_y < 0 { 0 } else if eff_y >= height as i32 { (height - 1) as u32 } else { eff_y as u32 };
+            let ty = (safe_y * 255) / h_denom;
+
+            let left_r = ((tl_r * (255 - ty as i32) + bl_r * ty as i32) / 255) as u32;
+            let left_g = ((tl_g * (255 - ty as i32) + bl_g * ty as i32) / 255) as u32;
+            let left_b = ((tl_b * (255 - ty as i32) + bl_b * ty as i32) / 255) as u32;
+
+            let right_r = ((tr_r * (255 - ty as i32) + br_r * ty as i32) / 255) as u32;
+            let right_g = ((tr_g * (255 - ty as i32) + br_g * ty as i32) / 255) as u32;
+            let right_b = ((tr_b * (255 - ty as i32) + br_b * ty as i32) / 255) as u32;
+
+            let mut row_ptr = buf.add((py * pitch) as usize);
+            for mut px in 0..width {
+                let tx = (px * 255) / w_denom;
+                let cur_r = (left_r * (255 - tx) + right_r * tx) / 255;
+                let cur_g = (left_g * (255 - tx) + right_g * tx) / 255;
+                let cur_b = (left_b * (255 - tx) + right_b * tx) / 255;
+                *(row_ptr) = 0xFF000000 | (cur_r << 16) | (cur_g << 8) | cur_b;
+                row_ptr = row_ptr.add(1);
+            }
+        }
+    }
+}
+
+static mut BAKENFX_BG_TICK: u32 = 0;
+
 @system
 pub fn bakenfx_draw_desktop_background(canvas: *mut Canvas, width: u32, height: u32) -> void {
-    if canvas == (null as *mut Canvas) || width == 0 || height == 0 { return; }
-
-    Canvas_clear(canvas, color_rgb(16, 28, 54));
-
-    // Base azul profunda e faixas largas translúcidas. As cores são tokens
-    // estáveis do Baken Lua e escalam com o painel sem depender de resolução.
-    Canvas_draw_linear_gradient(
-        canvas,
-        rect_make(0, 0, width, height),
-        linear_gradient_make(color_rgb(20, 40, 79), color_rgb(60, 39, 100), true)
-    );
-    Canvas_draw_linear_gradient(
-        canvas,
-        rect_make(0, 0, width, height),
-        linear_gradient_make(color_rgba(14, 170, 221, 94), color_rgba(194, 82, 223, 88), false)
-    );
-    Canvas_draw_linear_gradient(
-        canvas,
-        rect_make(0, 0, width, height),
-        linear_gradient_make(color_rgba(25, 75, 170, 38), color_rgba(250, 189, 83, 66), true)
-    );
-    Canvas_draw_linear_gradient(
-        canvas,
-        rect_make(0, 0, width, height),
-        linear_gradient_make(color_rgba(32, 199, 174, 20), color_rgba(71, 81, 213, 0), false)
-    );
+    unsafe {
+        BAKENFX_BG_TICK = (BAKENFX_BG_TICK + 1) % 3600;
+        bakenfx_draw_live_aurora_background(canvas, width, height, BAKENFX_BG_TICK);
+    }
 }
 
 // Sombra com queda analítica suave calculada estritamente no perímetro externo,

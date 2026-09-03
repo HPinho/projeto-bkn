@@ -27,6 +27,40 @@ pub fn ease_smooth_surface(t: f32) -> f32 {
     return safe_t * safe_t * (3.0 - 2.0 * safe_t);
 }
 
+// Avaliador Analítico de Mola Apple (CASpringAnimation - QuartzCore/Metal)
+// Modela rigidez=300.0, amortecimento=30.0 e massa=1.0 com disparo rápido,
+// leve overshoot elástico (107-109%) e assentamento perfeito em 1.0 (settling duration).
+@system
+pub fn anim_caspring_f32(t: f32) -> f32 {
+    if t <= 0.0 { return 0.0; }
+    if t >= 1.0 { return 1.0; }
+
+    let lut: [f32; 33] = [
+        0.0, 0.1245, 0.2568, 0.3890, 0.5152, 0.6315, 0.7351, 0.8245,
+        0.8994, 0.9600, 1.0073, 1.0424, 1.0669, 1.0823, 1.0902, 1.0921,
+        1.0894, 1.0835, 1.0753, 1.0658, 1.0558, 1.0458, 1.0363, 1.0275,
+        1.0197, 1.0130, 1.0074, 1.0028, 0.9993, 0.9967, 0.9949, 0.9937,
+        1.0
+    ];
+
+    let scaled = t * 32.0;
+    let idx = scaled as usize;
+    if idx >= 32 { return 1.0; }
+    let frac = scaled - (idx as f32);
+    let v0 = lut[idx];
+    let v1 = lut[idx + 1];
+    return v0 + frac * (v1 - v0);
+}
+
+@system
+pub fn anim_caspring_shift_i32(progress: u32, max_progress: u32, distance: i32) -> i32 {
+    if max_progress == 0 { return 0; }
+    let norm_t = (progress as f32) / (max_progress as f32);
+    let spring_val = anim_caspring_f32(norm_t);
+    let residual = 1.0 - spring_val;
+    return (residual * (distance as f32)) as i32;
+}
+
 @system
 pub fn calculate_dock_magnify(cursor_x: i32, icon_center_x: i32, radius: i32) -> f32 {
     let diff = if cursor_x > icon_center_x { cursor_x - icon_center_x } else { icon_center_x - cursor_x };

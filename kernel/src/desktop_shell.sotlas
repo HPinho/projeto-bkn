@@ -157,6 +157,16 @@ pub fn desktop_shell_set_cursor(x: i32, y: i32) -> void {
 }
 
 @system
+pub fn desktop_shell_get_cursor_x() -> i32 {
+    unsafe { return SHELL.cursor_x; }
+}
+
+@system
+pub fn desktop_shell_get_cursor_y() -> i32 {
+    unsafe { return SHELL.cursor_y; }
+}
+
+@system
 pub fn desktop_shell_open_app(idx: u32) -> void {
     unsafe {
         let sw = SHELL.screen_w;
