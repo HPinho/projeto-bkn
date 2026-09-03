@@ -32,11 +32,6 @@
           "name": "comment.block.sotlas",
           "begin": "/\\*",
           "end": "\\*/"
-        },
-        {
-          "name": "comment.block.parenthesis.sotlas",
-          "begin": "\\(\\*",
-          "end": "\\*\\)"
         }
       ]
     },
