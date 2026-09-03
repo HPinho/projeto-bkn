@@ -1,0 +1,583 @@
+// SOTLAS UI v0.2 — Framework de Interface, Render Tree e Layout Engine do SOTLAS OS.
+// Fornece:
+// 1. Materiais Declarativos (Solid, Glass, Acrylic, Frosted, Accent)
+// 2. RenderNode & RenderTree em Arena Estática (zero heap, zero fragmentação)
+// 3. Layout Engine de Duas Passagens (VStack, HStack, ZStack, measure, layout)
+// 4. RenderTree_draw desacoplado sobre SOTLAS Graphics Canvas
+
+module kernel::sotlas_ui;
+
+import kernel::sotlas_graphics::*;
+
+// -----------------------------------------------------------------------------
+// SISTEMA DECLARATIVO DE MATERIAIS
+// -----------------------------------------------------------------------------
+
+pub const UI_MATERIAL_SOLID: u32 = 0;
+pub const UI_MATERIAL_GLASS: u32 = 1;
+pub const UI_MATERIAL_ACRYLIC: u32 = 2;
+pub const UI_MATERIAL_FROSTED: u32 = 3;
+pub const UI_MATERIAL_ACCENT: u32 = 4;
+
+pub struct Material {
+    pub kind: u32;
+    pub tint_color: Color;
+    pub blur_radius: u32;
+    pub border_color: Color;
+    pub border_width: u32;
+    pub shadow_color: Color;
+    pub shadow_blur: u32;
+    pub shadow_offset_y: i32;
+    pub corner_radius: u32;
+    pub is_squircle: bool;
+}
+
+@inline
+pub fn material_solid(color: Color, radius: u32) -> Material {
+    return Material {
+        kind: UI_MATERIAL_SOLID,
+        tint_color: color,
+        blur_radius: 0,
+        border_color: Color { r: 0, g: 0, b: 0, a: 0 },
+        border_width: 0,
+        shadow_color: Color { r: 0, g: 0, b: 0, a: 0 },
+        shadow_blur: 0,
+        shadow_offset_y: 0,
+        corner_radius: radius,
+        is_squircle: false,
+    };
+}
+
+@inline
+pub fn material_glass(tint: Color, border: Color, radius: u32) -> Material {
+    return Material {
+        kind: UI_MATERIAL_GLASS,
+        tint_color: tint,
+        blur_radius: 20,
+        border_color: border,
+        border_width: 1,
+        shadow_color: Color { r: 0, g: 0, b: 0, a: 60 },
+        shadow_blur: 16,
+        shadow_offset_y: 4,
+        corner_radius: radius,
+        is_squircle: true,
+    };
+}
+
+@inline
+pub fn material_acrylic(tint: Color, blur: u32, border: Color, radius: u32) -> Material {
+    return Material {
+        kind: UI_MATERIAL_ACRYLIC,
+        tint_color: tint,
+        blur_radius: blur,
+        border_color: border,
+        border_width: 1,
+        shadow_color: Color { r: 0, g: 0, b: 0, a: 80 },
+        shadow_blur: 24,
+        shadow_offset_y: 6,
+        corner_radius: radius,
+        is_squircle: true,
+    };
+}
+
+@inline
+pub fn material_accent(tint: Color, radius: u32) -> Material {
+    return Material {
+        kind: UI_MATERIAL_ACCENT,
+        tint_color: tint,
+        blur_radius: 0,
+        border_color: Color { r: 255, g: 255, b: 255, a: 40 },
+        border_width: 1,
+        shadow_color: Color { r: 0, g: 0, b: 0, a: 50 },
+        shadow_blur: 12,
+        shadow_offset_y: 2,
+        corner_radius: radius,
+        is_squircle: true,
+    };
+}
+
+// -----------------------------------------------------------------------------
+// SISTEMA DE LAYOUT (VSTACK, HSTACK, ZSTACK, MEASURE E LAYOUT)
+// -----------------------------------------------------------------------------
+
+pub const LAYOUT_DIR_NONE: u32 = 0;
+pub const LAYOUT_DIR_VERTICAL: u32 = 1;   // VStack
+pub const LAYOUT_DIR_HORIZONTAL: u32 = 2; // HStack
+pub const LAYOUT_DIR_STACK: u32 = 3;      // ZStack
+
+pub const ALIGN_START: u32 = 0;
+pub const ALIGN_CENTER: u32 = 1;
+pub const ALIGN_END: u32 = 2;
+pub const ALIGN_STRETCH: u32 = 3;
+
+pub struct LayoutParams {
+    pub direction: u32;
+    pub spacing: u32;
+    pub padding_left: u32;
+    pub padding_right: u32;
+    pub padding_top: u32;
+    pub padding_bottom: u32;
+    pub cross_align: u32;
+    pub main_align: u32;
+}
+
+@inline
+pub fn layout_none() -> LayoutParams {
+    return LayoutParams {
+        direction: LAYOUT_DIR_NONE,
+        spacing: 0,
+        padding_left: 0,
+        padding_right: 0,
+        padding_top: 0,
+        padding_bottom: 0,
+        cross_align: ALIGN_START,
+        main_align: ALIGN_START,
+    };
+}
+
+@inline
+pub fn layout_vstack(spacing: u32, pad: u32, align: u32) -> LayoutParams {
+    return LayoutParams {
+        direction: LAYOUT_DIR_VERTICAL,
+        spacing: spacing,
+        padding_left: pad,
+        padding_right: pad,
+        padding_top: pad,
+        padding_bottom: pad,
+        cross_align: align,
+        main_align: ALIGN_START,
+    };
+}
+
+@inline
+pub fn layout_hstack(spacing: u32, pad: u32, align: u32) -> LayoutParams {
+    return LayoutParams {
+        direction: LAYOUT_DIR_HORIZONTAL,
+        spacing: spacing,
+        padding_left: pad,
+        padding_right: pad,
+        padding_top: pad,
+        padding_bottom: pad,
+        cross_align: align,
+        main_align: ALIGN_START,
+    };
+}
+
+// -----------------------------------------------------------------------------
+// ÁRVORE DE RENDERIZAÇÃO (RENDER TREE & RENDER NODES COM ARENA ESTÁTICA)
+// -----------------------------------------------------------------------------
+
+pub const NODE_CONTAINER: u32 = 0;
+pub const NODE_TEXT: u32 = 1;
+pub const NODE_SHAPE: u32 = 2;
+pub const NODE_ICON: u32 = 3;
+pub const NODE_IMAGE: u32 = 4;
+
+pub struct RenderNode {
+    pub node_type: u32;
+    pub bounds: Rect;
+    pub material: Material;
+    pub layout: LayoutParams;
+    pub measured_w: u32;
+    pub measured_h: u32;
+    pub text_content: *const u8;
+    pub text_scale: u32;
+    pub icon_id: u32;
+    pub parent_idx: i32;
+    pub first_child: i32;
+    pub next_sibling: i32;
+    pub visible: bool;
+}
+
+pub const MAX_RENDER_NODES: usize = 128;
+
+pub struct RenderTree {
+    pub nodes: [RenderNode; MAX_RENDER_NODES];
+    pub node_count: u32;
+    pub root_idx: i32;
+}
+
+pub fn RenderTree_init(self: *mut RenderTree) -> void {
+    if self == (null as *mut RenderTree) { return; }
+    unsafe {
+        (*self).node_count = 0;
+        (*self).root_idx = -1;
+    }
+}
+
+pub fn RenderTree_clear(self: *mut RenderTree) -> void {
+    if self == (null as *mut RenderTree) { return; }
+    unsafe {
+        (*self).node_count = 0;
+        (*self).root_idx = -1;
+    }
+}
+
+pub fn RenderTree_alloc_node(self: *mut RenderTree, node_type: u32, bounds: Rect) -> i32 {
+    if self == (null as *mut RenderTree) { return -1; }
+    unsafe {
+        let count = (*self).node_count as usize;
+        if count >= MAX_RENDER_NODES { return -1; }
+
+        let idx = count as i32;
+        let empty_mat = material_solid(Color { r: 0, g: 0, b: 0, a: 0 }, 0);
+        let default_l = layout_none();
+        (*self).nodes[count] = RenderNode {
+            node_type: node_type,
+            bounds: bounds,
+            material: empty_mat,
+            layout: default_l,
+            measured_w: bounds.width,
+            measured_h: bounds.height,
+            text_content: null as *const u8,
+            text_scale: 1,
+            icon_id: 0,
+            parent_idx: -1,
+            first_child: -1,
+            next_sibling: -1,
+            visible: true,
+        };
+        (*self).node_count += 1;
+        if (*self).root_idx == -1 {
+            (*self).root_idx = idx;
+        }
+        return idx;
+    }
+}
+
+pub fn RenderTree_add_child(self: *mut RenderTree, parent_idx: i32, child_idx: i32) -> void {
+    if self == (null as *mut RenderTree) || parent_idx < 0 || child_idx < 0 { return; }
+    unsafe {
+        let p_count = (*self).node_count as i32;
+        if parent_idx >= p_count || child_idx >= p_count { return; }
+
+        (*self).nodes[child_idx as usize].parent_idx = parent_idx;
+        let p_first = (*self).nodes[parent_idx as usize].first_child;
+        if p_first < 0 {
+            (*self).nodes[parent_idx as usize].first_child = child_idx;
+        } else {
+            let mut curr = p_first;
+            while (*self).nodes[curr as usize].next_sibling >= 0 {
+                curr = (*self).nodes[curr as usize].next_sibling;
+            }
+            (*self).nodes[curr as usize].next_sibling = child_idx;
+        }
+    }
+}
+
+pub fn RenderTree_set_material(self: *mut RenderTree, node_idx: i32, material: Material) -> void {
+    if self == (null as *mut RenderTree) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx < (*self).node_count as i32 {
+            (*self).nodes[node_idx as usize].material = material;
+        }
+    }
+}
+
+pub fn RenderTree_set_layout(self: *mut RenderTree, node_idx: i32, layout: LayoutParams) -> void {
+    if self == (null as *mut RenderTree) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx < (*self).node_count as i32 {
+            (*self).nodes[node_idx as usize].layout = layout;
+        }
+    }
+}
+
+pub fn RenderTree_set_text(self: *mut RenderTree, node_idx: i32, text: *const u8, scale: u32, color: Color) -> void {
+    if self == (null as *mut RenderTree) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx < (*self).node_count as i32 {
+            (*self).nodes[node_idx as usize].node_type = NODE_TEXT;
+            (*self).nodes[node_idx as usize].text_content = text;
+            (*self).nodes[node_idx as usize].text_scale = scale;
+            (*self).nodes[node_idx as usize].material.tint_color = color;
+        }
+    }
+}
+
+pub fn RenderTree_set_icon(self: *mut RenderTree, node_idx: i32, icon_id: u32, color: Color) -> void {
+    if self == (null as *mut RenderTree) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx < (*self).node_count as i32 {
+            (*self).nodes[node_idx as usize].node_type = NODE_ICON;
+            (*self).nodes[node_idx as usize].icon_id = icon_id;
+            (*self).nodes[node_idx as usize].material.tint_color = color;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PASSAGEM 1: MEASURE (BOTTOM-UP)
+// -----------------------------------------------------------------------------
+
+pub fn RenderTree_measure_node(self: *mut RenderTree, node_idx: i32, max_w: u32, max_h: u32) -> void {
+    if self == (null as *mut RenderTree) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx >= (*self).node_count as i32 { return; }
+
+        let ntype = (*self).nodes[node_idx as usize].node_type;
+        let ldir = (*self).nodes[node_idx as usize].layout.direction;
+
+        // Se for folha de texto
+        if ntype == NODE_TEXT {
+            let txt = (*self).nodes[node_idx as usize].text_content;
+            let scale = (*self).nodes[node_idx as usize].text_scale;
+            let base_w = if txt != (null as *const u8) { sotlas_measure_text(txt) } else { 0 };
+            let w = base_w * (if scale > 0 { scale } else { 1 });
+            let h = 16 * (if scale > 0 { scale } else { 1 });
+            (*self).nodes[node_idx as usize].measured_w = w;
+            (*self).nodes[node_idx as usize].measured_h = h;
+            return;
+        }
+
+        // Se for folha de ícone ou imagem
+        if ntype == NODE_ICON || ntype == NODE_IMAGE {
+            let b = (*self).nodes[node_idx as usize].bounds;
+            (*self).nodes[node_idx as usize].measured_w = b.width;
+            (*self).nodes[node_idx as usize].measured_h = b.height;
+            return;
+        }
+
+        // Mede recursivamente todos os filhos primeiro (Bottom-Up)
+        let mut child = (*self).nodes[node_idx as usize].first_child;
+        while child >= 0 {
+            RenderTree_measure_node(self, child, max_w, max_h);
+            child = (*self).nodes[child as usize].next_sibling;
+        }
+
+        // Se não possui layout automático, mantém bounds explícito
+        if ldir == LAYOUT_DIR_NONE {
+            let b = (*self).nodes[node_idx as usize].bounds;
+            (*self).nodes[node_idx as usize].measured_w = b.width;
+            (*self).nodes[node_idx as usize].measured_h = b.height;
+            return;
+        }
+
+        let l = (*self).nodes[node_idx as usize].layout;
+        let pad_h = l.padding_left + l.padding_right;
+        let pad_v = l.padding_top + l.padding_bottom;
+
+        if ldir == LAYOUT_DIR_VERTICAL {
+            let mut total_h = 0 as u32;
+            let mut max_child_w = 0 as u32;
+            let mut count = 0 as u32;
+
+            child = (*self).nodes[node_idx as usize].first_child;
+            while child >= 0 {
+                let cw = (*self).nodes[child as usize].measured_w;
+                let ch = (*self).nodes[child as usize].measured_h;
+                if cw > max_child_w { max_child_w = cw; }
+                total_h += ch;
+                count += 1;
+                child = (*self).nodes[child as usize].next_sibling;
+            }
+
+            if count > 1 {
+                total_h += (count - 1) * l.spacing;
+            }
+
+            let final_w = max_child_w + pad_h;
+            let final_h = total_h + pad_v;
+            (*self).nodes[node_idx as usize].measured_w = if max_w > 0 && final_w > max_w { max_w } else { final_w };
+            (*self).nodes[node_idx as usize].measured_h = if max_h > 0 && final_h > max_h { max_h } else { final_h };
+        } else if ldir == LAYOUT_DIR_HORIZONTAL {
+            let mut total_w = 0 as u32;
+            let mut max_child_h = 0 as u32;
+            let mut count = 0 as u32;
+
+            child = (*self).nodes[node_idx as usize].first_child;
+            while child >= 0 {
+                let cw = (*self).nodes[child as usize].measured_w;
+                let ch = (*self).nodes[child as usize].measured_h;
+                if ch > max_child_h { max_child_h = ch; }
+                total_w += cw;
+                count += 1;
+                child = (*self).nodes[child as usize].next_sibling;
+            }
+
+            if count > 1 {
+                total_w += (count - 1) * l.spacing;
+            }
+
+            let final_w = total_w + pad_h;
+            let final_h = max_child_h + pad_v;
+            (*self).nodes[node_idx as usize].measured_w = if max_w > 0 && final_w > max_w { max_w } else { final_w };
+            (*self).nodes[node_idx as usize].measured_h = if max_h > 0 && final_h > max_h { max_h } else { final_h };
+        } else if ldir == LAYOUT_DIR_STACK {
+            let mut max_child_w = 0 as u32;
+            let mut max_child_h = 0 as u32;
+
+            child = (*self).nodes[node_idx as usize].first_child;
+            while child >= 0 {
+                let cw = (*self).nodes[child as usize].measured_w;
+                let ch = (*self).nodes[child as usize].measured_h;
+                if cw > max_child_w { max_child_w = cw; }
+                if ch > max_child_h { max_child_h = ch; }
+                child = (*self).nodes[child as usize].next_sibling;
+            }
+
+            let final_w = max_child_w + pad_h;
+            let final_h = max_child_h + pad_v;
+            (*self).nodes[node_idx as usize].measured_w = if max_w > 0 && final_w > max_w { max_w } else { final_w };
+            (*self).nodes[node_idx as usize].measured_h = if max_h > 0 && final_h > max_h { max_h } else { final_h };
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PASSAGEM 2: LAYOUT (TOP-DOWN)
+// -----------------------------------------------------------------------------
+
+pub fn RenderTree_layout_node(self: *mut RenderTree, node_idx: i32, origin_x: i32, origin_y: i32) -> void {
+    if self == (null as *mut RenderTree) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx >= (*self).node_count as i32 { return; }
+
+        let mw = (*self).nodes[node_idx as usize].measured_w;
+        let mh = (*self).nodes[node_idx as usize].measured_h;
+
+        (*self).nodes[node_idx as usize].bounds = Rect {
+            x: origin_x,
+            y: origin_y,
+            width: mw,
+            height: mh,
+        };
+
+        let ldir = (*self).nodes[node_idx as usize].layout.direction;
+        let l = (*self).nodes[node_idx as usize].layout;
+
+        let content_x = origin_x + l.padding_left as i32;
+        let content_y = origin_y + l.padding_top as i32;
+        let avail_w = if mw > (l.padding_left + l.padding_right) { mw - (l.padding_left + l.padding_right) } else { 0 };
+        let avail_h = if mh > (l.padding_top + l.padding_bottom) { mh - (l.padding_top + l.padding_bottom) } else { 0 };
+
+        if ldir == LAYOUT_DIR_VERTICAL {
+            let mut curr_y = content_y;
+            let mut child = (*self).nodes[node_idx as usize].first_child;
+            while child >= 0 {
+                let cw = (*self).nodes[child as usize].measured_w;
+                let ch = (*self).nodes[child as usize].measured_h;
+
+                let cx = if l.cross_align == ALIGN_CENTER {
+                    content_x + (if avail_w > cw { ((avail_w - cw) / 2) as i32 } else { 0 })
+                } else if l.cross_align == ALIGN_END {
+                    content_x + (if avail_w > cw { (avail_w - cw) as i32 } else { 0 })
+                } else {
+                    content_x
+                };
+
+                RenderTree_layout_node(self, child, cx, curr_y);
+                curr_y += ch as i32 + l.spacing as i32;
+                child = (*self).nodes[child as usize].next_sibling;
+            }
+        } else if ldir == LAYOUT_DIR_HORIZONTAL {
+            let mut curr_x = content_x;
+            let mut child = (*self).nodes[node_idx as usize].first_child;
+            while child >= 0 {
+                let cw = (*self).nodes[child as usize].measured_w;
+                let ch = (*self).nodes[child as usize].measured_h;
+
+                let cy = if l.cross_align == ALIGN_CENTER {
+                    content_y + (if avail_h > ch { ((avail_h - ch) / 2) as i32 } else { 0 })
+                } else if l.cross_align == ALIGN_END {
+                    content_y + (if avail_h > ch { (avail_h - ch) as i32 } else { 0 })
+                } else {
+                    content_y
+                };
+
+                RenderTree_layout_node(self, child, curr_x, cy);
+                curr_x += cw as i32 + l.spacing as i32;
+                child = (*self).nodes[child as usize].next_sibling;
+            }
+        } else if ldir == LAYOUT_DIR_STACK {
+            let mut child = (*self).nodes[node_idx as usize].first_child;
+            while child >= 0 {
+                RenderTree_layout_node(self, child, content_x, content_y);
+                child = (*self).nodes[child as usize].next_sibling;
+            }
+        }
+    }
+}
+
+pub fn RenderTree_layout(self: *mut RenderTree, root_idx: i32, origin_x: i32, origin_y: i32, max_w: u32, max_h: u32) -> void {
+    if self == (null as *mut RenderTree) || root_idx < 0 { return; }
+    RenderTree_measure_node(self, root_idx, max_w, max_h);
+    unsafe {
+        if root_idx < (*self).node_count as i32 && max_w > 0 && max_h > 0 {
+            (*self).nodes[root_idx as usize].measured_w = max_w;
+            (*self).nodes[root_idx as usize].measured_h = max_h;
+        }
+    }
+    RenderTree_layout_node(self, root_idx, origin_x, origin_y);
+}
+
+// -----------------------------------------------------------------------------
+// PASSAGEM 3: PINTURA DESACOPLADA (RENDER TREE -> CANVAS)
+// -----------------------------------------------------------------------------
+
+pub fn RenderTree_draw_node(self: *mut RenderTree, node_idx: i32, canvas: *mut Canvas) -> void {
+    if self == (null as *mut RenderTree) || canvas == (null as *mut Canvas) || node_idx < 0 { return; }
+    unsafe {
+        if node_idx >= (*self).node_count as i32 { return; }
+        let node = (*self).nodes[node_idx as usize];
+        if !node.visible { return; }
+
+        Canvas_save(canvas);
+
+        let mat = node.material;
+        let bounds = node.bounds;
+
+        if node.node_type == NODE_CONTAINER || node.node_type == NODE_SHAPE {
+            let p_fill = paint_fill(mat.tint_color);
+            if mat.kind == UI_MATERIAL_GLASS || mat.kind == UI_MATERIAL_ACRYLIC {
+                if mat.is_squircle {
+                    Canvas_draw_squircle(canvas, bounds, mat.corner_radius, p_fill);
+                } else {
+                    Canvas_draw_round_rect(canvas, bounds, mat.corner_radius, p_fill);
+                }
+            } else if mat.kind == UI_MATERIAL_SOLID {
+                if mat.corner_radius > 0 {
+                    Canvas_draw_round_rect(canvas, bounds, mat.corner_radius, p_fill);
+                } else {
+                    Canvas_draw_rect(canvas, bounds, p_fill);
+                }
+            } else if mat.kind == UI_MATERIAL_ACCENT {
+                Canvas_draw_capsule(canvas, bounds, p_fill);
+            }
+
+            if mat.border_width > 0 && mat.border_color.a > 0 {
+                let p_stroke = paint_stroke(mat.border_color, mat.border_width);
+                if mat.corner_radius > 0 {
+                    Canvas_draw_round_rect(canvas, bounds, mat.corner_radius, p_stroke);
+                } else {
+                    Canvas_draw_rect(canvas, bounds, p_stroke);
+                }
+            }
+        } else if node.node_type == NODE_TEXT {
+            if node.text_content != (null as *const u8) {
+                let p_text = paint_fill(mat.tint_color);
+                Canvas_draw_text(canvas, node.text_content, bounds.x, bounds.y, node.text_scale, p_text);
+            }
+        } else if node.node_type == NODE_ICON {
+            let p_icon = paint_fill(mat.tint_color);
+            Canvas_draw_vector_icon(canvas, node.icon_id, bounds.width, bounds, p_icon);
+        }
+
+        let mut child = node.first_child;
+        while child >= 0 {
+            RenderTree_draw_node(self, child, canvas);
+            child = (*self).nodes[child as usize].next_sibling;
+        }
+
+        Canvas_restore(canvas);
+    }
+}
+
+pub fn RenderTree_draw(self: *mut RenderTree, canvas: *mut Canvas) -> void {
+    if self == (null as *mut RenderTree) || canvas == (null as *mut Canvas) { return; }
+    unsafe {
+        if (*self).root_idx >= 0 {
+            RenderTree_draw_node(self, (*self).root_idx, canvas);
+        }
+    }
+}

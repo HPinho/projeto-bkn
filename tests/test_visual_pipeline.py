@@ -42,10 +42,10 @@ class VisualPipelineTests(unittest.TestCase):
         oobe = (ROOT / "kernel/src/baken_oobe_screen.sotlas").read_text(encoding="utf-8")
         self.assertIn("installer_go_to", installer)
         self.assertIn("transition_tick", installer)
-        self.assertIn("gfx_smoothstep_u8", installer)
+        self.assertIn("raster_smoothstep_u8", installer)
         self.assertIn("oobe_go_to", oobe)
         self.assertIn("transition_tick", oobe)
-        self.assertIn("gfx_smoothstep_u8", oobe)
+        self.assertIn("raster_smoothstep_u8", oobe)
 
     def test_resampling_and_springs_tolerate_fractional_scale_and_slow_frames(self):
         animation = (ROOT / "kernel/src/baken_animation.sotlas").read_text(encoding="utf-8")
@@ -66,7 +66,7 @@ class VisualPipelineTests(unittest.TestCase):
         # Efeitos otimizados são chamados pelo material e pelo frame do shell.
         self.assertIn("baken_runtime_init_assets();", main)
         self.assertIn("baken_runtime_run(", main)
-        self.assertIn("gfx_draw_mesh_wallpaper();", shell)
+        self.assertIn("raster_draw_mesh_wallpaper();", shell)
         # O dt medido alcança as molas do dock e o installer é despachado pelo WM.
         self.assertIn("desktop_shell_update(SHELL.frame_delta)", shell)
         self.assertIn("dock_update(&mut MAIN_DOCK, dt", shell)

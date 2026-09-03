@@ -1,0 +1,614 @@
+// SOTLAS Graphics & Renderer v0.2 — Fundação gráfica e motor de renderização do SOTLAS OS.
+// Fornece: Surface, Canvas, Paint, Color, Rect, Point, Clip, Transforms, Shapes e Bitmaps.
+// Camada de renderização pura desacoplada da UI de alto nível e conectada à base display_* e raster_*.
+
+module kernel::sotlas_graphics;
+
+import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
+
+// -----------------------------------------------------------------------------
+// GEOMETRIA E CORES FUNDAMENTAIS
+// -----------------------------------------------------------------------------
+
+pub struct Point {
+    pub x: i32;
+    pub y: i32;
+}
+
+pub struct Rect {
+    pub x: i32;
+    pub y: i32;
+    pub width: u32;
+    pub height: u32;
+}
+
+pub struct Color {
+    pub r: u8;
+    pub g: u8;
+    pub b: u8;
+    pub a: u8;
+}
+
+pub const BLEND_SRC_OVER: u32 = 0;
+pub const BLEND_SRC: u32 = 1;
+pub const BLEND_ADD: u32 = 2;
+
+pub struct Paint {
+    pub color: Color;
+    pub antialias: bool;
+    pub stroke_width: u32;
+    pub is_stroke: bool;
+    pub blend_mode: u32;
+}
+
+// -----------------------------------------------------------------------------
+// CONSTRUTORES DE CONVENIÊNCIA
+// -----------------------------------------------------------------------------
+
+@inline
+pub fn point_make(x: i32, y: i32) -> Point {
+    return Point { x: x, y: y };
+}
+
+@inline
+pub fn rect_make(x: i32, y: i32, width: u32, height: u32) -> Rect {
+    return Rect { x: x, y: y, width: width, height: height };
+}
+
+@inline
+pub fn color_rgba(r: u8, g: u8, b: u8, a: u8) -> Color {
+    return Color { r: r, g: g, b: b, a: a };
+}
+
+@inline
+pub fn color_rgb(r: u8, g: u8, b: u8) -> Color {
+    return Color { r: r, g: g, b: b, a: 255 };
+}
+
+@inline
+pub fn color_from_u32(val: u32) -> Color {
+    return Color {
+        a: ((val >> 24) & 0xFF) as u8,
+        r: ((val >> 16) & 0xFF) as u8,
+        g: ((val >> 8) & 0xFF) as u8,
+        b: (val & 0xFF) as u8,
+    };
+}
+
+@inline
+pub fn color_to_u32(c: Color) -> u32 {
+    return ((c.a as u32) << 24) | ((c.r as u32) << 16) | ((c.g as u32) << 8) | (c.b as u32);
+}
+
+@inline
+pub fn paint_fill(color: Color) -> Paint {
+    return Paint {
+        color: color,
+        antialias: true,
+        stroke_width: 0,
+        is_stroke: false,
+        blend_mode: BLEND_SRC_OVER,
+    };
+}
+
+@inline
+pub fn paint_stroke(color: Color, stroke_width: u32) -> Paint {
+    return Paint {
+        color: color,
+        antialias: true,
+        stroke_width: stroke_width,
+        is_stroke: true,
+        blend_mode: BLEND_SRC_OVER,
+    };
+}
+
+// -----------------------------------------------------------------------------
+// OPERAÇÕES GEOMÉTRICAS EM RETÂNGULOS
+// -----------------------------------------------------------------------------
+
+pub fn rect_contains(r: Rect, p: Point) -> bool {
+    return p.x >= r.x && p.x < (r.x + r.width as i32) &&
+           p.y >= r.y && p.y < (r.y + r.height as i32);
+}
+
+pub fn rect_intersect(a: Rect, b: Rect) -> Rect {
+    let x0 = if a.x > b.x { a.x } else { b.x };
+    let y0 = if a.y > b.y { a.y } else { b.y };
+    let ax1 = a.x + a.width as i32;
+    let bx1 = b.x + b.width as i32;
+    let x1 = if ax1 < bx1 { ax1 } else { bx1 };
+    let ay1 = a.y + a.height as i32;
+    let by1 = b.y + b.height as i32;
+    let y1 = if ay1 < by1 { ay1 } else { by1 };
+
+    if x1 <= x0 || y1 <= y0 {
+        return Rect { x: 0, y: 0, width: 0, height: 0 };
+    }
+    return Rect {
+        x: x0,
+        y: y0,
+        width: (x1 - x0) as u32,
+        height: (y1 - y0) as u32,
+    };
+}
+
+@inline pub fn Rect_contains(r: Rect, p: Point) -> bool { return rect_contains(r, p); }
+@inline pub fn Rect_intersect(a: Rect, b: Rect) -> Rect { return rect_intersect(a, b); }
+
+// -----------------------------------------------------------------------------
+// ESTRUTURAS DE SUPORTE AO RENDERER (GRADIENTES & BITMAPS)
+// -----------------------------------------------------------------------------
+
+pub struct LinearGradient {
+    pub start_color: Color;
+    pub end_color: Color;
+    pub is_vertical: bool;
+}
+
+@inline
+pub fn linear_gradient_make(c0: Color, c1: Color, vert: bool) -> LinearGradient {
+    return LinearGradient { start_color: c0, end_color: c1, is_vertical: vert };
+}
+
+pub struct Bitmap {
+    pub buffer: *const u32;
+    pub width: u32;
+    pub height: u32;
+    pub pitch: u32;
+    pub has_alpha: bool;
+}
+
+@inline
+pub fn bitmap_make(buf: *const u32, w: u32, h: u32, pitch: u32, alpha: bool) -> Bitmap {
+    return Bitmap { buffer: buf, width: w, height: h, pitch: pitch, has_alpha: alpha };
+}
+
+// -----------------------------------------------------------------------------
+// SURFACE (GERENCIAMENTO DE SUPERFÍCIE DE DESENHO)
+// -----------------------------------------------------------------------------
+
+pub struct Surface {
+    pub buffer: *mut u32;
+    pub width: u32;
+    pub height: u32;
+    pub pitch: u32;
+}
+
+pub fn Surface_init(self: *mut Surface, buffer: *mut u32, width: u32, height: u32, pitch: u32) -> void {
+    if self == (null as *mut Surface) { return; }
+    unsafe {
+        (*self).buffer = buffer;
+        (*self).width = width;
+        (*self).height = height;
+        (*self).pitch = pitch;
+    }
+}
+
+pub fn Surface_put_pixel(self: *mut Surface, x: u32, y: u32, color: Color) -> void {
+    if self == (null as *mut Surface) { return; }
+    unsafe {
+        if x < (*self).width && y < (*self).height {
+            let offset = (y * (*self).pitch + x) as usize;
+            let bg = *((*self).buffer.add(offset));
+            let fg_u32 = color_to_u32(color) & 0x00FFFFFF;
+            let blended = raster_blend_color(bg, fg_u32, color.a);
+            *((*self).buffer.add(offset)) = blended;
+        }
+    }
+}
+
+pub fn Surface_get_pixel(self: *const Surface, x: u32, y: u32) -> Color {
+    if self == (null as *const Surface) { return color_rgba(0, 0, 0, 0); }
+    unsafe {
+        if x < (*self).width && y < (*self).height {
+            let offset = (y * (*self).pitch + x) as usize;
+            let val = *((*self).buffer.add(offset));
+            return color_from_u32(val);
+        }
+        return color_rgba(0, 0, 0, 0);
+    }
+}
+
+pub fn Surface_clear(self: *mut Surface, color: Color) -> void {
+    if self == (null as *mut Surface) { return; }
+    unsafe {
+        let val = color_to_u32(color);
+        let total = ((*self).pitch * (*self).height) as usize;
+        for mut i in 0..total {
+            *((*self).buffer.add(i)) = val;
+        }
+    }
+}
+
+pub fn surface_make(buffer: *mut u32, width: u32, height: u32, pitch: u32) -> Surface {
+    return Surface {
+        buffer: buffer,
+        width: width,
+        height: height,
+        pitch: pitch,
+    };
+}
+
+@inline
+pub fn surface_from_buffer(buffer: *mut u32, width: u32, height: u32, pitch: u32) -> Surface {
+    return surface_make(buffer, width, height, pitch);
+}
+
+pub fn surface_from_backbuffer() -> Surface {
+    return Surface {
+        buffer: display_get_backbuffer(),
+        width: display_get_width(),
+        height: display_get_height(),
+        pitch: display_get_pitch(),
+    };
+}
+
+// -----------------------------------------------------------------------------
+// CANVAS & RENDERER API
+// -----------------------------------------------------------------------------
+
+pub const CANVAS_MAX_SAVED_STATES: usize = 8;
+
+pub struct ClipState {
+    pub rect: Rect;
+    pub has_clip: bool;
+}
+
+pub struct CanvasState {
+    pub clip: ClipState;
+    pub offset_x: i32;
+    pub offset_y: i32;
+    pub scale_milli: u32; // Escala inteira de precisão: 1000 = 1.0x, 1500 = 1.5x, 2000 = 2.0x
+}
+
+pub struct Canvas {
+    pub surface: *mut Surface;
+    pub clip: ClipState;
+    pub save_stack: [CanvasState; CANVAS_MAX_SAVED_STATES];
+    pub save_count: usize;
+    pub offset_x: i32;
+    pub offset_y: i32;
+    pub scale_milli: u32;
+}
+
+pub fn Canvas_init(self: *mut Canvas, surface: *mut Surface) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        (*self).surface = surface;
+        (*self).clip = ClipState {
+            rect: Rect { x: 0, y: 0, width: 0, height: 0 },
+            has_clip: false,
+        };
+        (*self).save_count = 0;
+        (*self).offset_x = 0;
+        (*self).offset_y = 0;
+        (*self).scale_milli = 1000;
+    }
+}
+
+pub fn Canvas_save(self: *mut Canvas) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let count = (*self).save_count;
+        if count < CANVAS_MAX_SAVED_STATES {
+            (*self).save_stack[count] = CanvasState {
+                clip: (*self).clip,
+                offset_x: (*self).offset_x,
+                offset_y: (*self).offset_y,
+                scale_milli: (*self).scale_milli,
+            };
+            (*self).save_count += 1;
+        }
+    }
+}
+
+pub fn Canvas_restore(self: *mut Canvas) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        if (*self).save_count > 0 {
+            (*self).save_count -= 1;
+            let top = (*self).save_stack[(*self).save_count];
+            (*self).clip = top.clip;
+            (*self).offset_x = top.offset_x;
+            (*self).offset_y = top.offset_y;
+            (*self).scale_milli = top.scale_milli;
+        }
+    }
+}
+
+pub fn Canvas_translate(self: *mut Canvas, dx: i32, dy: i32) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        (*self).offset_x += dx;
+        (*self).offset_y += dy;
+    }
+}
+
+pub fn Canvas_scale_milli(self: *mut Canvas, scale_milli: u32) -> void {
+    if self == (null as *mut Canvas) || scale_milli < 100 { return; }
+    unsafe {
+        (*self).scale_milli = scale_milli;
+    }
+}
+
+pub fn Canvas_clip_rect(self: *mut Canvas, rect: Rect) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let translated = Rect {
+            x: rect.x + (*self).offset_x,
+            y: rect.y + (*self).offset_y,
+            width: rect.width,
+            height: rect.height,
+        };
+        if (*self).clip.has_clip {
+            (*self).clip.rect = rect_intersect((*self).clip.rect, translated);
+        } else {
+            (*self).clip.rect = translated;
+            (*self).clip.has_clip = true;
+        }
+    }
+}
+
+pub fn Canvas_clear(self: *mut Canvas, color: Color) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        if (*self).surface != (null as *mut Surface) {
+            Surface_clear((*self).surface, color);
+        }
+    }
+}
+
+pub fn Canvas_draw_rect(self: *mut Canvas, rect: Rect, paint: Paint) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let rx = rect.x + (*self).offset_x;
+        let ry = rect.y + (*self).offset_y;
+        let mut target_r = Rect { x: rx, y: ry, width: rect.width, height: rect.height };
+
+        let mut clipped_r = target_r;
+        if (*self).clip.has_clip {
+            clipped_r = rect_intersect(target_r, (*self).clip.rect);
+            if clipped_r.width == 0 || clipped_r.height == 0 { return; }
+        }
+
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+
+        if paint.is_stroke {
+            let sw = if paint.stroke_width > 0 { paint.stroke_width } else { 1 };
+            // Bordas superior e inferior
+            raster_fill_rect_alpha(clipped_r.x as u32, clipped_r.y as u32, clipped_r.width, sw, c_u32, paint.color.a);
+            if clipped_r.height > sw {
+                raster_fill_rect_alpha(clipped_r.x as u32, (clipped_r.y + clipped_r.height as i32 - sw as i32) as u32, clipped_r.width, sw, c_u32, paint.color.a);
+            }
+            // Bordas laterais
+            if clipped_r.height > sw * 2 {
+                raster_fill_rect_alpha(clipped_r.x as u32, (clipped_r.y + sw as i32) as u32, sw, clipped_r.height - sw * 2, c_u32, paint.color.a);
+                if clipped_r.width > sw {
+                    raster_fill_rect_alpha((clipped_r.x + clipped_r.width as i32 - sw as i32) as u32, (clipped_r.y + sw as i32) as u32, sw, clipped_r.height - sw * 2, c_u32, paint.color.a);
+                }
+            }
+        } else {
+            raster_fill_rect_alpha(clipped_r.x as u32, clipped_r.y as u32, clipped_r.width, clipped_r.height, c_u32, paint.color.a);
+        }
+    }
+}
+
+pub fn Canvas_draw_round_rect(self: *mut Canvas, rect: Rect, radius: u32, paint: Paint) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let rx = (rect.x + (*self).offset_x) as u32;
+        let ry = (rect.y + (*self).offset_y) as u32;
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+        raster_draw_squircle(rx, ry, rect.width, rect.height, c_u32, paint.color.a, c_u32, radius);
+    }
+}
+
+pub fn Canvas_draw_capsule(self: *mut Canvas, rect: Rect, paint: Paint) -> void {
+    if self == (null as *mut Canvas) { return; }
+    let r = if rect.height <= rect.width { rect.height / 2 } else { rect.width / 2 };
+    Canvas_draw_round_rect(self, rect, r, paint);
+}
+
+pub fn Canvas_draw_squircle(self: *mut Canvas, rect: Rect, radius: u32, paint: Paint) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let rx = (rect.x + (*self).offset_x) as u32;
+        let ry = (rect.y + (*self).offset_y) as u32;
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+        raster_draw_squircle(rx, ry, rect.width, rect.height, c_u32, paint.color.a, c_u32, radius);
+    }
+}
+
+pub fn Canvas_draw_circle(self: *mut Canvas, cx: i32, cy: i32, radius: u32, paint: Paint) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let t_cx = (cx + (*self).offset_x) as u32;
+        let t_cy = (cy + (*self).offset_y) as u32;
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+        raster_draw_circle_alpha(t_cx, t_cy, radius, c_u32, paint.color.a);
+    }
+}
+
+pub fn Canvas_draw_oval(self: *mut Canvas, rect: Rect, paint: Paint) -> void {
+    if self == (null as *mut Canvas) || rect.width == 0 || rect.height == 0 { return; }
+    unsafe {
+        let cx = rect.x + (*self).offset_x + (rect.width / 2) as i32;
+        let cy = rect.y + (*self).offset_y + (rect.height / 2) as i32;
+        let a = (rect.width / 2) as i32;
+        let b = (rect.height / 2) as i32;
+        let b2 = b * b;
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+
+        let mut dy = 0 - b;
+        while dy <= b {
+            let py = cy + dy;
+            if py >= 0 {
+                let dy2 = dy * dy;
+                if dy2 <= b2 {
+                    let term = 1.0 - ((dy2 as f32) / (b2 as f32));
+                    let span_x = ((a as f32) * term) as i32;
+                    let x_start = cx - span_x;
+                    let w_span = (span_x * 2) as u32;
+                    if x_start >= 0 && w_span > 0 {
+                        raster_fill_rect_alpha(x_start as u32, py as u32, w_span, 1, c_u32, paint.color.a);
+                    }
+                }
+            }
+            dy += 1;
+        }
+    }
+}
+
+pub fn Canvas_draw_linear_gradient(self: *mut Canvas, rect: Rect, gradient: LinearGradient) -> void {
+    if self == (null as *mut Canvas) || rect.width == 0 || rect.height == 0 { return; }
+    unsafe {
+        let ox = (rect.x + (*self).offset_x) as u32;
+        let oy = (rect.y + (*self).offset_y) as u32;
+
+        let r0 = gradient.start_color.r as u32;
+        let g0 = gradient.start_color.g as u32;
+        let b0 = gradient.start_color.b as u32;
+        let a0 = gradient.start_color.a as u32;
+
+        let r1 = gradient.end_color.r as u32;
+        let g1 = gradient.end_color.g as u32;
+        let b1 = gradient.end_color.b as u32;
+        let a1 = gradient.end_color.a as u32;
+
+        if gradient.is_vertical {
+            let h = rect.height;
+            for mut row in 0..h {
+                let t = (row * 255) / (if h > 1 { h - 1 } else { 1 });
+                let cur_r = ((r0 * (255 - t)) + (r1 * t)) / 255;
+                let cur_g = ((g0 * (255 - t)) + (g1 * t)) / 255;
+                let cur_b = ((b0 * (255 - t)) + (b1 * t)) / 255;
+                let cur_a = ((a0 * (255 - t)) + (a1 * t)) / 255;
+                let color_u32 = (cur_r << 16) | (cur_g << 8) | cur_b;
+                raster_fill_rect_alpha(ox, oy + row, rect.width, 1, color_u32, cur_a as u8);
+            }
+        } else {
+            let w = rect.width;
+            for mut col in 0..w {
+                let t = (col * 255) / (if w > 1 { w - 1 } else { 1 });
+                let cur_r = ((r0 * (255 - t)) + (r1 * t)) / 255;
+                let cur_g = ((g0 * (255 - t)) + (g1 * t)) / 255;
+                let cur_b = ((b0 * (255 - t)) + (b1 * t)) / 255;
+                let cur_a = ((a0 * (255 - t)) + (a1 * t)) / 255;
+                let color_u32 = (cur_r << 16) | (cur_g << 8) | cur_b;
+                raster_fill_rect_alpha(ox + col, oy, 1, rect.height, color_u32, cur_a as u8);
+            }
+        }
+    }
+}
+
+pub fn Canvas_draw_bitmap(self: *mut Canvas, bmp: *const Bitmap, src: Rect, dst: Rect, paint: Paint) -> void {
+    if self == (null as *mut Canvas) || bmp == (null as *const Bitmap) { return; }
+    unsafe {
+        let src_buf = (*bmp).buffer;
+        if src_buf == (null as *const u32) { return; }
+
+        let ox = (dst.x + (*self).offset_x) as u32;
+        let oy = (dst.y + (*self).offset_y) as u32;
+        let bmp_pitch = (*bmp).pitch;
+
+        for mut dy in 0..dst.height {
+            let sy = src.y as u32 + (dy * src.height) / dst.height;
+            if sy >= (*bmp).height { continue; }
+            for mut dx in 0..dst.width {
+                let sx = src.x as u32 + (dx * src.width) / dst.width;
+                if sx >= (*bmp).width { continue; }
+                let pixel = *src_buf.add((sy * bmp_pitch + sx) as usize);
+                let a = if (*bmp).has_alpha { ((pixel >> 24) & 0xFF) as u8 } else { 255 };
+                let eff_a = ((a as u32 * paint.color.a as u32) / 255) as u8;
+                if eff_a > 0 {
+                    raster_put_pixel_alpha(ox + dx, oy + dy, pixel & 0x00FFFFFF, eff_a);
+                }
+            }
+        }
+    }
+}
+
+pub fn Canvas_draw_text(self: *mut Canvas, text: *const u8, x: i32, y: i32, scale: u32, paint: Paint) -> void {
+    if self == (null as *mut Canvas) || text == (null as *const u8) { return; }
+    unsafe {
+        let tx = (x + (*self).offset_x) as u32;
+        let ty = (y + (*self).offset_y) as u32;
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+        raster_draw_text_alpha(tx, ty, text, c_u32, scale, paint.color.a);
+    }
+}
+
+pub fn Canvas_draw_image(self: *mut Canvas, alpha_map: *const u8, img_w: u32, img_h: u32, dst: Rect, paint: Paint) -> void {
+    if self == (null as *mut Canvas) || alpha_map == (null as *const u8) { return; }
+    unsafe {
+        let ox = (dst.x + (*self).offset_x) as u32;
+        let oy = (dst.y + (*self).offset_y) as u32;
+        let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
+        for mut gy in 0..img_h {
+            for mut gx in 0..img_w {
+                let cov = *alpha_map.add((gy * img_w + gx) as usize);
+                if cov > 4 {
+                    let eff_a = ((cov as u32 * paint.color.a as u32) / 255) as u8;
+                    raster_put_pixel_alpha(ox + gx, oy + gy, c_u32, eff_a);
+                }
+            }
+        }
+    }
+}
+
+pub fn Canvas_draw_vector_icon(self: *mut Canvas, icon_id: u32, size: u32, dst: Rect, paint: Paint) -> void {
+    if self == (null as *mut Canvas) { return; }
+    unsafe {
+        let alpha_map = baken_get_app_icon_alpha(icon_id, size);
+        if alpha_map != (null as *const u8) {
+            Canvas_draw_image(self, alpha_map, size, size, dst, paint);
+        }
+    }
+}
+
+pub fn sotlas_measure_text(text: *const u8) -> u32 {
+    if text == (null as *const u8) { return 0; }
+    return raster_measure_text(text);
+}
+
+pub fn Canvas_measure_text(self: *const Canvas, text: *const u8) -> u32 {
+    if text == (null as *const u8) { return 0; }
+    return raster_measure_text(text);
+}
+
+static mut DEFAULT_CANVAS_SURFACE: Surface = Surface {
+    buffer: null as *mut u32,
+    width: 0,
+    height: 0,
+    pitch: 0,
+};
+
+static mut DEFAULT_CANVAS: Canvas = Canvas {
+    surface: null as *mut Surface,
+    clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false },
+    save_stack: [
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 }
+    ],
+    save_count: 0,
+    offset_x: 0,
+    offset_y: 0,
+    scale_milli: 1000,
+};
+
+pub fn sotlas_get_default_canvas() -> *mut Canvas {
+    unsafe {
+        if DEFAULT_CANVAS.surface == (null as *mut Surface) {
+            DEFAULT_CANVAS_SURFACE = surface_from_backbuffer();
+            Canvas_init(&mut DEFAULT_CANVAS, &mut DEFAULT_CANVAS_SURFACE);
+        }
+        return &mut DEFAULT_CANVAS;
+    }
+}

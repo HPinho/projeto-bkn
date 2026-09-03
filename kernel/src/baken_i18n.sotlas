@@ -232,12 +232,26 @@ static I18N_WIN_ABOUT: [*const u8; 11] = [
 // DICIONARIO BOTOES & LINKS DO INSTALADOR / OOBE
 // -----------------------------------------------------------------------------
 
+static I18N_WELCOME_TEXTS: [*const u8; 11] = [
+    "Bem-vindo, obrigado por escolher o Baken OS".as_ptr(),
+    "Welcome, thank you for choosing Baken OS".as_ptr(),
+    "Bienvenue, merci d'avoir choisi Baken OS".as_ptr(),
+    "Benvenuto, grazie per aver scelto Baken OS".as_ptr(),
+    "Bienvenido, gracias por elegir Baken OS".as_ptr(),
+    "Willkommen, danke dass Sie Baken OS gewählt haben".as_ptr(),
+    "Kalosorisate, efcharistoume pou epilexate to Baken OS".as_ptr(),
+    "Huan ying, gan xie nin xuan ze Baken OS".as_ptr(),
+    "Yokoso, Baken OS wo erande itadaki arigatou gozaimasu".as_ptr(),
+    "Swagat hai, Baken OS chunne ke liye dhanyavad".as_ptr(),
+    "Karibu, asante kwa kuchagua Baken OS".as_ptr()
+];
+
 static I18N_BTN_START: [*const u8; 11] = [
-    "Comecar agora".as_ptr(),
-    "Get started".as_ptr(),
+    "Começar agora".as_ptr(),
+    "Get Started".as_ptr(),
     "Commencer".as_ptr(),
     "Inizia ora".as_ptr(),
-    "Empezar ahora".as_ptr(),
+    "Comenzar ahora".as_ptr(),
     "Jetzt starten".as_ptr(),
     "Xekiniste tora".as_ptr(),
     "Kaishi tiyan".as_ptr(),
@@ -247,39 +261,39 @@ static I18N_BTN_START: [*const u8; 11] = [
 ];
 
 static I18N_BTN_NEXT: [*const u8; 11] = [
-    "Avancar >".as_ptr(),
-    "Next >".as_ptr(),
-    "Suivant >".as_ptr(),
-    "Avanti >".as_ptr(),
-    "Siguiente >".as_ptr(),
-    "Weiter >".as_ptr(),
-    "Epomeno >".as_ptr(),
-    "Xiayibu >".as_ptr(),
-    "Tsugi he >".as_ptr(),
-    "Aage >".as_ptr(),
-    "Mbele >".as_ptr()
+    "Avançar".as_ptr(),
+    "Next".as_ptr(),
+    "Suivant".as_ptr(),
+    "Avanti".as_ptr(),
+    "Siguiente".as_ptr(),
+    "Weiter".as_ptr(),
+    "Epomeno".as_ptr(),
+    "Xiayibu".as_ptr(),
+    "Tsugi he".as_ptr(),
+    "Aage".as_ptr(),
+    "Mbele".as_ptr()
 ];
 
 static I18N_BTN_BACK: [*const u8; 11] = [
-    "< Voltar".as_ptr(),
-    "< Back".as_ptr(),
-    "< Retour".as_ptr(),
-    "< Indietro".as_ptr(),
-    "< Atras".as_ptr(),
-    "< Zuruck".as_ptr(),
-    "< Piso".as_ptr(),
-    "< Fanhui".as_ptr(),
-    "< Modoru".as_ptr(),
-    "< Peeche".as_ptr(),
-    "< Nyuma".as_ptr()
+    "Voltar".as_ptr(),
+    "Back".as_ptr(),
+    "Retour".as_ptr(),
+    "Indietro".as_ptr(),
+    "Atrás".as_ptr(),
+    "Zurück".as_ptr(),
+    "Piso".as_ptr(),
+    "Fanhui".as_ptr(),
+    "Modoru".as_ptr(),
+    "Peeche".as_ptr(),
+    "Nyuma".as_ptr()
 ];
 
 static I18N_FOOTER_HELP: [*const u8; 11] = [
-    "Configuracoes | Restaurar ou Corrigir Computador".as_ptr(),
+    "Configurações | Restaurar ou Reparar Computador".as_ptr(),
     "Settings | Restore or Repair Computer".as_ptr(),
-    "Parametres | Restaurer ou Reparer l'ordinateur".as_ptr(),
+    "Paramètres | Restaurer ou Réparer l'ordinateur".as_ptr(),
     "Impostazioni | Ripristina o Ripara PC".as_ptr(),
-    "Ajustes | Restaurar o Reparar Computadora".as_ptr(),
+    "Configuración | Restaurar o Reparar Computadora".as_ptr(),
     "Einstellungen | Computer reparieren".as_ptr(),
     "Rythmiseis | Epidiorthosi Ypologisti".as_ptr(),
     "Shezhi | Huifu huo Xiufu Jisuanji".as_ptr(),
@@ -336,4 +350,9 @@ static I18N_FOOTER_HELP: [*const u8; 11] = [
 @system pub fn i18n_footer_help_for_lang(idx: usize) -> *const u8 {
     let l = if (idx < 11) { idx } else { 0 };
     return I18N_FOOTER_HELP[l];
+}
+
+@system pub fn i18n_welcome_text_for_lang(idx: usize) -> *const u8 {
+    let l = if (idx < 11) { idx } else { 0 };
+    return I18N_WELCOME_TEXTS[l];
 }

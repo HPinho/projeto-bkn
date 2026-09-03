@@ -829,6 +829,10 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "baken_get_cjk_alpha": Function("baken_get_cjk_alpha", [("idx", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
     "baken_get_logo_pixels": Function("baken_get_logo_pixels", [], Type("u32", pointer=True), [], public=True, attributes=["@system"]),
     "baken_get_logo_size": Function("baken_get_logo_size", [], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_srgb_to_linear": Function("baken_srgb_to_linear", [("c", Type("u8"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_linear_to_srgb": Function("baken_linear_to_srgb", [("lin", Type("u32"))], Type("u8"), [], public=True, attributes=["@system"]),
+    "baken_get_app_icon_alpha": Function("baken_get_app_icon_alpha", [("app_id", Type("u32")), ("size_px", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
+    "baken_get_motion_icon_alpha": Function("baken_get_motion_icon_alpha", [("motion_id", Type("u32")), ("size_px", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
 }
 
 
@@ -1206,6 +1210,9 @@ static inline void baken_serial_print(const uint8_t *s) {
 #include "font_google_sans_flex_atlas.h"
 #include "baken_cjk_atlas.h"
 #include "baken_logo_atlas.h"
+#include "baken_color_lut.h"
+#include "baken_app_icons_atlas.h"
+#include "baken_motion_icons_atlas.h"
 
 static inline const uint8_t *baken_get_font_advances(uint32_t idx) {
     if (idx < 9) return sotlas_font_atlases[idx].advances;
@@ -1247,6 +1254,30 @@ static inline const uint32_t *baken_get_logo_pixels(void) {
 static inline uint32_t baken_get_logo_size(void) {
     return g_baken_logo_atlases[0].size;
 }
+
+static inline uint32_t baken_srgb_to_linear(uint8_t c) {
+    return (uint32_t)bkn_srgb_to_linear_16[c];
+}
+static inline uint8_t baken_linear_to_srgb(uint32_t lin) {
+    uint32_t idx = lin >> 4;
+    if (idx > 4096) idx = 4096;
+    return bkn_linear_16_to_srgb[idx];
+}
+
+static inline const uint8_t *baken_get_app_icon_alpha(uint32_t app_id, uint32_t size_px) {
+    if (app_id >= 16) return 0;
+    if (size_px == 32) return baken_app_icons_32[app_id];
+    if (size_px == 48) return baken_app_icons_48[app_id];
+    if (size_px == 64) return baken_app_icons_64[app_id];
+    if (size_px == 96) return baken_app_icons_96[app_id];
+    return baken_app_icons_32[app_id];
+}
+
+static inline const uint8_t *baken_get_motion_icon_alpha(uint32_t motion_id, uint32_t size_px) {
+    if (motion_id >= 5) return 0;
+    if (size_px == 24) return baken_motion_icons_24[motion_id];
+    return baken_motion_icons_32[motion_id];
+}
 #else
 static inline const uint8_t *baken_get_font_advances(uint32_t idx) { (void)idx; return 0; }
 static inline const uint8_t *baken_get_font_alpha(uint32_t idx) { (void)idx; return 0; }
@@ -1258,6 +1289,10 @@ static inline uint32_t baken_get_cjk_height(uint32_t idx) { (void)idx; return 0;
 static inline const uint8_t *baken_get_cjk_alpha(uint32_t idx) { (void)idx; return 0; }
 static inline const uint32_t *baken_get_logo_pixels(void) { return 0; }
 static inline uint32_t baken_get_logo_size(void) { return 0; }
+static inline uint32_t baken_srgb_to_linear(uint8_t c) { return (uint32_t)c * 257; }
+static inline uint8_t baken_linear_to_srgb(uint32_t lin) { return (uint8_t)(lin / 257); }
+static inline const uint8_t *baken_get_app_icon_alpha(uint32_t app_id, uint32_t size_px) { (void)app_id; (void)size_px; return 0; }
+static inline const uint8_t *baken_get_motion_icon_alpha(uint32_t motion_id, uint32_t size_px) { (void)motion_id; (void)size_px; return 0; }
 #endif
 #else
 static inline const uint8_t *baken_get_font_advances(uint32_t idx) { (void)idx; return 0; }
@@ -1270,6 +1305,10 @@ static inline uint32_t baken_get_cjk_height(uint32_t idx) { (void)idx; return 0;
 static inline const uint8_t *baken_get_cjk_alpha(uint32_t idx) { (void)idx; return 0; }
 static inline const uint32_t *baken_get_logo_pixels(void) { return 0; }
 static inline uint32_t baken_get_logo_size(void) { return 0; }
+static inline uint32_t baken_srgb_to_linear(uint8_t c) { return (uint32_t)c * 257; }
+static inline uint8_t baken_linear_to_srgb(uint32_t lin) { return (uint8_t)(lin / 257); }
+static inline const uint8_t *baken_get_app_icon_alpha(uint32_t app_id, uint32_t size_px) { (void)app_id; (void)size_px; return 0; }
+static inline const uint8_t *baken_get_motion_icon_alpha(uint32_t motion_id, uint32_t size_px) { (void)motion_id; (void)size_px; return 0; }
 #endif
 """
 

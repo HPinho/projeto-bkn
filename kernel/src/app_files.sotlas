@@ -97,46 +97,46 @@ pub fn app_files_render(x: u32, y: u32, w: u32, h: u32) -> void {
         }
 
         // Fundo da Janela de Arquivos (Glass Dark Acrylic)
-        gfx_fill_rect_alpha(x, y, w, h, 0x000F172A, 240);
+        raster_fill_rect_alpha(x, y, w, h, 0x000F172A, 240);
 
         // 1. Barra de Ferramentas Superior
         let bar_h: u32 = 40;
-        gfx_fill_rect_alpha(x, y, w, bar_h, 0x001E293B, 200);
-        gfx_draw_hline(x, y + bar_h, w, 0x00334155, 180);
+        raster_fill_rect_alpha(x, y, w, bar_h, 0x001E293B, 200);
+        raster_draw_hline(x, y + bar_h, w, 0x00334155, 180);
 
         // Breadcrumb Path Box
         let box_x = x + 12;
         let box_y = y + 8;
         let box_w = w - 160;
         let box_h: u32 = 24;
-        gfx_draw_glass_rect(box_x, box_y, box_w, box_h, 0x000F172A, 200, 0x00475569, 6);
-        gfx_draw_text_alpha(box_x + 8, box_y + 5, "/home/documentos", 0x0038BDF8, 1, 255);
+        raster_draw_glass_rect(box_x, box_y, box_w, box_h, 0x000F172A, 200, 0x00475569, 6);
+        raster_draw_text_alpha(box_x + 8, box_y + 5, "/home/documentos", 0x0038BDF8, 1, 255);
 
         // Botões de Ação na barra superior
         let btn_x = x + w - 135;
-        gfx_draw_glass_rect(btn_x, box_y, 60, box_h, 0x00334155, 180, 0x0064748B, 6);
-        gfx_draw_text_alpha(btn_x + 8, box_y + 5, "+ Pasta", 0x00E2E8F0, 1, 230);
+        raster_draw_glass_rect(btn_x, box_y, 60, box_h, 0x00334155, 180, 0x0064748B, 6);
+        raster_draw_text_alpha(btn_x + 8, box_y + 5, "+ Pasta", 0x00E2E8F0, 1, 230);
 
         let ref_x = btn_x + 68;
-        gfx_draw_glass_rect(ref_x, box_y, 55, box_h, 0x00334155, 180, 0x0064748B, 6);
-        gfx_draw_text_alpha(ref_x + 8, box_y + 5, "Recarregar", 0x0094A3B8, 1, 220);
+        raster_draw_glass_rect(ref_x, box_y, 55, box_h, 0x00334155, 180, 0x0064748B, 6);
+        raster_draw_text_alpha(ref_x + 8, box_y + 5, "Recarregar", 0x0094A3B8, 1, 220);
 
         // 2. Barra Lateral de Acesso Rápido (Sidebar)
         let sidebar_w: u32 = 130;
         let body_y = y + bar_h + 1;
         let body_h = h - bar_h - 32; // deixa 32px para o rodapé
-        gfx_fill_rect_alpha(x, body_y, sidebar_w, body_h, 0x000F172A, 220);
-        gfx_draw_hline(x + sidebar_w, body_y, 1, 0x00334155, 150);
+        raster_fill_rect_alpha(x, body_y, sidebar_w, body_h, 0x000F172A, 220);
+        raster_draw_hline(x + sidebar_w, body_y, 1, 0x00334155, 150);
 
         let side_items = ["Inicio", "Documentos", "Projetos", "Sistema", "Midias"];
         for mut si in 0..5 {
             let sy = body_y + 12 + (si * 28) as u32;
             let is_sel = si == 1; // Documentos selecionado
             if is_sel {
-                gfx_draw_glass_rect(x + 6, sy - 2, sidebar_w - 12, 22, 0x0038BDF8, 80, 0x0038BDF8, 6);
-                gfx_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0038BDF8, 1, 255);
+                raster_draw_glass_rect(x + 6, sy - 2, sidebar_w - 12, 22, 0x0038BDF8, 80, 0x0038BDF8, 6);
+                raster_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0038BDF8, 1, 255);
             } else {
-                gfx_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0094A3B8, 1, 200);
+                raster_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0094A3B8, 1, 200);
             }
         }
 
@@ -157,35 +157,35 @@ pub fn app_files_render(x: u32, y: u32, w: u32, h: u32) -> void {
             let bg_c = if is_active { 0x001E293B } else { 0x00131E32 };
             let border_c = if is_active { 0x0038BDF8 } else { 0x00334155 };
 
-            gfx_draw_glass_rect(cx, cy, card_w, card_h, bg_c, 210, border_c, 8);
+            raster_draw_glass_rect(cx, cy, card_w, card_h, bg_c, 210, border_c, 8);
 
             // Ícone do Arquivo/Pasta
             let is_folder = ITEMS[i].is_dir;
             let icon_col = if is_folder { 0x00F59E0B } else { 0x0038BDF8 };
-            gfx_draw_circle_alpha(cx + 18, cy + 28, 10, icon_col, 200);
+            raster_draw_circle_alpha(cx + 18, cy + 28, 10, icon_col, 200);
 
             // Nome e Tamanho do Arquivo
             let name_ptr = ITEMS[i].name.as_ptr();
             let size_ptr = ITEMS[i].size_str.as_ptr();
-            gfx_draw_text_alpha(cx + 36, cy + 14, name_ptr, 0x00F8FAFC, 1, 240);
-            gfx_draw_text_alpha(cx + 36, cy + 32, size_ptr, 0x0064748B, 1, 200);
+            raster_draw_text_alpha(cx + 36, cy + 14, name_ptr, 0x00F8FAFC, 1, 240);
+            raster_draw_text_alpha(cx + 36, cy + 32, size_ptr, 0x0064748B, 1, 200);
         }
 
         // 4. Rodapé de Status do Armazenamento
         let foot_y = y + h - 28;
-        gfx_fill_rect_alpha(x, foot_y, w, 28, 0x000B1120, 240);
-        gfx_draw_hline(x, foot_y, w, 0x001E293B, 150);
+        raster_fill_rect_alpha(x, foot_y, w, 28, 0x000B1120, 240);
+        raster_draw_hline(x, foot_y, w, 0x001E293B, 150);
 
-        gfx_draw_text_alpha(x + 12, foot_y + 8, "BakenFS: 14.2 GB livres de 32.0 GB (44% usado)", 0x0094A3B8, 1, 220);
+        raster_draw_text_alpha(x + 12, foot_y + 8, "BakenFS: 14.2 GB livres de 32.0 GB (44% usado)", 0x0094A3B8, 1, 220);
 
         // Barra de Progresso do Disco
         let bar_bg_x = x + w - 160;
         let bar_bg_y = foot_y + 10;
         let bar_len: u32 = 140;
         let bar_thick: u32 = 8;
-        gfx_draw_glass_rect(bar_bg_x, bar_bg_y, bar_len, bar_thick, 0x001E293B, 200, 0x00334155, 4);
+        raster_draw_glass_rect(bar_bg_x, bar_bg_y, bar_len, bar_thick, 0x001E293B, 200, 0x00334155, 4);
         let used_len = (bar_len * 44) / 100;
-        gfx_fill_rect_alpha(bar_bg_x, bar_bg_y, used_len, bar_thick, 0x0038BDF8, 255);
+        raster_fill_rect_alpha(bar_bg_x, bar_bg_y, used_len, bar_thick, 0x0038BDF8, 255);
     }
 }
 

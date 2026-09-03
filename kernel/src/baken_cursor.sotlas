@@ -18,7 +18,7 @@ pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
     for mut sy in 3..22 {
         let max_sx = if (sy < 14) { sy } else { 22 - sy };
         for mut sx in 2..max_sx {
-            gfx_put_pixel_alpha(x + sx + 2, y + sy + 2, shadow_col, 55);
+            raster_put_pixel_alpha(x + sx + 2, y + sy + 2, shadow_col, 55);
         }
     }
 
@@ -49,10 +49,10 @@ pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
             // Borda externa escura com contraste suave
             let is_border = (c == start_col) || (c == start_col + span - 1) || (row == 0) || (row == 19);
             if (is_border) {
-                gfx_put_pixel_alpha(px, py, 0x000F172A, 240);
+                raster_put_pixel_alpha(px, py, 0x000F172A, 240);
             } else {
                 // Corpo da seta: Branco Pérola acetinado
-                gfx_put_pixel_alpha(px, py, 0x00FFFFFF, 255);
+                raster_put_pixel_alpha(px, py, 0x00FFFFFF, 255);
             }
         }
     }
@@ -63,10 +63,10 @@ pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
     let pulse_dist = if (pulse_phase < 30) { pulse_phase } else { 60 - pulse_phase };
     let aura_alpha: u8 = 70 + (((pulse_dist * 120) / 30) as u8);
 
-    gfx_put_pixel_alpha(x + 1, y + 1, 0x0000E5FF, 255);
-    gfx_put_pixel_alpha(x + 2, y + 2, 0x0038BDF8, 220);
-    gfx_put_pixel_alpha(x + 2, y + 3, 0x0000E5FF, aura_alpha);
-    gfx_put_pixel_alpha(x + 3, y + 2, 0x0038BDF8, aura_alpha);
+    raster_put_pixel_alpha(x + 1, y + 1, 0x0000E5FF, 255);
+    raster_put_pixel_alpha(x + 2, y + 2, 0x0038BDF8, 220);
+    raster_put_pixel_alpha(x + 2, y + 3, 0x0000E5FF, aura_alpha);
+    raster_put_pixel_alpha(x + 3, y + 2, 0x0038BDF8, aura_alpha);
 }
 
 // Renderiza uma Seta de Acao Animada Estilizada para Botoes (Micro-Interacao de Hover/Fluidez)
@@ -83,18 +83,18 @@ pub fn baken_draw_animated_action_arrow(x: u32, y: u32, tick: u32, color: u32, i
     // Desenha uma seta chanfrada vetorial '->' moderna e nitida
     // 1. Linha horizontal da haste da seta (7px)
     for mut i in 0..7 {
-        gfx_put_pixel_alpha(ox + i, oy + 4, color, 255);
-        gfx_put_pixel_alpha(ox + i, oy + 5, color, 255);
+        raster_put_pixel_alpha(ox + i, oy + 4, color, 255);
+        raster_put_pixel_alpha(ox + i, oy + 5, color, 255);
     }
     // 2. Ponta em chevron angular de 45 graus
-    gfx_put_pixel_alpha(ox + 5, oy + 2, color, 255);
-    gfx_put_pixel_alpha(ox + 6, oy + 3, color, 255);
-    gfx_put_pixel_alpha(ox + 7, oy + 4, color, 255);
-    gfx_put_pixel_alpha(ox + 7, oy + 5, color, 255);
-    gfx_put_pixel_alpha(ox + 6, oy + 6, color, 255);
-    gfx_put_pixel_alpha(ox + 5, oy + 7, color, 255);
+    raster_put_pixel_alpha(ox + 5, oy + 2, color, 255);
+    raster_put_pixel_alpha(ox + 6, oy + 3, color, 255);
+    raster_put_pixel_alpha(ox + 7, oy + 4, color, 255);
+    raster_put_pixel_alpha(ox + 7, oy + 5, color, 255);
+    raster_put_pixel_alpha(ox + 6, oy + 6, color, 255);
+    raster_put_pixel_alpha(ox + 5, oy + 7, color, 255);
 
     // Destaque brilhante na ponta
-    gfx_put_pixel_alpha(ox + 8, oy + 4, 0x00FFFFFF, 220);
-    gfx_put_pixel_alpha(ox + 8, oy + 5, 0x00FFFFFF, 220);
+    raster_put_pixel_alpha(ox + 8, oy + 4, 0x00FFFFFF, 220);
+    raster_put_pixel_alpha(ox + 8, oy + 5, 0x00FFFFFF, 220);
 }

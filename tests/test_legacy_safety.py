@@ -29,6 +29,8 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/app_about.sotlas",
         "kernel/src/baken_installer.sotlas",
         "kernel/src/baken_oobe_screen.sotlas",
+        "kernel/src/sotlas_graphics.sotlas",
+        "kernel/src/sotlas_ui.sotlas",
     }
 
     def test_sotlas_tree_contains_only_the_canonical_desktop_route(self):
@@ -64,6 +66,17 @@ class LegacySafetyTests(unittest.TestCase):
         self.assertIn('#include "baken_boot_info.h"', bootloader)
         self.assertIn("return EFI_UNSUPPORTED;", bootloader)
         self.assertIn("return EFI_ABORTED;", bootloader)
+
+    def test_kernel_has_zero_gfx_occurrences(self):
+        kernel_src = ROOT / "kernel" / "src"
+        files = list(kernel_src.glob("*.sotlas")) + list(kernel_src.glob("*.c"))
+        offenders = {}
+        for f in files:
+            content = f.read_text(encoding="utf-8", errors="ignore")
+            count = content.count("gfx_")
+            if count > 0:
+                offenders[f.name] = count
+        self.assertEqual(offenders, {}, f"Ainda existem chamadas gfx_ no kernel: {offenders}")
 
 
 if __name__ == "__main__":

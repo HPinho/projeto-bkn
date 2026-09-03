@@ -1,18 +1,24 @@
-// Baken OS - Motor Gráfico de Pixels de Alta Definição em Sotlas (@system)
+// Baken OS - Dispositivo de Display e Framebuffer Nativo em Sotlas (@system)
+// Gerenciamento do painel físico UEFI GOP e alocação estática do Backbuffer.
 // Renderização Linear 32-bit ARGB8888.
-// A rota gráfica inicial usa o framebuffer GOP diretamente. Double buffering
-// só pode ser ligado após o PMM ser inicializado com um mapa de memória UEFI
-// válido; alocar páginas antes disso corrompe a inicialização.
 
 module kernel::graphics_engine;
 
-const GFX_MAX_WIDTH: u32 = 1920;
-const GFX_MAX_HEIGHT: u32 = 1200;
-const GFX_BUFFER_PIXELS: usize = 2304000;
+// O framebuffer de software cobre o painel 2880x1800 do equipamento de
+// referência e modos GOP até 3840x2400 (4K UHD). O pitch pode ser maior que a largura.
+const DISPLAY_MAX_WIDTH: u32 = 3840;
+const DISPLAY_MAX_HEIGHT: u32 = 2400;
+const DISPLAY_MAX_PITCH: u32 = 4096;
+const DISPLAY_BUFFER_PIXELS: usize = 9830400;
 
-static mut BACKBUFFER_STORAGE: [u32; GFX_BUFFER_PIXELS] = [0; GFX_BUFFER_PIXELS];
-static mut TRANSITION_SNAPSHOT: [u32; GFX_BUFFER_PIXELS] = [0; GFX_BUFFER_PIXELS];
+static mut BACKBUFFER_STORAGE: [u32; DISPLAY_BUFFER_PIXELS] = [0; DISPLAY_BUFFER_PIXELS];
+static mut WALLPAPER_STORAGE: [u32; DISPLAY_BUFFER_PIXELS] = [0; DISPLAY_BUFFER_PIXELS];
+static mut TRANSITION_SNAPSHOT: [u32; DISPLAY_BUFFER_PIXELS] = [0; DISPLAY_BUFFER_PIXELS];
 
+static mut DISPLAY_REFRESH_HZ: u32 = 60;
+static mut DISPLAY_WIDTH_MM: u32 = 0;
+static mut DISPLAY_HEIGHT_MM: u32 = 0;
+static mut UI_SCALE_MILLI: u32 = 1000;
 
 pub struct FramebufferConfig {
     pub base: *mut u32;
@@ -32,50 +38,60 @@ static mut FB: FramebufferConfig = FramebufferConfig {
     use_double_buffering: false
 };
 
+// -----------------------------------------------------------------------------
+// API CANÔNICA NATIVA DO DISPLAY (SOTLAS DISPLAY)
+// -----------------------------------------------------------------------------
+
 @system
-pub fn gfx_init(base: *mut u32, width: u32, height: u32, pitch: u32) -> void {
+pub fn display_init(base: *mut u32, width: u32, height: u32, pitch: u32) -> void {
     unsafe {
         FB.base = base;
         FB.width = width;
         FB.height = height;
         FB.pitch = pitch;
 
-        FB.use_double_buffering = width <= GFX_MAX_WIDTH && height <= GFX_MAX_HEIGHT && pitch <= GFX_MAX_WIDTH;
+        FB.use_double_buffering = width <= DISPLAY_MAX_WIDTH && height <= DISPLAY_MAX_HEIGHT && pitch <= DISPLAY_MAX_PITCH &&
+                                  (pitch as usize) * (height as usize) <= DISPLAY_BUFFER_PIXELS;
         FB.backbuffer = if FB.use_double_buffering { BACKBUFFER_STORAGE.as_ptr() } else { base };
+
+        // Ajuste adaptativo de escala da interface de acordo com a resolução nativa do painel
+        if (width >= 3200 || height >= 2000) {
+            UI_SCALE_MILLI = 2000; // Escala 200% para 4K UHD
+        } else if (width >= 2560 || height >= 1440) {
+            UI_SCALE_MILLI = 1500; // Escala 150% para 2K / 2.8K (ex: 2880x1800)
+        } else {
+            UI_SCALE_MILLI = 1000; // Escala 100% para 1080p Full HD
+        }
     }
 }
 
 @system
-pub fn gfx_get_backbuffer() -> *mut u32 {
-    unsafe {
-        return FB.backbuffer;
-    }
+pub fn display_get_framebuffer() -> *mut u32 {
+    unsafe { return FB.base; }
 }
 
 @system
-pub fn gfx_get_pitch() -> u32 {
-    unsafe {
-        return FB.pitch;
-    }
+pub fn display_get_backbuffer() -> *mut u32 {
+    unsafe { return FB.backbuffer; }
 }
 
 @system
-pub fn gfx_get_width() -> u32 {
-    unsafe {
-        return FB.width;
-    }
+pub fn display_get_pitch() -> u32 {
+    unsafe { return FB.pitch; }
 }
 
 @system
-pub fn gfx_get_height() -> u32 {
-    unsafe {
-        return FB.height;
-    }
+pub fn display_get_width() -> u32 {
+    unsafe { return FB.width; }
 }
 
-// Mantém o contrato da API. Na fase GOP direta não há buffer secundário.
 @system
-pub fn gfx_swap_buffers() -> void {
+pub fn display_get_height() -> u32 {
+    unsafe { return FB.height; }
+}
+
+@system
+pub fn display_swap_buffers() -> void {
     unsafe {
         if (!FB.use_double_buffering || FB.backbuffer == null as *mut u32 || FB.base == null as *mut u32) { return; }
         let total_bytes = (FB.pitch * FB.height * 4) as usize;
@@ -84,7 +100,39 @@ pub fn gfx_swap_buffers() -> void {
 }
 
 @system
-pub fn gfx_transition_capture() -> void {
+pub fn display_set_metrics(refresh_hz: u32, width_mm: u32, height_mm: u32, ui_scale_milli: u32) -> void {
+    unsafe {
+        DISPLAY_REFRESH_HZ = if (refresh_hz < 30 || refresh_hz > 240) { 60 } else { refresh_hz };
+        DISPLAY_WIDTH_MM = width_mm;
+        DISPLAY_HEIGHT_MM = height_mm;
+        UI_SCALE_MILLI = if (ui_scale_milli < 750 || ui_scale_milli > 3000) { 1000 } else { ui_scale_milli };
+    }
+}
+
+@system
+pub fn display_get_refresh_hz() -> u32 { unsafe { return DISPLAY_REFRESH_HZ; } }
+
+@system
+pub fn display_get_scale_milli() -> u32 { unsafe { return UI_SCALE_MILLI; } }
+
+@system
+pub fn display_get_width_mm() -> u32 { unsafe { return DISPLAY_WIDTH_MM; } }
+
+@system
+pub fn display_get_height_mm() -> u32 { unsafe { return DISPLAY_HEIGHT_MM; } }
+
+@system
+pub fn display_scale_px(logical_px: u32) -> u32 {
+    unsafe { return (logical_px * UI_SCALE_MILLI + 500) / 1000; }
+}
+
+@system
+pub fn display_get_wallpaper_storage() -> *mut u32 {
+    unsafe { return WALLPAPER_STORAGE.as_ptr(); }
+}
+
+@system
+pub fn display_transition_capture() -> void {
     unsafe {
         if !FB.use_double_buffering || FB.backbuffer == (null as *mut u32) { return; }
         let total = (FB.pitch * FB.height) as usize;
@@ -93,7 +141,7 @@ pub fn gfx_transition_capture() -> void {
 }
 
 @system
-pub fn gfx_transition_composite(old_alpha: u8, slide_x: i32) -> void {
+pub fn display_transition_composite(old_alpha: u8, slide_x: i32) -> void {
     unsafe {
         if old_alpha == 0 || !FB.use_double_buffering || FB.backbuffer == (null as *mut u32) { return; }
         let inv = 255 - old_alpha as u32;
@@ -113,7 +161,7 @@ pub fn gfx_transition_composite(old_alpha: u8, slide_x: i32) -> void {
 }
 
 @system
-pub fn gfx_put_pixel(x: u32, y: u32, color: u32) -> void {
+pub fn display_put_pixel(x: u32, y: u32, color: u32) -> void {
     unsafe {
         if (x < FB.width && y < FB.height) {
             let offset = (y * FB.pitch + x) as usize;
@@ -123,7 +171,7 @@ pub fn gfx_put_pixel(x: u32, y: u32, color: u32) -> void {
 }
 
 @system
-pub fn gfx_get_pixel(x: u32, y: u32) -> u32 {
+pub fn display_get_pixel(x: u32, y: u32) -> u32 {
     unsafe {
         if (x < FB.width && y < FB.height) {
             let offset = (y * FB.pitch + x) as usize;

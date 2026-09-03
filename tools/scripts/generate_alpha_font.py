@@ -14,12 +14,19 @@ OUTPUT = ROOT / "kernel" / "include" / "font_google_sans_flex_atlas.h"
 SIZES = ((12, 11, 15, -2), (14, 13, 18, -3), (16, 15, 20, -3),
          (20, 18, 25, -4), (24, 22, 30, -5), (32, 29, 40, -7),
          (40, 37, 50, -9), (48, 44, 60, -10), (64, 59, 80, -14))
-PT_BR = {129:'á',128:'à',130:'â',131:'ã',137:'é',138:'ê',141:'í',147:'ó',148:'ô',149:'õ',154:'ú',156:'ü',135:'ç',193:'Á',192:'À',194:'Â',195:'Ã',201:'É',202:'Ê',205:'Í',211:'Ó',212:'Ô',213:'Õ',218:'Ú',220:'Ü',199:'Ç',176:'°',183:'·',133:'…',169:'©'}
+LATIN1_CHARS = {i: chr(i) for i in range(160, 256)}
+SPECIAL_SYMBOLS = {
+    133: '…',
+    140: '→',
+    141: '•',
+    142: '|',
+    143: '©'
+}
 
 def render(size, width, height, baseline):
     font = ImageFont.truetype(FONT, size)
     advances, pixels = [0] * 256, [0] * (256 * width * height)
-    characters = {i: chr(i) for i in range(32, 127)} | PT_BR
+    characters = {i: chr(i) for i in range(32, 127)} | LATIN1_CHARS | SPECIAL_SYMBOLS
     for code, char in characters.items():
         image = Image.new('L', (width, height), 0)
         ImageDraw.Draw(image).text((0, baseline), char, fill=255, font=font)

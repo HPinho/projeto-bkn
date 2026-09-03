@@ -32,8 +32,8 @@ pub struct BakenDockLayout {
 pub fn baken_dock_layout(item_count: u32, out: *mut BakenDockLayout) -> void {
     if out == (null as *mut BakenDockLayout) { return; }
     unsafe {
-        let sw = gfx_get_width();
-        let sh = gfx_get_height();
+        let sw = display_get_width();
+        let sh = display_get_height();
         (*out).pitch = 64;
         (*out).height = 72;
         (*out).icon = 48;
@@ -123,12 +123,12 @@ pub fn dock_draw(dock: *const DesktopDock) -> void {
         let mut geo = BakenDockLayout { x: 0, y: 0, width: 0, height: 0, pitch: 0, icon: 0, pad: 0 };
         baken_dock_layout((*dock).item_count, &mut geo);
         // Sombra física profunda sob o dock
-        gfx_draw_physical_shadow(geo.x, geo.y, geo.width, geo.height, ELEVATION_DOCK);
+        raster_draw_physical_shadow(geo.x, geo.y, geo.width, geo.height, ELEVATION_DOCK);
         // Superfície de vidro escuro acrílico com borda translúcida
-        gfx_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x000B132B, 225, 0x00334155, 20);
+        raster_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x000B132B, 225, 0x00334155, 20);
         // Linha de luz especular superior
-        gfx_fill_rect_alpha(geo.x + 14, geo.y + 1, geo.width - 28, 1, 0x00FFFFFF, 80);
-        gfx_fill_rect_alpha(geo.x + 14, geo.y + 2, geo.width - 28, 1, 0x00FFFFFF, 30);
+        raster_fill_rect_alpha(geo.x + 14, geo.y + 1, geo.width - 28, 1, 0x00FFFFFF, 80);
+        raster_fill_rect_alpha(geo.x + 14, geo.y + 2, geo.width - 28, 1, 0x00FFFFFF, 30);
         for mut i in 0..(*dock).item_count {
             let scale = (*dock).item_springs[i as usize].current_val;
             let bounce = (*dock).bounce_springs[i as usize].current_val;
@@ -137,9 +137,9 @@ pub fn dock_draw(dock: *const DesktopDock) -> void {
             let ix = base_x - (icon - geo.icon) / 2;
             let iy = ((geo.y + (geo.height - geo.icon) / 2 - (icon - geo.icon) / 2) as f32 + bounce) as u32;
             if scale > 1.02 {
-                gfx_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 5, 0x0000E5FF, 50);
+                raster_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 5, 0x0000E5FF, 50);
             }
-            gfx_draw_app_icon_hd(ix, iy, icon, i);
+            raster_draw_app_icon_hd(ix, iy, icon, i);
         }
     }
 }

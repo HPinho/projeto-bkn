@@ -26,22 +26,22 @@ static mut SETTINGS: SettingsState = SettingsState {
 pub fn app_settings_render(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
         // Fundo do Painel de Ajustes
-        gfx_fill_rect_alpha(x, y, w, h, 0x000F172A, 240);
+        raster_fill_rect_alpha(x, y, w, h, 0x000F172A, 240);
 
         // 1. Barra Lateral de Categorias
         let side_w: u32 = 140;
-        gfx_fill_rect_alpha(x, y, side_w, h, 0x000B1120, 240);
-        gfx_draw_hline(x + side_w, y, 1, 0x001E293B, 200);
+        raster_fill_rect_alpha(x, y, side_w, h, 0x000B1120, 240);
+        raster_draw_hline(x + side_w, y, 1, 0x001E293B, 200);
 
         let cat_names = ["Tela & Tema", "Desempenho", "Armazenamento", "Sobre Hardware"];
         for mut i in 0..4 {
             let cy = y + 18 + (i * 36) as u32;
             let is_sel = i == SETTINGS.active_tab;
             if is_sel {
-                gfx_draw_glass_rect(x + 8, cy - 4, side_w - 16, 28, 0x0038BDF8, 80, 0x0038BDF8, 8);
-                gfx_draw_text_alpha(x + 18, cy + 2, cat_names[i], 0x0038BDF8, 1, 255);
+                raster_draw_glass_rect(x + 8, cy - 4, side_w - 16, 28, 0x0038BDF8, 80, 0x0038BDF8, 8);
+                raster_draw_text_alpha(x + 18, cy + 2, cat_names[i], 0x0038BDF8, 1, 255);
             } else {
-                gfx_draw_text_alpha(x + 18, cy + 2, cat_names[i], 0x0094A3B8, 1, 200);
+                raster_draw_text_alpha(x + 18, cy + 2, cat_names[i], 0x0094A3B8, 1, 200);
             }
         }
 
@@ -51,8 +51,8 @@ pub fn app_settings_render(x: u32, y: u32, w: u32, h: u32) -> void {
 
         if SETTINGS.active_tab == 0 {
             // --- ABA 0: TELA & TEMAS ---
-            gfx_draw_text_alpha(content_x, content_y, "Personalizacao do Desktop & Display", 0x00F8FAFC, 1, 255);
-            gfx_draw_text_alpha(content_x, content_y + 20, "Escolha o papel de parede e o estilo de transparencia.", 0x0064748B, 1, 200);
+            raster_draw_text_alpha(content_x, content_y, "Personalizacao do Desktop & Display", 0x00F8FAFC, 1, 255);
+            raster_draw_text_alpha(content_x, content_y + 20, "Escolha o papel de parede e o estilo de transparencia.", 0x0064748B, 1, 200);
 
             // Seletor de Papéis de Parede (3 cards miniatura)
             let wp_y = content_y + 48;
@@ -67,50 +67,50 @@ pub fn app_settings_render(x: u32, y: u32, w: u32, h: u32) -> void {
                 let border_col = if is_cur_wp { 0x0038BDF8 } else { 0x00334155 };
 
                 // Card preview
-                gfx_draw_glass_rect(wx, wp_y, wp_w, wp_h, wp_colors[wpi], 220, border_col, 8);
-                gfx_draw_text_alpha(wx + 8, wp_y + wp_h + 6, wp_names[wpi], 0x00CBD5E1, 1, 220);
+                raster_draw_glass_rect(wx, wp_y, wp_w, wp_h, wp_colors[wpi], 220, border_col, 8);
+                raster_draw_text_alpha(wx + 8, wp_y + wp_h + 6, wp_names[wpi], 0x00CBD5E1, 1, 220);
             }
 
             // Opção de Escala de Interface
             let opt_y = wp_y + wp_h + 36;
-            gfx_draw_text_alpha(content_x, opt_y, "Escala da Interface:", 0x00E2E8F0, 1, 240);
-            gfx_draw_glass_rect(content_x + 160, opt_y - 4, 100, 24, 0x001E293B, 200, 0x0038BDF8, 6);
-            gfx_draw_text_alpha(content_x + 176, opt_y, "100% (Padrao)", 0x0038BDF8, 1, 255);
+            raster_draw_text_alpha(content_x, opt_y, "Escala da Interface:", 0x00E2E8F0, 1, 240);
+            raster_draw_glass_rect(content_x + 160, opt_y - 4, 100, 24, 0x001E293B, 200, 0x0038BDF8, 6);
+            raster_draw_text_alpha(content_x + 176, opt_y, "100% (Padrao)", 0x0038BDF8, 1, 255);
 
         } else if SETTINGS.active_tab == 1 {
             // --- ABA 1: DESEMPENHO & RAM ---
-            gfx_draw_text_alpha(content_x, content_y, "Monitor de Recursos do Sistema", 0x00F8FAFC, 1, 255);
-            gfx_draw_text_alpha(content_x, content_y + 20, "Alocacao de memoria fisica e uso de hardware.", 0x0064748B, 1, 200);
+            raster_draw_text_alpha(content_x, content_y, "Monitor de Recursos do Sistema", 0x00F8FAFC, 1, 255);
+            raster_draw_text_alpha(content_x, content_y + 20, "Alocacao de memoria fisica e uso de hardware.", 0x0064748B, 1, 200);
 
             // Card de Memória RAM
             let card_y = content_y + 48;
             let card_w: u32 = w - side_w - 32;
-            gfx_draw_glass_rect(content_x, card_y, card_w, 80, 0x001E293B, 220, 0x00334155, 10);
+            raster_draw_glass_rect(content_x, card_y, card_w, 80, 0x001E293B, 220, 0x00334155, 10);
 
-            gfx_draw_text_alpha(content_x + 16, card_y + 14, "Memoria RAM Fisica: 840 MB / 4096 MB (20.5% em uso)", 0x00E2E8F0, 1, 240);
-            gfx_draw_text_alpha(content_x + 16, card_y + 32, "Kernel Native Core: 48 MB | GPU Framebuffer: 32 MB", 0x0094A3B8, 1, 200);
+            raster_draw_text_alpha(content_x + 16, card_y + 14, "Memoria RAM Fisica: 840 MB / 4096 MB (20.5% em uso)", 0x00E2E8F0, 1, 240);
+            raster_draw_text_alpha(content_x + 16, card_y + 32, "Kernel Native Core: 48 MB | GPU Framebuffer: 32 MB", 0x0094A3B8, 1, 200);
 
             // Barra de Progresso RAM
             let bar_y = card_y + 54;
             let bar_w = card_w - 32;
-            gfx_draw_glass_rect(content_x + 16, bar_y, bar_w, 12, 0x000F172A, 220, 0x00475569, 6);
+            raster_draw_glass_rect(content_x + 16, bar_y, bar_w, 12, 0x000F172A, 220, 0x00475569, 6);
             let used_ram_w = (bar_w * 205) / 1000;
-            gfx_fill_rect_alpha(content_x + 16, bar_y, used_ram_w, 12, 0x0010B981, 255);
+            raster_fill_rect_alpha(content_x + 16, bar_y, used_ram_w, 12, 0x0010B981, 255);
 
         } else {
             // --- ABA 2/3: SISTEMA & HARDWARE ---
-            gfx_draw_text_alpha(content_x, content_y, "Informacoes de Hardware & Firmware", 0x00F8FAFC, 1, 255);
-            gfx_draw_text_alpha(content_x, content_y + 20, "Dispositivos detectados na inicializacao UEFI.", 0x0064748B, 1, 200);
+            raster_draw_text_alpha(content_x, content_y, "Informacoes de Hardware & Firmware", 0x00F8FAFC, 1, 255);
+            raster_draw_text_alpha(content_x, content_y + 20, "Dispositivos detectados na inicializacao UEFI.", 0x0064748B, 1, 200);
 
             let grid_y = content_y + 50;
-            gfx_draw_text_alpha(content_x, grid_y, "Processador:", 0x0094A3B8, 1, 220);
-            gfx_draw_text_alpha(content_x + 120, grid_y, "x86_64 SMP Multi-Core (64-bit)", 0x00F8FAFC, 1, 240);
+            raster_draw_text_alpha(content_x, grid_y, "Processador:", 0x0094A3B8, 1, 220);
+            raster_draw_text_alpha(content_x + 120, grid_y, "x86_64 SMP Multi-Core (64-bit)", 0x00F8FAFC, 1, 240);
 
-            gfx_draw_text_alpha(content_x, grid_y + 24, "Video / Display:", 0x0094A3B8, 1, 220);
-            gfx_draw_text_alpha(content_x + 120, grid_y + 24, "UEFI GOP Linear Framebuffer 32-bit ARGB", 0x0038BDF8, 1, 240);
+            raster_draw_text_alpha(content_x, grid_y + 24, "Video / Display:", 0x0094A3B8, 1, 220);
+            raster_draw_text_alpha(content_x + 120, grid_y + 24, "UEFI GOP Linear Framebuffer 32-bit ARGB", 0x0038BDF8, 1, 240);
 
-            gfx_draw_text_alpha(content_x, grid_y + 48, "Entrada / I/O:", 0x0094A3B8, 1, 220);
-            gfx_draw_text_alpha(content_x + 120, grid_y + 48, "PS/2 + USB Human Interface Device", 0x00F8FAFC, 1, 240);
+            raster_draw_text_alpha(content_x, grid_y + 48, "Entrada / I/O:", 0x0094A3B8, 1, 220);
+            raster_draw_text_alpha(content_x + 120, grid_y + 48, "PS/2 + USB Human Interface Device", 0x00F8FAFC, 1, 240);
         }
     }
 }

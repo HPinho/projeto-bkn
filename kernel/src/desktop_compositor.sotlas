@@ -7,6 +7,8 @@ import kernel::graphics_engine::*;
 import kernel::baken_installer::*;
 import kernel::baken_oobe_screen::*;
 import kernel::desktop_shell::*;
+import kernel::sotlas_graphics::*;
+import kernel::sotlas_ui::*;
 
 pub const SESSION_INSTALLER: u32 = 0;
 pub const SESSION_OOBE: u32 = 1;
@@ -16,6 +18,86 @@ static mut COMPOSITOR_READY: bool = false;
 static mut CURRENT_SESSION: u32 = 0; // Inicia no Assistente de Instalacao / OOBE
 static mut COMPOSITOR_W: u32 = 1920;
 static mut COMPOSITOR_H: u32 = 1080;
+
+static mut ROOT_SURFACE: Surface = Surface {
+    buffer: null as *mut u32,
+    width: 0,
+    height: 0,
+    pitch: 0,
+};
+
+static mut ROOT_CANVAS: Canvas = Canvas {
+    surface: null as *mut Surface,
+    clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false },
+    save_stack: [
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 },
+        CanvasState { clip: ClipState { rect: Rect { x: 0, y: 0, width: 0, height: 0 }, has_clip: false }, offset_x: 0, offset_y: 0, scale_milli: 1000 }
+    ],
+    save_count: 0,
+    offset_x: 0,
+    offset_y: 0,
+    scale_milli: 1000,
+};
+
+static mut ROOT_RENDER_TREE: RenderTree = RenderTree {
+    nodes: [RenderNode {
+        node_type: 0,
+        bounds: Rect { x: 0, y: 0, width: 0, height: 0 },
+        material: Material {
+            kind: 0,
+            tint_color: Color { r: 0, g: 0, b: 0, a: 0 },
+            blur_radius: 0,
+            border_color: Color { r: 0, g: 0, b: 0, a: 0 },
+            border_width: 0,
+            shadow_color: Color { r: 0, g: 0, b: 0, a: 0 },
+            shadow_blur: 0,
+            shadow_offset_y: 0,
+            corner_radius: 0,
+            is_squircle: false,
+        },
+        layout: LayoutParams {
+            direction: 0,
+            spacing: 0,
+            padding_left: 0,
+            padding_right: 0,
+            padding_top: 0,
+            padding_bottom: 0,
+            cross_align: 0,
+            main_align: 0,
+        },
+        measured_w: 0,
+        measured_h: 0,
+        text_content: null as *const u8,
+        text_scale: 1,
+        icon_id: 0,
+        parent_idx: -1,
+        first_child: -1,
+        next_sibling: -1,
+        visible: false,
+    }; MAX_RENDER_NODES],
+    node_count: 0,
+    root_idx: -1,
+};
+
+@system
+pub fn compositor_get_canvas() -> *mut Canvas {
+    unsafe {
+        return &mut ROOT_CANVAS;
+    }
+}
+
+@system
+pub fn compositor_get_render_tree() -> *mut RenderTree {
+    unsafe {
+        return &mut ROOT_RENDER_TREE;
+    }
+}
 
 @system
 pub fn desktop_compositor_set_session(session: u32) -> void {
@@ -37,6 +119,9 @@ pub fn desktop_compositor_init(screen_w: u32, screen_h: u32) -> void {
         if COMPOSITOR_READY { return; }
         COMPOSITOR_W = screen_w;
         COMPOSITOR_H = screen_h;
+        ROOT_SURFACE = surface_from_backbuffer();
+        Canvas_init(&mut ROOT_CANVAS, &mut ROOT_SURFACE);
+        RenderTree_init(&mut ROOT_RENDER_TREE);
         desktop_shell_init(screen_w, screen_h);
         baken_installer_init();
         baken_oobe_init();
@@ -64,7 +149,7 @@ pub fn desktop_compositor_render_frame() -> void {
                 baken_installer_tick();
                 baken_installer_render(0, 0, COMPOSITOR_W, COMPOSITOR_H);
                 render_cursor();
-                gfx_swap_buffers();
+                display_swap_buffers();
             }
         } else if (CURRENT_SESSION == SESSION_OOBE) {
             if (baken_oobe_is_complete() == 1) {
@@ -73,7 +158,7 @@ pub fn desktop_compositor_render_frame() -> void {
             } else {
                 baken_oobe_render(0, 0, COMPOSITOR_W, COMPOSITOR_H);
                 render_cursor();
-                gfx_swap_buffers();
+                display_swap_buffers();
             }
         } else {
             desktop_shell_render_frame();

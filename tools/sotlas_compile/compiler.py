@@ -520,6 +520,10 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
             "baken_get_cjk_alpha",
             "baken_get_logo_pixels",
             "baken_get_logo_size",
+            "baken_srgb_to_linear",
+            "baken_linear_to_srgb",
+            "baken_get_app_icon_alpha",
+            "baken_get_motion_icon_alpha",
         }
         for fn in ast.functions:
             body = re.sub(r"//[^\n]*", "", fn.body)

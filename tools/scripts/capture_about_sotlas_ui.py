@@ -10,7 +10,7 @@ def main():
     iso = r"C:\Projetos\projeto-bkn\build\baken_os.iso"
     build_dir = r"C:\Projetos\projeto-bkn\build"
 
-    monitor_port = 55562
+    monitor_port = 55558
 
     args = [
         qemu,
@@ -18,14 +18,12 @@ def main():
         "-cpu", "max",
         "-drive", f"if=pflash,format=raw,unit=0,readonly=on,file={ovmf}",
         "-drive", f"media=cdrom,readonly=on,file={iso}",
-        "-device", "qemu-xhci,id=xhci",
-        "-device", "usb-tablet,bus=xhci.0",
-        "-device", "usb-mouse,bus=xhci.0",
-        "-device", "usb-kbd,bus=xhci.0",
+        "-device", "usb-ehci,id=ehci",
+        "-device", "usb-tablet,bus=ehci.0",
+        "-device", "usb-kbd,bus=ehci.0",
         "-m", "4G",
         "-smp", "1",
         "-device", "VGA,vgamem_mb=64,xres=1920,yres=1080",
-        "-serial", f"file:{os.path.join(build_dir, 'qemu_debug.log')}",
         "-monitor", f"tcp:127.0.0.1:{monitor_port},server,nowait",
         "-display", "none"
     ]
@@ -42,10 +40,7 @@ def main():
             time.sleep(1)
 
     time.sleep(1)
-    try:
-        sock.recv(4096)
-    except Exception:
-        pass
+    sock.recv(4096)
 
     def send_cmd(cmd):
         sock.sendall((cmd + "\n").encode('utf-8'))
@@ -55,39 +50,33 @@ def main():
         except Exception:
             return ""
 
-    # 1. Tela 0: Welcome Carousel
-    time.sleep(3.5)
-    ppm0 = os.path.join(build_dir, "screen0_welcome.ppm")
-    send_cmd(f"screendump {ppm0}")
-
-    # 2. Envia clique ou Enter para avançar para a Tela 1 (Idiomas)
+    time.sleep(4)
+    # Seleciona idioma 2 (English) e entra no desktop
     send_cmd("sendkey ret")
-    time.sleep(1.5)
-    ppm1 = os.path.join(build_dir, "screen1_languages.ppm")
-    send_cmd(f"screendump {ppm1}")
-
-    # 3. Avança para a próxima tela
-    send_cmd("sendkey ret")
-    time.sleep(1.5)
-    ppm2 = os.path.join(build_dir, "screen2_type.ppm")
-    send_cmd(f"screendump {ppm2}")
-
-    # 4. Pressiona 'd' para entrar diretamente no Desktop Shell com Dock
+    time.sleep(1.0)
+    send_cmd("sendkey 2")
+    time.sleep(0.8)
     send_cmd("sendkey d")
-    time.sleep(2.5)
-    ppm3 = os.path.join(build_dir, "screen3_desktop.ppm")
-    send_cmd(f"screendump {ppm3}")
+    time.sleep(1.8)
+
+    # Pressiona '5' para abrir o aplicativo 5 (app_about - Sobre este Computador)
+    send_cmd("sendkey 5")
+    time.sleep(1.5)
+
+    # Move o cursor para perto da janela
+    send_cmd("mouse_move 16383 16383")
+    time.sleep(0.5)
+
+    out = os.path.join(build_dir, "qemu-about-sotlas-ui.ppm")
+    send_cmd(f"screendump {out}")
 
     send_cmd("quit")
     sock.close()
     proc.wait()
 
-    for ppm, png_name in [(ppm0, "screen0_welcome.png"), (ppm1, "screen1_languages.png"), (ppm2, "screen2_type.png"), (ppm3, "screen3_desktop.png")]:
-        png = os.path.join(build_dir, png_name)
-        if os.path.exists(ppm):
-            Image.open(ppm).save(png)
-            os.remove(ppm)
-            print(f"[OK] Gravado: {png}")
+    png_out = os.path.join(build_dir, "screen4_about_sotlas_ui.png")
+    Image.open(out).save(png_out)
+    print(f"Sucesso: {png_out}")
 
 if __name__ == "__main__":
     main()

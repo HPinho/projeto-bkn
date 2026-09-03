@@ -7,6 +7,8 @@ module kernel::main;
 import kernel::graphics_engine::*;
 import kernel::desktop_compositor::*;
 import kernel::baken_runtime::*;
+import kernel::sotlas_graphics::*;
+import kernel::sotlas_ui::*;
 
 // Estrutura de Informações de Inicialização repassada pelo Bootloader UEFI
 pub struct BakenBootInfo {
@@ -34,7 +36,7 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     }
 
     // O framebuffer GOP é o único recurso de hardware necessário nesta fase.
-    gfx_init(
+    display_init(
         boot_info.framebuffer_base,
         boot_info.screen_width,
         boot_info.screen_height,

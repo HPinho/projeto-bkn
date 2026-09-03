@@ -9,7 +9,7 @@ import kernel::baken_rasterizer::*;
 @system
 pub fn material_draw_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border: u32, radius: u32) -> void {
     // Corpo em vidro acrílico translúcido com curvatura contínua e sem linhas brancas artificiais
-    gfx_draw_glass_rect(x, y, w, h, bg, alpha, border, radius);
+    raster_draw_glass_rect(x, y, w, h, bg, alpha, border, radius);
 }
 
 // Ray Tracing / Path Tracing Analítico de Superfície Acrílica baseado em SDF (Signed Distance Fields)
@@ -38,8 +38,8 @@ pub fn material_raytrace_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, al
             let rim_start = x + radius + 4;
             let rim_len = w - (radius * 2) - 8;
             // Reflexo cáustico ciano safira com dispersão cromática no canal azul
-            gfx_fill_rect_alpha(rim_start, y + 1, rim_len, 1, 0x0038BDF8, fresnel_intensity as u8);
-            gfx_fill_rect_alpha(rim_start, y + 2, rim_len, 1, 0x0000E5FF, (fresnel_intensity / 2) as u8);
+            raster_fill_rect_alpha(rim_start, y + 1, rim_len, 1, 0x0038BDF8, fresnel_intensity as u8);
+            raster_fill_rect_alpha(rim_start, y + 2, rim_len, 1, 0x0000E5FF, (fresnel_intensity / 2) as u8);
         }
     }
 }

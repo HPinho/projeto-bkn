@@ -175,6 +175,16 @@ static mut G_CYCLES_PER_US: u64 = 3000;
 static mut G_LAST_ABS_X: i32 = -1;
 static mut G_LAST_ABS_Y: i32 = -1;
 
+// Telemetria de Hardware, Pacing Adaptativo e Monitoramento de 60/120 Hz
+static mut G_LAST_FRAME_TSC: u64 = 0;
+static mut G_TARGET_FRAME_US: u64 = 16667;
+static mut G_TELEMETRY_FRAME_COUNT: u64 = 0;
+static mut G_TELEMETRY_DROPPED_FRAMES: u64 = 0;
+static mut G_TELEMETRY_ACCUM_US: u64 = 0;
+static mut G_TELEMETRY_FPS: f32 = 60.0;
+static mut G_TELEMETRY_FRAMETIME_MS: f32 = 16.66;
+static mut G_TELEMETRY_P95_MS: f32 = 16.66;
+
 static mut G_SIMPLE_GUID: EfiGuid = EfiGuid {
     Data1: 0x31878c87,
     Data2: 0x0b75,
@@ -201,7 +211,7 @@ pub fn baken_runtime_init_assets() -> void {
     let font_h = baken_get_font_height(2);
     let font_px = baken_get_font_px(2);
     if (font_alpha != (null as *const u8)) {
-        gfx_bind_font_atlas(font_adv, font_alpha, font_w, font_h, font_px);
+        raster_bind_font_atlas(font_adv, font_alpha, font_w, font_h, font_px);
     }
 
     let title_adv = baken_get_font_advances(5);
@@ -210,7 +220,7 @@ pub fn baken_runtime_init_assets() -> void {
     let title_h = baken_get_font_height(5);
     let title_px = baken_get_font_px(5);
     if (title_alpha != (null as *const u8)) {
-        gfx_bind_title_font_atlas(title_adv, title_alpha, title_w, title_h, title_px);
+        raster_bind_title_font_atlas(title_adv, title_alpha, title_w, title_h, title_px);
     }
 
     for mut i in 0..3 {
@@ -218,14 +228,14 @@ pub fn baken_runtime_init_assets() -> void {
         let ch = baken_get_cjk_height(i as u32);
         let calpha = baken_get_cjk_alpha(i as u32);
         if (calpha != (null as *const u8)) {
-            gfx_bind_cjk_item(i as u32, cw, ch, calpha);
+            raster_bind_cjk_item(i as u32, cw, ch, calpha);
         }
     }
 
     let logo_px = baken_get_logo_pixels();
     let logo_sz = baken_get_logo_size();
     if (logo_px != (null as *const u32)) {
-        gfx_bind_logo_atlas(logo_px, logo_sz);
+        raster_bind_logo_atlas(logo_px, logo_sz);
     }
 }
 
@@ -404,21 +414,79 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
     let frame_end = baken_efi_read_tsc();
     let cycles_per_us = G_CYCLES_PER_US;
     let bs = G_BOOT_SERVICES;
-    let dt: f32 = 0.0166667;
-    if (bs != (null as *mut EfiBootServicesPrefix)) {
-        if (cycles_per_us > 0 && frame_end > frame_start) {
-            let work_us = (frame_end - frame_start) / cycles_per_us;
-            if (work_us < 16667) {
-                bs.Stall(16667 - work_us);
-            } else {
-                bs.Stall(1000);
+
+    // Alvo adaptativo baseado na taxa de atualização do monitor
+    let refresh_hz = display_get_refresh_hz();
+    let target_us: u64 = if (refresh_hz >= 120) { 8333 } else if (refresh_hz >= 90) { 11111 } else { 16667 };
+    unsafe { G_TARGET_FRAME_US = target_us; }
+
+    if (cycles_per_us > 0 && frame_end > frame_start) {
+        let work_us = (frame_end - frame_start) / cycles_per_us;
+        if (work_us < target_us) {
+            let remain = target_us - work_us;
+            if (bs != (null as *mut EfiBootServicesPrefix)) {
+                if (target_us == 16667) {
+                    bs.Stall(16667 - work_us);
+                } else {
+                    bs.Stall(remain);
+                }
             }
         } else {
-            bs.Stall(16667);
+            // Quadro excedeu o orçamento: registra frame atrasado e NÃO penaliza com stall punitivo
+            unsafe { G_TELEMETRY_DROPPED_FRAMES += 1; }
+            if (bs != (null as *mut EfiBootServicesPrefix)) {
+                bs.Stall(15); // cooperação mínima para descritores USB
+            }
+        }
+    } else {
+        if (bs != (null as *mut EfiBootServicesPrefix)) {
+            bs.Stall(target_us);
         }
     }
+
+    // Medição real do delta de tempo decorrido desde o início do quadro anterior
+    let now_tsc = baken_efi_read_tsc();
+    let mut dt: f32 = 0.0166667;
+    unsafe {
+        if (G_LAST_FRAME_TSC > 0 && now_tsc > G_LAST_FRAME_TSC && cycles_per_us > 0) {
+            let total_us = (now_tsc - G_LAST_FRAME_TSC) / cycles_per_us;
+            dt = (total_us as f32) / 1000000.0;
+            if (dt < 0.001) { dt = 0.001; }
+            if (dt > 0.066) { dt = 0.066; }
+
+            let ft_ms = (total_us as f32) / 1000.0;
+            G_TELEMETRY_FRAMETIME_MS = (G_TELEMETRY_FRAMETIME_MS * 0.9) + (ft_ms * 0.1);
+            if (ft_ms > G_TELEMETRY_P95_MS) {
+                G_TELEMETRY_P95_MS = (G_TELEMETRY_P95_MS * 0.95) + (ft_ms * 0.05);
+            } else {
+                G_TELEMETRY_P95_MS = (G_TELEMETRY_P95_MS * 0.99) + (ft_ms * 0.01);
+            }
+
+            G_TELEMETRY_ACCUM_US += total_us;
+            G_TELEMETRY_FRAME_COUNT += 1;
+            if (G_TELEMETRY_ACCUM_US >= 1000000) {
+                G_TELEMETRY_FPS = ((G_TELEMETRY_FRAME_COUNT as f32) * 1000000.0) / (G_TELEMETRY_ACCUM_US as f32);
+                G_TELEMETRY_ACCUM_US = 0;
+                G_TELEMETRY_FRAME_COUNT = 0;
+            }
+        }
+        G_LAST_FRAME_TSC = now_tsc;
+    }
+
     desktop_shell_set_frame_delta(dt);
 }
+
+@system
+pub fn baken_telemetry_get_fps() -> f32 { unsafe { return G_TELEMETRY_FPS; } }
+
+@system
+pub fn baken_telemetry_get_frametime_ms() -> f32 { unsafe { return G_TELEMETRY_FRAMETIME_MS; } }
+
+@system
+pub fn baken_telemetry_get_p95_ms() -> f32 { unsafe { return G_TELEMETRY_P95_MS; } }
+
+@system
+pub fn baken_telemetry_get_dropped_frames() -> u64 { unsafe { return G_TELEMETRY_DROPPED_FRAMES; } }
 
 @system
 pub fn baken_runtime_timing_contract(frame_start: u64) -> void {
@@ -446,7 +514,7 @@ pub fn baken_runtime_dispatch_click(mx: i32, my: i32, w: u32, h: u32) -> void {
 @system
 pub fn baken_runtime_dispatch_move(mx: i32, my: i32) -> void {
     desktop_shell_set_cursor(mx, my);
-    gfx_set_cursor_parallax(mx, my);
+    raster_set_cursor_parallax(mx, my);
     let session = desktop_compositor_get_session();
     if (session == 2) {
         wm_handle_mouse_move(mx, my);
@@ -475,7 +543,7 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
     let mut left_down: u8 = 0;
 
     desktop_shell_set_cursor(mouse_x, mouse_y);
-    gfx_set_cursor_parallax(mouse_x, mouse_y);
+    raster_set_cursor_parallax(mouse_x, mouse_y);
 
     loop {
         let frame_start: u64 = baken_efi_read_tsc();
@@ -531,7 +599,7 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
 
         if (mouse_updated == 1) {
             desktop_shell_set_cursor(mouse_x, mouse_y);
-            gfx_set_cursor_parallax(mouse_x, mouse_y);
+            raster_set_cursor_parallax(mouse_x, mouse_y);
         }
 
         // 3. Despacho de Eventos de Clique e Arraste

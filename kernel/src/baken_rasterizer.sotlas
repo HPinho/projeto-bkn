@@ -27,7 +27,7 @@ pub static mut WALLPAPER_CACHE_H: u32 = 0;
 // Interpolador inteiro para efeitos do rasterizador sem depender de libm.
 // Retorna smoothstep(phase / duration) no intervalo 0..255.
 @inline
-pub fn gfx_smoothstep_u8(phase: u32, duration: u32) -> u8 {
+pub fn raster_smoothstep_u8(phase: u32, duration: u32) -> u8 {
     if (duration == 0 || phase >= duration) { return 255; }
     let t = (phase * 255) / duration;
     return ((t * t * (765 - 2 * t)) / 65025) as u8;
@@ -35,16 +35,16 @@ pub fn gfx_smoothstep_u8(phase: u32, duration: u32) -> u8 {
 
 // Onda senoidal/triangular suave em aritmética inteira no intervalo [-amp, +amp]
 @inline
-pub fn gfx_wave_i32(phase: u32, period: u32, amp: i32) -> i32 {
+pub fn raster_wave_i32(phase: u32, period: u32, amp: i32) -> i32 {
     if (period == 0 || amp == 0) { return 0; }
     let p = phase % period;
     let half = period / 2;
     if (half == 0) { return 0; }
     if (p < half) {
-        let s = gfx_smoothstep_u8(p, half) as i32;
+        let s = raster_smoothstep_u8(p, half) as i32;
         return -amp + ((2 * amp * s) / 255);
     } else {
-        let s = gfx_smoothstep_u8(p - half, half) as i32;
+        let s = raster_smoothstep_u8(p - half, half) as i32;
         return amp - ((2 * amp * s) / 255);
     }
 }
@@ -206,7 +206,7 @@ const FONT_FALLBACK_GLYPHS: [u8; 768] = [
 ];
 
 @system
-pub fn gfx_bind_font_atlas(advances: *const u8, alpha: *const u8,
+pub fn raster_bind_font_atlas(advances: *const u8, alpha: *const u8,
                            cell_w: u32, cell_h: u32, px: u32) -> u8 {
     if (advances == (null as *const u8) || alpha == (null as *const u8) ||
         cell_w == 0 || cell_h == 0 || px == 0) { return 0; }
@@ -221,7 +221,7 @@ pub fn gfx_bind_font_atlas(advances: *const u8, alpha: *const u8,
 }
 
 @system
-pub fn gfx_bind_title_font_atlas(advances: *const u8, alpha: *const u8,
+pub fn raster_bind_title_font_atlas(advances: *const u8, alpha: *const u8,
                                   cell_w: u32, cell_h: u32, px: u32) -> u8 {
     if (advances == (null as *const u8) || alpha == (null as *const u8) ||
         cell_w == 0 || cell_h == 0 || px == 0) { return 0; }
@@ -236,7 +236,7 @@ pub fn gfx_bind_title_font_atlas(advances: *const u8, alpha: *const u8,
 }
 
 @system
-pub fn gfx_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
+pub fn raster_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
     if (pixels == (null as *const u32) || size == 0) { return 0; }
     unsafe {
         LOGO_PIXELS = pixels;
@@ -246,7 +246,7 @@ pub fn gfx_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
 }
 
 @system
-pub fn gfx_bind_cjk_item(id: u32, w: u32, h: u32, alpha: *const u8) -> void {
+pub fn raster_bind_cjk_item(id: u32, w: u32, h: u32, alpha: *const u8) -> void {
     unsafe {
         if (id == 0) { CJK_0_W = w; CJK_0_H = h; CJK_0_ALPHA = alpha; }
         else if (id == 1) { CJK_1_W = w; CJK_1_H = h; CJK_1_ALPHA = alpha; }
@@ -255,7 +255,7 @@ pub fn gfx_bind_cjk_item(id: u32, w: u32, h: u32, alpha: *const u8) -> void {
 }
 
 @system
-pub fn gfx_draw_cjk_item(x: u32, y: u32, id: u32, color: u32, opacity: u8) -> void {
+pub fn raster_draw_cjk_item(x: u32, y: u32, id: u32, color: u32, opacity: u8) -> void {
     if (opacity == 0) { return; }
     unsafe {
         let mut alpha_ptr = null as *const u8;
@@ -272,7 +272,7 @@ pub fn gfx_draw_cjk_item(x: u32, y: u32, id: u32, color: u32, opacity: u8) -> vo
                 let cov = *alpha_ptr.add((gy * w + gx) as usize);
                 if (cov > 0) {
                     let a = (((cov as u32) * (opacity as u32)) / 255) as u8;
-                    gfx_put_pixel_alpha(x + gx, y + gy, color, a);
+                    raster_put_pixel_alpha(x + gx, y + gy, color, a);
                 }
             }
         }
@@ -280,7 +280,7 @@ pub fn gfx_draw_cjk_item(x: u32, y: u32, id: u32, color: u32, opacity: u8) -> vo
 }
 
 @system
-pub fn gfx_measure_cjk_item(id: u32) -> u32 {
+pub fn raster_measure_cjk_item(id: u32) -> u32 {
     unsafe {
         if (id == 0) { return CJK_0_W; }
         if (id == 1) { return CJK_1_W; }
@@ -298,16 +298,16 @@ fn bilerp_channel(p00: u32, p10: u32, p01: u32, p11: u32,
 }
 
 @system
-pub fn gfx_draw_baken_logo(x: u32, y: u32, size: u32, opacity: u8) -> void {
+pub fn raster_draw_baken_logo(x: u32, y: u32, size: u32, opacity: u8) -> void {
     if (size == 0 || opacity == 0) { return; }
     unsafe {
         if (LOGO_PIXELS == (null as *const u32) || LOGO_SIZE == 0) {
             // Vetor procedural elegante com gradiente concentrico neon Baken OS
             let r = size / 2;
-            gfx_draw_circle_alpha(x + r, y + r, r, 0x007C6CFF, opacity / 4);
-            gfx_draw_circle_alpha(x + r - r / 5, y + r - r / 6, (r * 2) / 3, 0x004CC9F0, opacity);
-            gfx_draw_circle_alpha(x + r + r / 4, y + r + r / 5, r / 2, 0x007C6CFF, opacity);
-            gfx_draw_circle_alpha(x + r, y + r, r / 3, 0x000F172A, opacity);
+            raster_draw_circle_alpha(x + r, y + r, r, 0x007C6CFF, opacity / 4);
+            raster_draw_circle_alpha(x + r - r / 5, y + r - r / 6, (r * 2) / 3, 0x004CC9F0, opacity);
+            raster_draw_circle_alpha(x + r + r / 4, y + r + r / 5, r / 2, 0x007C6CFF, opacity);
+            raster_draw_circle_alpha(x + r, y + r, r / 3, 0x000F172A, opacity);
             return;
         }
         let denom = if (size > 1) { size - 1 } else { 1 };
@@ -331,7 +331,7 @@ pub fn gfx_draw_baken_logo(x: u32, y: u32, size: u32, opacity: u8) -> void {
                     let rgb = (bilerp_channel(p00, p10, p01, p11, 16, wx, wy) << 16) |
                               (bilerp_channel(p00, p10, p01, p11, 8, wx, wy) << 8) |
                                bilerp_channel(p00, p10, p01, p11, 0, wx, wy);
-                    gfx_put_pixel_alpha(x + dx, y + dy, rgb, final_a);
+                    raster_put_pixel_alpha(x + dx, y + dy, rgb, final_a);
                 }
             }
         }
@@ -352,75 +352,93 @@ fn max_f32(a: f32, b: f32) -> f32 {
 }
 
 @system
-pub fn gfx_blend_color(bg: u32, fg: u32, alpha: u8) -> u32 {
+pub fn raster_blend_color(bg: u32, fg: u32, alpha: u8) -> u32 {
+    if (alpha == 0) { return bg; }
+    if (alpha == 255) { return fg | (0xFF << 24); }
+
     let a: u32 = alpha as u32;
     let inv_a: u32 = 255 - a;
 
-    let bg_r: u32 = (bg >> 16) & 0xFF;
-    let bg_g: u32 = (bg >> 8) & 0xFF;
-    let bg_b: u32 = bg & 0xFF;
+    let bg_r = (bg >> 16) & 0xFF;
+    let bg_g = (bg >> 8) & 0xFF;
+    let bg_b = bg & 0xFF;
 
-    let fg_r: u32 = (fg >> 16) & 0xFF;
-    let fg_g: u32 = (fg >> 8) & 0xFF;
-    let fg_b: u32 = fg & 0xFF;
+    let fg_r = (fg >> 16) & 0xFF;
+    let fg_g = (fg >> 8) & 0xFF;
+    let fg_b = fg & 0xFF;
 
-    let out_r: u32 = ((fg_r * a) + (bg_r * inv_a)) / 255;
-    let out_g: u32 = ((fg_g * a) + (bg_g * inv_a)) / 255;
-    let out_b: u32 = ((fg_b * a) + (bg_b * inv_a)) / 255;
+    // Conversão de gamma sRGB para espaço linear fotométrico de 16-bit
+    let lin_bg_r = baken_srgb_to_linear(bg_r as u8);
+    let lin_bg_g = baken_srgb_to_linear(bg_g as u8);
+    let lin_bg_b = baken_srgb_to_linear(bg_b as u8);
+
+    let lin_fg_r = baken_srgb_to_linear(fg_r as u8);
+    let lin_fg_g = baken_srgb_to_linear(fg_g as u8);
+    let lin_fg_b = baken_srgb_to_linear(fg_b as u8);
+
+    // Mistura em luz linear com conservação de energia e alpha premultiplicado
+    let out_lin_r = ((lin_fg_r * a) + (lin_bg_r * inv_a)) / 255;
+    let out_lin_g = ((lin_fg_g * a) + (lin_bg_g * inv_a)) / 255;
+    let out_lin_b = ((lin_fg_b * a) + (lin_bg_b * inv_a)) / 255;
+
+    // Mapeamento de volta para saída sRGB de 8 bits
+    let out_r = baken_linear_to_srgb(out_lin_r) as u32;
+    let out_g = baken_linear_to_srgb(out_lin_g) as u32;
+    let out_b = baken_linear_to_srgb(out_lin_b) as u32;
 
     return (0xFF << 24) | (out_r << 16) | (out_g << 8) | out_b;
 }
 
 @system
-pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) -> void {
+pub fn raster_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) -> void {
     if (alpha == 0) { return; }
-    if (x >= gfx_get_width() || y >= gfx_get_height()) { return; }
+    if (x >= display_get_width() || y >= display_get_height()) { return; }
     if (alpha == 255) {
-        gfx_put_pixel(x, y, color);
+        display_put_pixel(x, y, color);
         return;
     }
-    let current = gfx_get_pixel(x, y);
-    let blended = gfx_blend_color(current, color, alpha);
-    gfx_put_pixel(x, y, blended);
+    let current = display_get_pixel(x, y);
+    let blended = raster_blend_color(current, color, alpha);
+    display_put_pixel(x, y, blended);
 }
 
 @system
-pub fn gfx_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
-    let sw = gfx_get_width();
-    let sh = gfx_get_height();
+pub fn raster_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
+    let sw = display_get_width();
+    let sh = display_get_height();
     if (x >= sw || y >= sh || w == 0 || h == 0) { return; }
     let rw = if (x + w > sw) { sw - x } else { w };
     let rh = if (y + h > sh) { sh - y } else { h };
     unsafe {
-        baken_fast_fill_rect(gfx_get_backbuffer(), gfx_get_pitch(), x, y, rw, rh, color | (0xFF << 24));
+        baken_fast_fill_rect(display_get_backbuffer(), display_get_pitch(), x, y, rw, rh, color | (0xFF << 24));
     }
 }
 
 @system
-pub fn gfx_fill_rect_alpha(x: u32, y: u32, w: u32, h: u32, color: u32, alpha: u8) -> void {
+pub fn raster_fill_rect_alpha(x: u32, y: u32, w: u32, h: u32, color: u32, alpha: u8) -> void {
     if (alpha == 0) { return; }
-    let sw = gfx_get_width();
-    let sh = gfx_get_height();
+    let sw = display_get_width();
+    let sh = display_get_height();
     let max_x = if (x + w > sw) { sw } else { x + w };
     let max_y = if (y + h > sh) { sh } else { y + h };
 
     for mut py in y..max_y {
         for mut px in x..max_x {
-            gfx_put_pixel_alpha(px, py, color, alpha);
+            raster_put_pixel_alpha(px, py, color, alpha);
         }
     }
 }
 
 @system
-pub fn gfx_draw_hline(x: u32, y: u32, width: u32, color: u32, alpha: u8) -> void {
-    gfx_fill_rect_alpha(x, y, width, 1, color, alpha);
+pub fn raster_draw_hline(x: u32, y: u32, width: u32, color: u32, alpha: u8) -> void {
+    raster_fill_rect_alpha(x, y, width, 1, color, alpha);
 }
 
 // Sombra Suave Volumetrica (Drop Shadow) com Gravidade (Y-Offset)
 @system
-pub fn gfx_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u32, offset_y: i32, max_alpha_factor: f32) -> void {
-    let sw = gfx_get_width();
-    let sh = gfx_get_height();
+pub fn raster_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u32, offset_y: i32, max_alpha_factor: f32) -> void {
+    let sw = display_get_width();
+    let sh = display_get_height();
     let base_y = (y as i32 + offset_y) as u32;
     let sx = if (x > blur + spread) { x - blur - spread } else { 0 };
     let sy = if (base_y > blur + spread) { base_y - blur - spread } else { 0 };
@@ -442,7 +460,7 @@ pub fn gfx_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u
                 let alpha = (((falloff_num * 90) / max_dist_sq) as u32);
                 let final_a = (((alpha as f32) * max_alpha_factor) as u8);
                 if (final_a > 4) {
-                    gfx_put_pixel_alpha(px, py, 0x00000000, final_a);
+                    raster_put_pixel_alpha(px, py, 0x00000000, final_a);
                 }
             }
         }
@@ -451,7 +469,7 @@ pub fn gfx_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u
 
 // Sombra Fisica calculada pelo Eixo-Z
 @system
-pub fn gfx_draw_physical_shadow(x: u32, y: u32, w: u32, h: u32, elevation: u32) -> void {
+pub fn raster_draw_physical_shadow(x: u32, y: u32, w: u32, h: u32, elevation: u32) -> void {
     if (elevation == 0) { return; }
     let blur = elevation;
     let spread = elevation / 4;
@@ -459,14 +477,14 @@ pub fn gfx_draw_physical_shadow(x: u32, y: u32, w: u32, h: u32, elevation: u32) 
     let max_alpha = 1.0 - ((elevation as f32) / 100.0);
     let final_alpha = if (max_alpha < 0.2) { 0.2 } else { max_alpha };
     
-    gfx_draw_drop_shadow(x, y, w, h, blur, spread, offset_y, final_alpha);
+    raster_draw_drop_shadow(x, y, w, h, blur, spread, offset_y, final_alpha);
 }
 
 // Retangulo com vidro fosco acrilico, cantos arredondados e borda com destaque especular superior
 @system
-pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void {
-    let sw = gfx_get_width();
-    let sh = gfx_get_height();
+pub fn raster_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void {
+    let sw = display_get_width();
+    let sh = display_get_height();
     if (x >= sw || y >= sh || w == 0 || h == 0) { return; }
 
     let max_x = if (x + w > sw) { sw } else { x + w };
@@ -485,17 +503,19 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
         let fill_h = if (h > 2) { h - 2 } else { 0 };
         if (fill_w > 0 && fill_h > 0) {
             unsafe {
-                baken_fast_fill_rect(gfx_get_backbuffer(), gfx_get_pitch(),
+                baken_fast_fill_rect(display_get_backbuffer(), display_get_pitch(),
                                      fill_x, fill_y, fill_w, fill_h, bg_color | (0xFF << 24));
             }
         }
     }
 
-    // Bordas e cantos: blend pixel-a-pixel apenas onde necessário
+    // Bordas e cantos: blend pixel-a-pixel com anti-aliasing analítico subpixel
+    let border_span = if (r2 > inner_r2) { r2 - inner_r2 } else { 1 };
     for mut py in y..max_y {
         for mut px in x..max_x {
             let mut is_corner = false;
             let mut inside = true;
+            let mut subpixel_cov: u32 = 255;
 
             let cx = if (px < x + radius) { x + radius } else if (px > x + w - radius) { x + w - radius } else { px };
             let cy = if (py < y + radius) { y + radius } else if (py > y + h - radius) { y + h - radius } else { py };
@@ -504,8 +524,11 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
                 is_corner = true;
                 let dx = px as i32 - cx as i32;
                 let dy = py as i32 - cy as i32;
-                if ((dx * dx + dy * dy) > r2) {
+                let dist_sq = dx * dx + dy * dy;
+                if (dist_sq > r2) {
                     inside = false;
+                } else if (dist_sq > inner_r2) {
+                    subpixel_cov = (((r2 - dist_sq) * 255) / border_span) as u32;
                 }
             }
 
@@ -517,10 +540,16 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
                     if ((dx * dx + dy * dy) >= inner_r2) { is_border = true; }
                 }
                 if (is_border) {
-                    let b_alpha = if (alpha > 210) { alpha } else { 210 };
-                    gfx_put_pixel_alpha(px, py, border_color, b_alpha);
+                    let base_b_a = if (alpha > 210) { alpha as u32 } else { 210 };
+                    let b_alpha = ((base_b_a * subpixel_cov) / 255) as u8;
+                    if (b_alpha > 0) {
+                        raster_put_pixel_alpha(px, py, border_color, b_alpha);
+                    }
                 } else if (glass_a < 248) {
-                    gfx_put_pixel_alpha(px, py, bg_color, glass_a);
+                    let g_alpha = (((glass_a as u32) * subpixel_cov) / 255) as u8;
+                    if (g_alpha > 0) {
+                        raster_put_pixel_alpha(px, py, bg_color, g_alpha);
+                    }
                 }
             }
         }
@@ -534,40 +563,44 @@ pub fn sdf_render_liquid_glass_panel(framebuffer: *mut u32, pitch: u32,
                                      bg_color: u32, alpha: u8, border_color: u32,
                                      glow: u8, outline: u32) -> void {
     if (framebuffer == (null as *mut u32) || pitch == 0) { return; }
-    gfx_draw_physical_shadow(x, y, w, h, ELEVATION_WINDOW_INACTIVE);
-    gfx_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius);
+    raster_draw_physical_shadow(x, y, w, h, ELEVATION_WINDOW_INACTIVE);
+    raster_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius);
     if (outline > 1 && w > 2 && h > 2 && radius > 0) {
-        gfx_draw_glass_rect(x + 1, y + 1, w - 2, h - 2, bg_color, 0, border_color, radius - 1);
+        raster_draw_glass_rect(x + 1, y + 1, w - 2, h - 2, bg_color, 0, border_color, radius - 1);
     }
 }
 
 // Renderiza Materiais Inteligentes com base no Z-Axis (Elevacao)
 @system
-pub fn gfx_draw_smart_material(x: u32, y: u32, w: u32, h: u32, material: u8, elevation: u32, radius: u32) -> void {
+pub fn raster_draw_smart_material(x: u32, y: u32, w: u32, h: u32, material: u8, elevation: u32, radius: u32) -> void {
     // 1. Projeta a sombra fisica com gravidade baseada na elevacao
-    gfx_draw_physical_shadow(x, y, w, h, elevation);
+    raster_draw_physical_shadow(x, y, w, h, elevation);
 
     // 2. Renderiza o material correto
     if (material == MATERIAL_MICA) {
         let is_active = (elevation == ELEVATION_WINDOW_ACTIVE);
         let mica_bg = if (is_active) { 0x001E293B } else { 0x000F172A };
         let border = if (is_active) { 0x0000E5FF } else { 0x00334155 };
-        gfx_draw_glass_rect(x, y, w, h, mica_bg, 245, border, radius);
+        raster_draw_glass_rect(x, y, w, h, mica_bg, 245, border, radius);
     } else if (material == MATERIAL_ACRYLIC) {
         let acrylic_bg = 0x00172232; 
-        gfx_draw_glass_rect(x, y, w, h, acrylic_bg, 180, 0x0038BDF8, radius);
+        raster_draw_glass_rect(x, y, w, h, acrylic_bg, 180, 0x0038BDF8, radius);
     } else if (material == MATERIAL_SMOKE) {
-        gfx_fill_rect_alpha(x, y, w, h, 0x00000000, 140);
+        raster_fill_rect_alpha(x, y, w, h, 0x00000000, 140);
     } else {
-        gfx_fill_rect(x, y, w, h, 0x00FFFFFF);
+        raster_fill_rect(x, y, w, h, 0x00FFFFFF);
     }
 }
 
-// Circulo com antialiasing
+// Circulo com antialiasing analítico subpixel
 @system
-pub fn gfx_draw_circle_alpha(cx: u32, cy: u32, radius: u32, color: u32, alpha: u8) -> void {
-    if (alpha == 0) { return; }
+pub fn raster_draw_circle_alpha(cx: u32, cy: u32, radius: u32, color: u32, alpha: u8) -> void {
+    if (alpha == 0 || radius == 0) { return; }
     let r2 = (radius * radius) as i32;
+    let inner_r = if (radius > 1) { radius - 1 } else { 0 };
+    let inner_r2 = (inner_r * inner_r) as i32;
+    let span = r2 - inner_r2;
+
     for mut dy in 0 .. (radius * 2 + 1) {
         for mut dx in 0 .. (radius * 2 + 1) {
             if (cx + dx < radius || cy + dy < radius) { continue; }
@@ -576,27 +609,33 @@ pub fn gfx_draw_circle_alpha(cx: u32, cy: u32, radius: u32, color: u32, alpha: u
             let ix = dx as i32 - radius as i32;
             let iy = dy as i32 - radius as i32;
             let dist = (ix * ix) + (iy * iy);
-            if (dist <= r2) {
-                gfx_put_pixel_alpha(px, py, color, alpha);
+            if (dist <= inner_r2) {
+                raster_put_pixel_alpha(px, py, color, alpha);
+            } else if (dist <= r2) {
+                let cov = if (span > 0) { ((r2 - dist) * 255) / span } else { 128 };
+                let a = (((alpha as u32) * (cov as u32)) / 255) as u8;
+                if (a > 0) {
+                    raster_put_pixel_alpha(px, py, color, a);
+                }
             }
         }
     }
 }
 
 @system
-pub fn gfx_draw_circle_button(cx: u32, cy: u32, radius: u32, color: u32) -> void {
-    gfx_draw_circle_alpha(cx, cy, radius, color, 255);
-    if (radius > 2) { gfx_draw_circle_alpha(cx, cy, radius - 2, 0x00FFFFFF, 70); }
+pub fn raster_draw_circle_button(cx: u32, cy: u32, radius: u32, color: u32) -> void {
+    raster_draw_circle_alpha(cx, cy, radius, color, 255);
+    if (radius > 2) { raster_draw_circle_alpha(cx, cy, radius - 2, 0x00FFFFFF, 70); }
 }
 
 // Desenha um caractere com suavizacao ou bitmap fallback
 @system
-pub fn gfx_draw_char_aa(x: u32, y: u32, ch: u8, color: u32) -> void {
-    gfx_draw_char_atlas(x, y, ch, color, 255, 1);
+pub fn raster_draw_char_aa(x: u32, y: u32, ch: u8, color: u32) -> void {
+    raster_draw_char_atlas(x, y, ch, color, 255, 1);
 }
 
 @system
-fn gfx_draw_char_atlas(x: u32, y: u32, ch: u8, color: u32,
+fn raster_draw_char_atlas(x: u32, y: u32, ch: u8, color: u32,
                        opacity: u8, scale: u32) -> void {
     if (opacity == 0 || scale == 0) { return; }
     unsafe {
@@ -607,7 +646,7 @@ fn gfx_draw_char_atlas(x: u32, y: u32, ch: u8, color: u32,
                     let coverage = *FONT_ALPHA.add((glyph_base + gy * FONT_CELL_W + gx) as usize);
                     if (coverage != 0) {
                         let a = (((coverage as u32) * (opacity as u32)) / 255) as u8;
-                        gfx_fill_rect_alpha(x + gx * scale, y + gy * scale, scale, scale, color, a);
+                        raster_fill_rect_alpha(x + gx * scale, y + gy * scale, scale, scale, color, a);
                     }
                 }
             }
@@ -622,14 +661,14 @@ fn gfx_draw_char_atlas(x: u32, y: u32, ch: u8, color: u32,
                 if (row_bits != 0) {
                     for mut col in 0..8 {
                         if ((row_bits & (0x80 >> col)) != 0) {
-                            gfx_fill_rect_alpha(x + col * scale, y + row * scale, scale, scale, color, opacity);
+                            raster_fill_rect_alpha(x + col * scale, y + row * scale, scale, scale, color, opacity);
                         }
                     }
                 }
             }
         } else {
             // Caractere desconhecido / retangulo discreto
-            gfx_draw_glass_rect(x, y, 6 * scale, 8 * scale, 0x00000000, 0, color, 1);
+            raster_draw_glass_rect(x, y, 6 * scale, 8 * scale, 0x00000000, 0, color, 1);
         }
     }
 }
@@ -647,22 +686,22 @@ fn glyph_advance(ch: u8) -> u32 {
 
 // Desenha uma sombra suave gaussiana multicamada baseada em SDF
 @system
-pub fn gfx_draw_smooth_shadow(x: i32, y: i32, w: i32, h: i32, radius: i32, blur: i32, max_alpha: u8) -> void {
+pub fn raster_draw_smooth_shadow(x: i32, y: i32, w: i32, h: i32, radius: i32, blur: i32, max_alpha: u8) -> void {
     if (w <= 0 || h <= 0 || blur <= 0 || max_alpha == 0) { return; }
     let ux = if (x < 0) { 0 } else { x as u32 };
     let uy = if (y < 0) { 0 } else { y as u32 };
-    gfx_draw_drop_shadow(ux, uy, w as u32, h as u32, blur as u32, 0, 0, (max_alpha as f32) / 255.0);
+    raster_draw_drop_shadow(ux, uy, w as u32, h as u32, blur as u32, 0, 0, (max_alpha as f32) / 255.0);
 }
 
 // Desenha Textos usando renderizacao proporcional suavizada
 @system
-pub fn gfx_draw_text_proportional(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
-    gfx_draw_text(x, y, text_ptr, color);
+pub fn raster_draw_text_proportional(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
+    raster_draw_text(x, y, text_ptr, color);
 }
 
 // Desenha Textos usando decodificacao UTF-8 nativa para Portugues, Espanhol, Alemao, etc.
 @system
-pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
+pub fn raster_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
     if (text_ptr == (null as *const u8)) { return; }
     let mut px = x;
     let mut i = 0;
@@ -671,21 +710,35 @@ pub fn gfx_draw_text(x: u32, y: u32, text_ptr: *const u8, color: u32) -> void {
             let b0 = *text_ptr.add(i);
             if (b0 == 0xC3 && *text_ptr.add(i + 1) != 0) {
                 let b1 = *text_ptr.add(i + 1);
-                let glyph_code = 128 + (b1 & 0x3F);
-                gfx_draw_char_atlas(px, y, glyph_code, color, 255, 1);
+                let glyph_code = (b1 as u32) + 0x40;
+                raster_draw_char_atlas(px, y, glyph_code, color, 255, 1);
                 i += 2;
                 px += glyph_advance(glyph_code);
+            } else if (b0 == 0xC2 && *text_ptr.add(i + 1) != 0) {
+                let b1 = *text_ptr.add(i + 1);
+                let glyph_code = b1 as u32;
+                raster_draw_char_atlas(px, y, glyph_code, color, 255, 1);
+                i += 2;
+                px += glyph_advance(glyph_code);
+            } else if (b0 == 0xE2 && *text_ptr.add(i + 1) == 0x86 && *text_ptr.add(i + 2) == 0x92) {
+                raster_draw_char_atlas(px, y, 140, color, 255, 1);
+                i += 3;
+                px += glyph_advance(140);
+            } else if (b0 == 0xE2 && *text_ptr.add(i + 1) == 0x80 && *text_ptr.add(i + 2) == 0xA2) {
+                raster_draw_char_atlas(px, y, 141, color, 255, 1);
+                i += 3;
+                px += glyph_advance(141);
             } else {
-                gfx_draw_char_atlas(px, y, b0, color, 255, 1);
+                raster_draw_char_atlas(px, y, b0 as u32, color, 255, 1);
                 i += 1;
-                px += glyph_advance(b0);
+                px += glyph_advance(b0 as u32);
             }
         }
     }
 }
 
 @system
-pub fn gfx_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scale: u32, alpha: u8) -> void {
+pub fn raster_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scale: u32, alpha: u8) -> void {
     if (alpha == 0 || scale == 0 || text_ptr == (null as *const u8)) { return; }
     let mut px = x;
     let mut i = 0;
@@ -693,13 +746,28 @@ pub fn gfx_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scal
         while (*text_ptr.add(i) != 0) {
             let b0 = *text_ptr.add(i);
             if (b0 == 0xC3 && *text_ptr.add(i + 1) != 0) {
-                let glyph_code = 128 + (*text_ptr.add(i + 1) & 0x3F);
-                gfx_draw_char_atlas(px, y, glyph_code, color, alpha, scale);
+                let b1 = *text_ptr.add(i + 1);
+                let glyph_code = (b1 as u32) + 0x40;
+                raster_draw_char_atlas(px, y, glyph_code, color, alpha, scale);
                 px += glyph_advance(glyph_code) * scale;
                 i += 2;
+            } else if (b0 == 0xC2 && *text_ptr.add(i + 1) != 0) {
+                let b1 = *text_ptr.add(i + 1);
+                let glyph_code = b1 as u32;
+                raster_draw_char_atlas(px, y, glyph_code, color, alpha, scale);
+                px += glyph_advance(glyph_code) * scale;
+                i += 2;
+            } else if (b0 == 0xE2 && *text_ptr.add(i + 1) == 0x86 && *text_ptr.add(i + 2) == 0x92) {
+                raster_draw_char_atlas(px, y, 140, color, alpha, scale);
+                px += glyph_advance(140) * scale;
+                i += 3;
+            } else if (b0 == 0xE2 && *text_ptr.add(i + 1) == 0x80 && *text_ptr.add(i + 2) == 0xA2) {
+                raster_draw_char_atlas(px, y, 141, color, alpha, scale);
+                px += glyph_advance(141) * scale;
+                i += 3;
             } else {
-                gfx_draw_char_atlas(px, y, b0, color, alpha, scale);
-                px += glyph_advance(b0) * scale;
+                raster_draw_char_atlas(px, y, b0 as u32, color, alpha, scale);
+                px += glyph_advance(b0 as u32) * scale;
                 i += 1;
             }
         }
@@ -712,29 +780,78 @@ static mut PARALLAX_MOUSE_X: i32 = 960;
 static mut PARALLAX_MOUSE_Y: i32 = 540;
 
 @system
-pub fn gfx_set_cursor_parallax(mx: i32, my: i32) -> void {
+pub fn raster_set_cursor_parallax(mx: i32, my: i32) -> void {
     unsafe {
         PARALLAX_MOUSE_X = mx;
         PARALLAX_MOUSE_Y = my;
     }
 }
 
-// Papel de parede dinâmico em malha de 60 FPS com Parallax 3D e Dithering de Bayer.
-// O fundo é calculado uma vez com parâmetros e nos quadros seguintes uma cópia linear restaura o fundo ou interpolação rápida atualiza a atmosfera.
+static mut WALLPAPER_CACHED_VALID: u32 = 0;
+static mut WALLPAPER_LAST_PARALLAX_X: i32 = -9999;
+static mut WALLPAPER_LAST_PARALLAX_Y: i32 = -9999;
+static mut WALLPAPER_LAST_TICK: u32 = 999999;
+
 @system
-pub fn gfx_draw_mesh_wallpaper() -> void {
+pub fn anim_sine_smooth(phase_0_255: u32) -> i32 {
+    let p = phase_0_255 % 256;
+    if (p < 128) {
+        let t = (p * 255) / 128;
+        let s = (t * t * (3 * 255 - 2 * t)) / (255 * 255);
+        return ((s as i32) * 255) / 255 - 128;
+    } else {
+        let t = ((p - 128) * 255) / 128;
+        let s = (t * t * (3 * 255 - 2 * t)) / (255 * 255);
+        return 127 - ((s as i32) * 255) / 255;
+    }
+}
+
+// Papel de parede dinâmico em malha a 60 FPS com Parallax 3D, Dithering de Bayer e Cache de Linha Linear.
+// O fundo é calculado uma vez com parâmetros e nos quadros seguintes uma cópia linear restaura o fundo em < 1ms.
+@system
+pub fn raster_draw_mesh_wallpaper() -> void {
     unsafe {
-        WALLPAPER_CACHE_W = gfx_get_width();
-        WALLPAPER_CACHE_H = gfx_get_height();
+        let sw = display_get_width();
+        let sh = display_get_height();
+        let pitch = display_get_pitch();
+        let backbuf = display_get_backbuffer();
+        let cache_buf = display_get_wallpaper_storage();
+
+        WALLPAPER_CACHE_W = sw;
+        WALLPAPER_CACHE_H = sh;
         WALLPAPER_CACHE[0] = 0;
+
         DYNAMIC_TICK = (DYNAMIC_TICK + 1) % 3600;
-        gfx_draw_aurora_parallax_bg(0, 0, WALLPAPER_CACHE_W, WALLPAPER_CACHE_H, DYNAMIC_TICK);
+
+        let dx = if (PARALLAX_MOUSE_X > WALLPAPER_LAST_PARALLAX_X) { PARALLAX_MOUSE_X - WALLPAPER_LAST_PARALLAX_X } else { WALLPAPER_LAST_PARALLAX_X - PARALLAX_MOUSE_X };
+        let dy = if (PARALLAX_MOUSE_Y > WALLPAPER_LAST_PARALLAX_Y) { PARALLAX_MOUSE_Y - WALLPAPER_LAST_PARALLAX_Y } else { WALLPAPER_LAST_PARALLAX_Y - PARALLAX_MOUSE_Y };
+        let dtick = if (DYNAMIC_TICK >= WALLPAPER_LAST_TICK) { DYNAMIC_TICK - WALLPAPER_LAST_TICK } else { (DYNAMIC_TICK + 3600) - WALLPAPER_LAST_TICK };
+
+        // Se o cache é válido e a posição do parallax e a fase cósmica não mudaram bruscamente:
+        if (WALLPAPER_CACHED_VALID == 1 && dx < 2 && dy < 2 && dtick < 2 && cache_buf != (null as *mut u32) && backbuf != (null as *mut u32)) {
+            let total_bytes = (pitch * sh * 4) as usize;
+            baken_fast_memcpy(backbuf as *mut void, cache_buf as *const void, total_bytes);
+            return;
+        }
+
+        // Renderiza no buffer de cache dedicado e copia com transferência linear ultra-rápida
+        if (cache_buf != (null as *mut u32)) {
+            raster_draw_aurora_to_target(cache_buf, pitch, 0, 0, sw, sh, DYNAMIC_TICK);
+            WALLPAPER_CACHED_VALID = 1;
+            WALLPAPER_LAST_PARALLAX_X = PARALLAX_MOUSE_X;
+            WALLPAPER_LAST_PARALLAX_Y = PARALLAX_MOUSE_Y;
+            WALLPAPER_LAST_TICK = DYNAMIC_TICK;
+            let total_bytes = (pitch * sh * 4) as usize;
+            baken_fast_memcpy(backbuf as *mut void, cache_buf as *const void, total_bytes);
+        } else {
+            raster_draw_aurora_parallax_bg(0, 0, sw, sh, DYNAMIC_TICK);
+        }
     }
 }
 
 // Fundo Espacial Unificado com o Desktop para o Assistente de Instalacao
 @system
-pub fn gfx_sample_aurora_node(px: i32, py: i32, p1_x: i32, p1_y: i32, p2_x: i32, p2_y: i32, p3_x: i32, p3_y: i32) -> u32 {
+pub fn raster_sample_aurora_node(px: i32, py: i32, p1_x: i32, p1_y: i32, p2_x: i32, p2_y: i32, p3_x: i32, p3_y: i32) -> u32 {
     let dx1 = px - p1_x; let dy1 = py - p1_y;
     let dx2 = px - p2_x; let dy2 = py - p2_y;
     let dx3 = px - p3_x; let dy3 = py - p3_y;
@@ -755,22 +872,19 @@ pub fn gfx_sample_aurora_node(px: i32, py: i32, p1_x: i32, p1_y: i32, p2_x: i32,
 }
 
 @system
-pub fn gfx_draw_aurora_parallax_bg(x: u32, y: u32, w: u32, h: u32, tick: u32) -> void {
-    let sw = gfx_get_width();
-    let sh = gfx_get_height();
-    if (sw == 0 || sh == 0) { return; }
+pub fn raster_draw_aurora_to_target(target: *mut u32, pitch: u32, x: u32, y: u32, w: u32, h: u32, tick: u32) -> void {
+    let sw = display_get_width();
+    let sh = display_get_height();
+    if (sw == 0 || sh == 0 || target == (null as *mut u32)) { return; }
 
     unsafe {
-        let target = gfx_get_backbuffer();
-        let pitch = gfx_get_pitch();
-
         // Deslocamento de Parallax Físico 3D sutil na direção oposta ao mouse
         let px_off = (PARALLAX_MOUSE_X - (sw as i32 / 2)) / 45;
         let py_off = (PARALLAX_MOUSE_Y - (sh as i32 / 2)) / 45;
 
-        // Fase senoidal da atmosfera cósmica viva (período de 120 frames para transição lenta de veludo)
+        // Fase senoidal suave contínua da atmosfera cósmica viva (período de 120 frames)
         let t_phase = ((tick % 120) * 255) / 120;
-        let wave_sine = if (t_phase < 128) { (t_phase as i32) - 64 } else { 192 - (t_phase as i32) };
+        let wave_sine = anim_sine_smooth(t_phase);
 
         // Posição dos 3 polos de luz móveis
         let p1_x = ((sw as i32 * 15) / 100) - px_off + (wave_sine / 4);
@@ -796,10 +910,10 @@ pub fn gfx_draw_aurora_parallax_bg(x: u32, y: u32, w: u32, h: u32, tick: u32) ->
             while (bx < x + w) {
                 let bw = if (bx + 16 <= x + w) { 16 } else { (x + w) - bx };
 
-                let c00 = gfx_sample_aurora_node(bx as i32, by as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
-                let c10 = gfx_sample_aurora_node((bx + bw) as i32, by as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
-                let c01 = gfx_sample_aurora_node(bx as i32, (by + bh) as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
-                let c11 = gfx_sample_aurora_node((bx + bw) as i32, (by + bh) as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c00 = raster_sample_aurora_node(bx as i32, by as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c10 = raster_sample_aurora_node((bx + bw) as i32, by as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c01 = raster_sample_aurora_node(bx as i32, (by + bh) as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c11 = raster_sample_aurora_node((bx + bw) as i32, (by + bh) as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
 
                 let r00 = (c00 >> 16) & 0xFF; let g00 = (c00 >> 8) & 0xFF; let b00 = c00 & 0xFF;
                 let r10 = (c10 >> 16) & 0xFF; let g10 = (c10 >> 8) & 0xFF; let b10 = c10 & 0xFF;
@@ -845,116 +959,95 @@ pub fn gfx_draw_aurora_parallax_bg(x: u32, y: u32, w: u32, h: u32, tick: u32) ->
     }
 }
 
-// Renderiza Icones Vetoriais em Alta Definição (HD) para a Dock
 @system
-pub fn gfx_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
+pub fn raster_draw_aurora_parallax_bg(x: u32, y: u32, w: u32, h: u32, tick: u32) -> void {
+    unsafe {
+        raster_draw_aurora_to_target(display_get_backbuffer(), display_get_pitch(), x, y, w, h, tick);
+    }
+}
+
+// Renderiza Icones Vetoriais em Alta Definição (HD) para a Dock usando Atlas de Ionicons Reais
+@system
+pub fn raster_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
     let id = app_id % 6;
     let isz: u32 = if (size > 8) { size - 8 } else { 38 };
     let pad = (size - isz) / 2;
     let ox = x + pad;
     let oy = y + pad;
 
+    let mut bg_col: u32 = 0x000284C7;
+    let mut border_col: u32 = 0x0038BDF8;
+    let mut atlas_id: u32 = 0;
+
     if (id == 0) {
-        // App 0: Arquivos (Pasta BakenFS Fluent em Alta Definição)
-        // Corpo traseiro da pasta
-        gfx_draw_glass_rect_material(ox + 1, oy + 5, isz - 2, isz - 7, 0x000284C7, 245, 0x000369A1, 9);
-        // Aba superior traseira
-        gfx_draw_glass_rect_material(ox + 3, oy + 2, (isz * 45) / 100, 10, 0x000369A1, 255, 0x0038BDF8, 4);
-        // Folha de documento branca interna com linhas de texto
-        let doc_w = (isz * 55) / 100;
-        let doc_h = (isz * 45) / 100;
-        gfx_fill_rect_alpha(ox + 10, oy + 6, doc_w, doc_h, 0x00FFFFFF, 235);
-        gfx_fill_rect_alpha(ox + 13, oy + 10, doc_w - 6, 2, 0x0094A3B8, 255);
-        gfx_fill_rect_alpha(ox + 13, oy + 14, doc_w - 10, 2, 0x0094A3B8, 255);
-        gfx_fill_rect_alpha(ox + 13, oy + 18, doc_w - 8, 2, 0x0038BDF8, 255);
-        // Bolso frontal iluminado com gradiente azul safira
-        gfx_draw_glass_rect_material(ox + 1, oy + 12, isz - 2, isz - 14, 0x0038BDF8, 250, 0x00BAE6FD, 8);
-        gfx_fill_rect_alpha(ox + 4, oy + 13, isz - 8, 1, 0x00FFFFFF, 130);
+        // App 0: Arquivos (BakenFS) - Ionicons Folder
+        bg_col = 0x000284C7;
+        border_col = 0x0038BDF8;
+        atlas_id = 0;
     } else if (id == 1) {
-        // App 1: Notas (Prancheta moderna em Alta Definição com presilha metálica)
-        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00F59E0B, 245, 0x00B45309, 8);
-        // Folha branca acetinada interna
-        gfx_draw_glass_rect_material(ox + 5, oy + 6, isz - 10, isz - 11, 0x00F8FAFC, 255, 0x00CBD5E1, 5);
-        // Presilha prateada no topo
-        gfx_draw_glass_rect_material(ox + isz / 2 - 8, oy + 1, 16, 6, 0x00E2E8F0, 255, 0x0064748B, 2);
-        // Marcador amarelo de cabeçalho
-        gfx_fill_rect_alpha(ox + 9, oy + 12, (isz * 45) / 100, 3, 0x00F59E0B, 255);
-        // Linhas de código e notas
-        gfx_fill_rect_alpha(ox + 9, oy + 18, isz - 18, 2, 0x00334155, 230);
-        gfx_fill_rect_alpha(ox + 9, oy + 23, isz - 22, 2, 0x00334155, 230);
-        gfx_fill_rect_alpha(ox + 9, oy + 28, (isz * 35) / 100, 2, 0x0038BDF8, 255);
+        // App 1: Notas (BakenNotes) - Ionicons Document
+        bg_col = 0x00D97706;
+        border_col = 0x00FCD34D;
+        atlas_id = 6;
     } else if (id == 2) {
-        // App 2: Central de Ajustes (Painel índigo com sliders de alumínio polido)
-        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x004F46E5, 245, 0x00818CF8, 8);
-        gfx_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 100);
-        // Trilhos horizontais
-        let track_w = isz - 14;
-        let t1_y = oy + (isz * 32) / 100;
-        let t2_y = oy + (isz * 64) / 100;
-        gfx_draw_glass_rect_material(ox + 7, t1_y, track_w, 5, 0x001E1B4B, 255, 0x00312E81, 2);
-        gfx_draw_glass_rect_material(ox + 7, t2_y, track_w, 5, 0x001E1B4B, 255, 0x00312E81, 2);
-        // Knobs circulares 3D
-        let k1_x = ox + 7 + (track_w * 35) / 100;
-        let k2_x = ox + 7 + (track_w * 70) / 100;
-        gfx_draw_circle_alpha(k1_x, t1_y + 2, 6, 0x00FFFFFF, 255);
-        gfx_draw_circle_alpha(k1_x, t1_y + 2, 3, 0x0000E5FF, 255);
-        gfx_draw_circle_alpha(k2_x, t2_y + 2, 6, 0x00FFFFFF, 255);
-        gfx_draw_circle_alpha(k2_x, t2_y + 2, 3, 0x0000E5FF, 255);
+        // App 2: Central de Controle - Ionicons Settings
+        bg_col = 0x004F46E5;
+        border_col = 0x00818CF8;
+        atlas_id = 10;
     } else if (id == 3) {
-        // App 3: BakenTerminal (Janela Obsidian Glass com 3 bolinhas e prompt neon esmeralda)
-        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00080E1A, 250, 0x0010B981, 8);
-        gfx_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 80);
-        // Barra de título da mini janela
-        gfx_fill_rect_alpha(ox + 3, oy + 3, isz - 6, 8, 0x00162032, 255);
-        gfx_draw_circle_alpha(ox + 8, oy + 7, 2, 0x00EF4444, 255);
-        gfx_draw_circle_alpha(ox + 14, oy + 7, 2, 0x00F59E0B, 255);
-        gfx_draw_circle_alpha(ox + 20, oy + 7, 2, 0x0010B981, 255);
-        // Prompt neon verde esmeralda ">_" nítido
-        let p_y = oy + (isz / 2) + 1;
-        let p_x = ox + 9;
-        gfx_put_pixel_alpha(p_x, p_y, 0x0010B981, 255);
-        gfx_put_pixel_alpha(p_x + 1, p_y + 1, 0x0010B981, 255);
-        gfx_put_pixel_alpha(p_x + 2, p_y + 2, 0x0010B981, 255);
-        gfx_put_pixel_alpha(p_x + 3, p_y + 3, 0x0010B981, 255);
-        gfx_put_pixel_alpha(p_x + 2, p_y + 4, 0x0010B981, 255);
-        gfx_put_pixel_alpha(p_x + 1, p_y + 5, 0x0010B981, 255);
-        gfx_put_pixel_alpha(p_x, p_y + 6, 0x0010B981, 255);
-        // Cursor '_'
-        gfx_fill_rect_alpha(p_x + 6, p_y + 5, 8, 2, 0x0010B981, 255);
+        // App 3: Terminal - Ionicons Terminal
+        bg_col = 0x000F172A;
+        border_col = 0x0010B981;
+        atlas_id = 9;
     } else if (id == 4) {
-        // App 4: Sobre o Baken OS (Emblema Vortex 3D de alta fidelidade)
-        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00070B14, 245, 0x0038BDF8, 8);
-        gfx_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 90);
-        let cx = ox + isz / 2;
-        let cy = oy + isz / 2;
-        let r_max = (isz / 2) - 5;
-        gfx_draw_circle_alpha(cx, cy, r_max, 0x000284C7, 180);
-        gfx_draw_circle_alpha(cx, cy, (r_max * 75) / 100, 0x0000E5FF, 230);
-        gfx_draw_circle_alpha(cx, cy, (r_max * 50) / 100, 0x00070B14, 255);
-        gfx_draw_circle_alpha(cx, cy, (r_max * 28) / 100, 0x00FFFFFF, 255);
+        // App 4: Sobre o Baken OS - Ionicons Vortex / System
+        bg_col = 0x007C3AED;
+        border_col = 0x00C084FC;
+        atlas_id = 15;
     } else {
-        // App 5: Assistente de Instalação (Disco de Sistema com anéis de luz)
-        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00064E3B, 245, 0x0034D399, 8);
-        let cx = ox + isz / 2;
-        let cy = oy + isz / 2;
-        gfx_draw_circle_alpha(cx, cy, (isz / 2) - 6, 0x0010B981, 220);
-        gfx_draw_circle_alpha(cx, cy, (isz / 2) - 11, 0x00064E3B, 255);
-        gfx_draw_circle_alpha(cx, cy, 3, 0x00FFFFFF, 255);
+        // App 5: Assistente de Instalação - Ionicons Package / Install
+        bg_col = 0x00064E3B;
+        border_col = 0x0034D399;
+        atlas_id = 8;
+    }
+
+    // Fundo Squircle Fluent com Vidro Acrílico e Borda Especular
+    raster_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, bg_col, 240, border_col, 8);
+    raster_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 80);
+
+    // Renderização do glifo vetorial real do Atlas Ionicons em 32x32
+    unsafe {
+        let alpha_map = baken_get_app_icon_alpha(atlas_id, 32);
+        if (alpha_map != (null as *const u8)) {
+            let icon_ox = ox + (if (isz > 32) { (isz - 32) / 2 } else { 0 });
+            let icon_oy = oy + (if (isz > 32) { (isz - 32) / 2 } else { 0 });
+            for mut gy in 0..32 {
+                for mut gx in 0..32 {
+                    let cov = *alpha_map.add((gy * 32 + gx) as usize);
+                    if (cov > 8) {
+                        // Sombra sutil de profundidade
+                        raster_put_pixel_alpha(icon_ox + gx, icon_oy + gy + 1, 0x00000000, cov / 4);
+                        // Glifo nítido com branco especular
+                        raster_put_pixel_alpha(icon_ox + gx, icon_oy + gy, 0x00FFFFFF, cov);
+                    }
+                }
+            }
+        }
     }
 }
 
 @system
-pub fn gfx_draw_app_icon(x: u32, y: u32, size: u32, app_id: u32) -> void {
-    gfx_draw_app_icon_hd(x, y, size, app_id);
+pub fn raster_draw_app_icon(x: u32, y: u32, size: u32, app_id: u32) -> void {
+    raster_draw_app_icon_hd(x, y, size, app_id);
 }
 
 @system
-pub fn gfx_draw_glass_rect_material(x: u32, y: u32, w: u32, h: u32, bg: u32, a: u8, border: u32, radius: u32) -> void {
-    gfx_draw_glass_rect(x, y, w, h, bg, a, border, radius);
+pub fn raster_draw_glass_rect_material(x: u32, y: u32, w: u32, h: u32, bg: u32, a: u8, border: u32, radius: u32) -> void {
+    raster_draw_glass_rect(x, y, w, h, bg, a, border, radius);
 }
 
 @system
-pub fn gfx_measure_text(str: *const u8) -> u32 {
+pub fn raster_measure_text(str: *const u8) -> u32 {
     if (str == (null as *const u8)) { return 0; }
     let mut width: u32 = 0;
     let mut i: usize = 0;
@@ -962,10 +1055,22 @@ pub fn gfx_measure_text(str: *const u8) -> u32 {
         while (*str.add(i) != 0) {
             let b0 = *str.add(i);
             if (b0 == 0xC3 && *str.add(i + 1) != 0) {
-                width += glyph_advance(128 + (*str.add(i + 1) & 0x3F));
+                let b1 = *str.add(i + 1);
+                let glyph_code = (b1 as u32) + 0x40;
+                width += glyph_advance(glyph_code);
                 i += 2;
+            } else if (b0 == 0xC2 && *str.add(i + 1) != 0) {
+                let b1 = *str.add(i + 1);
+                width += glyph_advance(b1 as u32);
+                i += 2;
+            } else if (b0 == 0xE2 && *str.add(i + 1) == 0x86 && *str.add(i + 2) == 0x92) {
+                width += glyph_advance(140);
+                i += 3;
+            } else if (b0 == 0xE2 && *str.add(i + 1) == 0x80 && *str.add(i + 2) == 0xA2) {
+                width += glyph_advance(141);
+                i += 3;
             } else {
-                width += glyph_advance(b0);
+                width += glyph_advance(b0 as u32);
                 i += 1;
             }
         }
@@ -974,11 +1079,11 @@ pub fn gfx_measure_text(str: *const u8) -> u32 {
 }
 
 @system
-pub fn gfx_measure_title_text(str: *const u8) -> u32 {
+pub fn raster_measure_title_text(str: *const u8) -> u32 {
     if (str == (null as *const u8)) { return 0; }
     unsafe {
         if (TITLE_FONT_ALPHA == (null as *const u8) || TITLE_FONT_CELL_W == 0) {
-            return gfx_measure_text(str) * 2;
+            return raster_measure_text(str) * 2;
         }
         let mut width: u32 = 0;
         let mut i: usize = 0;
@@ -998,12 +1103,12 @@ pub fn gfx_measure_title_text(str: *const u8) -> u32 {
 
 // Renderiza títulos em Alta Resolução Nativa (32px) com antialiasing subpixel suave
 @system
-pub fn gfx_draw_title_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, alpha: u8) -> void {
+pub fn raster_draw_title_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, alpha: u8) -> void {
     if (alpha == 0 || text_ptr == (null as *const u8)) { return; }
     unsafe {
         if (TITLE_FONT_ALPHA == (null as *const u8) || TITLE_FONT_CELL_W == 0 || TITLE_FONT_CELL_H == 0) {
             // Fallback para escala 2 se o atlas de título não estiver vinculado
-            gfx_draw_text_alpha(x, y, text_ptr, color, 2, alpha);
+            raster_draw_text_alpha(x, y, text_ptr, color, 2, alpha);
             return;
         }
 
@@ -1017,7 +1122,7 @@ pub fn gfx_draw_title_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32
                     let coverage = *TITLE_FONT_ALPHA.add((glyph_base + gy * TITLE_FONT_CELL_W + gx) as usize);
                     if (coverage != 0) {
                         let a = (((coverage as u32) * (alpha as u32)) / 255) as u8;
-                        gfx_put_pixel_alpha(px + gx, y + gy, color, a);
+                        raster_put_pixel_alpha(px + gx, y + gy, color, a);
                     }
                 }
             }
@@ -1034,6 +1139,9 @@ pub fn gfx_draw_title_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32
 }
 
 @system
-pub fn gfx_measure_text_role(str: *const u8, role: u32) -> u32 {
-    return gfx_measure_text(str);
+pub fn raster_measure_text_role(str: *const u8, role: u32) -> u32 {
+    return raster_measure_text(str);
 }
+
+@system pub fn raster_draw_squircle(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void { raster_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius); }
+

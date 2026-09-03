@@ -58,15 +58,15 @@ class SotlasResolverTests(unittest.TestCase):
         # garante que todas as unidades reais chegam a objetos.
         result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas")
         self.assertIn("compiled_objects", result)
-        self.assertEqual(len(result["compiled_objects"]), 20)
-        self.assertEqual(len(result["generated_sources"]), 19)
-        self.assertEqual(len(result["generated_headers"]), 19)
+        self.assertEqual(len(result["compiled_objects"]), 22)
+        self.assertEqual(len(result["generated_sources"]), 21)
+        self.assertEqual(len(result["generated_headers"]), 21)
         self.assertTrue(all(Path(path).is_file() for path in result["generated_headers"]))
-        self.assertEqual(len(result["generated_interfaces"]), 19)
+        self.assertEqual(len(result["generated_interfaces"]), 21)
         main_interface = next(Path(path) for path in result["generated_interfaces"] if path.endswith("kernel__main.soti.json"))
         self.assertEqual(json.loads(main_interface.read_text(encoding="utf-8"))["module"], "kernel::main")
         graphics_c = next(Path(path) for path in result["generated_sources"] if path.endswith("kernel__graphics_engine.c"))
-        self.assertIn("void gfx_init", graphics_c.read_text(encoding="utf-8"))
+        self.assertIn("void display_init", graphics_c.read_text(encoding="utf-8"))
         self.assertNotIn("bridge_runtime", result)
 
     def test_self_import_is_reported(self):

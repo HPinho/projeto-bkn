@@ -79,32 +79,32 @@ pub fn baken_oobe_init() -> void {
 
 @inline
 fn draw_specular_box(x: u32, y: u32, w: u32, h: u32, bg: u32, a: u8, brd: u32, rad: u32) -> void {
-    gfx_draw_glass_rect(x, y, w, h, bg, a, brd, rad);
+    raster_draw_glass_rect(x, y, w, h, bg, a, brd, rad);
     if (w > 20 && h > 10) {
-        gfx_fill_rect_alpha(x + rad / 2, y + 1, w - rad, 1, 0x00FFFFFF, 75);
-        gfx_fill_rect_alpha(x + rad / 2, y + h - 2, w - rad, 1, 0x00000000, 45);
+        raster_fill_rect_alpha(x + rad / 2, y + 1, w - rad, 1, 0x00FFFFFF, 75);
+        raster_fill_rect_alpha(x + rad / 2, y + h - 2, w - rad, 1, 0x00000000, 45);
     }
 }
 
 @system
 fn btn(x: u32, y: u32, w: u32, s: *const u8, p: u8) -> void {
     draw_specular_box(x, y, w, 42, if (p == 1) { 0x000284C7 } else { CARD2 }, 245, if (p == 1) { BLUE } else { LINE }, 12);
-    let tw = gfx_measure_text(s);
-    gfx_draw_text_alpha(x + (w - tw) / 2, y + 13, s, TEXT, 1, 255);
+    let tw = raster_measure_text(s);
+    raster_draw_text_alpha(x + (w - tw) / 2, y + 13, s, TEXT, 1, 255);
 }
 
 @system
 fn option(x: u32, y: u32, w: u32, a: *const u8, b: *const u8, on: u8) -> void {
     draw_specular_box(x, y, w, 58, if (on == 1) { 0x00132338 } else { CARD2 }, 235, if (on == 1) { BLUE } else { LINE }, 11);
-    gfx_draw_text_alpha(x + 16, y + 10, a, TEXT, 1, 255);
-    gfx_draw_text_alpha(x + 16, y + 32, b, MUTED, 1, 230);
-    gfx_draw_circle_alpha(x + w - 22, y + 20, 6, if (on == 1) { BLUE } else { LINE }, 255);
+    raster_draw_text_alpha(x + 16, y + 10, a, TEXT, 1, 255);
+    raster_draw_text_alpha(x + 16, y + 32, b, MUTED, 1, 230);
+    raster_draw_circle_alpha(x + w - 22, y + 20, 6, if (on == 1) { BLUE } else { LINE }, 255);
 }
 
 @system
 fn toggle(x: u32, y: u32, on: u8) -> void {
-    gfx_draw_glass_rect(x, y, 42, 22, if (on == 1) { GREEN } else { LINE }, 255, LINE, 11);
-    gfx_draw_circle_alpha(if (on == 1) { x + 31 } else { x + 11 }, y + 11, 8, TEXT, 255);
+    raster_draw_glass_rect(x, y, 42, 22, if (on == 1) { GREEN } else { LINE }, 255, LINE, 11);
+    raster_draw_circle_alpha(if (on == 1) { x + 31 } else { x + 11 }, y + 11, 8, TEXT, 255);
 }
 
 @inline
@@ -121,15 +121,15 @@ fn get_bounds_cw(w: u32) -> u32 {
 
 @system
 fn frame(x: u32, y: u32, w: u32, h: u32) -> void {
-    gfx_draw_aurora_parallax_bg(x, y, w, h, unsafe { O.tick });
+    raster_draw_aurora_parallax_bg(x, y, w, h, unsafe { O.tick });
     let q = if (w > 760) { 680 } else { w - 32 };
     let px = x + (w - q) / 2;
     draw_specular_box(px, y + 18, q, h - 36, CARD, 232, LINE, 20);
-    gfx_draw_baken_logo(px + 24, y + 32, 28, 255);
-    gfx_draw_text_alpha(px + 60, y + 38, "BAKEN OS".as_ptr(), TEXT, 1, 255);
+    raster_draw_baken_logo(px + 24, y + 32, 28, 255);
+    raster_draw_text_alpha(px + 60, y + 38, "BAKEN OS".as_ptr(), TEXT, 1, 255);
     let s = unsafe { O.step };
     for mut i in 0..6 {
-        gfx_draw_circle_alpha(px + q - 104 + (i as u32 * 16), y + 44, 4, if (i as u32 <= s) { BLUE } else { LINE }, 255);
+        raster_draw_circle_alpha(px + q - 104 + (i as u32 * 16), y + 44, 4, if (i as u32 <= s) { BLUE } else { LINE }, 255);
     }
 }
 
@@ -141,7 +141,7 @@ pub fn baken_oobe_render(x: u32, y: u32, w: u32, h: u32) -> void {
     }
     frame(x, y, w, h);
 
-    let prog = gfx_smoothstep_u8(unsafe { O.transition_tick }, 24) as u32;
+    let prog = raster_smoothstep_u8(unsafe { O.transition_tick }, 24) as u32;
     let slide_ox = if (unsafe { O.transition_tick } < 24) {
         unsafe { O.transition_direction } * (((255 - prog as i32) * 32) / 255)
     } else {
@@ -163,8 +163,8 @@ fn region(x: u32, y: u32, w: u32, h: u32) -> void {
     let cx = get_bounds_cx(x, w);
     let cw = get_bounds_cw(w);
     let t = y + 82;
-    gfx_draw_text_alpha(cx, t, "Boas-vindas ao Baken OS".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx, t + 26, "Confirme sua regiao e o layout do teclado.".as_ptr(), MUTED, 1, 235);
+    raster_draw_text_alpha(cx, t, "Boas-vindas ao Baken OS".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx, t + 26, "Confirme sua regiao e o layout do teclado.".as_ptr(), MUTED, 1, 235);
     option(cx, t + 68, cw, "Brasil".as_ptr(), "Portugues (Brasil) / ABNT2".as_ptr(), 1);
     option(cx, t + 134, cw, "Estados Unidos".as_ptr(), "English / US International".as_ptr(), 0);
     option(cx, t + 200, cw, "America Latina".as_ptr(), "Espanol / Latinoamericano".as_ptr(), 0);
@@ -176,11 +176,11 @@ fn network(x: u32, y: u32, w: u32, h: u32) -> void {
     let cx = get_bounds_cx(x, w);
     let cw = get_bounds_cw(w);
     let t = y + 82;
-    gfx_draw_text_alpha(cx, t, "Conecte-se quando quiser".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx, t + 26, "A configuracao offline continua disponivel.".as_ptr(), MUTED, 1, 235);
+    raster_draw_text_alpha(cx, t, "Conecte-se quando quiser".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx, t + 26, "A configuracao offline continua disponivel.".as_ptr(), MUTED, 1, 235);
     option(cx, t + 70, cw, "BakenNet-5G".as_ptr(), "Sinal excelente / WPA3 Seguro".as_ptr(), 1);
     option(cx, t + 138, cw, "Rede residencial".as_ptr(), "Sinal bom / WPA2".as_ptr(), 0);
-    gfx_draw_text_alpha(cx, t + 218, "Configurar offline (Zero Conexao Externa)".as_ptr(), BLUE, 1, 245);
+    raster_draw_text_alpha(cx, t + 218, "Configurar offline (Zero Conexao Externa)".as_ptr(), BLUE, 1, 245);
     btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
     btn(cx + cw - 150, y + h - 78, 150, "Conectar  >".as_ptr(), 1);
 }
@@ -190,21 +190,21 @@ fn profile(x: u32, y: u32, w: u32, h: u32) -> void {
     let cx = get_bounds_cx(x, w);
     let cw = get_bounds_cw(w);
     let t = y + 82;
-    gfx_draw_text_alpha(cx, t, "Criacao de Conta e Perfil Local".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx, t + 26, "Crie um perfil local protegido. BakenID e opcional.".as_ptr(), MUTED, 1, 235);
+    raster_draw_text_alpha(cx, t, "Criacao de Conta e Perfil Local".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx, t + 26, "Crie um perfil local protegido. BakenID e opcional.".as_ptr(), MUTED, 1, 235);
     
     // Avatar Picker Preview
-    gfx_draw_circle_alpha(cx + 32, t + 82, 22, 0x000284C7, 240);
-    gfx_draw_circle_alpha(cx + 32, t + 82, 10, 0x0000E5FF, 255);
-    gfx_draw_text_alpha(cx + 68, t + 72, "Avatar: Aurora Cosmos (Personalizavel)".as_ptr(), BLUE, 1, 245);
+    raster_draw_circle_alpha(cx + 32, t + 82, 22, 0x000284C7, 240);
+    raster_draw_circle_alpha(cx + 32, t + 82, 10, 0x0000E5FF, 255);
+    raster_draw_text_alpha(cx + 68, t + 72, "Avatar: Aurora Cosmos (Personalizavel)".as_ptr(), BLUE, 1, 245);
 
-    gfx_draw_text_alpha(cx, t + 116, "Nome de exibicao".as_ptr(), MUTED, 1, 230);
+    raster_draw_text_alpha(cx, t + 116, "Nome de exibicao".as_ptr(), MUTED, 1, 230);
     draw_specular_box(cx, t + 138, cw, 38, CARD2, 240, BLUE, 8);
-    gfx_draw_text_alpha(cx + 14, t + 148, "Usuario Baken".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx + 14, t + 148, "Usuario Baken".as_ptr(), TEXT, 1, 255);
     
-    gfx_draw_text_alpha(cx, t + 188, "Senha do dispositivo / PIN".as_ptr(), MUTED, 1, 230);
+    raster_draw_text_alpha(cx, t + 188, "Senha do dispositivo / PIN".as_ptr(), MUTED, 1, 230);
     draw_specular_box(cx, t + 210, cw, 38, CARD2, 240, LINE, 8);
-    gfx_draw_text_alpha(cx + 14, t + 220, "••••••••".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx + 14, t + 220, "••••••••".as_ptr(), TEXT, 1, 255);
     
     btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
     btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
@@ -215,15 +215,15 @@ fn privacy(x: u32, y: u32, w: u32, h: u32) -> void {
     let cx = get_bounds_cx(x, w);
     let cw = get_bounds_cw(w);
     let t = y + 78;
-    gfx_draw_text_alpha(cx, t, "Privacidade Total por Padrao".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx, t + 26, "Tudo comeca desligado. Voce tem controle absoluto.".as_ptr(), MUTED, 1, 235);
+    raster_draw_text_alpha(cx, t, "Privacidade Total por Padrao".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx, t + 26, "Tudo comeca desligado. Voce tem controle absoluto.".as_ptr(), MUTED, 1, 235);
     draw_specular_box(cx, t + 70, cw, 66, CARD2, 235, LINE, 11);
-    gfx_draw_text_alpha(cx + 16, t + 82, "Diagnostico anonimo".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx + 16, t + 106, "Encontra falhas sem coletar dados pessoais".as_ptr(), MUTED, 1, 225);
+    raster_draw_text_alpha(cx + 16, t + 82, "Diagnostico anonimo".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx + 16, t + 106, "Encontra falhas sem coletar dados pessoais".as_ptr(), MUTED, 1, 225);
     toggle(cx + cw - 58, t + 90, unsafe { O.diagnostics });
     draw_specular_box(cx, t + 144, cw, 66, CARD2, 235, LINE, 11);
-    gfx_draw_text_alpha(cx + 16, t + 156, "Servicos de localizacao".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx + 16, t + 180, "Permissao individual por aplicativo".as_ptr(), MUTED, 1, 225);
+    raster_draw_text_alpha(cx + 16, t + 156, "Servicos de localizacao".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx + 16, t + 180, "Permissao individual por aplicativo".as_ptr(), MUTED, 1, 225);
     toggle(cx + cw - 58, t + 164, unsafe { O.location });
     btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
     btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
@@ -234,8 +234,8 @@ fn style(x: u32, y: u32, w: u32, h: u32) -> void {
     let cx = get_bounds_cx(x, w);
     let cw = get_bounds_cw(w);
     let t = y + 78;
-    gfx_draw_text_alpha(cx, t, "Escolha a Atmosfera Visual".as_ptr(), TEXT, 1, 255);
-    gfx_draw_text_alpha(cx, t + 26, "A aparencia pode ser alterada a qualquer momento nos Ajustes.".as_ptr(), MUTED, 1, 235);
+    raster_draw_text_alpha(cx, t, "Escolha a Atmosfera Visual".as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx, t + 26, "A aparencia pode ser alterada a qualquer momento nos Ajustes.".as_ptr(), MUTED, 1, 235);
     let gap: u32 = 12;
     let tile = (cw - gap * 2) / 3;
     let names = ["Aurora Glass".as_ptr(), "Mica Claro".as_ptr(), "Cyber Neon".as_ptr()];
@@ -246,14 +246,14 @@ fn style(x: u32, y: u32, w: u32, h: u32) -> void {
         let mock_y = t + 84;
         let mock_w = tile - 20;
         let mock_x = tx + 10;
-        gfx_fill_rect_alpha(mock_x, mock_y, mock_w, 48, if (i == 0) { 0x000F172A } else if (i == 1) { 0x00E2E8F0 } else { 0x00050505 }, 255);
+        raster_fill_rect_alpha(mock_x, mock_y, mock_w, 48, if (i == 0) { 0x000F172A } else if (i == 1) { 0x00E2E8F0 } else { 0x00050505 }, 255);
         // Mock Topbar
-        gfx_fill_rect_alpha(mock_x, mock_y, mock_w, 5, if (i == 1) { 0x00CBD5E1 } else { 0x001E293B }, 255);
+        raster_fill_rect_alpha(mock_x, mock_y, mock_w, 5, if (i == 1) { 0x00CBD5E1 } else { 0x001E293B }, 255);
         // Mock Dock
         let dk_w = mock_w * 60 / 100;
-        gfx_fill_rect_alpha(mock_x + (mock_w - dk_w) / 2, mock_y + 40, dk_w, 4, if (i == 0) { 0x0000E5FF } else { 0x0038BDF8 }, 255);
+        raster_fill_rect_alpha(mock_x + (mock_w - dk_w) / 2, mock_y + 40, dk_w, 4, if (i == 0) { 0x0000E5FF } else { 0x0038BDF8 }, 255);
 
-        gfx_draw_text_alpha(tx + 12, t + 168, names[i], TEXT, 1, 245);
+        raster_draw_text_alpha(tx + 12, t + 168, names[i], TEXT, 1, 245);
     }
     btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
     btn(cx + cw - 150, y + h - 78, 150, "Continuar  >".as_ptr(), 1);
@@ -266,14 +266,14 @@ fn ready(x: u32, y: u32, w: u32, h: u32) -> void {
     let t = y + 108;
     let pulse_phase = unsafe { O.tick } % 120;
     let pulse_leg = if (pulse_phase < 60) { pulse_phase } else { 120 - pulse_phase };
-    let p = 34 + ((gfx_smoothstep_u8(pulse_leg, 60) as u32 * 3) / 255);
-    gfx_draw_circle_alpha(cx + cw / 2, t + 48, p + 16, VIOLET, 28);
-    gfx_draw_circle_alpha(cx + cw / 2, t + 48, p, BLUE, 210);
-    gfx_draw_circle_alpha(cx + cw / 2, t + 48, p / 3, BG, 255);
+    let p = 34 + ((raster_smoothstep_u8(pulse_leg, 60) as u32 * 3) / 255);
+    raster_draw_circle_alpha(cx + cw / 2, t + 48, p + 16, VIOLET, 28);
+    raster_draw_circle_alpha(cx + cw / 2, t + 48, p, BLUE, 210);
+    raster_draw_circle_alpha(cx + cw / 2, t + 48, p / 3, BG, 255);
     let a = "Pronto para Explorar!";
-    gfx_draw_text_alpha(cx + (cw - gfx_measure_text(a.as_ptr())) / 2, t + 112, a.as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx + (cw - raster_measure_text(a.as_ptr())) / 2, t + 112, a.as_ptr(), TEXT, 1, 255);
     let b = "Seu ambiente Baken OS foi configurado com sucesso.";
-    gfx_draw_text_alpha(cx + (cw - gfx_measure_text(b.as_ptr())) / 2, t + 140, b.as_ptr(), MUTED, 1, 235);
+    raster_draw_text_alpha(cx + (cw - raster_measure_text(b.as_ptr())) / 2, t + 140, b.as_ptr(), MUTED, 1, 235);
     btn(cx + (cw - 220) / 2, t + 192, 220, "Abrir meu Baken OS >".as_ptr(), 1);
 }
 
