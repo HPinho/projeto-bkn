@@ -5,6 +5,7 @@ import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::bakenfx::*;
 import kernel::sotlas_graphics::*;
+import kernel::baken_materials::*;
 
 const REGION: u32 = 0;
 const NETWORK: u32 = 1;
@@ -90,9 +91,7 @@ fn draw_specular_box(x: u32, y: u32, w: u32, h: u32, bg: u32, a: u8, brd: u32, r
 
 @system
 fn btn(x: u32, y: u32, w: u32, s: *const u8, p: u8) -> void {
-    draw_specular_box(x, y, w, 42, if (p == 1) { 0x000284C7 } else { CARD2 }, 245, if (p == 1) { BLUE } else { LINE }, 12);
-    let tw = raster_measure_text(s);
-    raster_draw_text_alpha(x + (w - tw) / 2, y + 13, s, TEXT, 1, 255);
+    material_draw_macos_button(x, y, w, 42, s, p == 1, true);
 }
 
 @system
@@ -125,9 +124,9 @@ fn get_bounds_cw(w: u32) -> u32 {
 fn frame(x: u32, y: u32, w: u32, h: u32) -> void {
     let q = if (w > 760) { 680 } else { w - 32 };
     let px = x + (w - q) / 2;
-    draw_specular_box(px, y + 18, q, h - 36, CARD, 232, LINE, 20);
-    raster_draw_baken_logo(px + 24, y + 32, 28, 255);
-    raster_draw_text_alpha(px + 60, y + 38, "BAKEN OS".as_ptr(), TEXT, 1, 255);
+    material_draw_macos_card(px, y + 18, q, h - 36, 20, true);
+    raster_draw_baken_logo(px + 76, y + 32, 28, 255);
+    raster_draw_text_alpha(px + 112, y + 38, "BAKEN OS".as_ptr(), TEXT, 1, 255);
     let s = unsafe { O.step };
     for mut i in 0..6 {
         raster_draw_circle_alpha(px + q - 104 + (i as u32 * 16), y + 44, 4, if (i as u32 <= s) { BLUE } else { LINE }, 255);

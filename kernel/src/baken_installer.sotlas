@@ -142,12 +142,8 @@ fn draw_specular_card(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border
 // Botao Interativo Moderno com Efeito de Luz e Seta Animada
 @inline
 fn draw_interactive_btn(x: u32, y: u32, w: u32, h: u32, text: *const u8, is_primary: bool, is_hover: bool) -> void {
-    let bg_col = if (is_primary) { if (is_hover) { 0x000284C7 } else { 0x000369A1 } } else { if (is_hover) { 0x00334155 } else { 0x001E293B } };
-    let border_col = if (is_primary) { if (is_hover) { 0x0038BDF8 } else { 0x0000E5FF } } else { if (is_hover) { 0x0064748B } else { 0x00475569 } };
     let text_col = if (is_primary) { 0x00FFFFFF } else { if (is_hover) { 0x00F8FAFC } else { 0x0094A3B8 } };
-    let a: u8 = if (is_hover) { 250 } else { 220 };
-
-    material_draw_glass_panel(x, y, w, h, bg_col, a, border_col, 10);
+    material_draw_macos_button(x, y, w, h, null as *const u8, is_primary, is_hover);
     let tw = raster_measure_text(text);
 
     if (is_primary) {
@@ -518,8 +514,8 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let base_cy = if (h > ch) { (h - ch) / 2 - 12 } else { 10 };
         let cy = (y as i32 + base_cy as i32 + float_dy) as u32;
 
-        // Card Hero central com material definido pelo design system.
-        material_draw_glass_panel(cx, cy, cw, ch, 0x000B132B, 210, 0x0038BDF8, 24);
+        // Card Hero central com material translúcido Liquid Glass estilo macOS.
+        material_draw_macos_card(cx, cy, cw, ch, 24, true);
 
         let logo_x = cx + (cw / 2);
         let logo_y = cy + 80;

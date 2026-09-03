@@ -218,4 +218,8 @@ pub fn bakenfx_draw_material(canvas: *mut Canvas, bounds: Rect, kind: u32, tint:
             Canvas_draw_rect(canvas, bounds, stroke);
         }
     }
+
+    if (kind == BAKENFX_MATERIAL_GLASS || kind == BAKENFX_MATERIAL_ACRYLIC) && bounds.width > radius * 2 {
+        Canvas_draw_specular_sheen(canvas, bounds, radius, 65);
+    }
 }

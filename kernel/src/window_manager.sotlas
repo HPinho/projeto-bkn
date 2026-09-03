@@ -12,6 +12,7 @@ import kernel::app_settings::*;
 import kernel::app_terminal::*;
 import kernel::app_about::*;
 import kernel::baken_installer::*;
+import kernel::baken_materials::*;
 
 pub const MAX_WINDOWS: usize = 16;
 pub const TITLE_BAR_HEIGHT: u32 = 36;
@@ -271,9 +272,7 @@ fn wm_render_single_window(win: &Window) -> void {
     let panel_alpha: u8 = if win.is_focused { 238 } else { 218 };
     bakenfx_draw_elevated_panel(x, y, win.width, win.height, win.bg_color, panel_alpha, border, 14, if win.is_focused { 4 } else { 2 });
     bakenfx_draw_rect(x + 1, y + TITLE_BAR_HEIGHT, win.width - 2, 1, border, 60);
-    bakenfx_draw_circle(x + 18, y + 18, 6, 0x00EF4444, 255);
-    bakenfx_draw_circle(x + 36, y + 18, 6, 0x00F59E0B, 255);
-    bakenfx_draw_circle(x + 54, y + 18, 6, 0x0010B981, 255);
+    material_draw_traffic_lights(x + 18, y + 18);
     bakenfx_draw_text(x + 72, y + 11, win.title.as_ptr(), 0x00FFFFFF, 230);
 
     // Renderiza o corpo do aplicativo

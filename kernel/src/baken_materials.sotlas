@@ -1,29 +1,105 @@
-// Adaptador de materiais do Baken OS. Mantém a API dos consumidores antigos,
-// mas toda composição pertence ao BakenFX.
+// Modulo de Materiais Fluent & macOS Liquid Glass do Baken OS
+// Fornece superficies em vidro translúcido acrilico, reflexo especular de 1px,
+// sombras fisicas multicamadas, botoes em capsula e controles de semaforo macOS.
 
 module kernel::baken_materials;
 
+import kernel::sotlas_graphics::*;
+import kernel::baken_design::*;
 import kernel::bakenfx::*;
 
 @system
+pub fn material_draw_traffic_lights(x: u32, y: u32) -> void {
+    let r: u32 = 6;
+    // Fechar (Vermelho Ruby)
+    bakenfx_draw_circle(x, y, r, MACOS_TRAFFIC_RED, 255);
+    bakenfx_draw_circle(x, y, r - 1, 0x00FF7B72, 100);
+    // Minimizar (Amarelo Âmbar)
+    bakenfx_draw_circle(x + 18, y, r, MACOS_TRAFFIC_YELLOW, 255);
+    bakenfx_draw_circle(x + 18, y, r - 1, 0x00FDE047, 100);
+    // Maximizar (Verde Esmeralda)
+    bakenfx_draw_circle(x + 36, y, r, MACOS_TRAFFIC_GREEN, 255);
+    bakenfx_draw_circle(x + 36, y, r - 1, 0x0086EFAC, 100);
+}
+
+@system
+pub fn material_draw_macos_card(x: u32, y: u32, w: u32, h: u32, radius: u32, show_traffic_lights: bool) -> void {
+    let token = baken_material_macos_sheet();
+    let bounds = rect_make(x as i32, y as i32, w, h);
+    bakenfx_draw_material(
+        sotlas_get_default_canvas(),
+        bounds,
+        BAKENFX_MATERIAL_GLASS,
+        token.fill,
+        token.border,
+        1,
+        radius,
+        color_rgba(0, 0, 0, 95),
+        16,
+        8,
+        true
+    );
+
+    if show_traffic_lights && w > 80 && h > 40 {
+        material_draw_traffic_lights(x + 20, y + 20);
+    }
+}
+
+@system
+pub fn material_draw_macos_button(x: u32, y: u32, w: u32, h: u32, text: *const u8, is_primary: bool, is_hover: bool) -> void {
+    let token = baken_material_macos_button(is_primary, is_hover);
+    let bounds = rect_make(x as i32, y as i32, w, h);
+    let radius = if h <= 24 { h / 2 } else { 12 };
+
+    bakenfx_draw_material(
+        sotlas_get_default_canvas(),
+        bounds,
+        BAKENFX_MATERIAL_SOLID,
+        token.fill,
+        token.border,
+        1,
+        radius,
+        token.shadow,
+        if is_primary { 8 } else { 4 },
+        if is_primary { 3 } else { 1 },
+        true
+    );
+
+    if is_primary && w > radius * 2 {
+        // Sheen especular superior no botao primario
+        bakenfx_fill_rect_alpha(x + radius, y + 1, w - radius * 2, 1, 0x00FFFFFF, 90);
+    }
+
+    if text != (null as *const u8) {
+        let tw = bakenfx_measure_text(text);
+        let tx = x + (if (w > tw) { (w - tw) / 2 } else { 10 });
+        let ty = y + (if (h > 18) { (h - 18) / 2 } else { 2 });
+        let text_col = if is_primary { 0x00FFFFFF } else { if is_hover { 0x00F8FAFC } else { 0x0094A3B8 } };
+        bakenfx_draw_text_alpha(tx, ty, text, text_col, 1, 255);
+    }
+}
+
+@system
 pub fn material_draw_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border: u32, radius: u32) -> void {
-    bakenfx_draw_panel(x, y, w, h, bg, alpha, border, radius);
+    let bounds = rect_make(x as i32, y as i32, w, h);
+    let fill_c = bakenfx_color(bg, alpha);
+    let border_c = if border != 0 { bakenfx_color(border, 110) } else { color_rgba(255, 255, 255, 35) };
+    bakenfx_draw_material(
+        sotlas_get_default_canvas(),
+        bounds,
+        BAKENFX_MATERIAL_GLASS,
+        fill_c,
+        border_c,
+        1,
+        radius,
+        color_rgba(0, 0, 0, 80),
+        12,
+        6,
+        true
+    );
 }
 
 @system
 pub fn material_draw_button(x: u32, y: u32, w: u32, h: u32, is_primary: bool, is_hover: bool) -> void {
-    let bg_col = if (is_primary) {
-        if (is_hover) { 0x000284C7 } else { 0x000369A1 }
-    } else {
-        if (is_hover) { 0x00334155 } else { 0x001E293B }
-    };
-
-    let border_col = if (is_primary) {
-        if (is_hover) { 0x0038BDF8 } else { 0x0000E5FF }
-    } else {
-        if (is_hover) { 0x0064748B } else { 0x00475569 }
-    };
-
-    let alpha: u8 = if (is_hover) { 250 } else { 220 };
-    material_draw_glass_panel(x, y, w, h, bg_col, alpha, border_col, 10);
+    material_draw_macos_button(x, y, w, h, null as *const u8, is_primary, is_hover);
 }

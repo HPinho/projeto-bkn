@@ -539,13 +539,13 @@ pub fn raster_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alp
                     let dy = py as i32 - cy as i32;
                     if ((dx * dx + dy * dy) >= inner_r2) { is_border = true; }
                 }
-                if (is_border) {
+                if (is_border && border_color != 0) {
                     let base_b_a = if (alpha > 210) { alpha as u32 } else { 210 };
                     let b_alpha = ((base_b_a * subpixel_cov) / 255) as u8;
                     if (b_alpha > 0) {
                         raster_put_pixel_alpha(px, py, border_color, b_alpha);
                     }
-                } else if (glass_a < 248) {
+                } else if (glass_a > 0) {
                     let g_alpha = (((glass_a as u32) * subpixel_cov) / 255) as u8;
                     if (g_alpha > 0) {
                         raster_put_pixel_alpha(px, py, bg_color, g_alpha);

@@ -422,7 +422,11 @@ pub fn Canvas_draw_round_rect(self: *mut Canvas, rect: Rect, radius: u32, paint:
         let ry = transformed.y as u32;
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
         let scaled_radius = (radius * (*self).scale_milli + 500) / 1000;
-        raster_draw_squircle(rx, ry, transformed.width, transformed.height, c_u32, paint.color.a, c_u32, scaled_radius);
+        if paint.is_stroke {
+            raster_draw_squircle(rx, ry, transformed.width, transformed.height, 0, 0, c_u32, scaled_radius);
+        } else {
+            raster_draw_squircle(rx, ry, transformed.width, transformed.height, c_u32, paint.color.a, 0, scaled_radius);
+        }
     }
 }
 
@@ -446,7 +450,27 @@ pub fn Canvas_draw_squircle(self: *mut Canvas, rect: Rect, radius: u32, paint: P
         let ry = transformed.y as u32;
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
         let scaled_radius = (radius * (*self).scale_milli + 500) / 1000;
-        raster_draw_squircle(rx, ry, transformed.width, transformed.height, c_u32, paint.color.a, c_u32, scaled_radius);
+        if paint.is_stroke {
+            raster_draw_squircle(rx, ry, transformed.width, transformed.height, 0, 0, c_u32, scaled_radius);
+        } else {
+            raster_draw_squircle(rx, ry, transformed.width, transformed.height, c_u32, paint.color.a, 0, scaled_radius);
+        }
+    }
+}
+
+pub fn Canvas_draw_specular_sheen(self: *mut Canvas, rect: Rect, radius: u32, alpha: u8) -> void {
+    if self == (null as *mut Canvas) || rect.width <= radius * 2 || alpha == 0 { return; }
+    unsafe {
+        let transformed = Canvas_transform_rect(self, rect);
+        let rx = transformed.x as u32;
+        let ry = transformed.y as u32;
+        let rw = transformed.width;
+        let start_x = rx + radius;
+        let sheen_w = rw - radius * 2;
+        raster_fill_rect_alpha(start_x, ry + 1, sheen_w, 1, 0x00FFFFFF, alpha);
+        if alpha > 40 {
+            raster_fill_rect_alpha(start_x + 4, ry + 2, sheen_w - 8, 1, 0x00FFFFFF, alpha / 2);
+        }
     }
 }
 
