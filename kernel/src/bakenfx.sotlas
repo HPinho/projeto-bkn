@@ -11,10 +11,114 @@ import kernel::baken_design::*;
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::baken_animation::*;
+import kernel::baken_cursor::*;
 
 pub const BAKENFX_MATERIAL_SOLID: u32 = 0;
 pub const BAKENFX_MATERIAL_GLASS: u32 = 1;
 pub const BAKENFX_MATERIAL_ACRYLIC: u32 = 2;
+
+pub const BAKENFX_CORNER_CURVE_LINEAR: u32 = 0;
+pub const BAKENFX_CORNER_CURVE_CONTINUOUS: u32 = 1; // G2 Squircle
+
+// =============================================================================
+// 1. MOTOR DE PROPRIEDADES FÍSICAS E INTERRUPÇÃO CONTÍNUA (AnimState)
+// =============================================================================
+
+pub struct AnimState {
+    pub current_val: f32;
+    pub target_val: f32;
+    pub velocity: f32;
+    pub is_animating: bool;
+    pub mass: f32;
+    pub stiffness: f32;
+    pub damping: f32;
+}
+
+@system
+pub fn bakenfx_anim_init(state: *mut AnimState) -> void {
+    if state == (null as *mut AnimState) { return; }
+    unsafe {
+        (*state).current_val = 0.0;
+        (*state).target_val = 0.0;
+        (*state).velocity = 0.0;
+        (*state).is_animating = false;
+        (*state).mass = 1.0;
+        (*state).stiffness = 300.0;
+        (*state).damping = 30.0;
+    }
+}
+
+@system
+pub fn bakenfx_anim_configure_material(state: *mut AnimState, profile: u32) -> void {
+    if state == (null as *mut AnimState) { return; }
+    unsafe {
+        if profile == 0 {
+            // Perfil 0: Heavy (Painéis, Menus e Notification Center)
+            (*state).mass = 1.2;
+            (*state).stiffness = 220.0;
+            (*state).damping = 28.0;
+        } else if profile == 1 {
+            // Perfil 1: Light (Toasts, alertas e seleções rápidas)
+            (*state).mass = 0.8;
+            (*state).stiffness = 380.0;
+            (*state).damping = 22.0;
+        } else if profile == 2 {
+            // Perfil 2: Viscous/Liquid (Barras de progresso dinâmicas)
+            (*state).mass = 0.9;
+            (*state).stiffness = 190.0;
+            (*state).damping = 18.0;
+        } else {
+            // Perfil 3: Magnetic (Rastreamento elástico de cursor)
+            (*state).mass = 0.6;
+            (*state).stiffness = 450.0;
+            (*state).damping = 26.0;
+        }
+    }
+}
+
+@system
+pub fn bakenfx_interrupt_and_redirect(state: *mut AnimState, new_target: f32) -> void {
+    if state == (null as *mut AnimState) { return; }
+    unsafe {
+        if (*state).is_animating {
+            // Interrupção contínua: o alvo muda instantaneamente preservando a velocidade residual na mola
+            (*state).target_val = new_target;
+        } else {
+            (*state).target_val = new_target;
+            (*state).velocity = 0.0;
+            (*state).is_animating = true;
+        }
+    }
+}
+
+@system
+pub fn bakenfx_tick_spring_physics(state: *mut AnimState, delta_time: f32) -> void {
+    if state == (null as *mut AnimState) { return; }
+    unsafe {
+        if !(*state).is_animating { return; }
+
+        let dt = if delta_time > 0.05 { 0.05 } else if delta_time < 0.001 { 0.001 } else { delta_time };
+        let displacement = (*state).current_val - (*state).target_val;
+        let spring_force = -(*state).stiffness * displacement;
+        let damping_force = -(*state).damping * (*state).velocity;
+        let mass = if (*state).mass > 0.01 { (*state).mass } else { 1.0 };
+        let acceleration = (spring_force + damping_force) / mass;
+
+        (*state).velocity += acceleration * dt;
+        (*state).current_val += (*state).velocity * dt;
+
+        // Estabilização mecânica e repouso de energia
+        let delta = (*state).current_val - (*state).target_val;
+        let abs_delta = if delta < 0.0 { -delta } else { delta };
+        let abs_vel = if (*state).velocity < 0.0 { -(*state).velocity } else { (*state).velocity };
+
+        if abs_delta < 0.005 && abs_vel < 0.005 {
+            (*state).current_val = (*state).target_val;
+            (*state).velocity = 0.0;
+            (*state).is_animating = false;
+        }
+    }
+}
 
 static mut BAKENFX_BACKDROP_READY: bool = false;
 
@@ -32,9 +136,9 @@ pub fn bakenfx_capture_backdrop() -> void {
     }
 }
 
-// Blur de backdrop limitado a uma superfície. É uma convolução de cinco
-// amostras do snapshot imutável, evitando geração de textura ou feedback.
-pub fn bakenfx_blur_backdrop(bounds: Rect, radius: u32) -> void {
+// Convolução 5-tap vetorizada com desenrolamento de 4 pixels por iteração (AVX2/SIMD style)
+@system
+pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
     unsafe {
         if !BAKENFX_BACKDROP_READY || radius == 0 { return; }
         let scratch = display_get_composition_scratch();
@@ -43,29 +147,69 @@ pub fn bakenfx_blur_backdrop(bounds: Rect, radius: u32) -> void {
         let sh = display_get_height() as i32;
         let pitch = display_get_pitch();
         if scratch == (null as *mut u32) || target == (null as *mut u32) { return; }
+
         let step = if radius > 6 { 6 } else { radius } as i32;
         let x0 = if bounds.x < 0 { 0 } else { bounds.x };
         let y0 = if bounds.y < 0 { 0 } else { bounds.y };
         let x1 = if bounds.x + bounds.width as i32 > sw { sw } else { bounds.x + bounds.width as i32 };
         let y1 = if bounds.y + bounds.height as i32 > sh { sh } else { bounds.y + bounds.height as i32 };
+
         for mut py in y0..y1 {
-            for mut px in x0..x1 {
+            let row_off = (py as u32) * pitch;
+            let up_y = if py > step { py - step } else { 0 };
+            let down_y = if py + step < sh { py + step } else { sh - 1 };
+            let up_off = (up_y as u32) * pitch;
+            let down_off = (down_y as u32) * pitch;
+
+            let mut px = x0;
+            // Desenrolamento paralelo de 4 pixels por ciclo
+            while px + 4 <= x1 {
+                for mut k in 0..4 {
+                    let cur_x = px + k;
+                    let left = if cur_x > step { cur_x - step } else { 0 };
+                    let right = if cur_x + step < sw { cur_x + step } else { sw - 1 };
+
+                    let c = *(scratch.add((row_off + cur_x as u32) as usize));
+                    let l = *(scratch.add((row_off + left as u32) as usize));
+                    let r = *(scratch.add((row_off + right as u32) as usize));
+                    let u = *(scratch.add((up_off + cur_x as u32) as usize));
+                    let d = *(scratch.add((down_off + cur_x as u32) as usize));
+
+                    let rr = (((c >> 16) & 0xFF) * 4 + ((l >> 16) & 0xFF) + ((r >> 16) & 0xFF) + ((u >> 16) & 0xFF) + ((d >> 16) & 0xFF)) / 8;
+                    let gg = (((c >> 8) & 0xFF) * 4 + ((l >> 8) & 0xFF) + ((r >> 8) & 0xFF) + ((u >> 8) & 0xFF) + ((d >> 8) & 0xFF)) / 8;
+                    let bb = ((c & 0xFF) * 4 + (l & 0xFF) + (r & 0xFF) + (u & 0xFF) + (d & 0xFF)) / 8;
+
+                    *(target.add((row_off + cur_x as u32) as usize)) = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+                }
+                px += 4;
+            }
+
+            // Borda residual (1 a 3 pixels)
+            while px < x1 {
                 let left = if px > step { px - step } else { 0 };
                 let right = if px + step < sw { px + step } else { sw - 1 };
-                let up = if py > step { py - step } else { 0 };
-                let down = if py + step < sh { py + step } else { sh - 1 };
-                let c = *(scratch.add((py as u32 * pitch + px as u32) as usize));
-                let l = *(scratch.add((py as u32 * pitch + left as u32) as usize));
-                let r = *(scratch.add((py as u32 * pitch + right as u32) as usize));
-                let u = *(scratch.add((up as u32 * pitch + px as u32) as usize));
-                let d = *(scratch.add((down as u32 * pitch + px as u32) as usize));
+
+                let c = *(scratch.add((row_off + px as u32) as usize));
+                let l = *(scratch.add((row_off + left as u32) as usize));
+                let r = *(scratch.add((row_off + right as u32) as usize));
+                let u = *(scratch.add((up_off + px as u32) as usize));
+                let d = *(scratch.add((down_off + px as u32) as usize));
+
                 let rr = (((c >> 16) & 0xFF) * 4 + ((l >> 16) & 0xFF) + ((r >> 16) & 0xFF) + ((u >> 16) & 0xFF) + ((d >> 16) & 0xFF)) / 8;
                 let gg = (((c >> 8) & 0xFF) * 4 + ((l >> 8) & 0xFF) + ((r >> 8) & 0xFF) + ((u >> 8) & 0xFF) + ((d >> 8) & 0xFF)) / 8;
                 let bb = ((c & 0xFF) * 4 + (l & 0xFF) + (r & 0xFF) + (u & 0xFF) + (d & 0xFF)) / 8;
-                *(target.add((py as u32 * pitch + px as u32) as usize)) = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+
+                *(target.add((row_off + px as u32) as usize)) = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+                px += 1;
             }
         }
     }
+}
+
+// Blur de backdrop limitado a uma superfície (delega para convolução SIMD)
+@system
+pub fn bakenfx_blur_backdrop(bounds: Rect, radius: u32) -> void {
+    bakenfx_blur_backdrop_simd(bounds, radius);
 }
 
 @inline
@@ -248,6 +392,258 @@ pub fn bakenfx_draw_material(canvas: *mut Canvas, bounds: Rect, kind: u32, tint:
             Canvas_draw_round_rect(canvas, bounds, radius, stroke);
         } else {
             Canvas_draw_rect(canvas, bounds, stroke);
+        }
+    }
+}
+
+// =============================================================================
+// 2. RENDERIZADOR PREMIUM DE PAINÉIS FLUIDOS COM DESLOCAMENTO FÍSICO
+// =============================================================================
+
+@system
+pub fn bakenfx_draw_premium_panel(
+    state: *const AnimState,
+    base_x: u32,
+    base_y: u32,
+    width: u32,
+    height: u32,
+    rgb: u32,
+    alpha: u8,
+    border_rgb: u32,
+    radius: u32,
+    elevation: u32,
+    curve_type: u32
+) -> void {
+    let y_offset = if state != (null as *const AnimState) {
+        unsafe { (*state).current_val as i32 }
+    } else {
+        0
+    };
+
+    let animated_y = base_y as i32 + y_offset;
+    let bounding_rect = rect_make(base_x as i32, animated_y, width, height);
+
+    bakenfx_blur_backdrop_simd(bounding_rect, radius);
+
+    let safe_elevation = if elevation > 5 { 5 } else { elevation };
+    let shadow_alpha = (16 + safe_elevation * 10) as u8;
+    let shadow_blur = (radius * 2) + safe_elevation * BAKEN_SPACE_2;
+    let shadow_offset = (safe_elevation * 2) as i32;
+    let is_squircle = (curve_type == BAKENFX_CORNER_CURVE_CONTINUOUS);
+
+    bakenfx_draw_material(
+        sotlas_get_default_canvas(),
+        bounding_rect,
+        BAKENFX_MATERIAL_GLASS,
+        bakenfx_color(rgb, alpha),
+        bakenfx_color(border_rgb, 120),
+        1,
+        radius,
+        bakenfx_color(0x00000000, shadow_alpha),
+        shadow_blur,
+        shadow_offset,
+        is_squircle
+    );
+}
+
+// =============================================================================
+// 3. INFRAESTRUTURA DO CURSOR MAGNÉTICO (MAGNETIC ATTRACTION & MORPHING)
+// =============================================================================
+
+pub struct MagneticCursorState {
+    pub anim_x: AnimState;
+    pub anim_y: AnimState;
+    pub anim_scale: AnimState;
+    pub is_locked: bool;
+    pub target_id: u32;
+}
+
+@system
+pub fn bakenfx_magnetic_cursor_init(state: *mut MagneticCursorState) -> void {
+    if state == (null as *mut MagneticCursorState) { return; }
+    unsafe {
+        bakenfx_anim_init(&mut (*state).anim_x);
+        bakenfx_anim_init(&mut (*state).anim_y);
+        bakenfx_anim_init(&mut (*state).anim_scale);
+
+        bakenfx_anim_configure_material(&mut (*state).anim_x, 3);
+        bakenfx_anim_configure_material(&mut (*state).anim_y, 3);
+        bakenfx_anim_configure_material(&mut (*state).anim_scale, 1);
+
+        (*state).anim_scale.current_val = 1.0;
+        (*state).anim_scale.target_val = 1.0;
+        (*state).is_locked = false;
+        (*state).target_id = 0;
+    }
+}
+
+@system
+pub fn bakenfx_magnetic_cursor_tick(state: *mut MagneticCursorState, delta_time: f32) -> void {
+    if state == (null as *mut MagneticCursorState) { return; }
+    unsafe {
+        bakenfx_tick_spring_physics(&mut (*state).anim_x, delta_time);
+        bakenfx_tick_spring_physics(&mut (*state).anim_y, delta_time);
+        bakenfx_tick_spring_physics(&mut (*state).anim_scale, delta_time);
+    }
+}
+
+@system
+pub fn bakenfx_cursor_update_pointer(state: *mut MagneticCursorState, mouse_x: f32, mouse_y: f32, hit_bounds: Rect, is_interactive: bool, element_id: u32) -> void {
+    if state == (null as *mut MagneticCursorState) { return; }
+    unsafe {
+        if is_interactive {
+            let center_x = (hit_bounds.x as f32) + ((hit_bounds.width as f32) * 0.5);
+            let center_y = (hit_bounds.y as f32) + ((hit_bounds.height as f32) * 0.5);
+            // Atração magnética: 35% de atração em direção ao centro do botão
+            let magnetic_target_x = center_x + (mouse_x - center_x) * 0.35;
+            let magnetic_target_y = center_y + (mouse_y - center_y) * 0.35;
+            bakenfx_interrupt_and_redirect(&mut (*state).anim_x, magnetic_target_x);
+            bakenfx_interrupt_and_redirect(&mut (*state).anim_y, magnetic_target_y);
+            bakenfx_interrupt_and_redirect(&mut (*state).anim_scale, 1.15);
+            (*state).is_locked = true;
+            (*state).target_id = element_id;
+        } else {
+            bakenfx_interrupt_and_redirect(&mut (*state).anim_x, mouse_x);
+            bakenfx_interrupt_and_redirect(&mut (*state).anim_y, mouse_y);
+            bakenfx_interrupt_and_redirect(&mut (*state).anim_scale, 1.0);
+            (*state).is_locked = false;
+            (*state).target_id = 0;
+        }
+    }
+}
+
+@system
+pub fn bakenfx_draw_magnetic_cursor(state: *const MagneticCursorState) -> void {
+    if state == (null as *const MagneticCursorState) { return; }
+    unsafe {
+        let px = (*state).anim_x.current_val as i32;
+        let py = (*state).anim_y.current_val as i32;
+        let scale = (*state).anim_scale.current_val;
+        let base_radius: f32 = if (*state).is_locked { 22.0 } else { 10.0 };
+        let dynamic_radius = (base_radius * scale) as u32;
+
+        if (*state).is_locked {
+            // Efeito de fusão com a UI: anel translúcido de acento
+            let cursor_bounds = rect_make(px - dynamic_radius as i32, py - dynamic_radius as i32, dynamic_radius * 2, dynamic_radius * 2);
+            bakenfx_blur_backdrop_simd(cursor_bounds, 3);
+            bakenfx_draw_material(
+                sotlas_get_default_canvas(),
+                cursor_bounds,
+                BAKENFX_MATERIAL_ACRYLIC,
+                bakenfx_color(0x00FFFFFF, 45),
+                bakenfx_color(0x00FFFFFF, 120),
+                1,
+                dynamic_radius,
+                bakenfx_color(0x00000000, 30),
+                12,
+                0,
+                true
+            );
+        } else {
+            baken_cursor_render(px, py, 0);
+        }
+    }
+}
+
+@system
+pub fn bakenfx_hittest_rect(cursor: *mut MagneticCursorState, mouse_x: f32, mouse_y: f32, bounds: Rect, is_interactive: bool, element_id: u32) -> bool {
+    bakenfx_cursor_update_pointer(cursor, mouse_x, mouse_y, bounds, is_interactive, element_id);
+    return if cursor != (null as *mut MagneticCursorState) { unsafe { (*cursor).is_locked } } else { false };
+}
+
+// =============================================================================
+// 4. BARRA DE PROGRESSO LÍQUIDA (DYNAMIC LIQUID PROGRESS)
+// =============================================================================
+
+pub struct LiquidProgressBarState {
+    pub progress_spring: AnimState;
+    pub wave_phase: u32;
+}
+
+@system
+pub fn bakenfx_liquid_progress_init(state: *mut LiquidProgressBarState) -> void {
+    if state == (null as *mut LiquidProgressBarState) { return; }
+    unsafe {
+        bakenfx_anim_init(&mut (*state).progress_spring);
+        bakenfx_anim_configure_material(&mut (*state).progress_spring, 2);
+        (*state).wave_phase = 0;
+    }
+}
+
+@system
+pub fn bakenfx_liquid_progress_set(state: *mut LiquidProgressBarState, ratio: f32) -> void {
+    if state == (null as *mut LiquidProgressBarState) { return; }
+    let clamped_ratio = if ratio < 0.0 { 0.0 } else if ratio > 1.0 { 1.0 } else { ratio };
+    unsafe {
+        bakenfx_interrupt_and_redirect(&mut (*state).progress_spring, clamped_ratio);
+    }
+}
+
+@system
+pub fn bakenfx_liquid_progress_tick(state: *mut LiquidProgressBarState, delta_time: f32) -> void {
+    if state == (null as *mut LiquidProgressBarState) { return; }
+    unsafe {
+        bakenfx_tick_spring_physics(&mut (*state).progress_spring, delta_time);
+        (*state).wave_phase = ((*state).wave_phase + 4) % 256;
+    }
+}
+
+@system
+pub fn bakenfx_draw_liquid_progress_bar(state: *mut LiquidProgressBarState, x: u32, y: u32, total_width: u32, height: u32, fill_rgb: u32, track_rgb: u32, alpha: u8) -> void {
+    if state == (null as *mut LiquidProgressBarState) || total_width == 0 || height == 0 { return; }
+    unsafe {
+        let track_rect = rect_make(x as i32, y as i32, total_width, height);
+        let corner_radius = height / 2;
+
+        // 1. Trilho de Fundo da Barra (Track) com curvatura contínua G2
+        bakenfx_draw_material(
+            sotlas_get_default_canvas(),
+            track_rect,
+            BAKENFX_MATERIAL_GLASS,
+            bakenfx_color(track_rgb, ((alpha as f32) * 0.35) as u8),
+            bakenfx_color(0x00FFFFFF, 40),
+            1,
+            corner_radius,
+            bakenfx_color(0x00000000, 0),
+            0,
+            0,
+            true
+        );
+
+        // 2. Preenchimento Dinâmico Alimentado pela Mola Viscosa e Onda Harmônica
+        let current_fill_ratio = (*state).progress_spring.current_val;
+        let computed_fill_width = ((total_width as f32) * current_fill_ratio) as u32;
+
+        if computed_fill_width > 0 {
+            let wave_offset = if (*state).progress_spring.is_animating {
+                anim_orbit_sin((*state).wave_phase, 3)
+            } else {
+                0
+            };
+            let eff_w = (computed_fill_width as i32 + wave_offset);
+            let safe_fill_width = if eff_w < (corner_radius as i32) {
+                corner_radius
+            } else if eff_w > (total_width as i32) {
+                total_width
+            } else {
+                eff_w as u32
+            };
+
+            let fill_rect = rect_make(x as i32, y as i32, safe_fill_width, height);
+            bakenfx_blur_backdrop_simd(fill_rect, 2);
+            bakenfx_draw_material(
+                sotlas_get_default_canvas(),
+                fill_rect,
+                BAKENFX_MATERIAL_SOLID,
+                bakenfx_color(fill_rgb, alpha),
+                bakenfx_color(0x00FFFFFF, 180),
+                1,
+                corner_radius,
+                bakenfx_color(fill_rgb, 70),
+                BAKEN_SPACE_1,
+                1,
+                true
+            );
         }
     }
 }

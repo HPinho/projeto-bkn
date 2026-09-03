@@ -173,6 +173,7 @@ pub const NODE_TEXT: u32 = 1;
 pub const NODE_SHAPE: u32 = 2;
 pub const NODE_ICON: u32 = 3;
 pub const NODE_IMAGE: u32 = 4;
+pub const NODE_BUTTON: u32 = 5;
 
 pub struct RenderNode {
     pub node_type: u32;
@@ -562,5 +563,34 @@ pub fn RenderTree_draw(self: *mut RenderTree, canvas: *mut Canvas) -> void {
         if (*self).root_idx >= 0 {
             RenderTree_draw_node(self, (*self).root_idx, canvas);
         }
+    }
+}
+
+// Despacha eventos de cursor para o estado magnético examinando nós interativos da cena
+@system
+pub fn RenderTree_hittest_magnetic_cursor(self: *const RenderTree, x: i32, y: i32, cursor: *mut MagneticCursorState) -> i32 {
+    if self == (null as *const RenderTree) || cursor == (null as *mut MagneticCursorState) { return -1; }
+    unsafe {
+        let count = (*self).node_count as usize;
+        let mut i = count;
+        while i > 0 {
+            i -= 1;
+            let node = &(*self).nodes[i];
+            if (*node).visible {
+                let bx = (*node).bounds.x;
+                let by = (*node).bounds.y;
+                let bw = (*node).bounds.width as i32;
+                let bh = (*node).bounds.height as i32;
+                if x >= bx && x <= (bx + bw) && y >= by && y <= (by + bh) {
+                    let is_interactive = ((*node).node_type == NODE_BUTTON || (*node).node_type == NODE_CONTAINER);
+                    if is_interactive {
+                        bakenfx_cursor_update_pointer(cursor, x as f32, y as f32, (*node).bounds, true, (i + 1) as u32);
+                        return i as i32;
+                    }
+                }
+            }
+        }
+        bakenfx_cursor_update_pointer(cursor, x as f32, y as f32, rect_make(x, y, 1, 1), false, 0);
+        return -1;
     }
 }
