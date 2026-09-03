@@ -57,9 +57,9 @@ pub const MACOS_TRAFFIC_GREEN: u32 = 0x0027C93F;
 
 pub fn baken_material_macos_sheet_light() -> BakenMaterialToken {
     return BakenMaterialToken {
-        fill: color_rgba(255, 255, 255, 205),
-        border: color_rgba(255, 255, 255, 190),
-        shadow: color_rgba(15, 23, 42, 45),
+        fill: color_rgba(255, 255, 255, 140),
+        border: color_rgba(255, 255, 255, 175),
+        shadow: color_rgba(15, 23, 42, 35),
         corner_radius: BAKEN_RADIUS_WINDOW,
         elevation: 3,
     };

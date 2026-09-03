@@ -6,67 +6,53 @@ module kernel::baken_cursor;
 
 import kernel::baken_rasterizer::*;
 
-// Seta do Cursor em Alta Definicao (16x22) com Contorno Suave e Sombra Realista
+// Seta do Cursor de Alta Precisão estilo macOS (12x19) com Contorno Nítido e Sombra Suave
 @system
 pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
     if (cx < 0 || cy < 0) { return; }
     let x = cx as u32;
     let y = cy as u32;
 
-    // 1. Sombra Suave Projetada do Cursor (Offset de 3px, Efeito Flutuante de Vidro)
-    let shadow_col = 0x00050811;
-    for mut sy in 3..22 {
-        let max_sx = if (sy < 14) { sy } else { 22 - sy };
-        for mut sx in 2..max_sx {
-            raster_put_pixel_alpha(x + sx + 2, y + sy + 2, shadow_col, 55);
-        }
-    }
+    // Máscaras de bits por linha (19 linhas, até 12 colunas)
+    // 0: transparente, b_mask: borda escura (#0F172A), f_mask: interior branco (#FFFFFF)
+    let border_masks: [u16; 19] = [
+        0x0001, 0x0003, 0x0005, 0x0009, 0x0011, 0x0021, 0x0041, 0x0081,
+        0x0101, 0x0201, 0x0401, 0x0fc1, 0x0049, 0x0125, 0x0123, 0x0241,
+        0x0240, 0x0480, 0x0300
+    ];
+    let fill_masks: [u16; 19] = [
+        0x0000, 0x0000, 0x0002, 0x0006, 0x000e, 0x001e, 0x003e, 0x007e,
+        0x00fe, 0x01fe, 0x03fe, 0x003e, 0x0036, 0x00c2, 0x00c0, 0x0180,
+        0x0180, 0x0300, 0x0000
+    ];
 
-    // 2. Geometria da Seta: 18x24 px elegante estilo Fluent/Precision
-    // Formato:
-    // Linha 0: 1 pixel
-    // Linha 1..13: triangulo expandindo a 45 graus
-    // Linha 14..22: haste da seta chanfrada
-    for mut row in 0..20 {
-        let span = if (row < 13) {
-            row + 1
-        } else if (row < 17) {
-            13 - (row - 12) * 2
-        } else {
-            3
-        };
-
-        let start_col = if (row >= 13) {
-            (row - 12) * 2
-        } else {
-            0
-        };
-
-        for mut c in start_col..(start_col + span) {
-            let px = x + c;
-            let py = y + row;
-
-            // Borda externa escura com contraste suave
-            let is_border = (c == start_col) || (c == start_col + span - 1) || (row == 0) || (row == 19);
-            if (is_border) {
-                raster_put_pixel_alpha(px, py, 0x000F172A, 240);
-            } else {
-                // Corpo da seta: Branco Pérola acetinado
-                raster_put_pixel_alpha(px, py, 0x00FFFFFF, 255);
+    // 1. Sombra Suave com Offset de 1px x 2px
+    for mut row in 0..19 {
+        let bm = border_masks[row as usize];
+        let fm = fill_masks[row as usize];
+        let shape = bm | fm;
+        for mut col in 0..12 {
+            if ((shape & (1 << col)) != 0) {
+                raster_put_pixel_alpha(x + col + 1, y + row + 2, 0x00000000, 48);
             }
         }
     }
 
-    // 3. Efeito "Seta Animada" - Núcleo de Brilho Cósmico Pulsante no Topo da Seta
-    // Ciclo de respiração de 60 frames com transição suave Ciano Safira / Elétrico
-    let pulse_phase = (tick % 60);
-    let pulse_dist = if (pulse_phase < 30) { pulse_phase } else { 60 - pulse_phase };
-    let aura_alpha: u8 = 70 + (((pulse_dist * 120) / 30) as u8);
-
-    raster_put_pixel_alpha(x + 1, y + 1, 0x0000E5FF, 255);
-    raster_put_pixel_alpha(x + 2, y + 2, 0x0038BDF8, 220);
-    raster_put_pixel_alpha(x + 2, y + 3, 0x0000E5FF, aura_alpha);
-    raster_put_pixel_alpha(x + 3, y + 2, 0x0038BDF8, aura_alpha);
+    // 2. Preenchimento e Borda Nítida
+    for mut row in 0..19 {
+        let bm = border_masks[row as usize];
+        let fm = fill_masks[row as usize];
+        for mut col in 0..12 {
+            let bit = (1 << col);
+            if ((bm & bit) != 0) {
+                // Contorno escuro sólido de alta definição
+                raster_put_pixel_alpha(x + col, y + row, 0x000F172A, 245);
+            } else if ((fm & bit) != 0) {
+                // Corpo da seta em branco acetinado puro
+                raster_put_pixel_alpha(x + col, y + row, 0x00FFFFFF, 255);
+            }
+        }
+    }
 }
 
 // Renderiza uma Seta de Acao Animada Estilizada para Botoes (Micro-Interacao de Hover/Fluidez)

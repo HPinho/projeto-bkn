@@ -515,7 +515,9 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let cy = (y as i32 + base_cy as i32 + float_dy) as u32;
 
         // Card Hero central com material translúcido Liquid Glass estilo macOS.
-        material_draw_macos_card(cx, cy, cw, ch, 24, true);
+        material_draw_macos_card(cx, cy, cw, ch, 24, false);
+        // No instalador, apenas o botão de Fechar (vermelho) para acionar desligamento/reinicialização
+        material_draw_close_button(cx + 20, cy + 20);
 
         let logo_x = cx + (cw / 2);
         let logo_y = cy + 80;

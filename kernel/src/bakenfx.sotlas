@@ -9,6 +9,7 @@ module kernel::bakenfx;
 import kernel::sotlas_graphics::*;
 import kernel::baken_design::*;
 import kernel::graphics_engine::*;
+import kernel::baken_rasterizer::*;
 
 pub const BAKENFX_MATERIAL_SOLID: u32 = 0;
 pub const BAKENFX_MATERIAL_GLASS: u32 = 1;
@@ -170,24 +171,24 @@ pub fn bakenfx_draw_desktop_background(canvas: *mut Canvas, width: u32, height: 
     );
 }
 
-// Sombra em passagens concêntricas. O raio e a opacidade formam uma queda
-// suave previsível, preservando a geometria arredondada do componente.
+// Sombra com queda analítica suave calculada estritamente no perímetro externo,
+// sem alterar ou escurecer o fundo sob a superfície translúcida.
 pub fn bakenfx_draw_shadow(canvas: *mut Canvas, bounds: Rect, radius: u32, color: Color, blur: u32, offset_y: i32) -> void {
     if canvas == (null as *mut Canvas) || color.a == 0 || blur == 0 { return; }
+    if bounds.width == 0 || bounds.height == 0 { return; }
 
-    let mut pass: u32 = blur;
-    while pass > 0 {
-        let alpha = ((color.a as u32 * (blur - pass + 1)) / (blur + 1)) as u8;
-        let spread = pass / 3 + 1;
-        let shadow = rect_make(
-            bounds.x - spread as i32,
-            bounds.y + offset_y - spread as i32,
-            bounds.width + spread * 2,
-            bounds.height + spread * 2
-        );
-        Canvas_draw_round_rect(canvas, shadow, radius + spread, paint_fill(color_rgba(color.r, color.g, color.b, alpha)));
-        pass -= 1;
-    }
+    let safe_blur = if blur > 18 { 18 } else { blur };
+    let alpha_factor = (color.a as f32) / 255.0;
+    raster_draw_drop_shadow(
+        bounds.x as u32,
+        bounds.y as u32,
+        bounds.width,
+        bounds.height,
+        safe_blur,
+        2,
+        offset_y,
+        alpha_factor
+    );
 }
 
 // Material central do design system. A translucidez pertence ao material,

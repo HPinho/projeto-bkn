@@ -23,6 +23,15 @@ pub fn material_draw_traffic_lights(x: u32, y: u32) -> void {
 }
 
 @system
+pub fn material_draw_close_button(x: u32, y: u32) -> void {
+    let r: u32 = 6;
+    // Apenas o botão Fechar vermelho rubi macOS com brilho interno
+    bakenfx_draw_circle(x, y, r, MACOS_TRAFFIC_RED, 255);
+    bakenfx_draw_circle(x, y, r - 1, 0x00FF7B72, 120);
+    bakenfx_draw_circle(x - 1, y - 1, 2, 0x00FFFFFF, 90);
+}
+
+@system
 pub fn material_draw_macos_card(x: u32, y: u32, w: u32, h: u32, radius: u32, show_traffic_lights: bool) -> void {
     let token = baken_material_macos_sheet();
     let bounds = rect_make(x as i32, y as i32, w, h);
@@ -34,9 +43,9 @@ pub fn material_draw_macos_card(x: u32, y: u32, w: u32, h: u32, radius: u32, sho
         token.border,
         1,
         radius,
-        color_rgba(0, 0, 0, 95),
-        16,
-        8,
+        token.shadow,
+        14,
+        6,
         true
     );
 
