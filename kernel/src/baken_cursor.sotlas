@@ -72,10 +72,12 @@ pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
 // Renderiza uma Seta de Acao Animada Estilizada para Botoes (Micro-Interacao de Hover/Fluidez)
 @system
 pub fn baken_draw_animated_action_arrow(x: u32, y: u32, tick: u32, color: u32, is_hover: bool) -> void {
-    // Micro-deslocamento animado para a direita na respiracao
-    let slide_phase = if (is_hover) { (tick % 40) } else { (tick % 80) };
-    let slide_amp = if (is_hover) { 4 } else { 2 };
-    let dx = (slide_phase * slide_amp) / (if (is_hover) { 40 } else { 80 });
+    // Deslocamento suave de ida e volta (respiração contínua sem saltos bruscos)
+    let cycle = if is_hover { 48 } else { 72 };
+    let phase = tick % cycle;
+    let half = cycle / 2;
+    let wave = if phase < half { phase } else { cycle - phase };
+    let dx = if is_hover { (wave * 4) / half } else { (wave * 2) / half };
 
     let ox = x + dx;
     let oy = y;
