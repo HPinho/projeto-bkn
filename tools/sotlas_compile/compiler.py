@@ -431,6 +431,8 @@ def parse_module_ast(text: str, path: Path | None = None) -> SotlasModuleAst:
 
 def _base_type_name(type_info: SotlasType) -> str:
     raw = type_info.name.strip()
+    if raw.startswith("fn(") or raw.startswith("fn (") or raw.startswith("fn "):
+        return "__fn_ptr__"
     if raw.startswith("["):
         raw = raw[1:].split(";", 1)[0].strip()
     for prefix in ("*mut ", "*const ", "*", "&mut ", "&"):
@@ -441,6 +443,7 @@ def _base_type_name(type_info: SotlasType) -> str:
 
 def typecheck_ast(ast: SotlasModuleAst, known_types: set | None = None) -> bool:
     types = set(KNOWN_PRIMITIVE_TYPES)
+    types.add("__fn_ptr__")
     if known_types:
         types.update(known_types)
     for s in ast.structs:
@@ -500,6 +503,23 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
         language_calls = {
             "if", "while", "for", "loop", "return", "unsafe", "sizeof", "mut",
             "baken_runtime_init_assets", "baken_runtime_run",
+            "baken_efi_init", "baken_efi_poll_key", "baken_efi_poll_mouse_rel", "baken_efi_poll_mouse_abs",
+            "baken_fast_memcpy",
+            "baken_fast_fill_rect",
+            "baken_rdtsc",
+            "baken_bind_all_assets",
+            "baken_efi_frame_wait",
+            "baken_efi_read_tsc",
+            "baken_get_font_advances",
+            "baken_get_font_alpha",
+            "baken_get_font_width",
+            "baken_get_font_height",
+            "baken_get_font_px",
+            "baken_get_cjk_width",
+            "baken_get_cjk_height",
+            "baken_get_cjk_alpha",
+            "baken_get_logo_pixels",
+            "baken_get_logo_size",
         }
         for fn in ast.functions:
             body = re.sub(r"//[^\n]*", "", fn.body)
@@ -651,18 +671,6 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
         generated_interfaces.append(interface)
         compiled_objects.append(obj)
 
-    # Adaptador de firmware sem UI: eventos, relógio de quadro e ligação dos
-    # atlas gerados às APIs Sotlas. Ele não contém primitivas de desenho.
-    runtime_src = root / "kernel" / "src" / "baken_runtime.c"
-    if runtime_src.exists():
-        runtime_obj = obj_dir / "baken_runtime.o"
-        res = subprocess.run(
-            [str(gcc), *common_flags, str(runtime_src), "-o", str(runtime_obj)],
-            capture_output=True, text=True, env=env,
-        )
-        if res.returncode != 0:
-            raise SotlasError(f"falha ao compilar adaptador UEFI: {res.stderr}")
-        compiled_objects.append(runtime_obj)
 
     # Compila o bootloader UEFI Sotlas.
     bootloader_src = root / "boot" / "uefi_bootloader.sotlas"

@@ -1,0 +1,100 @@
+// Baken OS - Cursor Moderno em Alta Definicao & Setas Animadas em Sotlas (@system)
+// Substitui o cursor bitmap arcaico por seta estilizada Fluent com sombra de vidro
+// e nucleo de luz cosmica animada.
+
+module kernel::baken_cursor;
+
+import kernel::baken_rasterizer::*;
+
+// Seta do Cursor em Alta Definicao (16x22) com Contorno Suave e Sombra Realista
+@system
+pub fn baken_cursor_render(cx: i32, cy: i32, tick: u32) -> void {
+    if (cx < 0 || cy < 0) { return; }
+    let x = cx as u32;
+    let y = cy as u32;
+
+    // 1. Sombra Suave Projetada do Cursor (Offset de 3px, Efeito Flutuante de Vidro)
+    let shadow_col = 0x00050811;
+    for mut sy in 3..22 {
+        let max_sx = if (sy < 14) { sy } else { 22 - sy };
+        for mut sx in 2..max_sx {
+            gfx_put_pixel_alpha(x + sx + 2, y + sy + 2, shadow_col, 55);
+        }
+    }
+
+    // 2. Geometria da Seta: 18x24 px elegante estilo Fluent/Precision
+    // Formato:
+    // Linha 0: 1 pixel
+    // Linha 1..13: triangulo expandindo a 45 graus
+    // Linha 14..22: haste da seta chanfrada
+    for mut row in 0..20 {
+        let span = if (row < 13) {
+            row + 1
+        } else if (row < 17) {
+            13 - (row - 12) * 2
+        } else {
+            3
+        };
+
+        let start_col = if (row >= 13) {
+            (row - 12) * 2
+        } else {
+            0
+        };
+
+        for mut c in start_col..(start_col + span) {
+            let px = x + c;
+            let py = y + row;
+
+            // Borda externa escura com contraste suave
+            let is_border = (c == start_col) || (c == start_col + span - 1) || (row == 0) || (row == 19);
+            if (is_border) {
+                gfx_put_pixel_alpha(px, py, 0x000F172A, 240);
+            } else {
+                // Corpo da seta: Branco Pérola acetinado
+                gfx_put_pixel_alpha(px, py, 0x00FFFFFF, 255);
+            }
+        }
+    }
+
+    // 3. Efeito "Seta Animada" - Núcleo de Brilho Cósmico Pulsante no Topo da Seta
+    // Ciclo de respiração de 60 frames com transição suave Ciano Safira / Elétrico
+    let pulse_phase = (tick % 60);
+    let pulse_dist = if (pulse_phase < 30) { pulse_phase } else { 60 - pulse_phase };
+    let aura_alpha: u8 = 70 + (((pulse_dist * 120) / 30) as u8);
+
+    gfx_put_pixel_alpha(x + 1, y + 1, 0x0000E5FF, 255);
+    gfx_put_pixel_alpha(x + 2, y + 2, 0x0038BDF8, 220);
+    gfx_put_pixel_alpha(x + 2, y + 3, 0x0000E5FF, aura_alpha);
+    gfx_put_pixel_alpha(x + 3, y + 2, 0x0038BDF8, aura_alpha);
+}
+
+// Renderiza uma Seta de Acao Animada Estilizada para Botoes (Micro-Interacao de Hover/Fluidez)
+@system
+pub fn baken_draw_animated_action_arrow(x: u32, y: u32, tick: u32, color: u32, is_hover: bool) -> void {
+    // Micro-deslocamento animado para a direita na respiracao
+    let slide_phase = if (is_hover) { (tick % 40) } else { (tick % 80) };
+    let slide_amp = if (is_hover) { 4 } else { 2 };
+    let dx = (slide_phase * slide_amp) / (if (is_hover) { 40 } else { 80 });
+
+    let ox = x + dx;
+    let oy = y;
+
+    // Desenha uma seta chanfrada vetorial '->' moderna e nitida
+    // 1. Linha horizontal da haste da seta (7px)
+    for mut i in 0..7 {
+        gfx_put_pixel_alpha(ox + i, oy + 4, color, 255);
+        gfx_put_pixel_alpha(ox + i, oy + 5, color, 255);
+    }
+    // 2. Ponta em chevron angular de 45 graus
+    gfx_put_pixel_alpha(ox + 5, oy + 2, color, 255);
+    gfx_put_pixel_alpha(ox + 6, oy + 3, color, 255);
+    gfx_put_pixel_alpha(ox + 7, oy + 4, color, 255);
+    gfx_put_pixel_alpha(ox + 7, oy + 5, color, 255);
+    gfx_put_pixel_alpha(ox + 6, oy + 6, color, 255);
+    gfx_put_pixel_alpha(ox + 5, oy + 7, color, 255);
+
+    // Destaque brilhante na ponta
+    gfx_put_pixel_alpha(ox + 8, oy + 4, 0x00FFFFFF, 220);
+    gfx_put_pixel_alpha(ox + 8, oy + 5, 0x00FFFFFF, 220);
+}

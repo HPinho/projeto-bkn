@@ -6,6 +6,7 @@ module kernel::main;
 
 import kernel::graphics_engine::*;
 import kernel::desktop_compositor::*;
+import kernel::baken_runtime::*;
 
 // Estrutura de Informações de Inicialização repassada pelo Bootloader UEFI
 pub struct BakenBootInfo {

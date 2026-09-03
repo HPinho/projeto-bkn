@@ -1,6 +1,3 @@
-// Baken OS - Motor de Animação e Física em Sotlas (@system)
-// Interpolação Bézier, Spring Physics para Dock Magnify e Transições de Janela
-
 module kernel::baken_animation;
 
 pub struct SpringState {
@@ -11,87 +8,97 @@ pub struct SpringState {
     pub damping: f32;
 }
 
-pub struct DockIconAnim {
-    pub scale: f32;
-    pub glow_intensity: u8;
-    pub bounce_offset: i16;
-}
-
-// Funcao auxiliar abs
-@inline
-fn abs_i32(x: i32) -> i32 {
-    if (x < 0) { return -x; }
-    return x;
-}
-
-@inline
-pub fn animation_clamp01(t: f32) -> f32 {
-    if (t < 0.0) { return 0.0; }
-    if (t > 1.0) { return 1.0; }
-    return t;
-}
-
-// Curva quintica com velocidade e aceleracao nulas nas duas extremidades.
-// Evita o pequeno tranco visual que curvas apenas cubicas deixam no encontro.
 @system
-pub fn ease_smootherstep(t: f32) -> f32 {
-    let x = animation_clamp01(t);
-    return x * x * x * (x * (x * 6.0 - 15.0) + 10.0);
+pub fn spring_update(spring: *mut SpringState, dt: f32) -> void {
+    if spring == (null as *mut SpringState) { return; }
+    let safe_dt = if (dt > 0.05) { 0.05 } else if (dt < 0.001) { 0.001 } else { dt };
+    unsafe {
+        let force = -(*spring).stiffness * ((*spring).current_val - (*spring).target_val);
+        let damping_force = -(*spring).damping * (*spring).velocity;
+        let acceleration = force + damping_force;
+        (*spring).velocity += acceleration * safe_dt;
+        (*spring).current_val += (*spring).velocity * safe_dt;
+    }
 }
 
-// Alias semantico usado por superficies, paineis e transicoes de tela.
 @system
 pub fn ease_smooth_surface(t: f32) -> f32 {
-    return ease_smootherstep(t);
-}
-
-// Fluent Design Easing: Fast Out, Slow In (Entrada) - cubic-bezier(0, 0, 0, 1)
-// Aproximação polinomial para t em [0, 1]
-@system
-pub fn ease_fast_out_slow_in(t: f32) -> f32 {
-    let inv = 1.0 - animation_clamp01(t);
-    return 1.0 - (inv * inv * inv * inv); // 1 - (1-t)^4 (Fricção forte no final)
-}
-
-// Fluent Design Easing: Slow Out, Fast In (Saída) - cubic-bezier(1, 0, 1, 1)
-// Aproximação polinomial para t em [0, 1]
-@system
-pub fn ease_slow_out_fast_in(t: f32) -> f32 {
-    let x = animation_clamp01(t);
-    return x * x * x * x; // t^4 (Acelera rapidamente no final)
+    let safe_t = if t < 0.0 { 0.0 } else if t > 1.0 { 1.0 } else { t };
+    return safe_t * safe_t * (3.0 - 2.0 * safe_t);
 }
 
 @system
-pub fn spring_update(spring: *mut SpringState, dt: f32) -> f32 {
-    unsafe {
-        // Subpassos mantem a mola estavel em quadros atrasados no QEMU.
-        let safe_dt = if (dt < 0.0) { 0.0 } else if (dt > 0.05) { 0.05 } else { dt };
-        let step = safe_dt / 4.0;
-        for mut i in 0..4 {
-            let force = -(*spring).stiffness * ((*spring).current_val - (*spring).target_val);
-            let damping_force = -(*spring).damping * (*spring).velocity;
-            let acceleration = force + damping_force;
-            (*spring).velocity += acceleration * step;
-            (*spring).current_val += (*spring).velocity * step;
-        }
-        // Encerra a cauda subpixel da mola para evitar repinturas eternas e
-        // tremor de um pixel perto do alvo.
-        if (abs_i32((((*spring).target_val - (*spring).current_val) * 10000.0) as i32) <= 1 &&
-            abs_i32(((*spring).velocity * 10000.0) as i32) <= 1) {
-            (*spring).current_val = (*spring).target_val;
-            (*spring).velocity = 0.0;
-        }
-        return (*spring).current_val;
-    }
-}
-
-@system
-pub fn calculate_dock_magnify(cursor_x: i32, icon_center_x: i32, max_radius: i32) -> f32 {
-    let dist = abs_i32(cursor_x - icon_center_x);
-    if (dist >= max_radius) {
+pub fn calculate_dock_magnify(cursor_x: i32, icon_center_x: i32, radius: i32) -> f32 {
+    let diff = if cursor_x > icon_center_x { cursor_x - icon_center_x } else { icon_center_x - cursor_x };
+    if (diff >= radius || radius <= 0) {
         return 1.0;
     }
-    let ratio = (max_radius - dist) as f32 / max_radius as f32;
-    // Interpolação suave em sino (Gaussian Bell Curve aproximada)
-    return 1.0 + (ratio * ratio * 0.45);
+    let norm = (diff as f32) / (radius as f32);
+    let factor = 1.0 - (norm * norm);
+    return 1.0 + (0.35 * factor);
+}
+
+@system
+pub fn anim_smoothstep_u8(val: u32, max_val: u32) -> u8 {
+    if (val >= max_val || max_val == 0) { return 255; }
+    let v = (val * 255) / max_val;
+    let v2 = (v * v) / 255;
+    let v3 = (v2 * (3 * 255 - 2 * v)) / (255 * 255);
+    return if (v3 > 255) { 255 } else { v3 as u8 };
+}
+
+@system
+pub fn anim_wave_i32(tick: u32, period: u32, amp: i32) -> i32 {
+    if (period == 0 || amp == 0) { return 0; }
+    let phase = tick % period;
+    let half = period / 2;
+    if (half == 0) { return 0; }
+    if (phase < half) {
+        let p = (phase * 255) / half;
+        let s = anim_smoothstep_u8(p, 255) as i32;
+        return ((s * 2 - 255) * amp) / 255;
+    } else {
+        let p = ((phase - half) * 255) / half;
+        let s = anim_smoothstep_u8(p, 255) as i32;
+        return ((255 - s * 2) * amp) / 255;
+    }
+}
+
+@system
+pub fn anim_breathe_alpha(tick: u32, period: u32, min_a: u8, max_a: u8) -> u8 {
+    if (max_a <= min_a) { return min_a; }
+    let diff = (max_a - min_a) as i32;
+    let w = anim_wave_i32(tick, period, diff / 2);
+    let mid = (min_a as i32) + (diff / 2);
+    let res = mid + w;
+    if (res < 0) { return 0; }
+    if (res > 255) { return 255; }
+    return res as u8;
+}
+
+@system
+pub fn anim_orbit_cos(phase: u32, radius: i32) -> i32 {
+    let cos_phase = (phase + 64) % 256;
+    if (cos_phase < 128) {
+        let p = (cos_phase * 255) / 128;
+        let s = anim_smoothstep_u8(p, 255) as i32;
+        return ((s * 2 - 255) * radius) / 255;
+    } else {
+        let p = ((cos_phase - 128) * 255) / 128;
+        let s = anim_smoothstep_u8(p, 255) as i32;
+        return ((255 - s * 2) * radius) / 255;
+    }
+}
+
+@system
+pub fn anim_orbit_sin(phase: u32, radius: i32) -> i32 {
+    if (phase < 128) {
+        let p = (phase * 255) / 128;
+        let s = anim_smoothstep_u8(p, 255) as i32;
+        return ((s * 2 - 255) * radius) / 255;
+    } else {
+        let p = ((phase - 128) * 255) / 128;
+        let s = anim_smoothstep_u8(p, 255) as i32;
+        return ((255 - s * 2) * radius) / 255;
+    }
 }

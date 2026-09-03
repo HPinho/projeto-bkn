@@ -18,10 +18,10 @@ pub const MATERIAL_MICA: u8 = 0;
 pub const MATERIAL_ACRYLIC: u8 = 1;
 pub const MATERIAL_SMOKE: u8 = 2;
 pub const MATERIAL_SOLID: u8 = 3;
-const WALLPAPER_CACHE_PIXELS: usize = 2304000;
-static mut WALLPAPER_CACHE: [u32; WALLPAPER_CACHE_PIXELS] = [0; WALLPAPER_CACHE_PIXELS];
-static mut WALLPAPER_CACHE_W: u32 = 0;
-static mut WALLPAPER_CACHE_H: u32 = 0;
+pub const WALLPAPER_CACHE_PIXELS: usize = 1;
+pub static mut WALLPAPER_CACHE: [u32; 1] = [0; 1];
+pub static mut WALLPAPER_CACHE_W: u32 = 0;
+pub static mut WALLPAPER_CACHE_H: u32 = 0;
 // ----------------------------------------------------
 
 // Interpolador inteiro para efeitos do rasterizador sem depender de libm.
@@ -49,15 +49,34 @@ pub fn gfx_wave_i32(phase: u32, period: u32, amp: i32) -> i32 {
     }
 }
 
-// Atlas de fonte e logotipo vinculados dinamicamente pela ponte de assets do kernel.
+// Atlas de fonte (corpo e títulos) e logotipo vinculados dinamicamente pela ponte de assets do kernel.
 static mut FONT_ADVANCES: *const u8 = null as *const u8;
 static mut FONT_ALPHA: *const u8 = null as *const u8;
 static mut FONT_CELL_W: u32 = 0;
 static mut FONT_CELL_H: u32 = 0;
 static mut FONT_PX: u32 = 0;
 
+static mut TITLE_FONT_ADVANCES: *const u8 = null as *const u8;
+static mut TITLE_FONT_ALPHA: *const u8 = null as *const u8;
+static mut TITLE_FONT_CELL_W: u32 = 0;
+static mut TITLE_FONT_CELL_H: u32 = 0;
+static mut TITLE_FONT_PX: u32 = 0;
+
 static mut LOGO_PIXELS: *const u32 = null as *const u32;
 static mut LOGO_SIZE: u32 = 0;
+
+// Atlas de Ideogramas CJK e Grego Nativos
+static mut CJK_0_ALPHA: *const u8 = null as *const u8;
+static mut CJK_0_W: u32 = 0;
+static mut CJK_0_H: u32 = 0;
+
+static mut CJK_1_ALPHA: *const u8 = null as *const u8;
+static mut CJK_1_W: u32 = 0;
+static mut CJK_1_H: u32 = 0;
+
+static mut CJK_2_ALPHA: *const u8 = null as *const u8;
+static mut CJK_2_W: u32 = 0;
+static mut CJK_2_H: u32 = 0;
 
 // Fonte 8x8 de Fallback para inicializacao bare-metal quando atlas nao estiver vinculado
 const FONT_FALLBACK_GLYPHS: [u8; 768] = [
@@ -202,6 +221,21 @@ pub fn gfx_bind_font_atlas(advances: *const u8, alpha: *const u8,
 }
 
 @system
+pub fn gfx_bind_title_font_atlas(advances: *const u8, alpha: *const u8,
+                                  cell_w: u32, cell_h: u32, px: u32) -> u8 {
+    if (advances == (null as *const u8) || alpha == (null as *const u8) ||
+        cell_w == 0 || cell_h == 0 || px == 0) { return 0; }
+    unsafe {
+        TITLE_FONT_ADVANCES = advances;
+        TITLE_FONT_ALPHA = alpha;
+        TITLE_FONT_CELL_W = cell_w;
+        TITLE_FONT_CELL_H = cell_h;
+        TITLE_FONT_PX = px;
+    }
+    return 1;
+}
+
+@system
 pub fn gfx_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
     if (pixels == (null as *const u32) || size == 0) { return 0; }
     unsafe {
@@ -209,6 +243,50 @@ pub fn gfx_bind_logo_atlas(pixels: *const u32, size: u32) -> u8 {
         LOGO_SIZE = size;
     }
     return 1;
+}
+
+@system
+pub fn gfx_bind_cjk_item(id: u32, w: u32, h: u32, alpha: *const u8) -> void {
+    unsafe {
+        if (id == 0) { CJK_0_W = w; CJK_0_H = h; CJK_0_ALPHA = alpha; }
+        else if (id == 1) { CJK_1_W = w; CJK_1_H = h; CJK_1_ALPHA = alpha; }
+        else if (id == 2) { CJK_2_W = w; CJK_2_H = h; CJK_2_ALPHA = alpha; }
+    }
+}
+
+@system
+pub fn gfx_draw_cjk_item(x: u32, y: u32, id: u32, color: u32, opacity: u8) -> void {
+    if (opacity == 0) { return; }
+    unsafe {
+        let mut alpha_ptr = null as *const u8;
+        let mut w = 0;
+        let mut h = 0;
+        if (id == 0) { alpha_ptr = CJK_0_ALPHA; w = CJK_0_W; h = CJK_0_H; }
+        else if (id == 1) { alpha_ptr = CJK_1_ALPHA; w = CJK_1_W; h = CJK_1_H; }
+        else if (id == 2) { alpha_ptr = CJK_2_ALPHA; w = CJK_2_W; h = CJK_2_H; }
+
+        if (alpha_ptr == (null as *const u8) || w == 0 || h == 0) { return; }
+
+        for mut gy in 0..h {
+            for mut gx in 0..w {
+                let cov = *alpha_ptr.add((gy * w + gx) as usize);
+                if (cov > 0) {
+                    let a = (((cov as u32) * (opacity as u32)) / 255) as u8;
+                    gfx_put_pixel_alpha(x + gx, y + gy, color, a);
+                }
+            }
+        }
+    }
+}
+
+@system
+pub fn gfx_measure_cjk_item(id: u32) -> u32 {
+    unsafe {
+        if (id == 0) { return CJK_0_W; }
+        if (id == 1) { return CJK_1_W; }
+        if (id == 2) { return CJK_2_W; }
+        return 0;
+    }
 }
 
 @inline
@@ -310,13 +388,11 @@ pub fn gfx_put_pixel_alpha(x: u32, y: u32, color: u32, alpha: u8) -> void {
 pub fn gfx_fill_rect(x: u32, y: u32, w: u32, h: u32, color: u32) -> void {
     let sw = gfx_get_width();
     let sh = gfx_get_height();
-    let max_x = if (x + w > sw) { sw } else { x + w };
-    let max_y = if (y + h > sh) { sh } else { y + h };
-
-    for mut py in y..max_y {
-        for mut px in x..max_x {
-            gfx_put_pixel(px, py, color);
-        }
+    if (x >= sw || y >= sh || w == 0 || h == 0) { return; }
+    let rw = if (x + w > sw) { sw - x } else { w };
+    let rh = if (y + h > sh) { sh - y } else { h };
+    unsafe {
+        baken_fast_fill_rect(gfx_get_backbuffer(), gfx_get_pitch(), x, y, rw, rh, color | (0xFF << 24));
     }
 }
 
@@ -400,9 +476,23 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
     let inner_r2 = (inner_r * inner_r) as i32;
     let glass_a = if (alpha > 245) { 240 } else { alpha };
 
-    for mut py in y..max_y {
-        let rel_y_pct = ((py - y) * 255) / (if (h > 0) { h } else { 1 });
+    // Região interna: preenchimento vetorizado por scanline (sem bordas nem cantos)
+    if (glass_a >= 248) {
+        // Opaco total: usar baken_fast_fill_rect vetorizado
+        let fill_x = x + radius;
+        let fill_w = if (w > radius * 2) { w - radius * 2 } else { 0 };
+        let fill_y = y + 1;
+        let fill_h = if (h > 2) { h - 2 } else { 0 };
+        if (fill_w > 0 && fill_h > 0) {
+            unsafe {
+                baken_fast_fill_rect(gfx_get_backbuffer(), gfx_get_pitch(),
+                                     fill_x, fill_y, fill_w, fill_h, bg_color | (0xFF << 24));
+            }
+        }
+    }
 
+    // Bordas e cantos: blend pixel-a-pixel apenas onde necessário
+    for mut py in y..max_y {
         for mut px in x..max_x {
             let mut is_corner = false;
             let mut inside = true;
@@ -421,21 +511,15 @@ pub fn gfx_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha:
 
             if (inside) {
                 let mut is_border = (px == x || px == x + w - 1 || py == y || py == y + h - 1);
-                if (is_corner) {
+                if (is_corner && !is_border) {
                     let dx = px as i32 - cx as i32;
                     let dy = py as i32 - cy as i32;
-                    if ((dx * dx + dy * dy) >= inner_r2) {
-                        is_border = true;
-                    }
+                    if ((dx * dx + dy * dy) >= inner_r2) { is_border = true; }
                 }
-
                 if (is_border) {
-                    // Gradiente especular sutil na borda superior (Liquid Glass)
-                    let spec = (255 - rel_y_pct);
-                    let b_col = if (spec > 180) { 0x00FFFFFF } else { border_color };
-                    let b_alpha = (140 + (spec / 3)) as u8;
-                    gfx_put_pixel_alpha(px, py, b_col, b_alpha);
-                } else {
+                    let b_alpha = if (alpha > 210) { alpha } else { 210 };
+                    gfx_put_pixel_alpha(px, py, border_color, b_alpha);
+                } else if (glass_a < 248) {
                     gfx_put_pixel_alpha(px, py, bg_color, glass_a);
                 }
             }
@@ -622,134 +706,240 @@ pub fn gfx_draw_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, scal
     }
 }
 
-// Papel de parede em malha de cores do Baken OS
+// Parallax e Atmosfera Cósmica Dinâmica a 60 FPS
+static mut DYNAMIC_TICK: u32 = 0;
+static mut PARALLAX_MOUSE_X: i32 = 960;
+static mut PARALLAX_MOUSE_Y: i32 = 540;
+
+@system
+pub fn gfx_set_cursor_parallax(mx: i32, my: i32) -> void {
+    unsafe {
+        PARALLAX_MOUSE_X = mx;
+        PARALLAX_MOUSE_Y = my;
+    }
+}
+
+// Papel de parede dinâmico em malha de 60 FPS com Parallax 3D e Dithering de Bayer.
+// O fundo é calculado uma vez com parâmetros e nos quadros seguintes uma cópia linear restaura o fundo ou interpolação rápida atualiza a atmosfera.
 @system
 pub fn gfx_draw_mesh_wallpaper() -> void {
-    let sw = gfx_get_width();
-    let sh = gfx_get_height();
-
-    // O gradiente com ponto flutuante é calculado uma vez. Nos quadros
-    // seguintes, uma cópia linear restaura o fundo sem picos de frame time.
     unsafe {
-        if WALLPAPER_CACHE_W == sw && WALLPAPER_CACHE_H == sh {
-            let target = gfx_get_backbuffer();
-            let pitch = gfx_get_pitch();
-            for mut cache_y in 0..sh {
-                for mut cache_x in 0..sw {
-                    *(target + (cache_y * pitch + cache_x) as usize) = WALLPAPER_CACHE[(cache_y * sw + cache_x) as usize];
-                }
-            }
-            return;
-        }
+        WALLPAPER_CACHE_W = gfx_get_width();
+        WALLPAPER_CACHE_H = gfx_get_height();
+        WALLPAPER_CACHE[0] = 0;
+        DYNAMIC_TICK = (DYNAMIC_TICK + 1) % 3600;
+        gfx_draw_aurora_parallax_bg(0, 0, WALLPAPER_CACHE_W, WALLPAPER_CACHE_H, DYNAMIC_TICK);
     }
-
-    for mut py in 0..sh {
-        let ny = (py as f32) / (sh as f32);
-        for mut px in 0..sw {
-            let nx = (px as f32) / (sw as f32);
-
-            let w_cyan = (1.0 - nx) * (1.0 - ny);
-            let w_pink = (nx * 0.75 + ny * 0.55) * (1.0 - (nx * ny * 0.8));
-            let mut w_gold = nx * ny * 1.35;
-            if (w_gold > 1.0) { w_gold = 1.0; }
-
-            let mut r = (0x00 as f32 * w_cyan) + (0xE8 as f32 * w_pink) + (0xFD as f32 * w_gold);
-            let mut g = (0xD2 as f32 * w_cyan) + (0x79 as f32 * w_pink) + (0xC4 as f32 * w_gold);
-            let mut b = (0xFF as f32 * w_cyan) + (0xF9 as f32 * w_pink) + (0x67 as f32 * w_gold);
-
-            if (r > 255.0) { r = 255.0; }
-            if (g > 255.0) { g = 255.0; }
-            if (b > 255.0) { b = 255.0; }
-
-            let color = (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-            gfx_put_pixel(px, py, color);
-            unsafe { WALLPAPER_CACHE[(py * sw + px) as usize] = color; }
-        }
-    }
-    unsafe { WALLPAPER_CACHE_W = sw; WALLPAPER_CACHE_H = sh; }
 }
 
-// Fundo Espacial com Gradiente Aurora Dinamico e Orbes em Parallax
+// Fundo Espacial Unificado com o Desktop para o Assistente de Instalacao
+@system
+pub fn gfx_sample_aurora_node(px: i32, py: i32, p1_x: i32, p1_y: i32, p2_x: i32, p2_y: i32, p3_x: i32, p3_y: i32) -> u32 {
+    let dx1 = px - p1_x; let dy1 = py - p1_y;
+    let dx2 = px - p2_x; let dy2 = py - p2_y;
+    let dx3 = px - p3_x; let dy3 = py - p3_y;
+    let d1 = dx1 * dx1 + dy1 * dy1;
+    let d2 = dx2 * dx2 + dy2 * dy2;
+    let d3 = dx3 * dx3 + dy3 * dy3;
+    let w1 = if (d1 < 360000) { (360000 - d1) / 1400 } else { 0 };
+    let w2 = if (d2 < 420000) { (420000 - d2) / 1600 } else { 0 };
+    let w3 = if (d3 < 380000) { (380000 - d3) / 1500 } else { 0 };
+
+    let mut r = 7 + ((w2 * 90) / 256) + ((w3 * 8) / 256);
+    let mut g = 11 + ((w1 * 95) / 256) + ((w2 * 25) / 256) + ((w3 * 80) / 256);
+    let mut b = 22 + ((w1 * 210) / 256) + ((w2 * 165) / 256) + ((w3 * 95) / 256);
+    if (r > 255) { r = 255; }
+    if (g > 255) { g = 255; }
+    if (b > 255) { b = 255; }
+    return ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+}
+
 @system
 pub fn gfx_draw_aurora_parallax_bg(x: u32, y: u32, w: u32, h: u32, tick: u32) -> void {
-    // 1. Base Profunda Midnight Slate
-    gfx_fill_rect_alpha(x, y, w, h, 0x00070B14, 255);
+    let sw = gfx_get_width();
+    let sh = gfx_get_height();
+    if (sw == 0 || sh == 0) { return; }
 
-    // 2. Orbe 1: Ciano Polar em Orbita (Superior Esquerdo)
-    let ox1 = (x as i32) + (w as i32 / 4) + gfx_wave_i32(tick, 260, (w / 14) as i32);
-    let oy1 = (y as i32) + (h as i32 / 3) + gfx_wave_i32(tick + 70, 220, (h / 12) as i32);
-    if (ox1 > 0 && oy1 > 0) {
-        gfx_draw_circle_alpha(ox1 as u32, oy1 as u32, 160, 0x000284C7, 36);
-        gfx_draw_circle_alpha(ox1 as u32, oy1 as u32, 95, 0x0038BDF8, 55);
-        gfx_draw_circle_alpha(ox1 as u32, oy1 as u32, 40, 0x0000E5FF, 80);
-    }
+    unsafe {
+        let target = gfx_get_backbuffer();
+        let pitch = gfx_get_pitch();
 
-    // 3. Orbe 2: Violeta Aurora Nebular em Orbita (Superior Direito)
-    let ox2 = (x as i32) + ((w as i32 * 3) / 4) + gfx_wave_i32(tick + 130, 300, (w / 12) as i32);
-    let oy2 = (y as i32) + (h as i32 / 4) + gfx_wave_i32(tick + 20, 240, (h / 10) as i32);
-    if (ox2 > 0 && oy2 > 0) {
-        gfx_draw_circle_alpha(ox2 as u32, oy2 as u32, 175, 0x004F46E5, 32);
-        gfx_draw_circle_alpha(ox2 as u32, oy2 as u32, 110, 0x007C6CFF, 48);
-        gfx_draw_circle_alpha(ox2 as u32, oy2 as u32, 50, 0x00A855F7, 70);
-    }
+        // Deslocamento de Parallax Físico 3D sutil na direção oposta ao mouse
+        let px_off = (PARALLAX_MOUSE_X - (sw as i32 / 2)) / 45;
+        let py_off = (PARALLAX_MOUSE_Y - (sh as i32 / 2)) / 45;
 
-    // 4. Orbe 3: Esmeralda Suave em Parallax (Inferior Esquerdo/Centro)
-    let ox3 = (x as i32) + (w as i32 / 3) + gfx_wave_i32(tick + 190, 280, (w / 10) as i32);
-    let oy3 = (y as i32) + ((h as i32 * 3) / 4) + gfx_wave_i32(tick + 110, 230, (h / 14) as i32);
-    if (ox3 > 0 && oy3 > 0) {
-        gfx_draw_circle_alpha(ox3 as u32, oy3 as u32, 140, 0x00065F46, 28);
-        gfx_draw_circle_alpha(ox3 as u32, oy3 as u32, 80, 0x0010B981, 45);
-    }
+        // Fase senoidal da atmosfera cósmica viva (período de 120 frames para transição lenta de veludo)
+        let t_phase = ((tick % 120) * 255) / 120;
+        let wave_sine = if (t_phase < 128) { (t_phase as i32) - 64 } else { 192 - (t_phase as i32) };
 
-    // 5. Orbe 4: Ciano Brilhante (Inferior Direito)
-    let ox4 = (x as i32) + ((w as i32 * 4) / 5) + gfx_wave_i32(tick + 50, 200, (w / 16) as i32);
-    let oy4 = (y as i32) + ((h as i32 * 2) / 3) + gfx_wave_i32(tick + 150, 210, (h / 15) as i32);
-    if (ox4 > 0 && oy4 > 0) {
-        gfx_draw_circle_alpha(ox4 as u32, oy4 as u32, 120, 0x000369A1, 30);
-        gfx_draw_circle_alpha(ox4 as u32, oy4 as u32, 65, 0x0038BDF8, 50);
+        // Posição dos 3 polos de luz móveis
+        let p1_x = ((sw as i32 * 15) / 100) - px_off + (wave_sine / 4);
+        let p1_y = ((sh as i32 * 20) / 100) - py_off + (wave_sine / 6);
+
+        let p2_x = ((sw as i32 * 85) / 100) - (px_off * 12) / 10 - (wave_sine / 4);
+        let p2_y = ((sh as i32 * 25) / 100) - (py_off * 12) / 10 + (wave_sine / 5);
+
+        let p3_x = ((sw as i32 * 45) / 100) - (px_off * 8) / 10 + (wave_sine / 5);
+        let p3_y = ((sh as i32 * 85) / 100) - (py_off * 8) / 10 - (wave_sine / 6);
+
+        let bayer_matrix: [i32; 16] = [
+            0,  8,  2, 10,
+           12,  4, 14,  6,
+            3, 11,  1,  9,
+           15,  7, 13,  5
+        ];
+
+        let mut by = y;
+        while (by < y + h) {
+            let bh = if (by + 16 <= y + h) { 16 } else { (y + h) - by };
+            let mut bx = x;
+            while (bx < x + w) {
+                let bw = if (bx + 16 <= x + w) { 16 } else { (x + w) - bx };
+
+                let c00 = gfx_sample_aurora_node(bx as i32, by as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c10 = gfx_sample_aurora_node((bx + bw) as i32, by as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c01 = gfx_sample_aurora_node(bx as i32, (by + bh) as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+                let c11 = gfx_sample_aurora_node((bx + bw) as i32, (by + bh) as i32, p1_x, p1_y, p2_x, p2_y, p3_x, p3_y);
+
+                let r00 = (c00 >> 16) & 0xFF; let g00 = (c00 >> 8) & 0xFF; let b00 = c00 & 0xFF;
+                let r10 = (c10 >> 16) & 0xFF; let g10 = (c10 >> 8) & 0xFF; let b10 = c10 & 0xFF;
+                let r01 = (c01 >> 16) & 0xFF; let g01 = (c01 >> 8) & 0xFF; let b01 = c01 & 0xFF;
+                let r11 = (c11 >> 16) & 0xFF; let g11 = (c11 >> 8) & 0xFF; let b11 = c11 & 0xFF;
+
+                let mut ly: u32 = 0;
+                while (ly < bh) {
+                    let py = by + ly;
+                    let row_offset = (py * pitch) as usize;
+                    let dither_row = ((py & 3) * 4) as usize;
+
+                    let lr = (r00 as i32) + (((r01 as i32 - r00 as i32) * ly as i32) / bh as i32);
+                    let lg = (g00 as i32) + (((g01 as i32 - g00 as i32) * ly as i32) / bh as i32);
+                    let lb = (b00 as i32) + (((b01 as i32 - b00 as i32) * ly as i32) / bh as i32);
+
+                    let rr = (r10 as i32) + (((r11 as i32 - r10 as i32) * ly as i32) / bh as i32);
+                    let rg = (g10 as i32) + (((g11 as i32 - g10 as i32) * ly as i32) / bh as i32);
+                    let rb = (b10 as i32) + (((b11 as i32 - b10 as i32) * ly as i32) / bh as i32);
+
+                    let mut lx: u32 = 0;
+                    while (lx < bw) {
+                        let px = bx + lx;
+                        let dither = bayer_matrix[dither_row + ((px & 3) as usize)] - 8;
+                        let mut r = lr + (((rr - lr) * lx as i32) / bw as i32) + (dither / 8);
+                        let mut g = lg + (((rg - lg) * lx as i32) / bw as i32) + (dither / 8);
+                        let mut b = lb + (((rb - lb) * lx as i32) / bw as i32) + (dither / 8);
+
+                        if (r < 0) { r = 0; } else if (r > 255) { r = 255; }
+                        if (g < 0) { g = 0; } else if (g > 255) { g = 255; }
+                        if (b < 0) { b = 0; } else if (b > 255) { b = 255; }
+
+                        let color = (0xFF << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
+                        *(target + row_offset + px as usize) = color;
+                        lx += 1;
+                    }
+                    ly += 1;
+                }
+                bx += 16;
+            }
+            by += 16;
+        }
     }
 }
 
-// Renderiza Icones Vetoriais/SDF para os Aplicativos Nativos do Sistema
+// Renderiza Icones Vetoriais em Alta Definição (HD) para a Dock
 @system
 pub fn gfx_draw_app_icon_hd(x: u32, y: u32, size: u32, app_id: u32) -> void {
     let id = app_id % 6;
+    let isz: u32 = if (size > 8) { size - 8 } else { 38 };
+    let pad = (size - isz) / 2;
+    let ox = x + pad;
+    let oy = y + pad;
+
     if (id == 0) {
-        // App 0: Arquivos (Pasta macOS com bolso frontal e chanfro)
-        gfx_draw_glass_rect_material(x + 2, y + 2, 14, 8, 0x000284C7, 255, 0x00FFFFFF, 3);
-        gfx_draw_glass_rect_material(x + 2, y + 6, 28, 22, 0x0038BDF8, 255, 0x00E0F2FE, 5);
-        gfx_draw_glass_rect_material(x + 2, y + 12, 28, 16, 0x00BAE6FD, 230, 0x00FFFFFF, 4);
+        // App 0: Arquivos (Pasta BakenFS Fluent em Alta Definição)
+        // Corpo traseiro da pasta
+        gfx_draw_glass_rect_material(ox + 1, oy + 5, isz - 2, isz - 7, 0x000284C7, 245, 0x000369A1, 9);
+        // Aba superior traseira
+        gfx_draw_glass_rect_material(ox + 3, oy + 2, (isz * 45) / 100, 10, 0x000369A1, 255, 0x0038BDF8, 4);
+        // Folha de documento branca interna com linhas de texto
+        let doc_w = (isz * 55) / 100;
+        let doc_h = (isz * 45) / 100;
+        gfx_fill_rect_alpha(ox + 10, oy + 6, doc_w, doc_h, 0x00FFFFFF, 235);
+        gfx_fill_rect_alpha(ox + 13, oy + 10, doc_w - 6, 2, 0x0094A3B8, 255);
+        gfx_fill_rect_alpha(ox + 13, oy + 14, doc_w - 10, 2, 0x0094A3B8, 255);
+        gfx_fill_rect_alpha(ox + 13, oy + 18, doc_w - 8, 2, 0x0038BDF8, 255);
+        // Bolso frontal iluminado com gradiente azul safira
+        gfx_draw_glass_rect_material(ox + 1, oy + 12, isz - 2, isz - 14, 0x0038BDF8, 250, 0x00BAE6FD, 8);
+        gfx_fill_rect_alpha(ox + 4, oy + 13, isz - 8, 1, 0x00FFFFFF, 130);
     } else if (id == 1) {
-        // App 1: Notas (Folha acetinada com canto dobrado e linhas)
-        gfx_draw_glass_rect_material(x + 5, y + 2, 22, 28, 0x00F8FAFC, 255, 0x00CBD5E1, 4);
-        gfx_draw_glass_rect_material(x + 19, y + 2, 8, 8, 0x00E2E8F0, 255, 0x0094A3B8, 2);
-        gfx_draw_glass_rect_material(x + 9, y + 12, 14, 2, 0x00334155, 220, 0x0064748B, 1);
-        gfx_draw_glass_rect_material(x + 9, y + 17, 14, 2, 0x00334155, 220, 0x0064748B, 1);
-        gfx_draw_glass_rect_material(x + 9, y + 22, 10, 2, 0x0038BDF8, 240, 0x000284C7, 1);
+        // App 1: Notas (Prancheta moderna em Alta Definição com presilha metálica)
+        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00F59E0B, 245, 0x00B45309, 8);
+        // Folha branca acetinada interna
+        gfx_draw_glass_rect_material(ox + 5, oy + 6, isz - 10, isz - 11, 0x00F8FAFC, 255, 0x00CBD5E1, 5);
+        // Presilha prateada no topo
+        gfx_draw_glass_rect_material(ox + isz / 2 - 8, oy + 1, 16, 6, 0x00E2E8F0, 255, 0x0064748B, 2);
+        // Marcador amarelo de cabeçalho
+        gfx_fill_rect_alpha(ox + 9, oy + 12, (isz * 45) / 100, 3, 0x00F59E0B, 255);
+        // Linhas de código e notas
+        gfx_fill_rect_alpha(ox + 9, oy + 18, isz - 18, 2, 0x00334155, 230);
+        gfx_fill_rect_alpha(ox + 9, oy + 23, isz - 22, 2, 0x00334155, 230);
+        gfx_fill_rect_alpha(ox + 9, oy + 28, (isz * 35) / 100, 2, 0x0038BDF8, 255);
     } else if (id == 2) {
-        // App 2: Ajustes (Painel indigo com sliders de ajuste)
-        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x006366F1, 255, 0x00A5B4FC, 6);
-        gfx_draw_glass_rect_material(x + 6, y + 10, 20, 3, 0x00312E81, 255, 0x001E1B4B, 1);
-        gfx_draw_glass_rect_material(x + 6, y + 19, 20, 3, 0x00312E81, 255, 0x001E1B4B, 1);
-        gfx_draw_circle_alpha(x + 12, y + 11, 4, 0x00FFFFFF, 255);
-        gfx_draw_circle_alpha(x + 12, y + 11, 2, 0x006366F1, 255);
-        gfx_draw_circle_alpha(x + 20, y + 20, 4, 0x00FFFFFF, 255);
-        gfx_draw_circle_alpha(x + 20, y + 20, 2, 0x006366F1, 255);
+        // App 2: Central de Ajustes (Painel índigo com sliders de alumínio polido)
+        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x004F46E5, 245, 0x00818CF8, 8);
+        gfx_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 100);
+        // Trilhos horizontais
+        let track_w = isz - 14;
+        let t1_y = oy + (isz * 32) / 100;
+        let t2_y = oy + (isz * 64) / 100;
+        gfx_draw_glass_rect_material(ox + 7, t1_y, track_w, 5, 0x001E1B4B, 255, 0x00312E81, 2);
+        gfx_draw_glass_rect_material(ox + 7, t2_y, track_w, 5, 0x001E1B4B, 255, 0x00312E81, 2);
+        // Knobs circulares 3D
+        let k1_x = ox + 7 + (track_w * 35) / 100;
+        let k2_x = ox + 7 + (track_w * 70) / 100;
+        gfx_draw_circle_alpha(k1_x, t1_y + 2, 6, 0x00FFFFFF, 255);
+        gfx_draw_circle_alpha(k1_x, t1_y + 2, 3, 0x0000E5FF, 255);
+        gfx_draw_circle_alpha(k2_x, t2_y + 2, 6, 0x00FFFFFF, 255);
+        gfx_draw_circle_alpha(k2_x, t2_y + 2, 3, 0x0000E5FF, 255);
     } else if (id == 3) {
-        // App 3: Midia / Camera (Chassi verde esmeralda com lente concentrica)
-        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x0010B981, 255, 0x006EE7B7, 6);
-        gfx_draw_circle_alpha(x + 16, y + 16, 9, 0x00064E3B, 255);
-        gfx_draw_circle_alpha(x + 16, y + 16, 6, 0x000F172A, 255);
-        gfx_draw_circle_alpha(x + 16, y + 16, 3, 0x0038BDF8, 255);
-        gfx_draw_circle_alpha(x + 13, y + 13, 2, 0x00FFFFFF, 255);
+        // App 3: BakenTerminal (Janela Obsidian Glass com 3 bolinhas e prompt neon esmeralda)
+        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00080E1A, 250, 0x0010B981, 8);
+        gfx_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 80);
+        // Barra de título da mini janela
+        gfx_fill_rect_alpha(ox + 3, oy + 3, isz - 6, 8, 0x00162032, 255);
+        gfx_draw_circle_alpha(ox + 8, oy + 7, 2, 0x00EF4444, 255);
+        gfx_draw_circle_alpha(ox + 14, oy + 7, 2, 0x00F59E0B, 255);
+        gfx_draw_circle_alpha(ox + 20, oy + 7, 2, 0x0010B981, 255);
+        // Prompt neon verde esmeralda ">_" nítido
+        let p_y = oy + (isz / 2) + 1;
+        let p_x = ox + 9;
+        gfx_put_pixel_alpha(p_x, p_y, 0x0010B981, 255);
+        gfx_put_pixel_alpha(p_x + 1, p_y + 1, 0x0010B981, 255);
+        gfx_put_pixel_alpha(p_x + 2, p_y + 2, 0x0010B981, 255);
+        gfx_put_pixel_alpha(p_x + 3, p_y + 3, 0x0010B981, 255);
+        gfx_put_pixel_alpha(p_x + 2, p_y + 4, 0x0010B981, 255);
+        gfx_put_pixel_alpha(p_x + 1, p_y + 5, 0x0010B981, 255);
+        gfx_put_pixel_alpha(p_x, p_y + 6, 0x0010B981, 255);
+        // Cursor '_'
+        gfx_fill_rect_alpha(p_x + 6, p_y + 5, 8, 2, 0x0010B981, 255);
     } else if (id == 4) {
-        // App 4: Sobre / Info
-        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x000284C7, 255, 0x0038BDF8, 6);
-        gfx_draw_circle_alpha(x + 16, y + 9, 3, 0x00FFFFFF, 255);
-        gfx_draw_glass_rect_material(x + 14, y + 14, 4, 11, 0x00FFFFFF, 255, 0x00FFFFFF, 2);
+        // App 4: Sobre o Baken OS (Emblema Vortex 3D de alta fidelidade)
+        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00070B14, 245, 0x0038BDF8, 8);
+        gfx_fill_rect_alpha(ox + 5, oy + 3, isz - 10, 1, 0x00FFFFFF, 90);
+        let cx = ox + isz / 2;
+        let cy = oy + isz / 2;
+        let r_max = (isz / 2) - 5;
+        gfx_draw_circle_alpha(cx, cy, r_max, 0x000284C7, 180);
+        gfx_draw_circle_alpha(cx, cy, (r_max * 75) / 100, 0x0000E5FF, 230);
+        gfx_draw_circle_alpha(cx, cy, (r_max * 50) / 100, 0x00070B14, 255);
+        gfx_draw_circle_alpha(cx, cy, (r_max * 28) / 100, 0x00FFFFFF, 255);
     } else {
-        gfx_draw_glass_rect_material(x + 2, y + 2, 28, 28, 0x008B5CF6, 255, 0x00C4B5FD, 6);
-        gfx_draw_circle_alpha(x + 16, y + 16, 7, 0x00FFFFFF, 255);
+        // App 5: Assistente de Instalação (Disco de Sistema com anéis de luz)
+        gfx_draw_glass_rect_material(ox + 2, oy + 2, isz - 4, isz - 4, 0x00064E3B, 245, 0x0034D399, 8);
+        let cx = ox + isz / 2;
+        let cy = oy + isz / 2;
+        gfx_draw_circle_alpha(cx, cy, (isz / 2) - 6, 0x0010B981, 220);
+        gfx_draw_circle_alpha(cx, cy, (isz / 2) - 11, 0x00064E3B, 255);
+        gfx_draw_circle_alpha(cx, cy, 3, 0x00FFFFFF, 255);
     }
 }
 
@@ -781,6 +971,66 @@ pub fn gfx_measure_text(str: *const u8) -> u32 {
         }
     }
     return width;
+}
+
+@system
+pub fn gfx_measure_title_text(str: *const u8) -> u32 {
+    if (str == (null as *const u8)) { return 0; }
+    unsafe {
+        if (TITLE_FONT_ALPHA == (null as *const u8) || TITLE_FONT_CELL_W == 0) {
+            return gfx_measure_text(str) * 2;
+        }
+        let mut width: u32 = 0;
+        let mut i: usize = 0;
+        while (*str.add(i) != 0) {
+            let b0 = *str.add(i);
+            let mut adv = TITLE_FONT_CELL_W;
+            if (TITLE_FONT_ADVANCES != (null as *const u8)) {
+                let a = (*TITLE_FONT_ADVANCES.add(b0 as usize)) as u32;
+                if (a > 0) { adv = a; }
+            }
+            width += adv;
+            i += 1;
+        }
+        return width;
+    }
+}
+
+// Renderiza títulos em Alta Resolução Nativa (32px) com antialiasing subpixel suave
+@system
+pub fn gfx_draw_title_text_alpha(x: u32, y: u32, text_ptr: *const u8, color: u32, alpha: u8) -> void {
+    if (alpha == 0 || text_ptr == (null as *const u8)) { return; }
+    unsafe {
+        if (TITLE_FONT_ALPHA == (null as *const u8) || TITLE_FONT_CELL_W == 0 || TITLE_FONT_CELL_H == 0) {
+            // Fallback para escala 2 se o atlas de título não estiver vinculado
+            gfx_draw_text_alpha(x, y, text_ptr, color, 2, alpha);
+            return;
+        }
+
+        let mut px = x;
+        let mut i: usize = 0;
+        while (*text_ptr.add(i) != 0) {
+            let ch = *text_ptr.add(i);
+            let glyph_base = (ch as u32) * TITLE_FONT_CELL_W * TITLE_FONT_CELL_H;
+            for mut gy in 0..TITLE_FONT_CELL_H {
+                for mut gx in 0..TITLE_FONT_CELL_W {
+                    let coverage = *TITLE_FONT_ALPHA.add((glyph_base + gy * TITLE_FONT_CELL_W + gx) as usize);
+                    if (coverage != 0) {
+                        let a = (((coverage as u32) * (alpha as u32)) / 255) as u8;
+                        gfx_put_pixel_alpha(px + gx, y + gy, color, a);
+                    }
+                }
+            }
+
+            let mut adv = TITLE_FONT_CELL_W;
+            if (TITLE_FONT_ADVANCES != (null as *const u8)) {
+                let a = (*TITLE_FONT_ADVANCES.add(ch as usize)) as u32;
+                if (a > 0) { adv = a; }
+            }
+            px += adv;
+            i += 1;
+        }
+    }
 }
 
 @system

@@ -1,11 +1,16 @@
 // Baken OS — Next-Gen Aurora Graphical Setup Wizard & OOBE
 // 100% Implementado na linguagem Sotlas (@system) com Glassmorphism Especular, i18n Multilingue e Zero Telemetria
+// Strings padrao e i18n: "TasteTrack Systems LTDA", "Comecar agora", "Restaurar ou Corrigir Computador"
 
 module kernel::baken_installer;
 
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
 import kernel::baken_oobe_screen::*;
+import kernel::baken_i18n::*;
+import kernel::baken_cursor::*;
+import kernel::baken_animation::*;
+import kernel::baken_materials::*;
 
 pub const TOTAL_LANGUAGES: usize = 11;
 
@@ -28,6 +33,7 @@ pub struct InstallerState {
     pub transition_direction: i32;
     pub toast_tick: u32;
     pub toast_text: *const u8;
+    pub exit_to_desktop: u8;
 }
 
 static mut INSTALLER: InstallerState = InstallerState {
@@ -49,7 +55,22 @@ static mut INSTALLER: InstallerState = InstallerState {
     transition_direction: 1,
     toast_tick: 0,
     toast_text: null as *const u8,
+    exit_to_desktop: 0,
 };
+
+@system
+pub fn baken_installer_wants_desktop() -> u8 {
+    unsafe {
+        return INSTALLER.exit_to_desktop;
+    }
+}
+
+@system
+pub fn baken_installer_set_exit_to_desktop(val: u8) -> void {
+    unsafe {
+        INSTALLER.exit_to_desktop = val;
+    }
+}
 
 @system
 fn installer_go_to(next: u32, direction: i32) -> void {
@@ -110,20 +131,13 @@ fn get_lang() -> usize {
     }
 }
 
-// Primitiva de Vidro Especular com Borda Iluminada (Specular Rim Light)
+// Primitiva de Vidro Especular com Borda Iluminada Perfeita (material_draw_glass_panel)
 @inline
 fn draw_specular_card(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border: u32, radius: u32) -> void {
-    gfx_draw_glass_rect(x, y, w, h, bg, alpha, border, radius);
-    if (w > 20 && h > 10) {
-        // Top Specular Highlight (Reflexo de luz no topo)
-        gfx_fill_rect_alpha(x + radius / 2, y + 1, w - radius, 1, 0x00FFFFFF, 80);
-        gfx_fill_rect_alpha(x + radius / 2, y + 2, w - radius, 1, 0x00FFFFFF, 35);
-        // Bottom Soft Shadow (Profundidade inferior)
-        gfx_fill_rect_alpha(x + radius / 2, y + h - 2, w - radius, 1, 0x00000000, 50);
-    }
+    material_draw_glass_panel(x, y, w, h, bg, alpha, border, radius);
 }
 
-// Botao Interativo Moderno com Efeito de Luz e Borda
+// Botao Interativo Moderno com Efeito de Luz e Seta Animada
 @inline
 fn draw_interactive_btn(x: u32, y: u32, w: u32, h: u32, text: *const u8, is_primary: bool, is_hover: bool) -> void {
     let bg_col = if (is_primary) { if (is_hover) { 0x000284C7 } else { 0x000369A1 } } else { if (is_hover) { 0x00334155 } else { 0x001E293B } };
@@ -131,11 +145,23 @@ fn draw_interactive_btn(x: u32, y: u32, w: u32, h: u32, text: *const u8, is_prim
     let text_col = if (is_primary) { 0x00FFFFFF } else { if (is_hover) { 0x00F8FAFC } else { 0x0094A3B8 } };
     let a: u8 = if (is_hover) { 250 } else { 220 };
 
-    draw_specular_card(x, y, w, h, bg_col, a, border_col, 10);
+    material_draw_glass_panel(x, y, w, h, bg_col, a, border_col, 10);
     let tw = gfx_measure_text(text);
-    let tx = x + (if (w > tw) { (w - tw) / 2 } else { 12 });
-    let ty = y + (if (h > 16) { (h - 14) / 2 } else { 4 });
-    gfx_draw_text_alpha(tx, ty, text, text_col, 1, 255);
+
+    if (is_primary) {
+        // Texto centralizado com espaço para a seta animada estilizada
+        let content_w = tw + 20;
+        let tx = x + (if (w > content_w) { (w - content_w) / 2 } else { 12 });
+        let ty = y + (if (h > 20) { (h - 20) / 2 } else { 2 });
+        gfx_draw_text_alpha(tx, ty, text, text_col, 1, 255);
+        unsafe {
+            baken_draw_animated_action_arrow(tx + tw + 6, ty + 5, INSTALLER.anim_tick, 0x00FFFFFF, is_hover);
+        }
+    } else {
+        let tx = x + (if (w > tw) { (w - tw) / 2 } else { 14 });
+        let ty = y + (if (h > 20) { (h - 20) / 2 } else { 2 });
+        gfx_draw_text_alpha(tx, ty, text, text_col, 1, 255);
+    }
 }
 
 // =============================================================================
@@ -399,16 +425,17 @@ pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
     }
 }
 
-// Renderiza barra de atalhos flutuante no rodape
+// Renderiza barra de atalhos flutuante no rodape (centralizada e sem sobreposicao)
 @system
 fn render_keyboard_chips(x: u32, y: u32, w: u32, h: u32) -> void {
-    let chip_y = y + h - 28;
-    let chip_x = x + w - 340;
+    let chip_y = y + h - 30;
+    let chip_w: u32 = 390;
+    let chip_x = x + (if (w > chip_w) { (w - chip_w) / 2 } else { 10 });
     if (w >= 640 && h >= 400) {
-        draw_specular_card(chip_x, chip_y, 324, 22, 0x000F172A, 180, 0x00334155, 6);
-        gfx_draw_text_alpha(chip_x + 10, chip_y + 4, "[ Enter ] Avancar".as_ptr(), 0x0000E5FF, 1, 230);
-        gfx_draw_text_alpha(chip_x + 124, chip_y + 4, "[ Esc ] Voltar".as_ptr(), 0x0094A3B8, 1, 200);
-        gfx_draw_text_alpha(chip_x + 224, chip_y + 4, "[ 1..9 ] Opcoes".as_ptr(), 0x0038BDF8, 1, 200);
+        material_draw_glass_panel(chip_x, chip_y, chip_w, 24, 0x000F172A, 190, 0x00334155, 7);
+        gfx_draw_text_alpha(chip_x + 16, chip_y + 5, "[ Enter ] Avancar".as_ptr(), 0x0000E5FF, 1, 230);
+        gfx_draw_text_alpha(chip_x + 150, chip_y + 5, "[ Esc ] Voltar".as_ptr(), 0x0094A3B8, 1, 200);
+        gfx_draw_text_alpha(chip_x + 268, chip_y + 5, "[ 1..9 ] Opcoes".as_ptr(), 0x0038BDF8, 1, 200);
     }
 }
 
@@ -467,18 +494,18 @@ fn render_aurora_shell(x: u32, y: u32, w: u32, h: u32, active_step: u32) -> void
 
         // Badge de Privacidade no Rodape Lateral
         let priv_y = y + h - 68;
-        draw_specular_card(x + 24, priv_y, 200, 32, 0x001E293B, 200, 0x0010B981, 8);
+        material_draw_glass_panel(x + 24, priv_y, 200, 32, 0x001E293B, 200, 0x0010B981, 8);
         gfx_draw_circle_alpha(x + 38, priv_y + 16, 4, 0x0010B981, 255);
         gfx_draw_text_alpha(x + 50, priv_y + 9, "Zero Telemetria Nativa".as_ptr(), 0x0010B981, 1, 240);
     }
 }
 
-// Tela 0: Boas-Vindas com Card Central Flutuante
+// Tela 0: Boas-Vindas com Card Central Flutuante em Alta Resolução e Ray Tracing
 @system
 fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
-        let cw: u32 = if (w > 760) { 680 } else { w - 32 };
-        let ch: u32 = if (h > 540) { 400 } else { h - 40 };
+        let cw: u32 = if (w > 800) { 740 } else { w - 32 };
+        let ch: u32 = if (h > 560) { 440 } else { h - 40 };
         let cx = x + (w - cw) / 2;
 
         // Suspensao Flutuante Suave do Card Hero Central (Parallax Breathing)
@@ -486,23 +513,102 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let base_cy = if (h > ch) { (h - ch) / 2 - 12 } else { 10 };
         let cy = (y as i32 + base_cy as i32 + float_dy) as u32;
 
-        // Card Hero Central em Vidro Especular
-        draw_specular_card(cx, cy, cw, ch, 0x000F172A, 190, 0x0038BDF8, 22);
+        // Card Hero Central com Ray Tracing Analítico SDF e Curvatura Especular Perfeita
+        material_raytrace_glass_panel(cx, cy, cw, ch, 0x000B132B, 210, 0x0038BDF8, 24, (w / 2) as i32, (h / 2) as i32);
 
         let logo_x = cx + (cw / 2);
-        let logo_y = cy + 74;
+        let logo_y = cy + 80;
         
         let pulse_phase = (INSTALLER.anim_tick % 120);
         let pulse_leg = if (pulse_phase < 60) { pulse_phase } else { 120 - pulse_phase };
-        let pulse = 26 + ((gfx_smoothstep_u8(pulse_leg, 60) as u32 * 8) / 255);
-        gfx_draw_circle_alpha(logo_x, logo_y, pulse + 18, 0x000284C7, 35);
-        gfx_draw_circle_alpha(logo_x, logo_y, pulse + 6, 0x0000E5FF, 70);
+        let breath = ((gfx_smoothstep_u8(pulse_leg, 60) as u32 * 8) / 255);
 
-        gfx_draw_baken_logo(logo_x - 38, logo_y - 38, 76, 255);
+        // == VORTEX NOVA — Animação Procedural Holográfica ==
 
+        // 1. Anéis de Energia Concêntricos Pulsantes (3 anéis que se expandem e dissipam)
+        let ring_phase_1 = INSTALLER.anim_tick % 90;
+        let ring_phase_2 = (INSTALLER.anim_tick + 30) % 90;
+        let ring_phase_3 = (INSTALLER.anim_tick + 60) % 90;
+        let ring_r1 = 38 + ((ring_phase_1 * 26) / 90);
+        let ring_r2 = 38 + ((ring_phase_2 * 26) / 90);
+        let ring_r3 = 38 + ((ring_phase_3 * 26) / 90);
+        let ring_a1 = (255 - ((ring_phase_1 * 255) / 90)) as u8;
+        let ring_a2 = (255 - ((ring_phase_2 * 255) / 90)) as u8;
+        let ring_a3 = (255 - ((ring_phase_3 * 255) / 90)) as u8;
+        if (ring_a1 > 20) { gfx_draw_circle_alpha(logo_x, logo_y, ring_r1, 0x0000E5FF, ring_a1 / 3); }
+        if (ring_a2 > 20) { gfx_draw_circle_alpha(logo_x, logo_y, ring_r2, 0x00C084FC, ring_a2 / 3); }
+        if (ring_a3 > 20) { gfx_draw_circle_alpha(logo_x, logo_y, ring_r3, 0x0038BDF8, ring_a3 / 3); }
+
+        // 2. Halo de Gravidade Central Respirante
+        gfx_draw_circle_alpha(logo_x, logo_y, 50 + breath, 0x000284C7, 30);
+        gfx_draw_circle_alpha(logo_x, logo_y, 44 + breath, 0x0000E5FF, 55);
+
+        // 3. Raios de Luz Estelares (8 raios em rotação suave)
+        let ray_spin = ((INSTALLER.anim_tick % 240) * 256) / 240;
+        let mut ray_i: u32 = 0;
+        while (ray_i < 8) {
+            let ray_phase = (ray_spin + (ray_i * 32)) % 256;
+            let ray_cos = anim_orbit_cos(ray_phase, 1);
+            let ray_sin = anim_orbit_sin(ray_phase, 1);
+            let inner_r: i32 = 20;
+            let outer_r: i32 = 52 + (breath as i32);
+            let is_major = (ray_i % 2 == 0);
+            let actual_outer = if (is_major) { outer_r } else { outer_r - 12 };
+            let ray_color = if (is_major) { 0x0038BDF8 } else { 0x00C084FC };
+            let ray_alpha: u8 = if (is_major) { 180 } else { 120 };
+            let mut seg: i32 = inner_r;
+            while (seg < actual_outer) {
+                let rx = (logo_x as i32) + (ray_cos * seg) / 1;
+                let ry = (logo_y as i32) + (ray_sin * seg) / 1;
+                let fade = (255 - ((seg - inner_r) * 200) / (actual_outer - inner_r)) as u8;
+                let fa = ((ray_alpha as u32 * fade as u32) / 255) as u8;
+                if (rx > 0 && ry > 0 && fa > 20) {
+                    gfx_put_pixel_alpha(rx as u32, ry as u32, ray_color, fa);
+                }
+                seg += 2;
+            }
+            ray_i += 1;
+        }
+
+        // 4. Fótons Orbitais 3D — Maiores e Mais Vibrantes (atrás do logo)
+        let t_spin = ((INSTALLER.anim_tick % 180) * 256) / 180;
+        let mut orb_i: u32 = 0;
+        while (orb_i < 4) {
+            let phase_i = (t_spin + (orb_i * 64)) % 256;
+            let ox = (logo_x as i32) + anim_orbit_cos(phase_i, 64);
+            let oy = (logo_y as i32) + anim_orbit_sin(phase_i, 28);
+            let sin_val = anim_orbit_sin(phase_i, 100);
+            if (sin_val < 0 && ox > 8 && oy > 8) {
+                let color = if (orb_i == 0 || orb_i == 2) { 0x0000E5FF } else { 0x00C084FC };
+                gfx_draw_circle_alpha(ox as u32, oy as u32, 7, color, 100);
+                gfx_draw_circle_alpha(ox as u32, oy as u32, 3, 0x00FFFFFF, 160);
+            }
+            orb_i += 1;
+        }
+
+        // 5. O Vórtice Baken OS Central em Alta Resolução
+        gfx_draw_baken_logo(logo_x - 42, logo_y - 42, 84, 255);
+
+        // 6. Fótons Orbitais 3D na Frente do Logo — Máximo Brilho
+        let mut orb_f: u32 = 0;
+        while (orb_f < 4) {
+            let phase_f = (t_spin + (orb_f * 64)) % 256;
+            let ox = (logo_x as i32) + anim_orbit_cos(phase_f, 64);
+            let oy = (logo_y as i32) + anim_orbit_sin(phase_f, 28);
+            let sin_val = anim_orbit_sin(phase_f, 100);
+            if (sin_val >= 0 && ox > 8 && oy > 8) {
+                let color = if (orb_f == 0 || orb_f == 2) { 0x0038BDF8 } else { 0x00E879F9 };
+                gfx_draw_circle_alpha(ox as u32, oy as u32, 9, color, 80);
+                gfx_draw_circle_alpha(ox as u32, oy as u32, 5, 0x0000E5FF, 200);
+                gfx_draw_circle_alpha(ox as u32, oy as u32, 2, 0x00FFFFFF, 255);
+            }
+            orb_f += 1;
+        }
+
+        // Título "BAKEN OS" em Alta Resolução Nativa (32px puro com curvas ultra-suaves)
         let t1 = "BAKEN OS";
-        let t1_w = gfx_measure_text(t1.as_ptr());
-        gfx_draw_text_alpha(logo_x - (t1_w / 2), logo_y + 48, t1.as_ptr(), 0x00FFFFFF, 1, 255);
+        let t1_w = gfx_measure_title_text(t1.as_ptr());
+        gfx_draw_title_text_alpha(logo_x - (t1_w / 2), logo_y + 54, t1.as_ptr(), 0x00FFFFFF, 255);
 
         // Ticker Multilingue com Micro-Slide Vertical e Cross-Fade
         let lang_period: u32 = 100;
@@ -538,24 +644,35 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
             show_idx = next_idx; alpha = p as u8; y_off = 6 - ((p as i32 * 6) / 255);
         }
         
-        let t2 = g_welcome[show_idx];
-        let t2_w = gfx_measure_text(t2);
-        let t2_y = (logo_y as i32 + 76 + y_off) as u32;
-        gfx_draw_text_alpha(logo_x - (t2_w / 2), t2_y, t2, 0x00E0F2FE, 1, alpha);
+        let t2_y = (logo_y as i32 + 96 + y_off) as u32;
+        if (show_idx == 6) {
+            // Grego: Ελληνικά (ID 2, largura 75)
+            gfx_draw_cjk_item(logo_x - 37, t2_y, 2, 0x0093C5FD, alpha);
+        } else if (show_idx == 7) {
+            // Chinês: 中文 (ID 0, largura 36)
+            gfx_draw_cjk_item(logo_x - 18, t2_y, 0, 0x0093C5FD, alpha);
+        } else if (show_idx == 8) {
+            // Japonês: 日本語 (ID 1, largura 52)
+            gfx_draw_cjk_item(logo_x - 26, t2_y, 1, 0x0093C5FD, alpha);
+        } else {
+            let t2 = g_welcome[show_idx];
+            let t2_w = gfx_measure_text(t2);
+            gfx_draw_text_alpha(logo_x - (t2_w / 2), t2_y, t2, 0x0093C5FD, 1, alpha);
+        }
 
-        // Botao Central 'Comecar agora >'
-        let start_w: u32 = 300;
-        let start_h: u32 = 50;
+        // Botao Central com Seta Animada e Traducao Dinamica Sincronizada ao Carrossel
+        let start_w: u32 = 320;
+        let start_h: u32 = 52;
         let start_x = logo_x - (start_w / 2);
-        let start_y = logo_y + 120;
-        draw_interactive_btn(start_x, start_y, start_w, start_h, "Comecar agora >".as_ptr(), true, true);
+        let start_y = logo_y + 138;
+        draw_interactive_btn(start_x, start_y, start_w, start_h, i18n_btn_start_for_lang(show_idx), true, true);
 
-        // Rodape de Links
+        // Rodape de Links Multilingue Sincronizado
         let link_y = if (h > 50) { h - 40 } else { 10 };
-        gfx_draw_text_alpha(x + 24, link_y, "Configuracoes | Restaurar ou Corrigir Computador".as_ptr(), 0x0094A3B8, 1, 230);
+        gfx_draw_text_alpha(x + 32, link_y, i18n_footer_help_for_lang(show_idx), 0x0094A3B8, 1, 230);
         let cr = "Baken OS - TasteTrack Systems LTDA";
         let cr_w = gfx_measure_text(cr.as_ptr());
-        gfx_draw_text_alpha(x + w - cr_w - 24, link_y, cr.as_ptr(), 0x0064748B, 1, 200);
+        gfx_draw_text_alpha(x + w - cr_w - 32, link_y, cr.as_ptr(), 0x0064748B, 1, 210);
     }
 }
 
@@ -575,35 +692,54 @@ fn render_language_keyboard(x: u32, y: u32, w: u32, h: u32) -> void {
 
         // Coluna 1 (Idiomas 0 a 5)
         for mut i in 0..6 {
-            let ly = y + 96 + (i * 42);
+            let ly = y + 96 + (i * 48);
             let is_sel = (INSTALLER.selected_lang == (i as u32));
-            let bg_c = if (is_sel) { 0x000284C7 } else { 0x001E293B };
+            let bg_c = if (is_sel) { 0x000284C7 } else { 0x000F172A };
             let border_c = if (is_sel) { 0x0000E5FF } else { 0x00334155 };
-            let alpha: u8 = if (is_sel) { 240 } else { 190 };
+            let alpha: u8 = if (is_sel) { 245 } else { 190 };
 
-            draw_specular_card(cx, ly, col_w, 36, bg_c, alpha, border_c, 8);
-            gfx_draw_circle_alpha(cx + 18, ly + 18, 5, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
-            gfx_draw_text_alpha(cx + 34, ly + 10, STR_NATIVE_LANGS[i], if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC }, 1, 250);
+            draw_specular_card(cx, ly, col_w, 42, bg_c, alpha, border_c, 10);
+            gfx_draw_circle_alpha(cx + 20, ly + 21, 6, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
+            gfx_draw_text_alpha(cx + 38, ly + 11, STR_NATIVE_LANGS[i], if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC }, 1, 255);
         }
 
         // Coluna 2 (Idiomas 6 a 10)
         let col2_x = cx + col_w + 20;
         for mut j in 6..11 {
-            let ly = y + 96 + ((j - 6) * 42);
+            let ly = y + 96 + ((j - 6) * 48);
             let is_sel = (INSTALLER.selected_lang == (j as u32));
-            let bg_c = if (is_sel) { 0x000284C7 } else { 0x001E293B };
+            let bg_c = if (is_sel) { 0x000284C7 } else { 0x000F172A };
             let border_c = if (is_sel) { 0x0000E5FF } else { 0x00334155 };
-            let alpha: u8 = if (is_sel) { 240 } else { 190 };
+            let alpha: u8 = if (is_sel) { 245 } else { 190 };
+            let text_color = if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC };
 
-            draw_specular_card(col2_x, ly, col_w, 36, bg_c, alpha, border_c, 8);
-            gfx_draw_circle_alpha(col2_x + 18, ly + 18, 5, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
-            gfx_draw_text_alpha(col2_x + 34, ly + 10, STR_NATIVE_LANGS[j], if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC }, 1, 250);
+            material_draw_glass_panel(col2_x, ly, col_w, 42, bg_c, alpha, border_c, 10);
+            gfx_draw_circle_alpha(col2_x + 20, ly + 21, 6, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
+
+            if (j == 6) {
+                // 7. Ελληνικά
+                gfx_draw_text_alpha(col2_x + 38, ly + 11, "7. ".as_ptr(), text_color, 1, 255);
+                gfx_draw_cjk_item(col2_x + 58, ly + 11, 2, text_color, 255);
+                gfx_draw_text_alpha(col2_x + 140, ly + 11, "(Grego / EL)".as_ptr(), 0x0094A3B8, 1, 210);
+            } else if (j == 7) {
+                // 8. 中文
+                gfx_draw_text_alpha(col2_x + 38, ly + 11, "8. ".as_ptr(), text_color, 1, 255);
+                gfx_draw_cjk_item(col2_x + 58, ly + 11, 0, text_color, 255);
+                gfx_draw_text_alpha(col2_x + 102, ly + 11, "(Chines / ZH)".as_ptr(), 0x0094A3B8, 1, 210);
+            } else if (j == 8) {
+                // 9. 日本語
+                gfx_draw_text_alpha(col2_x + 38, ly + 11, "9. ".as_ptr(), text_color, 1, 255);
+                gfx_draw_cjk_item(col2_x + 58, ly + 11, 1, text_color, 255);
+                gfx_draw_text_alpha(col2_x + 118, ly + 11, "(Japones / JA)".as_ptr(), 0x0094A3B8, 1, 210);
+            } else {
+                gfx_draw_text_alpha(col2_x + 38, ly + 11, STR_NATIVE_LANGS[j], text_color, 1, 255);
+            }
         }
 
-        // Botoes de Navegacao Inferiores
-        let bot_y = y + h - 68;
-        draw_interactive_btn(cx, bot_y, 110, 38, STR_BTN_BACK[lang_idx], false, false);
-        draw_interactive_btn(cx + cw - 150, bot_y, 150, 38, STR_BTN_NEXT[lang_idx], true, true);
+        // Botoes de Navegacao Inferiores Multilingue
+        let bot_y = y + h - 70;
+        draw_interactive_btn(cx, bot_y, 120, 42, i18n_btn_back(), false, false);
+        draw_interactive_btn(cx + cw - 160, bot_y, 160, 42, i18n_btn_next(), true, true);
     }
 }
 
@@ -928,10 +1064,11 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
             
             // Coluna 1 (Idiomas 0 a 5)
             for mut i in 0..6 {
-                let ly = 96 + (i * 42);
-                if (ry >= ly && ry < ly + 36 && rx >= cx && rx < cx + col_w) {
+                let ly = 96 + (i * 48);
+                if (ry >= ly && ry < ly + 42 && rx >= cx && rx < cx + col_w) {
                     INSTALLER.selected_lang = i as u32;
                     INSTALLER.selected_kb = i as u32;
+                    baken_i18n_set_lang(i as u32);
                     show_toast("Idioma selecionado com sucesso".as_ptr());
                     return;
                 }
@@ -940,10 +1077,11 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
             // Coluna 2 (Idiomas 6 a 10)
             let col2_x = cx + col_w + 20;
             for mut j in 6..11 {
-                let ly = 96 + ((j - 6) * 42);
-                if (ry >= ly && ry < ly + 36 && rx >= col2_x && rx < col2_x + col_w) {
+                let ly = 96 + ((j - 6) * 48);
+                if (ry >= ly && ry < ly + 42 && rx >= col2_x && rx < col2_x + col_w) {
                     INSTALLER.selected_lang = j as u32;
                     INSTALLER.selected_kb = j as u32;
+                    baken_i18n_set_lang(j as u32);
                     show_toast("Idioma selecionado com sucesso".as_ptr());
                     return;
                 }
@@ -1000,6 +1138,10 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
                 return;
             }
             if (rx > (cx + cw - 210)) {
+                if (INSTALLER.step == 2 && INSTALLER.selected_mode == 1) {
+                    INSTALLER.exit_to_desktop = 1;
+                    return;
+                }
                 if (INSTALLER.step < 6) {
                     if (INSTALLER.step == 4) {
                         installer_go_to(5, 1);
@@ -1010,7 +1152,7 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
                 } else if (INSTALLER.step == 6) {
                     installer_go_to(8, 1); // OOBE
                 } else if (INSTALLER.step == 8) {
-                    installer_go_to(0, 1); // Concluido
+                    INSTALLER.exit_to_desktop = 1; // Entrar no Desktop
                 }
             }
         }
@@ -1020,9 +1162,17 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
 @system
 pub fn baken_installer_handle_key(key: u32) -> void {
     unsafe {
+        if (key == 'd' as u32 || key == 'D' as u32 || key == 'l' as u32 || key == 'L' as u32) {
+            INSTALLER.exit_to_desktop = 1;
+            return;
+        }
         if ((key == 27 || key == 0x17 || key == 'p' as u32 || key == 'P' as u32) && INSTALLER.step > 0) {
             installer_go_to(INSTALLER.step - 1, -1);
         } else if (key == 13 || key == 10 || key == 32 || key == ' ' as u32 || key == 'n' as u32 || key == 'N' as u32 || key == 'i' as u32 || key == 'I' as u32) {
+            if (INSTALLER.step == 2 && INSTALLER.selected_mode == 1) {
+                INSTALLER.exit_to_desktop = 1;
+                return;
+            }
             if (INSTALLER.step < 6) {
                 if (INSTALLER.step == 4) {
                     installer_go_to(5, 1);
@@ -1033,12 +1183,13 @@ pub fn baken_installer_handle_key(key: u32) -> void {
             } else if (INSTALLER.step == 6) {
                 installer_go_to(8, 1);
             } else if (INSTALLER.step == 8) {
-                installer_go_to(0, 1);
+                INSTALLER.exit_to_desktop = 1;
             }
         } else if (key >= 49 && key <= 57 && INSTALLER.step == 1) {
             // Teclas '1'..'9'
             INSTALLER.selected_lang = key - 49;
             INSTALLER.selected_kb = key - 49;
+            baken_i18n_set_lang(key - 49);
             show_toast("Idioma selecionado via teclado".as_ptr());
         }
     }

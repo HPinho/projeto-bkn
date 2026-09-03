@@ -1,25 +1,46 @@
-// Compositor canônico do desktop Sotlas.
-//
-// Esta é a única fachada que kernel::main pode usar para renderizar a sessão
-// gráfica. Ela impede que o boot, widgets e aplicativos inicializem motores de
-// vídeo concorrentes ou escrevam diretamente no framebuffer.
+// Compositor canonico e gerenciador de sessoes do Baken OS em Sotlas (@system).
+// Gerencia a transicao fluida entre o Assistente de Instalacao/OOBE e o Desktop Shell.
 
 module kernel::desktop_compositor;
 
+import kernel::graphics_engine::*;
+import kernel::baken_installer::*;
+import kernel::baken_oobe_screen::*;
 import kernel::desktop_shell::*;
 
+pub const SESSION_INSTALLER: u32 = 0;
+pub const SESSION_OOBE: u32 = 1;
+pub const SESSION_DESKTOP: u32 = 2;
+
 static mut COMPOSITOR_READY: bool = false;
+static mut CURRENT_SESSION: u32 = 0; // Inicia no Assistente de Instalacao / OOBE
+static mut COMPOSITOR_W: u32 = 1920;
+static mut COMPOSITOR_H: u32 = 1080;
+
+@system
+pub fn desktop_compositor_set_session(session: u32) -> void {
+    unsafe {
+        CURRENT_SESSION = session;
+    }
+}
+
+@system
+pub fn desktop_compositor_get_session() -> u32 {
+    unsafe {
+        return CURRENT_SESSION;
+    }
+}
 
 @system
 pub fn desktop_compositor_init(screen_w: u32, screen_h: u32) -> void {
     unsafe {
         if COMPOSITOR_READY { return; }
-
-        // graphics_engine já recebeu o framebuffer no início de kernel::main.
-        // A integração de BakenUI e WindowManager volta aqui quando ambos
-        // estiverem no build Sotlas validado; o shell continua sendo a única
-        // superfície renderizada nesta rota inicial.
+        COMPOSITOR_W = screen_w;
+        COMPOSITOR_H = screen_h;
         desktop_shell_init(screen_w, screen_h);
+        baken_installer_init();
+        baken_oobe_init();
+        CURRENT_SESSION = SESSION_INSTALLER;
         COMPOSITOR_READY = true;
     }
 }
@@ -28,6 +49,34 @@ pub fn desktop_compositor_init(screen_w: u32, screen_h: u32) -> void {
 pub fn desktop_compositor_render_frame() -> void {
     unsafe {
         if !COMPOSITOR_READY { return; }
-        desktop_shell_render_frame();
+
+        if (desktop_shell_wants_installer() == 1) {
+            desktop_shell_clear_installer_request();
+            baken_installer_set_exit_to_desktop(0);
+            CURRENT_SESSION = SESSION_INSTALLER;
+        }
+
+        if (CURRENT_SESSION == SESSION_INSTALLER) {
+            if (baken_installer_wants_desktop() == 1) {
+                CURRENT_SESSION = SESSION_DESKTOP;
+                desktop_shell_render_frame();
+            } else {
+                baken_installer_tick();
+                baken_installer_render(0, 0, COMPOSITOR_W, COMPOSITOR_H);
+                render_cursor();
+                gfx_swap_buffers();
+            }
+        } else if (CURRENT_SESSION == SESSION_OOBE) {
+            if (baken_oobe_is_complete() == 1) {
+                CURRENT_SESSION = SESSION_DESKTOP;
+                desktop_shell_render_frame();
+            } else {
+                baken_oobe_render(0, 0, COMPOSITOR_W, COMPOSITOR_H);
+                render_cursor();
+                gfx_swap_buffers();
+            }
+        } else {
+            desktop_shell_render_frame();
+        }
     }
 }

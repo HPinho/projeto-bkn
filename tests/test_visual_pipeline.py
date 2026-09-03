@@ -14,21 +14,21 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("VerticalResolution <= 1200", boot)
 
     def test_runtime_uses_real_frame_time_and_not_cpu_dependent_spin_delay(self):
-        runtime = (ROOT / "kernel/src/baken_runtime.c").read_text(encoding="utf-8")
-        self.assertIn("cycles_per_us", runtime)
+        runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
+        self.assertIn("CYCLES_PER_US", runtime.upper())
         self.assertIn("desktop_shell_set_frame_delta(dt)", runtime)
-        self.assertIn("stall(16667 - work_us)", runtime)
+        self.assertIn("Stall(16667 - work_us)", runtime)
         self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", runtime)
 
     def test_runtime_supports_simple_and_absolute_uefi_pointers(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        runtime = (ROOT / "kernel/src/baken_runtime.c").read_text(encoding="utf-8")
+        runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
         simple = boot.index("LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID")
         absolute = boot.index("LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID")
         self.assertLess(simple, absolute)
         self.assertIn("EfiSimplePointerState", runtime)
         self.assertIn("EfiAbsolutePointerState", runtime)
-        self.assertIn("boot_services->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID", runtime)
+        self.assertIn("LocateProtocol(&G_ABSOLUTE_GUID", runtime)
         self.assertIn("raw_x > range_x", runtime)
 
     def test_expensive_background_and_blur_are_bounded(self):

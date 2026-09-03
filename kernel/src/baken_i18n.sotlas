@@ -1,0 +1,339 @@
+// Baken OS - Modulo Central de Internacionalizacao Multilingue em Sotlas (@system)
+// Dicionarios completos para 11 Idiomas Globais:
+// 0: PT-BR, 1: EN-US, 2: FR, 3: IT, 4: ES, 5: DE, 6: EL, 7: ZH, 8: JA, 9: HI, 10: SW.
+
+module kernel::baken_i18n;
+
+pub static mut CURRENT_SYSTEM_LANG: u32 = 0;
+
+@system
+pub fn baken_i18n_set_lang(lang: u32) -> void {
+    unsafe {
+        CURRENT_SYSTEM_LANG = if (lang < 11) { lang } else { 0 };
+    }
+}
+
+@system
+pub fn baken_i18n_get_lang() -> u32 {
+    unsafe {
+        return CURRENT_SYSTEM_LANG;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// DICIONARIO TOP BAR
+// -----------------------------------------------------------------------------
+
+static I18N_TOP_FILE: [*const u8; 11] = [
+    "Arquivo".as_ptr(),
+    "File".as_ptr(),
+    "Fichier".as_ptr(),
+    "File".as_ptr(),
+    "Archivo".as_ptr(),
+    "Datei".as_ptr(),
+    "Archeio".as_ptr(),
+    "Wenjian".as_ptr(),
+    "Fairu".as_ptr(),
+    "Fael".as_ptr(),
+    "Faili".as_ptr()
+];
+
+static I18N_TOP_EDIT: [*const u8; 11] = [
+    "Editar".as_ptr(),
+    "Edit".as_ptr(),
+    "Modifier".as_ptr(),
+    "Modifica".as_ptr(),
+    "Editar".as_ptr(),
+    "Bearbeiten".as_ptr(),
+    "Epexergasia".as_ptr(),
+    "Bianji".as_ptr(),
+    "Henshu".as_ptr(),
+    "Sampadit".as_ptr(),
+    "Hariri".as_ptr()
+];
+
+static I18N_TOP_VIEW: [*const u8; 11] = [
+    "Exibir".as_ptr(),
+    "View".as_ptr(),
+    "Affichage".as_ptr(),
+    "Visualizza".as_ptr(),
+    "Ver".as_ptr(),
+    "Ansicht".as_ptr(),
+    "Provoli".as_ptr(),
+    "Chakan".as_ptr(),
+    "Hyoji".as_ptr(),
+    "Dekhen".as_ptr(),
+    "Ona".as_ptr()
+];
+
+static I18N_TOP_INSTALL: [*const u8; 11] = [
+    "Instalar OS".as_ptr(),
+    "Install OS".as_ptr(),
+    "Installer l'OS".as_ptr(),
+    "Installa OS".as_ptr(),
+    "Instalar SO".as_ptr(),
+    "OS installieren".as_ptr(),
+    "Egkatastasi OS".as_ptr(),
+    "Anzhuang OS".as_ptr(),
+    "OS Inusutooru".as_ptr(),
+    "OS Sthapit".as_ptr(),
+    "Sakinisha OS".as_ptr()
+];
+
+static I18N_TOP_LIVE: [*const u8; 11] = [
+    "Live RAM".as_ptr(),
+    "Live RAM".as_ptr(),
+    "RAM Live".as_ptr(),
+    "RAM Live".as_ptr(),
+    "Live RAM".as_ptr(),
+    "Live-RAM".as_ptr(),
+    "Live RAM".as_ptr(),
+    "Zhibo RAM".as_ptr(),
+    "Live RAM".as_ptr(),
+    "Live RAM".as_ptr(),
+    "RAM Mubashara".as_ptr()
+];
+
+// -----------------------------------------------------------------------------
+// DICIONARIO DOCK & APLICATIVOS
+// -----------------------------------------------------------------------------
+
+static I18N_APP_FILES: [*const u8; 11] = [
+    "Arquivos".as_ptr(),
+    "Files".as_ptr(),
+    "Fichiers".as_ptr(),
+    "File".as_ptr(),
+    "Archivos".as_ptr(),
+    "Dateien".as_ptr(),
+    "Archeia".as_ptr(),
+    "Wenjian".as_ptr(),
+    "Fairu".as_ptr(),
+    "Faelen".as_ptr(),
+    "Mafaili".as_ptr()
+];
+
+static I18N_APP_NOTES: [*const u8; 11] = [
+    "Notas".as_ptr(),
+    "Notes".as_ptr(),
+    "Notes".as_ptr(),
+    "Note".as_ptr(),
+    "Notas".as_ptr(),
+    "Notizen".as_ptr(),
+    "Simeioseis".as_ptr(),
+    "Biji".as_ptr(),
+    "Memo".as_ptr(),
+    "Notes".as_ptr(),
+    "Vidokezo".as_ptr()
+];
+
+static I18N_APP_SETTINGS: [*const u8; 11] = [
+    "Ajustes".as_ptr(),
+    "Settings".as_ptr(),
+    "Reglages".as_ptr(),
+    "Impostazioni".as_ptr(),
+    "Ajustes".as_ptr(),
+    "Einstellungen".as_ptr(),
+    "Rythmiseis".as_ptr(),
+    "Shezhi".as_ptr(),
+    "Settei".as_ptr(),
+    "Settings".as_ptr(),
+    "Mipangilio".as_ptr()
+];
+
+static I18N_APP_TERMINAL: [*const u8; 11] = [
+    "Terminal".as_ptr(),
+    "Terminal".as_ptr(),
+    "Terminal".as_ptr(),
+    "Terminale".as_ptr(),
+    "Terminal".as_ptr(),
+    "Terminal".as_ptr(),
+    "Termatiko".as_ptr(),
+    "Zhongduan".as_ptr(),
+    "Taaminaru".as_ptr(),
+    "Terminal".as_ptr(),
+    "Kituo".as_ptr()
+];
+
+static I18N_APP_ABOUT: [*const u8; 11] = [
+    "Sobre".as_ptr(),
+    "About".as_ptr(),
+    "A propos".as_ptr(),
+    "Info".as_ptr(),
+    "Acerca de".as_ptr(),
+    "Uber".as_ptr(),
+    "Schetika".as_ptr(),
+    "Guanyu".as_ptr(),
+    "Jouhou".as_ptr(),
+    "Ke Bare Me".as_ptr(),
+    "Kuhusu".as_ptr()
+];
+
+// -----------------------------------------------------------------------------
+// DICIONARIO JANELAS
+// -----------------------------------------------------------------------------
+
+static I18N_WIN_FILES: [*const u8; 11] = [
+    "Arquivos - BakenFS".as_ptr(),
+    "Files - BakenFS".as_ptr(),
+    "Fichiers - BakenFS".as_ptr(),
+    "File - BakenFS".as_ptr(),
+    "Archivos - BakenFS".as_ptr(),
+    "Dateien - BakenFS".as_ptr(),
+    "Archeia - BakenFS".as_ptr(),
+    "Wenjian - BakenFS".as_ptr(),
+    "Fairu - BakenFS".as_ptr(),
+    "Faelen - BakenFS".as_ptr(),
+    "Mafaili - BakenFS".as_ptr()
+];
+
+static I18N_WIN_NOTES: [*const u8; 11] = [
+    "Notas - Documento.txt".as_ptr(),
+    "Notes - Document.txt".as_ptr(),
+    "Notes - Document.txt".as_ptr(),
+    "Note - Documento.txt".as_ptr(),
+    "Notas - Documento.txt".as_ptr(),
+    "Notizen - Dokument.txt".as_ptr(),
+    "Simeioseis - Document.txt".as_ptr(),
+    "Biji - Wendang.txt".as_ptr(),
+    "Memo - Dokyumento.txt".as_ptr(),
+    "Notes - Dastavez.txt".as_ptr(),
+    "Vidokezo - Waraka.txt".as_ptr()
+];
+
+static I18N_WIN_SETTINGS: [*const u8; 11] = [
+    "Ajustes do Sistema".as_ptr(),
+    "System Settings".as_ptr(),
+    "Reglages du Systeme".as_ptr(),
+    "Impostazioni di Sistema".as_ptr(),
+    "Ajustes del Sistema".as_ptr(),
+    "Systemeinstellungen".as_ptr(),
+    "Rythmiseis Systimatos".as_ptr(),
+    "Xitong Shezhi".as_ptr(),
+    "Shisutemu Settei".as_ptr(),
+    "System Settings".as_ptr(),
+    "Mipangilio ya Mfumo".as_ptr()
+];
+
+static I18N_WIN_ABOUT: [*const u8; 11] = [
+    "Sobre o Baken OS".as_ptr(),
+    "About Baken OS".as_ptr(),
+    "A propos de Baken OS".as_ptr(),
+    "Informazioni su Baken OS".as_ptr(),
+    "Acerca de Baken OS".as_ptr(),
+    "Uber Baken OS".as_ptr(),
+    "Schetika me to Baken OS".as_ptr(),
+    "Guanyu Baken OS".as_ptr(),
+    "Baken OS ni tsuite".as_ptr(),
+    "Baken OS ke Bare Me".as_ptr(),
+    "Kuhusu Baken OS".as_ptr()
+];
+
+// -----------------------------------------------------------------------------
+// DICIONARIO BOTOES & LINKS DO INSTALADOR / OOBE
+// -----------------------------------------------------------------------------
+
+static I18N_BTN_START: [*const u8; 11] = [
+    "Comecar agora".as_ptr(),
+    "Get started".as_ptr(),
+    "Commencer".as_ptr(),
+    "Inizia ora".as_ptr(),
+    "Empezar ahora".as_ptr(),
+    "Jetzt starten".as_ptr(),
+    "Xekiniste tora".as_ptr(),
+    "Kaishi tiyan".as_ptr(),
+    "Ima sugu kaishi".as_ptr(),
+    "Abhi shuru karein".as_ptr(),
+    "Anza sasa".as_ptr()
+];
+
+static I18N_BTN_NEXT: [*const u8; 11] = [
+    "Avancar >".as_ptr(),
+    "Next >".as_ptr(),
+    "Suivant >".as_ptr(),
+    "Avanti >".as_ptr(),
+    "Siguiente >".as_ptr(),
+    "Weiter >".as_ptr(),
+    "Epomeno >".as_ptr(),
+    "Xiayibu >".as_ptr(),
+    "Tsugi he >".as_ptr(),
+    "Aage >".as_ptr(),
+    "Mbele >".as_ptr()
+];
+
+static I18N_BTN_BACK: [*const u8; 11] = [
+    "< Voltar".as_ptr(),
+    "< Back".as_ptr(),
+    "< Retour".as_ptr(),
+    "< Indietro".as_ptr(),
+    "< Atras".as_ptr(),
+    "< Zuruck".as_ptr(),
+    "< Piso".as_ptr(),
+    "< Fanhui".as_ptr(),
+    "< Modoru".as_ptr(),
+    "< Peeche".as_ptr(),
+    "< Nyuma".as_ptr()
+];
+
+static I18N_FOOTER_HELP: [*const u8; 11] = [
+    "Configuracoes | Restaurar ou Corrigir Computador".as_ptr(),
+    "Settings | Restore or Repair Computer".as_ptr(),
+    "Parametres | Restaurer ou Reparer l'ordinateur".as_ptr(),
+    "Impostazioni | Ripristina o Ripara PC".as_ptr(),
+    "Ajustes | Restaurar o Reparar Computadora".as_ptr(),
+    "Einstellungen | Computer reparieren".as_ptr(),
+    "Rythmiseis | Epidiorthosi Ypologisti".as_ptr(),
+    "Shezhi | Huifu huo Xiufu Jisuanji".as_ptr(),
+    "Settei | Konpyuta no Shufuku".as_ptr(),
+    "Settings | Computer Thik Karein".as_ptr(),
+    "Mipangilio | Rekebisha Kompyuta".as_ptr()
+];
+
+// -----------------------------------------------------------------------------
+// FUNCOES GETTER CONVENIENTES
+// -----------------------------------------------------------------------------
+
+@system pub fn i18n_top_file() -> *const u8 { unsafe { return I18N_TOP_FILE[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_top_edit() -> *const u8 { unsafe { return I18N_TOP_EDIT[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_top_view() -> *const u8 { unsafe { return I18N_TOP_VIEW[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_top_install() -> *const u8 { unsafe { return I18N_TOP_INSTALL[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_top_live() -> *const u8 { unsafe { return I18N_TOP_LIVE[CURRENT_SYSTEM_LANG as usize]; } }
+
+@system pub fn i18n_app_name(id: u32) -> *const u8 {
+    unsafe {
+        let l = CURRENT_SYSTEM_LANG as usize;
+        let mid = id % 6;
+        if (mid == 0) { return I18N_APP_FILES[l]; }
+        if (mid == 1) { return I18N_APP_NOTES[l]; }
+        if (mid == 2) { return I18N_APP_SETTINGS[l]; }
+        if (mid == 3) { return I18N_APP_TERMINAL[l]; }
+        if (mid == 4) { return I18N_APP_ABOUT[l]; }
+        return I18N_TOP_INSTALL[l];
+    }
+}
+
+@system pub fn i18n_win_title(id: u32) -> *const u8 {
+    unsafe {
+        let l = CURRENT_SYSTEM_LANG as usize;
+        let mid = id % 6;
+        if (mid == 0) { return I18N_WIN_FILES[l]; }
+        if (mid == 1) { return I18N_WIN_NOTES[l]; }
+        if (mid == 2) { return I18N_WIN_SETTINGS[l]; }
+        if (mid == 3) { return "BakenTerminal - /home/root".as_ptr(); }
+        if (mid == 4) { return I18N_WIN_ABOUT[l]; }
+        return I18N_TOP_INSTALL[l];
+    }
+}
+
+@system pub fn i18n_btn_start() -> *const u8 { unsafe { return I18N_BTN_START[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_btn_start_for_lang(idx: usize) -> *const u8 {
+    let l = if (idx < 11) { idx } else { 0 };
+    return I18N_BTN_START[l];
+}
+
+@system pub fn i18n_btn_next() -> *const u8 { unsafe { return I18N_BTN_NEXT[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_btn_back() -> *const u8 { unsafe { return I18N_BTN_BACK[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_footer_help() -> *const u8 { unsafe { return I18N_FOOTER_HELP[CURRENT_SYSTEM_LANG as usize]; } }
+@system pub fn i18n_footer_help_for_lang(idx: usize) -> *const u8 {
+    let l = if (idx < 11) { idx } else { 0 };
+    return I18N_FOOTER_HELP[l];
+}

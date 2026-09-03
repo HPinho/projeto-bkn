@@ -296,16 +296,21 @@ static void choose_high_density_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         if (query(gop, mode, &info_size, &info) != EFI_SUCCESS || !info) continue;
 
         uint64_t area = (uint64_t)info->HorizontalResolution * info->VerticalResolution;
-        /* O renderer EFI e software. 1920x1200 e o teto que preserva texto
-         * nativo e double buffering sem transformar cada quadro em uma copia
-         * 4K de dezenas de MiB. A selecao anterior iniciava best_area com o
-         * modo corrente: se o firmware abrisse em 4K, nenhum modo dentro do
-         * teto poderia vence-lo e o sistema permanecia no caminho sem buffer. */
+        uint64_t score = area;
+        // Bônus para telas Widescreen modernas (16:9 e 16:10), eliminando barras pretas
+        if ((info->HorizontalResolution * 9 == info->VerticalResolution * 16) ||
+            (info->HorizontalResolution * 10 == info->VerticalResolution * 16)) {
+            score += 5000000ULL;
+        }
+        if (info->HorizontalResolution == 1920 && info->VerticalResolution == 1080) {
+            score += 15000000ULL;
+        }
+
         if (info->PixelFormat == PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR &&
             info->HorizontalResolution <= 1920 && info->VerticalResolution <= 1200 &&
-            area >= best_area) {
+            score >= best_area) {
             best_mode = mode;
-            best_area = area;
+            best_area = score;
             found_budget_mode = 1;
         }
         if (bs && bs->FreePool) ((EFI_STATUS (*)(void*))bs->FreePool)(info);

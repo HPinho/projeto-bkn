@@ -65,13 +65,14 @@ $qemu_args = @(
     "-cpu", "max",
     "-drive", "if=pflash,format=raw,unit=0,readonly=on,file=$ovmf",
     "-drive", "media=cdrom,readonly=on,file=$iso",
-    "-device", "usb-ehci,id=ehci",
-    "-device", "usb-tablet,bus=ehci.0",
-    "-device", "usb-kbd,bus=ehci.0",
+    "-device", "qemu-xhci,id=xhci",
+    "-device", "usb-tablet,bus=xhci.0",
+    "-device", "usb-mouse,bus=xhci.0",
+    "-device", "usb-kbd,bus=xhci.0",
     "-m", "4G",
     "-smp", "1",
-    "-vga", "std",
-    "-global", "VGA.vgamem_mb=64",
+    "-device", "VGA,vgamem_mb=64,xres=1920,yres=1080",
+    "-serial", "file:build/qemu_debug.log",
     "-name", "Baken OS MVP Desktop"
 )
 

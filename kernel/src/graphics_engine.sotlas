@@ -78,14 +78,8 @@ pub fn gfx_get_height() -> u32 {
 pub fn gfx_swap_buffers() -> void {
     unsafe {
         if (!FB.use_double_buffering || FB.backbuffer == null as *mut u32 || FB.base == null as *mut u32) { return; }
-        
-        let total_u64 = (FB.pitch * FB.height * 4 / 8) as usize;
-        let src_u64 = FB.backbuffer as *const u64;
-        let dst_u64 = FB.base as *mut u64;
-
-        for mut i in 0 .. total_u64 {
-            *(dst_u64 + i) = *(src_u64 + i);
-        }
+        let total_bytes = (FB.pitch * FB.height * 4) as usize;
+        baken_fast_memcpy(FB.base as *mut void, FB.backbuffer as *const void, total_bytes);
     }
 }
 

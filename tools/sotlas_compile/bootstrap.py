@@ -137,7 +137,7 @@ def lex(source: str, filename: str | None = None) -> list[Token]:
     return tokens
 
 
-@dataclass
+@dataclass(frozen=True)
 class Type:
     name: str
     pointer: bool = False
@@ -145,8 +145,14 @@ class Type:
     is_array: bool = False
     array_size: int | str = 0
     elem_type: Type | None = None
+    # Suporte a ponteiros de funcao: fn(T1, T2) -> R
+    is_fn_ptr: bool = False
+    fn_params: tuple = ()  # tuple[Type, ...]
+    fn_ret: Type | None = None
 
     def base_c(self) -> str:
+        if self.is_fn_ptr:
+            return self._fn_ptr_c("")
         if self.is_array and self.elem_type:
             return self.elem_type.base_c()
         base = C_TYPES.get(self.name, self.name)
@@ -155,6 +161,14 @@ class Type:
             return f"{prefix}{base} *"
         return base
 
+    def _fn_ptr_c(self, var_name: str) -> str:
+        """Emite o typedef correto para ponteiro de funcao: ret_t (*var_name)(p1, p2)."""
+        ret = self.fn_ret.c() if self.fn_ret else "void"
+        params = ", ".join(p.c() for p in self.fn_params) if self.fn_params else "void"
+        if var_name:
+            return f"{ret} (*{var_name})({params})"
+        return f"{ret}(*)({params})"
+
     def array_dims(self) -> str:
         if not self.is_array:
             return ""
@@ -162,6 +176,8 @@ class Type:
         return f"[{self.array_size}]{child_dims}"
 
     def c(self) -> str:
+        if self.is_fn_ptr:
+            return self._fn_ptr_c("")
         if self.is_array:
             return f"{self.base_c()} *"
         base = C_TYPES.get(self.name, self.name)
@@ -171,6 +187,8 @@ class Type:
         return base
 
     def c_decl(self, var_name: str) -> str:
+        if self.is_fn_ptr:
+            return self._fn_ptr_c(var_name)
         if self.is_array:
             return f"{self.base_c()} {var_name}{self.array_dims()}"
         return f"{self.c()} {var_name}"
@@ -209,6 +227,8 @@ class MethodCall(Expr):
     args: list[Expr]
     target_type: Type | None = None
     pass_by_ref: bool = False
+    is_vtable_call: bool = False
+    is_arrow: bool = False
 @dataclass
 class Cast(Expr): expr: Expr; target_type: Type
 @dataclass
@@ -354,6 +374,27 @@ class Parser:
             self.at += 1; parts.append(self.ident())
         return "::".join(parts)
 
+    def _fn_ptr_type(self) -> Type:
+        """Parseia fn(T1, T2, ...) -> R como tipo ponteiro de funcao."""
+        self.expect("(")
+        params: list[Type] = []
+        if not self.accept(")"):
+            while True:
+                params.append(self.type())
+                if self.accept(")"):
+                    break
+                self.expect(",")
+        ret = self.type() if self.accept("->") else Type("void")
+        return Type(name="__fn_ptr", is_fn_ptr=True, fn_params=tuple(params), fn_ret=ret)
+
+    def _field_type(self) -> Type:
+        """Tipo de campo de struct: 'nome: tipo' ou 'nome: fn(...)->R'."""
+        self.expect(":")
+        if self.current.kind == "fn":
+            self.at += 1
+            return self._fn_ptr_type()
+        return self.type()
+
     def type(self) -> Type:
         if self.accept("!"):
             return Type("void")
@@ -482,8 +523,6 @@ class Parser:
 
             raise SotlasBootstrapError("declaração de topo Sotlas Bootstrap inválida", self.current.line, self.current.column, self.filename, self.source)
         return module
-
-    def _field_type(self) -> Type: self.expect(":"); return self.type()
 
     def function(self, public: bool, attributes: list[str] | None = None) -> Function:
         name = self.ident(); self.expect("("); params = []
@@ -769,6 +808,27 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "__hlt": Function("__hlt", [], Type("void"), [], public=True, attributes=["@system"]),
     "baken_runtime_init_assets": Function("baken_runtime_init_assets", [], Type("void"), [], public=True, attributes=["@system"]),
     "baken_runtime_run": Function("baken_runtime_run", [("boot_info", Type("void", pointer=True)), ("width", Type("u32")), ("height", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_efi_init": Function("baken_efi_init", [("boot_info", Type("void", pointer=True))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_efi_poll_key": Function("baken_efi_poll_key", [("out_scan", Type("u16", pointer=True)), ("out_uni", Type("u16", pointer=True))], Type("u8"), [], public=True, attributes=["@system"]),
+    "baken_efi_poll_mouse_rel": Function("baken_efi_poll_mouse_rel", [("out_dx", Type("i32", pointer=True)), ("out_dy", Type("i32", pointer=True)), ("out_btn", Type("u8", pointer=True))], Type("u8"), [], public=True, attributes=["@system"]),
+    "baken_efi_poll_mouse_abs": Function("baken_efi_poll_mouse_abs", [("width", Type("u32")), ("height", Type("u32")), ("out_x", Type("i32", pointer=True)), ("out_y", Type("i32", pointer=True)), ("out_btn", Type("u8", pointer=True))], Type("u8"), [], public=True, attributes=["@system"]),
+    "baken_fast_memcpy": Function("baken_fast_memcpy", [("dst", Type("void", pointer=True)), ("src", Type("void", pointer=True)), ("n", Type("usize"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_fast_fill_rect": Function("baken_fast_fill_rect", [("fb", Type("u32", pointer=True)), ("pitch", Type("u32")), ("x", Type("u32")), ("y", Type("u32")), ("w", Type("u32")), ("h", Type("u32")), ("color", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_rdtsc": Function("baken_rdtsc", [], Type("u64"), [], public=True, attributes=["@system"]),
+    "baken_bind_all_assets": Function("baken_bind_all_assets", [], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_serial_print": Function("baken_serial_print", [("s", Type("u8", pointer=True))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_efi_read_tsc": Function("baken_efi_read_tsc", [], Type("u64"), [], public=True, attributes=["@system"]),
+    "baken_efi_frame_wait": Function("baken_efi_frame_wait", [("frame_start", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_get_font_advances": Function("baken_get_font_advances", [("idx", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
+    "baken_get_font_alpha": Function("baken_get_font_alpha", [("idx", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
+    "baken_get_font_width": Function("baken_get_font_width", [("idx", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_get_font_height": Function("baken_get_font_height", [("idx", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_get_font_px": Function("baken_get_font_px", [("idx", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_get_cjk_width": Function("baken_get_cjk_width", [("idx", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_get_cjk_height": Function("baken_get_cjk_height", [("idx", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_get_cjk_alpha": Function("baken_get_cjk_alpha", [("idx", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
+    "baken_get_logo_pixels": Function("baken_get_logo_pixels", [], Type("u32", pointer=True), [], public=True, attributes=["@system"]),
+    "baken_get_logo_size": Function("baken_get_logo_size", [], Type("u32"), [], public=True, attributes=["@system"]),
 }
 
 
@@ -884,6 +944,13 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
                 return target_t
             if expr.method == "add":
                 return target_t
+            s_def = struct_map.get(target_t.name)
+            if s_def:
+                fld = next((f for f in s_def.fields if f.name == expr.method), None)
+                if fld and getattr(fld.type, "is_fn_ptr", False):
+                    expr.is_vtable_call = True
+                    expr.is_arrow = target_t.pointer
+                    return fld.type.fn_ret or Type("void")
             method = functions.get(f"{target_t.name}_{expr.method}")
             if method:
                 expr.pass_by_ref = bool(method.params and method.params[0][1].pointer and not target_t.pointer)
@@ -973,6 +1040,12 @@ def _emit_expr(expr: Expr, mod_prefix: str = "") -> str:
         callee = expr.callee
         return f"{callee}(" + ", ".join(_emit_expr(item, mod_prefix) for item in expr.args) + ")"
     if isinstance(expr, MethodCall):
+        if getattr(expr, "is_vtable_call", False):
+            target_str = _emit_expr(expr.target, mod_prefix)
+            arrow = "->" if getattr(expr, "is_arrow", False) else "."
+            callee = f"{target_str}{arrow}{expr.method}"
+            args_s = ", ".join(_emit_expr(item, mod_prefix) for item in expr.args)
+            return f"({callee})({args_s})"
         if expr.method == "as_ptr":
             return _emit_expr(expr.target, mod_prefix)
         if expr.method == "abs":
@@ -1022,6 +1095,12 @@ PREAMBLE = """/* Gerado pelo frontend Sotlas Bootstrap. */
 
 extern void baken_runtime_init_assets(void);
 extern void baken_runtime_run(const void *boot_info, uint32_t width, uint32_t height);
+extern void baken_efi_init(const void *boot_info);
+extern uint8_t baken_efi_poll_key(uint16_t *out_scan, uint16_t *out_uni);
+extern uint8_t baken_efi_poll_mouse_rel(int32_t *out_dx, int32_t *out_dy, uint8_t *out_btn);
+extern uint8_t baken_efi_poll_mouse_abs(uint32_t width, uint32_t height, int32_t *out_x, int32_t *out_y, uint8_t *out_btn);
+extern uint64_t baken_efi_read_tsc(void);
+extern void baken_efi_frame_wait(uint64_t frame_start);
 
 static inline void __outb(uint16_t port, uint8_t val) {
 #if defined(__x86_64__) || defined(__i386__)
@@ -1058,6 +1137,140 @@ static inline void __hlt(void) {
     __asm__ volatile ("hlt");
 #endif
 }
+
+static inline void baken_fast_memcpy(void *dst, const void *src, size_t n) {
+#if defined(__x86_64__)
+    size_t qwords = n / 8;
+    size_t bytes = n % 8;
+    __asm__ volatile (
+        "cld\\n\\t"
+        "rep movsq"
+        : "+D"(dst), "+S"(src), "+c"(qwords)
+        :
+        : "memory"
+    );
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    for (size_t i = 0; i < bytes; i++) d[i] = s[i];
+#else
+    uint64_t *d64 = (uint64_t *)dst;
+    const uint64_t *s64 = (const uint64_t *)src;
+    size_t q = n / 8;
+    for (size_t i = 0; i < q; i++) d64[i] = s64[i];
+#endif
+}
+
+static inline void baken_fast_fill_rect(uint32_t *fb, uint32_t pitch, uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t color) {
+    if (!fb || w == 0 || h == 0) return;
+    for (uint32_t row = 0; row < h; row++) {
+        uint32_t *dst = fb + (y + row) * pitch + x;
+#if defined(__x86_64__) || defined(__i386__)
+        size_t q = w;
+        __asm__ volatile (
+            "cld\\n\\t"
+            "rep stosl"
+            : "+D"(dst), "+c"(q)
+            : "a"(color)
+            : "memory"
+        );
+#else
+        for (uint32_t i = 0; i < w; i++) dst[i] = color;
+#endif
+    }
+}
+
+static inline uint64_t baken_rdtsc(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    uint32_t low, high;
+    __asm__ volatile ("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+#else
+    return 0;
+#endif
+}
+
+static inline void baken_serial_print(const uint8_t *s) {
+    if (!s) return;
+    while (*s) {
+        if (*s == 10) {
+            while ((__inb(0x3FD) & 0x20) == 0);
+            __outb(0x3F8, 13);
+        }
+        while ((__inb(0x3FD) & 0x20) == 0);
+        __outb(0x3F8, *s++);
+    }
+}
+
+#if defined(__has_include)
+#if __has_include("font_google_sans_flex_atlas.h")
+#include "font_google_sans_flex_atlas.h"
+#include "baken_cjk_atlas.h"
+#include "baken_logo_atlas.h"
+
+static inline const uint8_t *baken_get_font_advances(uint32_t idx) {
+    if (idx < 9) return sotlas_font_atlases[idx].advances;
+    return 0;
+}
+static inline const uint8_t *baken_get_font_alpha(uint32_t idx) {
+    if (idx < 9) return sotlas_font_atlases[idx].alpha;
+    return 0;
+}
+static inline uint32_t baken_get_font_width(uint32_t idx) {
+    if (idx < 9) return (uint32_t)sotlas_font_atlases[idx].width;
+    return 0;
+}
+static inline uint32_t baken_get_font_height(uint32_t idx) {
+    if (idx < 9) return (uint32_t)sotlas_font_atlases[idx].height;
+    return 0;
+}
+static inline uint32_t baken_get_font_px(uint32_t idx) {
+    if (idx < 9) return (uint32_t)sotlas_font_atlases[idx].px;
+    return 0;
+}
+
+static inline uint32_t baken_get_cjk_width(uint32_t idx) {
+    if (idx < BAKEN_CJK_COUNT) return g_baken_cjk_items[idx].width;
+    return 0;
+}
+static inline uint32_t baken_get_cjk_height(uint32_t idx) {
+    if (idx < BAKEN_CJK_COUNT) return g_baken_cjk_items[idx].height;
+    return 0;
+}
+static inline const uint8_t *baken_get_cjk_alpha(uint32_t idx) {
+    if (idx < BAKEN_CJK_COUNT) return g_baken_cjk_items[idx].alpha;
+    return 0;
+}
+
+static inline const uint32_t *baken_get_logo_pixels(void) {
+    return g_baken_logo_atlases[0].pixels;
+}
+static inline uint32_t baken_get_logo_size(void) {
+    return g_baken_logo_atlases[0].size;
+}
+#else
+static inline const uint8_t *baken_get_font_advances(uint32_t idx) { (void)idx; return 0; }
+static inline const uint8_t *baken_get_font_alpha(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_font_width(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_font_height(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_font_px(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_cjk_width(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_cjk_height(uint32_t idx) { (void)idx; return 0; }
+static inline const uint8_t *baken_get_cjk_alpha(uint32_t idx) { (void)idx; return 0; }
+static inline const uint32_t *baken_get_logo_pixels(void) { return 0; }
+static inline uint32_t baken_get_logo_size(void) { return 0; }
+#endif
+#else
+static inline const uint8_t *baken_get_font_advances(uint32_t idx) { (void)idx; return 0; }
+static inline const uint8_t *baken_get_font_alpha(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_font_width(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_font_height(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_font_px(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_cjk_width(uint32_t idx) { (void)idx; return 0; }
+static inline uint32_t baken_get_cjk_height(uint32_t idx) { (void)idx; return 0; }
+static inline const uint8_t *baken_get_cjk_alpha(uint32_t idx) { (void)idx; return 0; }
+static inline const uint32_t *baken_get_logo_pixels(void) { return 0; }
+static inline uint32_t baken_get_logo_size(void) { return 0; }
+#endif
 """
 
 
@@ -1085,6 +1298,12 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True,
             val_str = f" = {v.value}" if v.value is not None else ""
             lines.append(f"    {enum_obj.name}_{v.name}{val_str},")
         lines.append(f"}} {enum_obj.name};\n")
+
+    # Forward typedefs das structs para suportar ponteiros de função autorreferenciais e vtables
+    for struct in module.structs:
+        lines.append(f"typedef struct {struct.name} {struct.name};")
+    if module.structs:
+        lines.append("")
 
     # Structs
     for struct in module.structs:
@@ -1282,6 +1501,12 @@ def emit_header(module: Module) -> str:
             value = f" = {variant.value}" if variant.value is not None else ""
             lines.append(f"    {enum_obj.name}_{variant.name}{value},")
         lines.append(f"}} {enum_obj.name};")
+
+    for struct in module.structs:
+        if struct.public:
+            lines.append(f"typedef struct {struct.name} {struct.name};")
+    if any(struct.public for struct in module.structs):
+        lines.append("")
 
     for struct in module.structs:
         if not struct.public:

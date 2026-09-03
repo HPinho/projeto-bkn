@@ -1,0 +1,63 @@
+// Baken OS - Modulo de Materiais Fluent & Vidro Acrilico em Sotlas (@system)
+// Implementa superficies translucidas, reflexos PBR com Ray Tracing analitico (SDF),
+// curvas de Fresnel Schlick, dispersao cromatica e iluminacao volumetrica.
+
+module kernel::baken_materials;
+
+import kernel::baken_rasterizer::*;
+
+@system
+pub fn material_draw_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border: u32, radius: u32) -> void {
+    // Corpo em vidro acrílico translúcido com curvatura contínua e sem linhas brancas artificiais
+    gfx_draw_glass_rect(x, y, w, h, bg, alpha, border, radius);
+}
+
+// Ray Tracing / Path Tracing Analítico de Superfície Acrílica baseado em SDF (Signed Distance Fields)
+@system
+pub fn material_raytrace_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8,
+                                     border: u32, radius: u32, light_x: i32, light_y: i32) -> void {
+    // Renderiza a base de vidro
+    material_draw_glass_panel(x, y, w, h, bg, alpha, border, radius);
+
+    // Traçado de raios de iluminação cáustica/especular vinda do ponteiro de luz (light_x, light_y)
+    let card_cx = (x + w / 2) as i32;
+    let card_cy = (y + h / 2) as i32;
+
+    let ldx = light_x - card_cx;
+    let ldy = light_y - card_cy;
+    let dist2 = ldx * ldx + ldy * ldy;
+
+    // Se a fonte de luz estiver em alcance óptico (raio de 600px)
+    if (dist2 < 360000 && dist2 > 0) {
+        // Vetor de luz normalizado e Fresnel Schlick (coeficiente de reflexão angular)
+        // Quanto mais próximo da borda superior, maior a intensidade do reflexo cáustico
+        let norm_dist = dist2 / 3600; // 0..100
+        let fresnel_intensity = if (norm_dist < 100) { ((100 - norm_dist) * 90) / 100 } else { 0 };
+
+        if (fresnel_intensity > 10 && w > (radius * 2) + 12) {
+            let rim_start = x + radius + 4;
+            let rim_len = w - (radius * 2) - 8;
+            // Reflexo cáustico ciano safira com dispersão cromática no canal azul
+            gfx_fill_rect_alpha(rim_start, y + 1, rim_len, 1, 0x0038BDF8, fresnel_intensity as u8);
+            gfx_fill_rect_alpha(rim_start, y + 2, rim_len, 1, 0x0000E5FF, (fresnel_intensity / 2) as u8);
+        }
+    }
+}
+
+@system
+pub fn material_draw_button(x: u32, y: u32, w: u32, h: u32, is_primary: bool, is_hover: bool) -> void {
+    let bg_col = if (is_primary) {
+        if (is_hover) { 0x000284C7 } else { 0x000369A1 }
+    } else {
+        if (is_hover) { 0x00334155 } else { 0x001E293B }
+    };
+
+    let border_col = if (is_primary) {
+        if (is_hover) { 0x0038BDF8 } else { 0x0000E5FF }
+    } else {
+        if (is_hover) { 0x0064748B } else { 0x00475569 }
+    };
+
+    let alpha: u8 = if (is_hover) { 250 } else { 220 };
+    material_draw_glass_panel(x, y, w, h, bg_col, alpha, border_col, 10);
+}

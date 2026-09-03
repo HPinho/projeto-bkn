@@ -34,10 +34,10 @@ pub fn baken_dock_layout(item_count: u32, out: *mut BakenDockLayout) -> void {
     unsafe {
         let sw = gfx_get_width();
         let sh = gfx_get_height();
-        (*out).pitch = 50;
-        (*out).height = 58;
-        (*out).icon = 40;
-        (*out).pad = 10;
+        (*out).pitch = 64;
+        (*out).height = 72;
+        (*out).icon = 48;
+        (*out).pad = 14;
         (*out).width = item_count * (*out).pitch + (*out).pad * 2;
         if (*out).width > sw { (*out).width = sw; }
         (*out).x = if sw > (*out).width { (sw - (*out).width) / 2 } else { 0 };
@@ -50,7 +50,7 @@ pub fn dock_init(dock: *mut DesktopDock) -> void {
     if dock == (null as *mut DesktopDock) { return; }
     unsafe {
         (*dock).y_offset = 14;
-        (*dock).icon_size = 40;
+        (*dock).icon_size = 48;
         (*dock).item_count = 0;
         for mut i in 0..DOCK_MAX_ITEMS {
             (*dock).item_labels[i] = null as *const u8;
@@ -90,8 +90,8 @@ pub fn dock_trigger_bounce(dock: *mut DesktopDock, index: u32) -> void {
     if dock == (null as *mut DesktopDock) { return; }
     unsafe {
         if index >= (*dock).item_count { return; }
-        (*dock).bounce_springs[index as usize].current_val = -6.0;
-        (*dock).bounce_springs[index as usize].velocity = -50.0;
+        (*dock).bounce_springs[index as usize].current_val = -8.0;
+        (*dock).bounce_springs[index as usize].velocity = -60.0;
     }
 }
 
@@ -107,7 +107,7 @@ pub fn dock_update(dock: *mut DesktopDock, dt: f32, cursor_x: i32, cursor_y: i32
         for mut i in 0..(*dock).item_count {
             let center = (geo.x + geo.pad + i * geo.pitch + geo.pitch / 2) as i32;
             (*dock).item_springs[i as usize].target_val = if inside {
-                calculate_dock_magnify(cursor_x, center, 68)
+                calculate_dock_magnify(cursor_x, center, 74)
             } else { 1.0 };
             spring_update(&mut (*dock).item_springs[i as usize], dt);
             spring_update(&mut (*dock).bounce_springs[i as usize], dt);
@@ -122,7 +122,13 @@ pub fn dock_draw(dock: *const DesktopDock) -> void {
         if (*dock).item_count == 0 { return; }
         let mut geo = BakenDockLayout { x: 0, y: 0, width: 0, height: 0, pitch: 0, icon: 0, pad: 0 };
         baken_dock_layout((*dock).item_count, &mut geo);
-        gfx_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x00111A2E, 220, 0x44FFFFFF, geo.height / 2);
+        // Sombra física profunda sob o dock
+        gfx_draw_physical_shadow(geo.x, geo.y, geo.width, geo.height, ELEVATION_DOCK);
+        // Superfície de vidro escuro acrílico com borda translúcida
+        gfx_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x000B132B, 225, 0x00334155, 20);
+        // Linha de luz especular superior
+        gfx_fill_rect_alpha(geo.x + 14, geo.y + 1, geo.width - 28, 1, 0x00FFFFFF, 80);
+        gfx_fill_rect_alpha(geo.x + 14, geo.y + 2, geo.width - 28, 1, 0x00FFFFFF, 30);
         for mut i in 0..(*dock).item_count {
             let scale = (*dock).item_springs[i as usize].current_val;
             let bounce = (*dock).bounce_springs[i as usize].current_val;
@@ -131,7 +137,7 @@ pub fn dock_draw(dock: *const DesktopDock) -> void {
             let ix = base_x - (icon - geo.icon) / 2;
             let iy = ((geo.y + (geo.height - geo.icon) / 2 - (icon - geo.icon) / 2) as f32 + bounce) as u32;
             if scale > 1.02 {
-                gfx_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 4, 0x00FFFFFF, 45);
+                gfx_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 5, 0x0000E5FF, 50);
             }
             gfx_draw_app_icon_hd(ix, iy, icon, i);
         }
