@@ -516,15 +516,15 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         // Card Hero central com material translúcido Liquid Glass estilo macOS.
         material_draw_macos_card(cx, cy, cw, ch, 24, false);
         // No instalador, apenas o botão de Fechar (vermelho) para acionar desligamento/reinicialização
-        material_draw_close_button(cx + 20, cy + 20);
+        material_draw_close_button(cx + 24, cy + 24);
 
         let logo_x = cx + (cw / 2);
         let logo_y = cy + 80;
         
-        // Moldura estática de marca e logotipo de asset. Nenhum ícone ou
-        // efeito visual é sintetizado durante a renderização.
-        raster_draw_circle_alpha(logo_x, logo_y, 50, 0x000284C7, 16);
-        raster_draw_circle_alpha(logo_x, logo_y, 44, 0x0000E5FF, 28);
+        // Moldura estática de marca e anéis de reflexo zenital translúcido
+        raster_draw_circle_alpha(logo_x, logo_y, 56, 0x000284C7, 20);
+        raster_draw_circle_alpha(logo_x, logo_y, 48, 0x0000E5FF, 36);
+        raster_draw_circle_alpha(logo_x, logo_y, 44, 0x00FFFFFF, 45);
         raster_draw_baken_logo(logo_x - 42, logo_y - 42, 84, 255);
 
         // Título "BAKEN OS" em Alta Resolução Nativa em tom escuro para tema claro
@@ -565,7 +565,7 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         }
         
         let t2_y = (logo_y as i32 + 96 + y_off) as u32;
-        let sub_color: u32 = 0x000284C7;
+        let sub_color: u32 = 0x000369A1;
         if (show_idx == 6) {
             // Grego: Ελληνικά (ID 2, largura 75)
             raster_draw_cjk_item(logo_x - 37, t2_y, 2, sub_color, alpha);
@@ -600,14 +600,14 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
 
         draw_interactive_btn(start_x, start_y, start_w, start_h, i18n_btn_start_for_lang(show_idx), true, is_hover);
 
-        // Rodapé de Links Multilíngue Sincronizado aos 11 Idiomas com Fade Suave
+        // Rodapé de Links Multilíngue Sincronizado aos 11 Idiomas com Alto Contraste Límpido
         let link_y = if (h > 50) { h - 40 } else { 10 };
         let footer_text = i18n_footer_help_for_lang(show_idx);
-        let footer_alpha = if (phase < 44) { 235 } else { (alpha as u32 * 235 / 255) as u8 };
-        raster_draw_text_alpha(x + 32, link_y, footer_text, 0x00475569, 1, footer_alpha);
+        let footer_alpha = if (phase < 44) { 245 } else { (alpha as u32 * 245 / 255) as u8 };
+        raster_draw_text_alpha(x + 36, link_y, footer_text, 0x00E2E8F0, 1, footer_alpha);
         let cr = "Baken OS - TasteTrack Systems LTDA";
         let cr_w = raster_measure_text(cr.as_ptr());
-        raster_draw_text_alpha(x + w - cr_w - 32, link_y, cr.as_ptr(), 0x0064748B, 1, 210);
+        raster_draw_text_alpha(x + w - cr_w - 36, link_y, cr.as_ptr(), 0x00CBD5E1, 1, 210);
     }
 }
 
@@ -974,17 +974,39 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
     unsafe {
         // Tela 0: Welcome
         if (INSTALLER.step == 0) {
-            let cw: i32 = if (w > 760) { 680 } else { (w - 32) as i32 };
-            let ch: i32 = if (h > 540) { 400 } else { (h - 40) as i32 };
-            let cx: i32 = (w as i32 - cw) / 2;
-            let cy: i32 = if (h as i32 > ch) { (h as i32 - ch) / 2 - 12 } else { 10 };
+            let cw: u32 = if (w > 800) { 740 } else { w - 32 };
+            let ch: u32 = if (h > 560) { 440 } else { h - 40 };
+            let cx = (w - cw) / 2;
+            let base_cy = if (h > ch) { (h - ch) / 2 - 12 } else { 10 };
 
-            // Clique no Card Hero Central ou no Botao Iniciar
-            if (rx >= cx && rx <= cx + cw && ry >= cy && ry <= cy + ch) {
+            // 1. Botao Fechar (Vermelho) no canto superior esquerdo do card
+            let close_x = (cx + 20) as i32;
+            let close_y = (base_cy + 20) as i32;
+            let cdx = rx - close_x;
+            let cdy = ry - close_y;
+            if (cdx * cdx + cdy * cdy <= 144) {
+                show_toast("Reiniciar ou Desligar o computador".as_ptr());
+                return;
+            }
+
+            // 2. Botao Iniciar "Começar agora"
+            let logo_x = cx + (cw / 2);
+            let logo_y = base_cy + 80;
+            let start_w: u32 = 320;
+            let start_h: u32 = 52;
+            let base_x = (logo_x - (start_w / 2)) as i32;
+            let base_y = (logo_y + 138) as i32;
+
+            if (rx >= base_x && rx <= base_x + (start_w as i32) &&
+                ry >= base_y && ry <= base_y + (start_h as i32)) {
                 installer_go_to(1, 1);
-            } else if (ry > (h as i32) - 52 && rx < 180) {
+                return;
+            }
+
+            // 3. Links do Rodapé
+            if (ry > (h as i32) - 52 && rx < 320) {
                 installer_go_to(1, 1); // Configuracoes
-            } else if (ry > (h as i32) - 52 && rx >= 180 && rx < 520) {
+            } else if (ry > (h as i32) - 52 && rx >= 320 && rx < 650) {
                 installer_go_to(7, 1); // Reparo
             }
             return;

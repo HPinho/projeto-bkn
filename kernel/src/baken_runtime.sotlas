@@ -12,6 +12,7 @@ import kernel::desktop_shell::*;
 import kernel::baken_installer::*;
 import kernel::baken_oobe_screen::*;
 import kernel::window_manager::*;
+import kernel::baken_cursor::*;
 
 // =============================================================================
 // ESTRUTURAS UEFI COM VTABLES NATIVAS EM SOTLAS
@@ -254,41 +255,33 @@ pub fn baken_efi_init(boot_info: *const void) -> void {
     G_BOOT_SERVICES = bs;
     G_KEYBOARD = st.ConIn;
 
-    // Conecta o protocolo repassado pelo bootloader se existir
-    if (info.pointer_protocol != (null as *mut u8)) {
-        G_SIMPLE_POINTERS[0] = info.pointer_protocol as *mut EfiSimplePointer;
-        G_SIMPLE_COUNT = 1;
-        G_ABS_POINTERS[0] = info.pointer_protocol as *mut EfiAbsolutePointer;
-        G_ABS_COUNT = 1;
+    // Busca e conecta dispositivos Absolute Pointer (USB Tablet) e Simple Pointer (USB Mouse) separadamente
+    if (bs != (null as *mut EfiBootServicesPrefix)) {
+        let mut abs_ptr: *mut void = null as *mut void;
+        if (bs.LocateProtocol(&G_ABSOLUTE_GUID, null as *mut void, &mut abs_ptr) == 0 && abs_ptr != (null as *mut void)) {
+            let ap = abs_ptr as *mut EfiAbsolutePointer;
+            ap.Reset(ap, 0);
+            G_ABS_POINTERS[0] = ap;
+            G_ABS_COUNT = 1;
+        }
+
+        let mut simple_ptr: *mut void = null as *mut void;
+        if (bs.LocateProtocol(&G_SIMPLE_GUID, null as *mut void, &mut simple_ptr) == 0 && simple_ptr != (null as *mut void)) {
+            let sp = simple_ptr as *mut EfiSimplePointer;
+            sp.Reset(sp, 0);
+            G_SIMPLE_POINTERS[0] = sp;
+            G_SIMPLE_COUNT = 1;
+        }
     }
 
-    // Busca via LocateProtocol se ainda nao estiver preenchido
-    if (bs != (null as *mut EfiBootServicesPrefix)) {
-        if (G_SIMPLE_COUNT == 0) {
-            let mut ptr: *mut void = null as *mut void;
-            if (bs.LocateProtocol(&G_SIMPLE_GUID, null as *mut void, &mut ptr) == 0) {
-                if (ptr != (null as *mut void)) {
-                    let sp = ptr as *mut EfiSimplePointer;
-                    sp.Reset(sp, 0);
-                    G_SIMPLE_POINTERS[0] = sp;
-                    G_SIMPLE_COUNT = 1;
-                }
-            }
-        }
-        if (G_ABS_COUNT == 0) {
-            let mut ptr: *mut void = null as *mut void;
-            if (bs.LocateProtocol(&G_ABSOLUTE_GUID, null as *mut void, &mut ptr) == 0) {
-                if (ptr != (null as *mut void)) {
-                    let ap = ptr as *mut EfiAbsolutePointer;
-                    ap.Reset(ap, 0);
-                    G_ABS_POINTERS[0] = ap;
-                    G_ABS_COUNT = 1;
-                }
-            }
-        }
+    if (G_SIMPLE_COUNT == 0 && G_ABS_COUNT == 0 && info.pointer_protocol != (null as *mut u8)) {
+        G_SIMPLE_POINTERS[0] = info.pointer_protocol as *mut EfiSimplePointer;
+        G_SIMPLE_COUNT = 1;
+    }
 
-        // Calibracao de ciclos por microsegundo via TSC e Stall
-        let start = baken_efi_read_tsc();
+    // Calibracao de ciclos por microsegundo via TSC e Stall
+    let start = baken_efi_read_tsc();
+    if (bs != (null as *mut EfiBootServicesPrefix)) {
         bs.Stall(10000);
         let end = baken_efi_read_tsc();
         if (end > start) {
@@ -512,6 +505,7 @@ pub fn baken_runtime_dispatch_click(mx: i32, my: i32, w: u32, h: u32) -> void {
 
 @system
 pub fn baken_runtime_dispatch_move(mx: i32, my: i32) -> void {
+    baken_cursor_set_pos(mx, my);
     desktop_shell_set_cursor(mx, my);
     raster_set_cursor_parallax(mx, my);
     let session = desktop_compositor_get_session();
@@ -575,28 +569,31 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
         let mut abs_x: i32 = 0;
         let mut abs_y: i32 = 0;
         let mut abs_btn: u8 = 0;
-        if (baken_efi_poll_mouse_abs(width, height, &mut abs_x, &mut abs_y, &mut abs_btn) == 1) {
+        if (G_ABS_COUNT > 0 && baken_efi_poll_mouse_abs(width, height, &mut abs_x, &mut abs_y, &mut abs_btn) == 1) {
             mouse_x = abs_x;
             mouse_y = abs_y;
             curr_btn = abs_btn;
             mouse_updated = 1;
         }
 
-        let mut rel_dx: i32 = 0;
-        let mut rel_dy: i32 = 0;
-        let mut rel_btn: u8 = 0;
-        if (baken_efi_poll_mouse_rel(&mut rel_dx, &mut rel_dy, &mut rel_btn) == 1) {
-            mouse_x += rel_dx;
-            mouse_y += rel_dy;
-            if (mouse_x < 0) { mouse_x = 0; }
-            if (mouse_y < 0) { mouse_y = 0; }
-            if (mouse_x >= (width as i32)) { mouse_x = (width as i32) - 1; }
-            if (mouse_y >= (height as i32)) { mouse_y = (height as i32) - 1; }
-            curr_btn = rel_btn;
-            mouse_updated = 1;
+        if (mouse_updated == 0 && G_SIMPLE_COUNT > 0) {
+            let mut rel_dx: i32 = 0;
+            let mut rel_dy: i32 = 0;
+            let mut rel_btn: u8 = 0;
+            if (baken_efi_poll_mouse_rel(&mut rel_dx, &mut rel_dy, &mut rel_btn) == 1) {
+                mouse_x += rel_dx;
+                mouse_y += rel_dy;
+                if (mouse_x < 0) { mouse_x = 0; }
+                if (mouse_y < 0) { mouse_y = 0; }
+                if (mouse_x >= (width as i32)) { mouse_x = (width as i32) - 1; }
+                if (mouse_y >= (height as i32)) { mouse_y = (height as i32) - 1; }
+                curr_btn = rel_btn;
+                mouse_updated = 1;
+            }
         }
 
         if (mouse_updated == 1) {
+            baken_cursor_set_pos(mouse_x, mouse_y);
             desktop_shell_set_cursor(mouse_x, mouse_y);
             raster_set_cursor_parallax(mouse_x, mouse_y);
         }

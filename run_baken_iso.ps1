@@ -67,7 +67,6 @@ $qemu_args = @(
     "-drive", "media=cdrom,readonly=on,file=$iso",
     "-device", "qemu-xhci,id=xhci",
     "-device", "usb-tablet,bus=xhci.0",
-    "-device", "usb-mouse,bus=xhci.0",
     "-device", "usb-kbd,bus=xhci.0",
     "-m", "4G",
     "-smp", "1",

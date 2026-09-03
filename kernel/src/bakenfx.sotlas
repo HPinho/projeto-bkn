@@ -385,11 +385,12 @@ pub fn bakenfx_draw_shadow(canvas: *mut Canvas, bounds: Rect, radius: u32, color
     let ao_blur: u32 = 4;
     let ao_offset: i32 = if offset_y > 0 { 2 } else { 0 };
     let ao_alpha: f32 = base_alpha * 0.45;
-    raster_draw_drop_shadow(
+    raster_draw_drop_shadow_rounded(
         bounds.x as u32,
         bounds.y as u32,
         bounds.width,
         bounds.height,
+        radius,
         ao_blur,
         2,
         ao_offset,
@@ -398,11 +399,12 @@ pub fn bakenfx_draw_shadow(canvas: *mut Canvas, bounds: Rect, radius: u32, color
 
     // 2. Camada de Luz Chave Zenital
     let key_alpha: f32 = base_alpha * 0.70;
-    raster_draw_drop_shadow(
+    raster_draw_drop_shadow_rounded(
         bounds.x as u32,
         bounds.y as u32,
         bounds.width,
         bounds.height,
+        radius,
         safe_blur,
         2,
         offset_y,
@@ -427,7 +429,7 @@ pub fn bakenfx_draw_specular_rim(canvas: *mut Canvas, bounds: Rect, radius: u32,
         let y1 = if (bounds.y + bounds.height as i32) > (sh as i32) { sh } else { (bounds.y + bounds.height as i32) as u32 };
         if x0 >= x1 || y0 >= y1 { return; }
 
-        let rim_rad = if radius > 4 { radius / 2 } else { 2 };
+        let rim_rad = if radius > 4 { radius } else { 2 };
         let w_eff = if (x1 - x0) > rim_rad * 2 { (x1 - x0) - rim_rad * 2 } else { (x1 - x0) };
         let start_x = x0 + rim_rad;
 

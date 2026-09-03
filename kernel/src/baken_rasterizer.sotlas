@@ -437,6 +437,12 @@ pub fn raster_draw_hline(x: u32, y: u32, width: u32, color: u32, alpha: u8) -> v
 // Sombra Suave Volumetrica (Drop Shadow) com Gravidade (Y-Offset)
 @system
 pub fn raster_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread: u32, offset_y: i32, max_alpha_factor: f32) -> void {
+    raster_draw_drop_shadow_rounded(x, y, w, h, 0, blur, spread, offset_y, max_alpha_factor);
+}
+
+// Sombra Suave com Suporte a Cantos Arredondados e Exclusao Estrita do Interior
+@system
+pub fn raster_draw_drop_shadow_rounded(x: u32, y: u32, w: u32, h: u32, radius: u32, blur: u32, spread: u32, offset_y: i32, max_alpha_factor: f32) -> void {
     let sw = display_get_width();
     let sh = display_get_height();
     let base_y = (y as i32 + offset_y) as u32;
@@ -449,8 +455,24 @@ pub fn raster_draw_drop_shadow(x: u32, y: u32, w: u32, h: u32, blur: u32, spread
     let max_dist_sq = (total_rad * total_rad) as i32;
     if (max_dist_sq <= 0) { return; }
 
+    let r = radius as i32;
+
     for mut py in sy..ey {
         for mut px in sx..ex {
+            // Exclusao estrita do corpo do elemento: nunca projeta sombra no interior de [x, y, w, h]
+            if (px >= x && px < x + w && py >= y && py < y + h) {
+                if (r <= 1) {
+                    continue;
+                }
+                let cx = if (px < x + radius) { x + radius } else if (px >= x + w - radius) { x + w - radius } else { px };
+                let cy = if (py < y + radius) { y + radius } else if (py >= y + h - radius) { y + h - radius } else { py };
+                let dx = px as i32 - cx as i32;
+                let dy = py as i32 - cy as i32;
+                if (dx * dx + dy * dy < r * r) {
+                    continue;
+                }
+            }
+
             let qx = if (px < x) { (x - px) as i32 } else if (px > x + w) { (px - (x + w)) as i32 } else { 0 };
             let qy = if (py < base_y) { (base_y - py) as i32 } else if (py > base_y + h) { (py - (base_y + h)) as i32 } else { 0 };
             let dist_sq = (qx * qx + qy * qy);
@@ -492,7 +514,7 @@ pub fn raster_draw_glass_rect(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alp
     let r2 = (radius * radius) as i32;
     let inner_r = if (radius > 1) { radius - 1 } else { 0 };
     let inner_r2 = (inner_r * inner_r) as i32;
-    let glass_a = if (alpha > 245) { 240 } else { alpha };
+    let glass_a = alpha;
 
     // Região interna: preenchimento vetorizado por scanline (sem bordas nem cantos)
     if (glass_a >= 248) {

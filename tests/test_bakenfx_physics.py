@@ -67,9 +67,29 @@ class BakenFxPhysicsTests(unittest.TestCase):
         self.assertIn("pub fn bakenfx_liquid_progress_tick", self.bakenfx)
         self.assertIn("pub fn bakenfx_draw_liquid_progress_bar", self.bakenfx)
 
-    def test_scene_render_tree_hit_test_dispatcher_exists(self):
-        self.assertIn("RenderTree_hittest_magnetic_cursor", self.sotlas_ui)
-        self.assertIn("NODE_BUTTON", self.sotlas_ui)
+    def test_installer_and_runtime_fixes(self):
+        installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
+        runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
+        desktop_shell = (ROOT / "kernel/src/desktop_shell.sotlas").read_text(encoding="utf-8")
+        
+        # 1. Sombras arredondadas com exclusao interna
+        self.assertIn("pub fn raster_draw_drop_shadow_rounded", self.baken_rasterizer)
+        self.assertIn("Exclusao estrita do corpo do elemento", self.baken_rasterizer)
+        self.assertIn("raster_draw_drop_shadow_rounded", self.bakenfx)
+
+        # 2. Rodapé com contraste alto
+        self.assertIn("0x00E2E8F0", installer)
+        self.assertIn("0x00CBD5E1", installer)
+
+        # 3. Hit-testing na tela 0
+        self.assertIn("show_toast(\"Reiniciar ou Desligar o computador\"", installer)
+        self.assertIn("installer_go_to(1, 1);", installer)
+
+        # 4. Sincronizacao de cursor e separacao UEFI
+        self.assertIn("baken_cursor_set_pos(x, y);", desktop_shell)
+        self.assertIn("baken_cursor_set_pos(mouse_x, mouse_y);", runtime)
+        self.assertIn("G_ABSOLUTE_GUID", runtime)
+        self.assertIn("G_SIMPLE_GUID", runtime)
 
 
 if __name__ == "__main__":

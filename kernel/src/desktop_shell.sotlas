@@ -152,6 +152,7 @@ pub fn desktop_shell_set_cursor(x: i32, y: i32) -> void {
     unsafe {
         SHELL.cursor_x = x;
         SHELL.cursor_y = y;
+        baken_cursor_set_pos(x, y);
         wm_handle_mouse_move(x, y);
     }
 }

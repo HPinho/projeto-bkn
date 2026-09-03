@@ -72,17 +72,17 @@ pub fn baken_material_macos_sheet() -> BakenMaterialToken {
 pub fn baken_material_macos_button(is_primary: bool, is_hover: bool) -> BakenMaterialToken {
     if is_primary {
         return BakenMaterialToken {
-            fill: if is_hover { color_rgba(14, 165, 233, 250) } else { color_rgba(2, 132, 199, 235) },
-            border: color_rgba(255, 255, 255, 80),
-            shadow: color_rgba(2, 132, 199, 90),
-            corner_radius: 12,
+            fill: if is_hover { color_rgba(14, 165, 233, 255) } else { color_rgba(2, 132, 199, 255) },
+            border: color_rgba(255, 255, 255, 110),
+            shadow: color_rgba(2, 132, 199, 60),
+            corner_radius: 14,
             elevation: 2,
         };
     } else {
         return BakenMaterialToken {
-            fill: if is_hover { color_rgba(30, 41, 59, 230) } else { color_rgba(15, 23, 42, 190) },
-            border: color_rgba(255, 255, 255, 30),
-            shadow: color_rgba(0, 0, 0, 60),
+            fill: if is_hover { color_rgba(255, 255, 255, 200) } else { color_rgba(255, 255, 255, 150) },
+            border: color_rgba(255, 255, 255, 90),
+            shadow: color_rgba(15, 23, 42, 25),
             corner_radius: 12,
             elevation: 1,
         };
