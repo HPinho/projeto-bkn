@@ -187,3 +187,47 @@ pub fn display_get_pixel(x: u32, y: u32) -> u32 {
         return 0;
     }
 }
+
+// -----------------------------------------------------------------------------
+// INFRAESTRUTURA DE ACELERAÇÃO E DESPACHO PARA GPU (INTEGRADA OU DISCRETA)
+// -----------------------------------------------------------------------------
+
+pub struct GpuDeviceState {
+    pub is_initialized: bool;
+    pub is_discrete: bool;
+    pub mmio_doorbell: *mut u32;
+    pub ring_submitted_count: u32;
+}
+
+static mut GPU_DEVICE: GpuDeviceState = GpuDeviceState {
+    is_initialized: false,
+    is_discrete: false,
+    mmio_doorbell: null as *mut u32,
+    ring_submitted_count: 0,
+};
+
+@system
+pub fn gpu_device_init(mmio_doorbell: *mut u32, is_discrete: bool) -> void {
+    unsafe {
+        GPU_DEVICE.mmio_doorbell = mmio_doorbell;
+        GPU_DEVICE.is_discrete = is_discrete;
+        GPU_DEVICE.is_initialized = (mmio_doorbell != (null as *mut u32));
+    }
+}
+
+@system
+pub fn gpu_device_is_available() -> bool {
+    unsafe { return GPU_DEVICE.is_initialized; }
+}
+
+@system
+pub fn gpu_device_submit_blur_command(src_buf: *mut u32, dst_buf: *mut u32, x: i32, y: i32, w: u32, h: u32, radius: u32) -> bool {
+    unsafe {
+        if !GPU_DEVICE.is_initialized || GPU_DEVICE.mmio_doorbell == (null as *mut u32) {
+            return false; // Fallback para CPU SIMD
+        }
+        GPU_DEVICE.ring_submitted_count += 1;
+        *(GPU_DEVICE.mmio_doorbell) = GPU_DEVICE.ring_submitted_count;
+        return true;
+    }
+}

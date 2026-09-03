@@ -136,7 +136,7 @@ pub fn bakenfx_capture_backdrop() -> void {
     }
 }
 
-// Convolução 5-tap vetorizada com desenrolamento de 4 pixels por iteração (AVX2/SIMD style)
+// Convolução 5-tap vetorizada com Dynamic Vibrancy (+30% saturação) e GPU offload
 @system
 pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
     unsafe {
@@ -147,6 +147,11 @@ pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
         let sh = display_get_height() as i32;
         let pitch = display_get_pitch();
         if scratch == (null as *mut u32) || target == (null as *mut u32) { return; }
+
+        // 1. Delegação direta para anel de comandos da GPU (se dispositivo presente)
+        if gpu_device_submit_blur_command(scratch, target, bounds.x, bounds.y, bounds.width, bounds.height, radius) {
+            return;
+        }
 
         let step = if radius > 6 { 6 } else { radius } as i32;
         let x0 = if bounds.x < 0 { 0 } else { bounds.x };
@@ -162,7 +167,7 @@ pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
             let down_off = (down_y as u32) * pitch;
 
             let mut px = x0;
-            // Desenrolamento paralelo de 4 pixels por ciclo
+            // Desenrolamento paralelo de 4 pixels por ciclo com Dynamic Vibrancy Apple
             while px + 4 <= x1 {
                 for mut k in 0..4 {
                     let cur_x = px + k;
@@ -179,12 +184,22 @@ pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
                     let gg = (((c >> 8) & 0xFF) * 4 + ((l >> 8) & 0xFF) + ((r >> 8) & 0xFF) + ((u >> 8) & 0xFF) + ((d >> 8) & 0xFF)) / 8;
                     let bb = ((c & 0xFF) * 4 + (l & 0xFF) + (r & 0xFF) + (u & 0xFF) + (d & 0xFF)) / 8;
 
-                    *(target.add((row_off + cur_x as u32) as usize)) = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+                    // Apple Dynamic Vibrancy Boost: +30% de saturação cromática ponderada pela luminância
+                    let lum = ((rr * 77 + gg * 150 + bb * 29) / 256) as i32;
+                    let vib_r = lum + ((((rr as i32) - lum) * 130) / 100);
+                    let vib_g = lum + ((((gg as i32) - lum) * 130) / 100);
+                    let vib_b = lum + ((((bb as i32) - lum) * 130) / 100);
+
+                    let fin_r = (if vib_r < 0 { 0 } else if vib_r > 255 { 255 } else { vib_r }) as u32;
+                    let fin_g = (if vib_g < 0 { 0 } else if vib_g > 255 { 255 } else { vib_g }) as u32;
+                    let fin_b = (if vib_b < 0 { 0 } else if vib_b > 255 { 255 } else { vib_b }) as u32;
+
+                    *(target.add((row_off + cur_x as u32) as usize)) = 0xFF000000 | (fin_r << 16) | (fin_g << 8) | fin_b;
                 }
                 px += 4;
             }
 
-            // Borda residual (1 a 3 pixels)
+            // Borda residual com Dynamic Vibrancy
             while px < x1 {
                 let left = if px > step { px - step } else { 0 };
                 let right = if px + step < sw { px + step } else { sw - 1 };
@@ -199,7 +214,16 @@ pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
                 let gg = (((c >> 8) & 0xFF) * 4 + ((l >> 8) & 0xFF) + ((r >> 8) & 0xFF) + ((u >> 8) & 0xFF) + ((d >> 8) & 0xFF)) / 8;
                 let bb = ((c & 0xFF) * 4 + (l & 0xFF) + (r & 0xFF) + (u & 0xFF) + (d & 0xFF)) / 8;
 
-                *(target.add((row_off + px as u32) as usize)) = 0xFF000000 | (rr << 16) | (gg << 8) | bb;
+                let lum = ((rr * 77 + gg * 150 + bb * 29) / 256) as i32;
+                let vib_r = lum + ((((rr as i32) - lum) * 130) / 100);
+                let vib_g = lum + ((((gg as i32) - lum) * 130) / 100);
+                let vib_b = lum + ((((bb as i32) - lum) * 130) / 100);
+
+                let fin_r = (if vib_r < 0 { 0 } else if vib_r > 255 { 255 } else { vib_r }) as u32;
+                let fin_g = (if vib_g < 0 { 0 } else if vib_g > 255 { 255 } else { vib_g }) as u32;
+                let fin_b = (if vib_b < 0 { 0 } else if vib_b > 255 { 255 } else { vib_b }) as u32;
+
+                *(target.add((row_off + px as u32) as usize)) = 0xFF000000 | (fin_r << 16) | (fin_g << 8) | fin_b;
                 px += 1;
             }
         }
@@ -346,14 +370,34 @@ pub fn bakenfx_draw_desktop_background(canvas: *mut Canvas, width: u32, height: 
     }
 }
 
-// Sombra com queda analítica suave calculada estritamente no perímetro externo,
-// sem alterar ou escurecer o fundo sob a superfície translúcida.
+// Dupla camada de sombras físicas estilo Apple:
+// 1. Camada de Contato / Oclusão Ambiental (AO): sombra curta que ancora o elemento
+// 2. Camada de Luz Chave Zenital (Key Light): sombra difusa ampla e suave
+@system
 pub fn bakenfx_draw_shadow(canvas: *mut Canvas, bounds: Rect, radius: u32, color: Color, blur: u32, offset_y: i32) -> void {
     if canvas == (null as *mut Canvas) || color.a == 0 || blur == 0 { return; }
     if bounds.width == 0 || bounds.height == 0 { return; }
 
-    let safe_blur = if blur > 18 { 18 } else { blur };
-    let alpha_factor = (color.a as f32) / 255.0;
+    let safe_blur = if blur > 24 { 24 } else { blur };
+    let base_alpha = (color.a as f32) / 255.0;
+
+    // 1. Camada AO de contato
+    let ao_blur: u32 = 4;
+    let ao_offset: i32 = if offset_y > 0 { 2 } else { 0 };
+    let ao_alpha: f32 = base_alpha * 0.45;
+    raster_draw_drop_shadow(
+        bounds.x as u32,
+        bounds.y as u32,
+        bounds.width,
+        bounds.height,
+        ao_blur,
+        2,
+        ao_offset,
+        ao_alpha
+    );
+
+    // 2. Camada de Luz Chave Zenital
+    let key_alpha: f32 = base_alpha * 0.70;
     raster_draw_drop_shadow(
         bounds.x as u32,
         bounds.y as u32,
@@ -362,8 +406,40 @@ pub fn bakenfx_draw_shadow(canvas: *mut Canvas, bounds: Rect, radius: u32, color
         safe_blur,
         2,
         offset_y,
-        alpha_factor
+        key_alpha
     );
+}
+
+// Borda Especular Chanfrada de 1px (Zenithal Specular Rim Light) estilo macOS
+@system
+pub fn bakenfx_draw_specular_rim(canvas: *mut Canvas, bounds: Rect, radius: u32, squircle: bool, top_alpha: u8, bottom_alpha: u8) -> void {
+    if canvas == (null as *mut Canvas) || bounds.width < 4 || bounds.height < 4 { return; }
+    unsafe {
+        let buf = display_get_backbuffer();
+        let pitch = display_get_pitch();
+        let sw = display_get_width();
+        let sh = display_get_height();
+        if buf == (null as *mut u32) || pitch == 0 { return; }
+
+        let x0 = if bounds.x < 0 { 0 } else { bounds.x as u32 };
+        let y0 = if bounds.y < 0 { 0 } else { bounds.y as u32 };
+        let x1 = if (bounds.x + bounds.width as i32) > (sw as i32) { sw } else { (bounds.x + bounds.width as i32) as u32 };
+        let y1 = if (bounds.y + bounds.height as i32) > (sh as i32) { sh } else { (bounds.y + bounds.height as i32) as u32 };
+        if x0 >= x1 || y0 >= y1 { return; }
+
+        let rim_rad = if radius > 4 { radius / 2 } else { 2 };
+        let w_eff = if (x1 - x0) > rim_rad * 2 { (x1 - x0) - rim_rad * 2 } else { (x1 - x0) };
+        let start_x = x0 + rim_rad;
+
+        // Borda superior: reflexo zenital mais intenso de 1px
+        if y0 < sh {
+            raster_fill_rect_alpha(start_x, y0, w_eff, 1, 0x00FFFFFF, top_alpha);
+        }
+        // Borda inferior: contato sutil de 1px
+        if y1 > 0 && (y1 - 1) < sh {
+            raster_fill_rect_alpha(start_x, y1 - 1, w_eff, 1, 0x00FFFFFF, bottom_alpha);
+        }
+    }
 }
 
 // Material central do design system. A translucidez pertence ao material,
@@ -393,6 +469,11 @@ pub fn bakenfx_draw_material(canvas: *mut Canvas, bounds: Rect, kind: u32, tint:
         } else {
             Canvas_draw_rect(canvas, bounds, stroke);
         }
+    }
+
+    // Aplicação do chanfro especular zenital de 1px em materiais de vidro
+    if kind == BAKENFX_MATERIAL_GLASS || kind == BAKENFX_MATERIAL_ACRYLIC {
+        bakenfx_draw_specular_rim(canvas, bounds, radius, squircle, 90, 20);
     }
 }
 
@@ -644,6 +725,174 @@ pub fn bakenfx_draw_liquid_progress_bar(state: *mut LiquidProgressBarState, x: u
                 1,
                 true
             );
+        }
+    }
+}
+
+// =============================================================================
+// 5. CURVATURA CONTÍNUA ANALÍTICA G2 (LAMÉ SUPERELIPSE / SQUIRCLE VERDADEIRO)
+// =============================================================================
+
+@system
+pub fn bakenfx_is_inside_squircle_g2(px: i32, py: i32, bounds: Rect, radius: u32) -> bool {
+    let bx = bounds.x;
+    let by = bounds.y;
+    let bw = bounds.width as i32;
+    let bh = bounds.height as i32;
+    if px < bx || px >= bx + bw || py < by || py >= by + bh { return false; }
+    let r = if radius > 0 { radius as i32 } else { 1 };
+    let dx = if px < bx + r { (bx + r) - px } else if px > bx + bw - r { px - (bx + bw - r) } else { 0 };
+    let dy = if py < by + r { (by + r) - py } else if py > by + bh - r { py - (by + bh - r) } else { 0 };
+    if dx == 0 || dy == 0 { return true; }
+
+    // Formulação da superelipse analítica de Lamé (dx/r)^4 + (dy/r)^4 <= 1 com aceleração contínua (kappa' = 0)
+    let nx = (dx * 100) / r;
+    let ny = (dy * 100) / r;
+    let nx2 = (nx * nx) / 100;
+    let ny2 = (ny * ny) / 100;
+    let sum = (nx2 * nx2 + ny2 * ny2) / 100;
+    return sum <= 10000;
+}
+
+// =============================================================================
+// 6. ÁRVORE DE COMPOSIÇÃO RETIDA EM CAMADAS (BAKEN LAYER / ESTILO CALAYER)
+// =============================================================================
+
+pub struct BakenLayer {
+    pub bounds: Rect;
+    pub opacity: u8;
+    pub is_visible: bool;
+    pub is_dirty: bool;
+    pub surface: Surface;
+}
+
+@system
+pub fn bakenfx_layer_init(layer: *mut BakenLayer, bounds: Rect, buffer: *mut u32) -> void {
+    if layer == (null as *mut BakenLayer) { return; }
+    unsafe {
+        (*layer).bounds = bounds;
+        (*layer).opacity = 255;
+        (*layer).is_visible = true;
+        (*layer).is_dirty = true;
+        (*layer).surface = Surface {
+            buffer: buffer,
+            width: bounds.width,
+            height: bounds.height,
+            pitch: bounds.width,
+        };
+    }
+}
+
+@system
+pub fn bakenfx_layer_composite(layer: *const BakenLayer, dst_canvas: *mut Canvas) -> void {
+    if layer == (null as *const BakenLayer) || dst_canvas == (null as *mut Canvas) { return; }
+    unsafe {
+        if !(*layer).is_visible || (*layer).opacity == 0 { return; }
+        let src_buf = (*layer).surface.buffer;
+        let dst_buf = display_get_backbuffer();
+        let pitch = display_get_pitch();
+        let sw = display_get_width();
+        let sh = display_get_height();
+        if src_buf == (null as *mut u32) || dst_buf == (null as *mut u32) { return; }
+
+        let bounds = (*layer).bounds;
+        let x0 = if bounds.x < 0 { 0 } else { bounds.x as u32 };
+        let y0 = if bounds.y < 0 { 0 } else { bounds.y as u32 };
+        let x1 = if (bounds.x + bounds.width as i32) > (sw as i32) { sw } else { (bounds.x + bounds.width as i32) as u32 };
+        let y1 = if (bounds.y + bounds.height as i32) > (sh as i32) { sh } else { (bounds.y + bounds.height as i32) as u32 };
+        if x0 >= x1 || y0 >= y1 { return; }
+
+        let alpha = (*layer).opacity as u32;
+        let layer_w = bounds.width;
+
+        for mut py in y0..y1 {
+            let src_y = py - y0;
+            let dst_row = dst_buf.add((py * pitch) as usize);
+            let src_row = src_buf.add((src_y * layer_w) as usize);
+
+            for mut px in x0..x1 {
+                let src_x = px - x0;
+                let src_pixel = *(src_row.add(src_x as usize));
+                let src_a = (((src_pixel >> 24) & 0xFF) * alpha) / 255;
+                if src_a == 255 {
+                    *(dst_row.add(px as usize)) = src_pixel;
+                } else if src_a > 0 {
+                    let dst_pixel = *(dst_row.add(px as usize));
+                    let inv_a = 255 - src_a;
+                    let r = (((src_pixel >> 16) & 0xFF) * src_a + ((dst_pixel >> 16) & 0xFF) * inv_a) / 255;
+                    let g = (((src_pixel >> 8) & 0xFF) * src_a + ((dst_pixel >> 8) & 0xFF) * inv_a) / 255;
+                    let b = ((src_pixel & 0xFF) * src_a + (dst_pixel & 0xFF) * inv_a) / 255;
+                    *(dst_row.add(px as usize)) = 0xFF000000 | (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
+// 7. EFEITO GENIE / DEFORMAÇÃO TRAPEZOIDAL PARABÓLICA DE JANELAS
+// =============================================================================
+
+@system
+pub fn bakenfx_draw_genie_transform(
+    src_surface: *const Surface,
+    window_rect: Rect,
+    dock_rect: Rect,
+    progress: f32
+) -> void {
+    if src_surface == (null as *const Surface) { return; }
+    let t = if progress < 0.0 { 0.0 } else if progress > 1.0 { 1.0 } else { progress };
+    if t == 0.0 { return; }
+
+    unsafe {
+        let src_buf = (*src_surface).buffer;
+        let dst_buf = display_get_backbuffer();
+        let pitch = display_get_pitch();
+        let sw = display_get_width() as i32;
+        let sh = display_get_height() as i32;
+        if src_buf == (null as *mut u32) || dst_buf == (null as *mut u32) { return; }
+
+        let orig_w = window_rect.width as f32;
+        let orig_h = window_rect.height as f32;
+        let orig_x = window_rect.x as f32;
+        let orig_y = window_rect.y as f32;
+
+        let target_x = (dock_rect.x as f32) + ((dock_rect.width as f32) * 0.5);
+        let target_y = dock_rect.y as f32;
+
+        let num_rows = (orig_h * (1.0 - t * 0.85)) as u32;
+        if num_rows == 0 { return; }
+
+        for mut r in 0..num_rows {
+            let row_norm = (r as f32) / (num_rows as f32);
+            let src_y = ((row_norm * orig_h) as u32);
+            if src_y >= (*src_surface).height { continue; }
+
+            // Curvatura parabólica suave que afunila em direção ao Dock
+            let curve = row_norm * row_norm;
+            let current_w = orig_w * (1.0 - t) + (dock_rect.width as f32) * t * (1.0 - curve * 0.6);
+            let current_cx = (orig_x + orig_w * 0.5) * (1.0 - t) + target_x * t;
+            let current_x0 = (current_cx - current_w * 0.5) as i32;
+            let current_y = (orig_y * (1.0 - t) + (target_y - (num_rows as f32 - r as f32)) * t) as i32;
+
+            if current_y < 0 || current_y >= sh { continue; }
+
+            let row_w = current_w as u32;
+            if row_w == 0 { continue; }
+
+            let dst_row = dst_buf.add((current_y as u32 * pitch) as usize);
+            let src_row = src_buf.add((src_y * (*src_surface).pitch) as usize);
+
+            for mut col in 0..row_w {
+                let px = current_x0 + col as i32;
+                if px >= 0 && px < sw {
+                    let sample_x = ((col as f32 / current_w) * orig_w) as u32;
+                    if sample_x < (*src_surface).width {
+                        let pix = *(src_row.add(sample_x as usize));
+                        *(dst_row.add(px as usize)) = pix;
+                    }
+                }
+            }
         }
     }
 }

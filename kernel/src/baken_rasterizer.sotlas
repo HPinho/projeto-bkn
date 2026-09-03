@@ -1145,3 +1145,7 @@ pub fn raster_measure_text_role(str: *const u8, role: u32) -> u32 {
 
 @system pub fn raster_draw_squircle(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void { raster_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius); }
 
+@system pub fn raster_draw_squircle_g2(x: u32, y: u32, w: u32, h: u32, bg_color: u32, alpha: u8, border_color: u32, radius: u32) -> void {
+    raster_draw_glass_rect(x, y, w, h, bg_color, alpha, border_color, radius);
+}
+

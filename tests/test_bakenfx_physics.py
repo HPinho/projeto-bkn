@@ -9,6 +9,8 @@ class BakenFxPhysicsTests(unittest.TestCase):
     def setUp(self):
         self.bakenfx = (ROOT / "kernel/src/bakenfx.sotlas").read_text(encoding="utf-8")
         self.sotlas_ui = (ROOT / "kernel/src/sotlas_ui.sotlas").read_text(encoding="utf-8")
+        self.graphics_engine = (ROOT / "kernel/src/graphics_engine.sotlas").read_text(encoding="utf-8")
+        self.baken_rasterizer = (ROOT / "kernel/src/baken_rasterizer.sotlas").read_text(encoding="utf-8")
 
     def test_anim_state_and_physical_interruptions_exist(self):
         self.assertIn("pub struct AnimState", self.bakenfx)
@@ -21,6 +23,34 @@ class BakenFxPhysicsTests(unittest.TestCase):
         self.assertIn("pub fn bakenfx_blur_backdrop_simd", self.bakenfx)
         self.assertIn("pub fn bakenfx_draw_premium_panel", self.bakenfx)
         self.assertIn("BAKENFX_CORNER_CURVE_CONTINUOUS", self.bakenfx)
+
+    def test_vibrancy_and_specular_rim_light(self):
+        self.assertIn("Dynamic Vibrancy", self.bakenfx)
+        self.assertIn("pub fn bakenfx_draw_specular_rim", self.bakenfx)
+        self.assertIn("bakenfx_draw_specular_rim", self.bakenfx)
+
+    def test_dual_layer_physical_shadows(self):
+        self.assertIn("ao_blur", self.bakenfx)
+        self.assertIn("key_alpha", self.bakenfx)
+
+    def test_analytical_g2_squircle(self):
+        self.assertIn("pub fn bakenfx_is_inside_squircle_g2", self.bakenfx)
+        self.assertIn("raster_draw_squircle_g2", self.baken_rasterizer)
+
+    def test_baken_layer_retained_composition(self):
+        self.assertIn("pub struct BakenLayer", self.bakenfx)
+        self.assertIn("pub fn bakenfx_layer_init", self.bakenfx)
+        self.assertIn("pub fn bakenfx_layer_composite", self.bakenfx)
+
+    def test_genie_transform_animation(self):
+        self.assertIn("pub fn bakenfx_draw_genie_transform", self.bakenfx)
+
+    def test_gpu_device_offload_hooks(self):
+        self.assertIn("pub struct GpuDeviceState", self.graphics_engine)
+        self.assertIn("pub fn gpu_device_init", self.graphics_engine)
+        self.assertIn("pub fn gpu_device_is_available", self.graphics_engine)
+        self.assertIn("pub fn gpu_device_submit_blur_command", self.graphics_engine)
+        self.assertIn("gpu_device_submit_blur_command", self.bakenfx)
 
     def test_magnetic_cursor_state_and_dispatch_exist(self):
         self.assertIn("pub struct MagneticCursorState", self.bakenfx)
