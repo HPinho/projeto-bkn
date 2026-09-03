@@ -1,0 +1,14 @@
+{
+  "iconDefinitions": {
+    "_sotlas_file": {
+      "iconPath": "./sotlas-icon.svg"
+    }
+  },
+  "fileExtensions": {
+    "sotlas": "_sotlas_file",
+    "sth": "_sotlas_file"
+  },
+  "languageIds": {
+    "sotlas": "_sotlas_file"
+  }
+}

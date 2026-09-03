@@ -1,20 +1,68 @@
 {
   "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
   "name": "Sotlas",
+  "scopeName": "source.sotlas",
   "patterns": [
-    { "include": "#keywords" },
-    { "include": "#ownership" },
-    { "include": "#topology_ptrs" },
-    { "include": "#hardware" },
-    { "include": "#bit_accessors" },
+    { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#char_literals" },
-    { "include": "#comments" },
-    { "include": "#types" },
     { "include": "#attributes" },
-    { "include": "#numbers" }
+    { "include": "#keywords" },
+    { "include": "#storage_modifiers" },
+    { "include": "#constants_language" },
+    { "include": "#variables_language" },
+    { "include": "#types_primitive" },
+    { "include": "#function_definition" },
+    { "include": "#function_call" },
+    { "include": "#types_user" },
+    { "include": "#constants_caps" },
+    { "include": "#pointers" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#bit_accessors" }
   ],
   "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.sotlas",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.sotlas",
+          "begin": "/\\*",
+          "end": "\\*/"
+        },
+        {
+          "name": "comment.block.parenthesis.sotlas",
+          "begin": "\\(\\*",
+          "end": "\\*\\)"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.sotlas",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.sotlas",
+          "match": "\\\\([nrtbf0\"'\\\\]|x[0-9a-fA-F]{2}|u\\{[0-9a-fA-F]+\\})"
+        }
+      ]
+    },
+    "char_literals": {
+      "name": "string.quoted.single.sotlas",
+      "match": "'([^'\\\\]|\\\\.)'"
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "entity.name.function.decorator.sotlas",
+          "match": "@[a-zA-Z0-9_]+"
+        }
+      ]
+    },
     "keywords": {
       "patterns": [
         {
@@ -27,95 +75,80 @@
         },
         {
           "name": "keyword.srg.sotlas",
-          "match": "\\b(handover|quarantine|rebound)\\b"
-        },
-        {
-          "name": "constant.language.sotlas",
-          "match": "\\b(true|false|nil)\\b"
-        },
-        {
-          "name": "keyword.operator.sotlas",
-          "match": "\\b(co-owned)\\b"
+          "match": "\\b(handover|quarantine|rebound|clinch|revert|quench|gate|emit)\\b"
         }
       ]
     },
-    "ownership": {
+    "storage_modifiers": {
       "patterns": [
         {
           "name": "storage.modifier.sotlas",
-          "match": "\\b(sole|island|whisper|direct|co-owned)\\b"
+          "match": "\\b(mut|sole|island|whisper|direct|co-owned)\\b"
         }
       ]
     },
-    "topology_ptrs": {
+    "constants_language": {
       "patterns": [
         {
-          "name": "storage.type.pointer.sotlas",
-          "match": "\\*(rawphys|virtmap|portwire|dmazone|voidzero|mut)\\b"
+          "name": "constant.language.sotlas",
+          "match": "\\b(true|false|null|nil)\\b"
         }
       ]
     },
-    "hardware": {
+    "variables_language": {
       "patterns": [
         {
-          "name": "keyword.hardware.sotlas",
-          "match": "\\b(clinch|revert|quench|gate|emit|rebound)\\b"
+          "name": "variable.language.self.sotlas",
+          "match": "\\b(self)\\b"
         }
       ]
     },
-    "bit_accessors": {
+    "types_primitive": {
       "patterns": [
         {
-          "name": "support.function.bit.sotlas",
-          "match": "\\.(slit|notch|strand)\\b"
-        }
-      ]
-    },
-    "types": {
-      "patterns": [
+          "name": "support.type.primitive.sotlas",
+          "match": "\\b(u8|u16|u32|u64|i8|i16|i32|i64|f32|f64|usize|isize|bool|void|str|char)\\b"
+        },
         {
           "name": "support.type.sotlas",
           "match": "\\b(Int8|Int16|Int32|Int64|UInt8|UInt16|UInt32|UInt64|Float32|Float64|USize|ISize|Bool|Void|String)\\b"
-        },
+        }
+      ]
+    },
+    "function_definition": {
+      "match": "\\b(fn|trapfn)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+      "captures": {
+        "1": { "name": "keyword.declaration.sotlas" },
+        "2": { "name": "entity.name.function.sotlas" }
+      }
+    },
+    "function_call": {
+      "match": "\\b([a-zA-Z_][a-zA-Z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.sotlas" }
+      }
+    },
+    "types_user": {
+      "patterns": [
         {
           "name": "entity.name.type.sotlas",
           "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
         }
       ]
     },
-    "attributes": {
+    "constants_caps": {
       "patterns": [
         {
-          "name": "entity.name.function.decorator.sotlas",
-          "match": "@[a-zA-Z0-9_]+"
+          "name": "constant.other.caps.sotlas",
+          "match": "\\b[A-Z][A-Z0-9_]{2,}\\b"
         }
       ]
     },
-    "strings": {
-      "name": "string.quoted.double.sotlas",
-      "begin": "\"",
-      "end": "\"",
+    "pointers": {
       "patterns": [
         {
-          "name": "constant.character.escape.sotlas",
-          "match": "\\\\."
-        }
-      ]
-    },
-    "char_literals": {
-      "name": "string.quoted.single.sotlas",
-      "match": "'([^'\\\\]|\\\\.)'"
-    },
-    "comments": {
-      "patterns": [
-        {
-          "name": "comment.line.double-slash.sotlas",
-          "match": "//.*$"
-        },
-        {
-          "name": "comment.block.sotlas",
-          "begin": "\\(\\*",
-          "end": "\\*\\)"
+          "name": "storage.type.pointer.sotlas",
+          "match": "\\*(const|mut|rawphys|virtmap|portwire|dmazone|voidzero)\\b"
         }
       ]
     },
@@ -131,14 +164,29 @@
         },
         {
           "name": "constant.numeric.float.sotlas",
-          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*\\b"
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?(f32|f64)?\\b"
         },
         {
           "name": "constant.numeric.integer.sotlas",
-          "match": "\\b[0-9][0-9_]*\\b"
+          "match": "\\b[0-9][0-9_]*(u8|u16|u32|u64|i8|i16|i32|i64|usize)?\\b"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.sotlas",
+          "match": "(::|->|=>|\\.\\.|\\+|-|\\*|/|%|==|!=|<=|>=|<|>|&&|\\|\\||!|&|\\||\\^|<<|>>|=|\\+=|-=|\\*=|/=)"
+        }
+      ]
+    },
+    "bit_accessors": {
+      "patterns": [
+        {
+          "name": "support.function.bit.sotlas",
+          "match": "\\.(slit|notch|strand)\\b"
         }
       ]
     }
-  },
-  "scopeName": "source.sotlas"
+  }
 }

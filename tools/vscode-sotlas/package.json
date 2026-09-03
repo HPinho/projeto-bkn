@@ -38,6 +38,13 @@
         "scopeName": "source.sotlas",
         "path": "./syntaxes/sotlas.tmLanguage.json"
       }
+    ],
+    "iconThemes": [
+      {
+        "id": "sotlas-icons",
+        "label": "Sotlas File Icons",
+        "path": "./icons/sotlas-icon-theme.json"
+      }
     ]
   }
 }
