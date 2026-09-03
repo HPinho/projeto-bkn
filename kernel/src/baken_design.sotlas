@@ -1,0 +1,70 @@
+// Baken Lua Design — tokens canônicos, densidade e acessibilidade.
+// Não contém desenho nem estado de hardware; é seguro para toda a UI.
+
+module kernel::baken_design;
+
+import kernel::sotlas_graphics::*;
+
+pub const BAKEN_SPACE_1: u32 = 4;
+pub const BAKEN_SPACE_2: u32 = 8;
+pub const BAKEN_SPACE_3: u32 = 12;
+pub const BAKEN_SPACE_4: u32 = 16;
+pub const BAKEN_SPACE_5: u32 = 24;
+pub const BAKEN_SPACE_6: u32 = 32;
+
+pub const BAKEN_RADIUS_CONTROL: u32 = 10;
+pub const BAKEN_RADIUS_CARD: u32 = 18;
+pub const BAKEN_RADIUS_WINDOW: u32 = 24;
+
+pub const BAKEN_MIN_HIT_TARGET: u32 = 36;
+pub const BAKEN_MIN_TEXT_CONTRAST: u32 = 112;
+
+pub const BAKEN_MOTION_FAST_MS: u32 = 120;
+pub const BAKEN_MOTION_STANDARD_MS: u32 = 200;
+pub const BAKEN_MOTION_SLOW_MS: u32 = 320;
+
+pub struct BakenMaterialToken {
+    pub fill: Color;
+    pub border: Color;
+    pub shadow: Color;
+    pub corner_radius: u32;
+    pub elevation: u32;
+}
+
+pub fn baken_material_glass_light() -> BakenMaterialToken {
+    return BakenMaterialToken {
+        fill: color_rgba(246, 249, 255, 184),
+        border: color_rgba(255, 255, 255, 132),
+        shadow: color_rgba(8, 15, 34, 62),
+        corner_radius: BAKEN_RADIUS_CARD,
+        elevation: 2,
+    };
+}
+
+pub fn baken_material_glass_dark() -> BakenMaterialToken {
+    return BakenMaterialToken {
+        fill: color_rgba(15, 23, 42, 218),
+        border: color_rgba(148, 198, 255, 96),
+        shadow: color_rgba(2, 6, 23, 110),
+        corner_radius: BAKEN_RADIUS_CARD,
+        elevation: 3,
+    };
+}
+
+pub fn baken_material_selected() -> BakenMaterialToken {
+    return BakenMaterialToken {
+        fill: color_rgba(2, 132, 199, 222),
+        border: color_rgba(125, 211, 252, 180),
+        shadow: color_rgba(2, 132, 199, 80),
+        corner_radius: BAKEN_RADIUS_CONTROL,
+        elevation: 2,
+    };
+}
+
+// Contraste simples e determinístico para impedir texto apagado em cards.
+pub fn baken_text_is_legible(foreground: Color, background: Color) -> bool {
+    let fg = (foreground.r as u32 * 54 + foreground.g as u32 * 183 + foreground.b as u32 * 19) / 256;
+    let bg = (background.r as u32 * 54 + background.g as u32 * 183 + background.b as u32 * 19) / 256;
+    let delta = if fg > bg { fg - bg } else { bg - fg };
+    return delta >= BAKEN_MIN_TEXT_CONTRAST;
+}

@@ -17,7 +17,7 @@ class VisualPipelineTests(unittest.TestCase):
         runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
         self.assertIn("CYCLES_PER_US", runtime.upper())
         self.assertIn("desktop_shell_set_frame_delta(dt)", runtime)
-        self.assertIn("Stall(16667 - work_us)", runtime)
+        self.assertIn("1000000 / refresh_hz as u64", runtime)
         self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", runtime)
 
     def test_runtime_supports_simple_and_absolute_uefi_pointers(self):
@@ -31,11 +31,15 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("LocateProtocol(&G_ABSOLUTE_GUID", runtime)
         self.assertIn("raw_x > range_x", runtime)
 
-    def test_expensive_background_and_blur_are_bounded(self):
-        rasterizer = (ROOT / "kernel/src/baken_rasterizer.sotlas").read_text(encoding="utf-8")
-        self.assertIn("WALLPAPER_CACHE", rasterizer)
-        self.assertIn("calculado uma vez", rasterizer)
-        self.assertIn("uma cópia linear restaura o fundo", rasterizer)
+    def test_background_is_a_static_bakenfx_composition(self):
+        bakenfx = (ROOT / "kernel/src/bakenfx.sotlas").read_text(encoding="utf-8")
+        shell = (ROOT / "kernel/src/desktop_shell.sotlas").read_text(encoding="utf-8")
+        installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
+        self.assertIn("bakenfx_draw_desktop_background", bakenfx)
+        self.assertIn("bakenfx_draw_desktop_background", shell)
+        self.assertIn("bakenfx_draw_desktop_background", installer)
+        self.assertNotIn("raster_draw_mesh_wallpaper();", shell)
+        self.assertNotIn("raster_draw_aurora_parallax_bg", installer)
 
     def test_installer_and_oobe_have_continuous_transitions(self):
         installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
@@ -66,12 +70,28 @@ class VisualPipelineTests(unittest.TestCase):
         # Efeitos otimizados são chamados pelo material e pelo frame do shell.
         self.assertIn("baken_runtime_init_assets();", main)
         self.assertIn("baken_runtime_run(", main)
-        self.assertIn("raster_draw_mesh_wallpaper();", shell)
+        self.assertIn("bakenfx_draw_desktop_background", shell)
         # O dt medido alcança as molas do dock e o installer é despachado pelo WM.
         self.assertIn("desktop_shell_update(SHELL.frame_delta)", shell)
         self.assertIn("dock_update(&mut MAIN_DOCK, dt", shell)
         self.assertIn("spring_update(&mut (*dock).item_springs", dock)
         self.assertIn("baken_installer_render(content_x, content_y", windows)
+
+    def test_ui_routes_use_bakenfx_not_the_pixel_backend(self):
+        for name in (
+            "desktop_shell.sotlas", "window_manager.sotlas", "baken_materials.sotlas",
+            "app_files.sotlas", "app_notes.sotlas", "app_settings.sotlas", "app_terminal.sotlas",
+        ):
+            source = (ROOT / "kernel/src" / name).read_text(encoding="utf-8")
+            self.assertIn("bakenfx", source, name)
+            self.assertNotIn("raster_", source, name)
+
+    def test_baken_design_defines_shared_accessibility_and_material_tokens(self):
+        design = (ROOT / "kernel/src/baken_design.sotlas").read_text(encoding="utf-8")
+        self.assertIn("BAKEN_MIN_HIT_TARGET", design)
+        self.assertIn("BAKEN_MIN_TEXT_CONTRAST", design)
+        self.assertIn("baken_material_glass_dark", design)
+        self.assertIn("BAKEN_MOTION_STANDARD_MS", design)
 
 
 if __name__ == "__main__":

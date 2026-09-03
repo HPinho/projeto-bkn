@@ -416,8 +416,11 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
     let bs = G_BOOT_SERVICES;
 
     // Alvo adaptativo baseado na taxa de atualização do monitor
-    let refresh_hz = display_get_refresh_hz();
-    let target_us: u64 = if (refresh_hz >= 120) { 8333 } else if (refresh_hz >= 90) { 11111 } else { 16667 };
+    let reported_refresh = display_get_refresh_hz();
+    // Cada painel recebe seu orçamento real: 60, 90, 120, 144, 165 e 240 Hz
+    // deixam de ser agrupados artificialmente em apenas três velocidades.
+    let refresh_hz: u32 = if reported_refresh < 30 { 60 } else if reported_refresh > 240 { 240 } else { reported_refresh };
+    let target_us: u64 = 1000000 / refresh_hz as u64;
     unsafe { G_TARGET_FRAME_US = target_us; }
 
     if (cycles_per_us > 0 && frame_end > frame_start) {
@@ -425,11 +428,7 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
         if (work_us < target_us) {
             let remain = target_us - work_us;
             if (bs != (null as *mut EfiBootServicesPrefix)) {
-                if (target_us == 16667) {
-                    bs.Stall(16667 - work_us);
-                } else {
-                    bs.Stall(remain);
-                }
+                bs.Stall(remain);
             }
         } else {
             // Quadro excedeu o orçamento: registra frame atrasado e NÃO penaliza com stall punitivo

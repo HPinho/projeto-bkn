@@ -5,7 +5,7 @@
 module kernel::window_manager;
 
 import kernel::graphics_engine::*;
-import kernel::baken_rasterizer::*;
+import kernel::bakenfx::*;
 import kernel::app_files::*;
 import kernel::app_notes::*;
 import kernel::app_settings::*;
@@ -148,9 +148,12 @@ pub fn wm_handle_mouse_down(mx: i32, my: i32) -> bool {
         if target == MAX_WINDOWS { return false; }
         let id = WINDOWS[target].id; wm_bring_to_front(id);
         let win = &mut WINDOWS[target]; let button_y = win.y + 18;
-        if (mx - (win.x + 18)).abs() + (my - button_y).abs() < 8 { win.is_open = false; return true; }
-        if (mx - (win.x + 36)).abs() + (my - button_y).abs() < 8 { win.is_minimized = true; return true; }
-        if (mx - (win.x + 54)).abs() + (my - button_y).abs() < 8 {
+        // A área tocável é maior que o desenho visual, respeitando o token
+        // de acessibilidade sem alterar a composição óptica dos botões.
+        let hit_radius = (bakenfx_hit_target_size(12) / 2) as i32;
+        if (mx - (win.x + 18)).abs() + (my - button_y).abs() < hit_radius { win.is_open = false; return true; }
+        if (mx - (win.x + 36)).abs() + (my - button_y).abs() < hit_radius { win.is_minimized = true; return true; }
+        if (mx - (win.x + 54)).abs() + (my - button_y).abs() < hit_radius {
             if win.is_maximized {
                 win.x = win.saved_x; win.y = win.saved_y; win.width = win.saved_w; win.height = win.saved_h; win.is_maximized = false;
             } else {
@@ -265,15 +268,13 @@ fn wm_render_single_window(win: &Window) -> void {
     let x = if win.x < 0 { 0 } else { win.x as u32 }; let y = if win.y < 0 { 0 } else { win.y as u32 };
     let border = if win.is_focused { win.border_color } else { 0x00475569 };
     
-    // Calcula a elevação baseada no foco
-    let elevation = if win.is_focused { ELEVATION_WINDOW_ACTIVE } else { ELEVATION_WINDOW_INACTIVE };
-    
-    // Substitui sombras e renderizador antigo pelo novo Smart Material (Mica Dark)
-    raster_draw_smart_material(x, y, win.width, win.height, MATERIAL_MICA, elevation, 14);
-    
-    raster_draw_hline(x + 1, y + TITLE_BAR_HEIGHT, win.width - 2, border, 60);
-    raster_draw_circle_button(x + 18, y + 18, 6, 0x00EF4444); raster_draw_circle_button(x + 36, y + 18, 6, 0x00F59E0B);
-    raster_draw_circle_button(x + 54, y + 18, 6, 0x0010B981); raster_draw_text_alpha(x + 72, y + 11, win.title.as_ptr(), 0x00FFFFFF, 1, 230);
+    let panel_alpha: u8 = if win.is_focused { 238 } else { 218 };
+    bakenfx_draw_elevated_panel(x, y, win.width, win.height, win.bg_color, panel_alpha, border, 14, if win.is_focused { 4 } else { 2 });
+    bakenfx_draw_rect(x + 1, y + TITLE_BAR_HEIGHT, win.width - 2, 1, border, 60);
+    bakenfx_draw_circle(x + 18, y + 18, 6, 0x00EF4444, 255);
+    bakenfx_draw_circle(x + 36, y + 18, 6, 0x00F59E0B, 255);
+    bakenfx_draw_circle(x + 54, y + 18, 6, 0x0010B981, 255);
+    bakenfx_draw_text(x + 72, y + 11, win.title.as_ptr(), 0x00FFFFFF, 230);
 
     // Renderiza o corpo do aplicativo
     let content_x = x + 1;

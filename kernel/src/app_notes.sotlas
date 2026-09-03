@@ -4,7 +4,7 @@
 module kernel::app_notes;
 
 import kernel::graphics_engine::*;
-import kernel::baken_rasterizer::*;
+import kernel::bakenfx::*;
 
 pub struct NotesState {
     pub cursor_line: u32;
@@ -24,31 +24,31 @@ static mut NOTES_STATE: NotesState = NotesState {
 pub fn app_notes_render(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
         // Fundo principal do editor (Dark Obsidian)
-        raster_fill_rect_alpha(x, y, w, h, 0x00090D16, 245);
+        bakenfx_fill_rect_alpha(x, y, w, h, 0x00090D16, 245);
 
         // 1. Menu Ribbon Superior
         let bar_h: u32 = 32;
-        raster_fill_rect_alpha(x, y, w, bar_h, 0x00131B2E, 220);
-        raster_draw_hline(x, y + bar_h, w, 0x001E293B, 180);
+        bakenfx_fill_rect_alpha(x, y, w, bar_h, 0x00131B2E, 220);
+        bakenfx_draw_hline(x, y + bar_h, w, 0x001E293B, 180);
 
         // Itens do Menu
-        raster_draw_text_alpha(x + 14, y + 8, "Arquivo", 0x0038BDF8, 1, 255);
-        raster_draw_text_alpha(x + 76, y + 8, "Editar", 0x0094A3B8, 1, 220);
-        raster_draw_text_alpha(x + 130, y + 8, "Visualizar", 0x0094A3B8, 1, 220);
-        raster_draw_text_alpha(x + 205, y + 8, "Compilar (F5)", 0x0010B981, 1, 240);
+        bakenfx_draw_text_alpha(x + 14, y + 8, "Arquivo", 0x0038BDF8, 1, 255);
+        bakenfx_draw_text_alpha(x + 76, y + 8, "Editar", 0x0094A3B8, 1, 220);
+        bakenfx_draw_text_alpha(x + 130, y + 8, "Visualizar", 0x0094A3B8, 1, 220);
+        bakenfx_draw_text_alpha(x + 205, y + 8, "Compilar (F5)", 0x0010B981, 1, 240);
 
         // Indicador de Arquivo Ativo
         let tab_w: u32 = 180;
         let tab_x = x + w - tab_w - 12;
-        raster_draw_glass_rect(tab_x, y + 4, tab_w, 24, 0x000F172A, 200, 0x00334155, 6);
-        raster_draw_text_alpha(tab_x + 8, y + 8, "kernel_main.sotlas *", 0x00F8FAFC, 1, 240);
+        bakenfx_draw_panel(tab_x, y + 4, tab_w, 24, 0x000F172A, 200, 0x00334155, 6);
+        bakenfx_draw_text_alpha(tab_x + 8, y + 8, "kernel_main.sotlas *", 0x00F8FAFC, 1, 240);
 
         // 2. Gutter Lateral com Numeração de Linhas
         let gutter_w: u32 = 38;
         let body_y = y + bar_h + 1;
         let body_h = h - bar_h - 26;
-        raster_fill_rect_alpha(x, body_y, gutter_w, body_h, 0x000D1322, 230);
-        raster_draw_hline(x + gutter_w, body_y, 1, 0x001E293B, 150);
+        bakenfx_fill_rect_alpha(x, body_y, gutter_w, body_h, 0x000D1322, 230);
+        bakenfx_draw_hline(x + gutter_w, body_y, 1, 0x001E293B, 150);
 
         // 3. Linhas de Código Sintetizadas com Cores
         static const LINE_NUMS: [&str; 9] = ["01", "02", "03", "04", "05", "06", "07", "08", "09"];
@@ -62,42 +62,42 @@ pub fn app_notes_render(x: u32, y: u32, w: u32, h: u32) -> void {
             
             // Destaca a linha ativa do cursor
             if i == NOTES_STATE.cursor_line {
-                raster_fill_rect_alpha(x + gutter_w + 1, ly - 2, w - gutter_w - 1, line_h, 0x001E293B, 140);
-                raster_draw_text_alpha(x + 10, ly + 2, LINE_NUMS[i], 0x0038BDF8, 1, 255);
+                bakenfx_fill_rect_alpha(x + gutter_w + 1, ly - 2, w - gutter_w - 1, line_h, 0x001E293B, 140);
+                bakenfx_draw_text_alpha(x + 10, ly + 2, LINE_NUMS[i], 0x0038BDF8, 1, 255);
             } else {
-                raster_draw_text_alpha(x + 10, ly + 2, LINE_NUMS[i], 0x00475569, 1, 180);
+                bakenfx_draw_text_alpha(x + 10, ly + 2, LINE_NUMS[i], 0x00475569, 1, 180);
             }
 
             if i == 0 {
-                raster_draw_text_alpha(text_x, ly + 2, "// Baken OS - Kernel Native Core", 0x0064748B, 1, 200);
+                bakenfx_draw_text_alpha(text_x, ly + 2, "// Baken OS - Kernel Native Core", 0x0064748B, 1, 200);
             } else if i == 1 {
-                raster_draw_text_alpha(text_x, ly + 2, "module kernel::app_notes;", 0x00C084FC, 1, 240);
+                bakenfx_draw_text_alpha(text_x, ly + 2, "module kernel::app_notes;", 0x00C084FC, 1, 240);
             } else if i == 2 {
-                raster_draw_text_alpha(text_x, ly + 2, "import kernel::graphics_engine::*;", 0x0093C5FD, 1, 230);
+                bakenfx_draw_text_alpha(text_x, ly + 2, "import kernel::graphics_engine::*;", 0x0093C5FD, 1, 230);
             } else if i == 3 {
-                raster_draw_text_alpha(text_x, ly + 2, "", 0x00FFFFFF, 1, 255);
+                bakenfx_draw_text_alpha(text_x, ly + 2, "", 0x00FFFFFF, 1, 255);
             } else if i == 4 {
-                raster_draw_text_alpha(text_x, ly + 2, "@system pub fn app_notes_render() -> void {", 0x0038BDF8, 1, 255);
+                bakenfx_draw_text_alpha(text_x, ly + 2, "@system pub fn app_notes_render() -> void {", 0x0038BDF8, 1, 255);
                 // Cursor piscante simulado na coluna ativa
-                raster_fill_rect(text_x + 360, ly, 2, line_h - 4, 0x0038BDF8);
+                bakenfx_fill_rect(text_x + 360, ly, 2, line_h - 4, 0x0038BDF8);
             } else if i == 5 {
-                raster_draw_text_alpha(text_x + 16, ly + 2, "raster_draw_glass_rect(10, 10, 100, 40, 0, 0, 0, 0);", 0x00E2E8F0, 1, 240);
+                bakenfx_draw_text_alpha(text_x + 16, ly + 2, "bakenfx_draw_panel(10, 10, 100, 40, 0, 0, 0, 0);", 0x00E2E8F0, 1, 240);
             } else if i == 6 {
-                raster_draw_text_alpha(text_x + 16, ly + 2, "raster_draw_text(20, 20, \"BakenNotes\", 0);", 0x00E2E8F0, 1, 240);
+                bakenfx_draw_text_alpha(text_x + 16, ly + 2, "bakenfx_draw_text(20, 20, \"BakenNotes\", 0);", 0x00E2E8F0, 1, 240);
             } else if i == 7 {
-                raster_draw_text_alpha(text_x + 16, ly + 2, "display_swap_buffers();", 0x00F59E0B, 1, 240);
+                bakenfx_draw_text_alpha(text_x + 16, ly + 2, "display_swap_buffers();", 0x00F59E0B, 1, 240);
             } else if i == 8 {
-                raster_draw_text_alpha(text_x, ly + 2, "}", 0x0038BDF8, 1, 255);
+                bakenfx_draw_text_alpha(text_x, ly + 2, "}", 0x0038BDF8, 1, 255);
             }
         }
 
         // 4. Barra de Status Inferior
         let foot_y = y + h - 24;
-        raster_fill_rect_alpha(x, foot_y, w, 24, 0x000F172A, 240);
-        raster_draw_hline(x, foot_y, w, 0x001E293B, 180);
+        bakenfx_fill_rect_alpha(x, foot_y, w, 24, 0x000F172A, 240);
+        bakenfx_draw_hline(x, foot_y, w, 0x001E293B, 180);
 
-        raster_draw_text_alpha(x + 12, foot_y + 5, "Sotlas 0.2.0 | UTF-8 | Linha 5, Coluna 18", 0x0094A3B8, 1, 220);
-        raster_draw_text_alpha(x + w - 140, foot_y + 5, "1.4 KB | LF | Ready", 0x0010B981, 1, 230);
+        bakenfx_draw_text_alpha(x + 12, foot_y + 5, "Sotlas 0.2.0 | UTF-8 | Linha 5, Coluna 18", 0x0094A3B8, 1, 220);
+        bakenfx_draw_text_alpha(x + w - 140, foot_y + 5, "1.4 KB | LF | Ready", 0x0010B981, 1, 230);
     }
 }
 

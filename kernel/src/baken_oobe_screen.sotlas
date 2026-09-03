@@ -3,6 +3,8 @@ module kernel::baken_oobe_screen;
 
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
+import kernel::bakenfx::*;
+import kernel::sotlas_graphics::*;
 
 const REGION: u32 = 0;
 const NETWORK: u32 = 1;
@@ -121,7 +123,6 @@ fn get_bounds_cw(w: u32) -> u32 {
 
 @system
 fn frame(x: u32, y: u32, w: u32, h: u32) -> void {
-    raster_draw_aurora_parallax_bg(x, y, w, h, unsafe { O.tick });
     let q = if (w > 760) { 680 } else { w - 32 };
     let px = x + (w - q) / 2;
     draw_specular_box(px, y + 18, q, h - 36, CARD, 232, LINE, 20);
@@ -139,6 +140,9 @@ pub fn baken_oobe_render(x: u32, y: u32, w: u32, h: u32) -> void {
         O.tick = (O.tick + 1) % 3600;
         if (O.transition_tick < 24) { O.transition_tick += 1; }
     }
+    // Composição estática compartilhada com o desktop e o instalador.
+    bakenfx_draw_desktop_background(sotlas_get_default_canvas(), w, h);
+    bakenfx_capture_backdrop();
     frame(x, y, w, h);
 
     let prog = raster_smoothstep_u8(unsafe { O.transition_tick }, 24) as u32;

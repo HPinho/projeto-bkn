@@ -335,18 +335,36 @@ pub fn Canvas_scale_milli(self: *mut Canvas, scale_milli: u32) -> void {
 pub fn Canvas_clip_rect(self: *mut Canvas, rect: Rect) -> void {
     if self == (null as *mut Canvas) { return; }
     unsafe {
-        let translated = Rect {
-            x: rect.x + (*self).offset_x,
-            y: rect.y + (*self).offset_y,
-            width: rect.width,
-            height: rect.height,
-        };
+        let translated = Canvas_transform_rect(self, rect);
         if (*self).clip.has_clip {
             (*self).clip.rect = rect_intersect((*self).clip.rect, translated);
         } else {
             (*self).clip.rect = translated;
             (*self).clip.has_clip = true;
         }
+    }
+}
+
+// Converte coordenadas lógicas para pixels uma única vez. Escala e clip são
+// propriedades do Canvas, não uma responsabilidade de cada widget.
+pub fn Canvas_transform_rect(self: *const Canvas, rect: Rect) -> Rect {
+    if self == (null as *const Canvas) { return rect; }
+    unsafe {
+        let scale = (*self).scale_milli;
+        return Rect {
+            x: (*self).offset_x + ((rect.x * scale as i32) / 1000),
+            y: (*self).offset_y + ((rect.y * scale as i32) / 1000),
+            width: ((rect.width * scale + 500) / 1000),
+            height: ((rect.height * scale + 500) / 1000),
+        };
+    }
+}
+
+pub fn Canvas_clip_bounds(self: *const Canvas, rect: Rect) -> Rect {
+    if self == (null as *const Canvas) { return rect; }
+    unsafe {
+        if (*self).clip.has_clip { return rect_intersect(rect, (*self).clip.rect); }
+        return rect;
     }
 }
 
@@ -362,15 +380,9 @@ pub fn Canvas_clear(self: *mut Canvas, color: Color) -> void {
 pub fn Canvas_draw_rect(self: *mut Canvas, rect: Rect, paint: Paint) -> void {
     if self == (null as *mut Canvas) { return; }
     unsafe {
-        let rx = rect.x + (*self).offset_x;
-        let ry = rect.y + (*self).offset_y;
-        let mut target_r = Rect { x: rx, y: ry, width: rect.width, height: rect.height };
-
-        let mut clipped_r = target_r;
-        if (*self).clip.has_clip {
-            clipped_r = rect_intersect(target_r, (*self).clip.rect);
-            if clipped_r.width == 0 || clipped_r.height == 0 { return; }
-        }
+        let target_r = Canvas_transform_rect(self, rect);
+        let clipped_r = Canvas_clip_bounds(self, target_r);
+        if clipped_r.width == 0 || clipped_r.height == 0 { return; }
 
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
 
@@ -397,10 +409,20 @@ pub fn Canvas_draw_rect(self: *mut Canvas, rect: Rect, paint: Paint) -> void {
 pub fn Canvas_draw_round_rect(self: *mut Canvas, rect: Rect, radius: u32, paint: Paint) -> void {
     if self == (null as *mut Canvas) { return; }
     unsafe {
-        let rx = (rect.x + (*self).offset_x) as u32;
-        let ry = (rect.y + (*self).offset_y) as u32;
+        let transformed = Canvas_transform_rect(self, rect);
+        let clipped = Canvas_clip_bounds(self, transformed);
+        if clipped.width == 0 || clipped.height == 0 { return; }
+        // Um clip parcial é conservadoramente desenhado como retângulo; isto
+        // evita que qualquer pixel atravesse o limite do pai.
+        if clipped.x != transformed.x || clipped.y != transformed.y || clipped.width != transformed.width || clipped.height != transformed.height {
+            Canvas_draw_rect(self, rect, paint);
+            return;
+        }
+        let rx = transformed.x as u32;
+        let ry = transformed.y as u32;
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
-        raster_draw_squircle(rx, ry, rect.width, rect.height, c_u32, paint.color.a, c_u32, radius);
+        let scaled_radius = (radius * (*self).scale_milli + 500) / 1000;
+        raster_draw_squircle(rx, ry, transformed.width, transformed.height, c_u32, paint.color.a, c_u32, scaled_radius);
     }
 }
 
@@ -413,10 +435,18 @@ pub fn Canvas_draw_capsule(self: *mut Canvas, rect: Rect, paint: Paint) -> void 
 pub fn Canvas_draw_squircle(self: *mut Canvas, rect: Rect, radius: u32, paint: Paint) -> void {
     if self == (null as *mut Canvas) { return; }
     unsafe {
-        let rx = (rect.x + (*self).offset_x) as u32;
-        let ry = (rect.y + (*self).offset_y) as u32;
+        let transformed = Canvas_transform_rect(self, rect);
+        let clipped = Canvas_clip_bounds(self, transformed);
+        if clipped.width == 0 || clipped.height == 0 { return; }
+        if clipped.x != transformed.x || clipped.y != transformed.y || clipped.width != transformed.width || clipped.height != transformed.height {
+            Canvas_draw_rect(self, rect, paint);
+            return;
+        }
+        let rx = transformed.x as u32;
+        let ry = transformed.y as u32;
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
-        raster_draw_squircle(rx, ry, rect.width, rect.height, c_u32, paint.color.a, c_u32, radius);
+        let scaled_radius = (radius * (*self).scale_milli + 500) / 1000;
+        raster_draw_squircle(rx, ry, transformed.width, transformed.height, c_u32, paint.color.a, c_u32, scaled_radius);
     }
 }
 
@@ -532,25 +562,34 @@ pub fn Canvas_draw_bitmap(self: *mut Canvas, bmp: *const Bitmap, src: Rect, dst:
 pub fn Canvas_draw_text(self: *mut Canvas, text: *const u8, x: i32, y: i32, scale: u32, paint: Paint) -> void {
     if self == (null as *mut Canvas) || text == (null as *const u8) { return; }
     unsafe {
-        let tx = (x + (*self).offset_x) as u32;
-        let ty = (y + (*self).offset_y) as u32;
+        let tx = ((*self).offset_x + ((x * (*self).scale_milli as i32) / 1000)) as u32;
+        let ty = ((*self).offset_y + ((y * (*self).scale_milli as i32) / 1000)) as u32;
+        if (*self).clip.has_clip && (tx as i32 < (*self).clip.rect.x || ty as i32 < (*self).clip.rect.y) { return; }
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
-        raster_draw_text_alpha(tx, ty, text, c_u32, scale, paint.color.a);
+        let effective_scale = ((scale * (*self).scale_milli + 500) / 1000);
+        raster_draw_text_alpha(tx, ty, text, c_u32, if effective_scale == 0 { 1 } else { effective_scale }, paint.color.a);
     }
 }
 
 pub fn Canvas_draw_image(self: *mut Canvas, alpha_map: *const u8, img_w: u32, img_h: u32, dst: Rect, paint: Paint) -> void {
-    if self == (null as *mut Canvas) || alpha_map == (null as *const u8) { return; }
+    if self == (null as *mut Canvas) || alpha_map == (null as *const u8) || img_w == 0 || img_h == 0 { return; }
     unsafe {
-        let ox = (dst.x + (*self).offset_x) as u32;
-        let oy = (dst.y + (*self).offset_y) as u32;
+        let target = Canvas_transform_rect(self, dst);
+        let clipped = Canvas_clip_bounds(self, target);
+        if clipped.width == 0 || clipped.height == 0 { return; }
         let c_u32 = color_to_u32(paint.color) & 0x00FFFFFF;
-        for mut gy in 0..img_h {
-            for mut gx in 0..img_w {
+        for mut dy in 0..clipped.height {
+            let py = clipped.y + dy as i32;
+            let local_y = (py - target.y) as u32;
+            let gy = (local_y * img_h) / target.height;
+            for mut dx in 0..clipped.width {
+                let px = clipped.x + dx as i32;
+                let local_x = (px - target.x) as u32;
+                let gx = (local_x * img_w) / target.width;
                 let cov = *alpha_map.add((gy * img_w + gx) as usize);
                 if cov > 4 {
                     let eff_a = ((cov as u32 * paint.color.a as u32) / 255) as u8;
-                    raster_put_pixel_alpha(ox + gx, oy + gy, c_u32, eff_a);
+                    raster_put_pixel_alpha(px as u32, py as u32, c_u32, eff_a);
                 }
             }
         }
@@ -560,9 +599,12 @@ pub fn Canvas_draw_image(self: *mut Canvas, alpha_map: *const u8, img_w: u32, im
 pub fn Canvas_draw_vector_icon(self: *mut Canvas, icon_id: u32, size: u32, dst: Rect, paint: Paint) -> void {
     if self == (null as *mut Canvas) { return; }
     unsafe {
-        let alpha_map = baken_get_app_icon_alpha(icon_id, size);
+        // Seleciona o atlas nativo imediatamente acima do tamanho solicitado;
+        // reduzimos quando necessário, mas nunca ampliamos um glifo pequeno.
+        let native_size = if size <= 32 { 32 } else if size <= 48 { 48 } else if size <= 64 { 64 } else { 96 };
+        let alpha_map = baken_get_app_icon_alpha(icon_id, native_size);
         if alpha_map != (null as *const u8) {
-            Canvas_draw_image(self, alpha_map, size, size, dst, paint);
+            Canvas_draw_image(self, alpha_map, native_size, native_size, dst, paint);
         }
     }
 }

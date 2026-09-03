@@ -131,6 +131,13 @@ pub fn display_get_wallpaper_storage() -> *mut u32 {
     unsafe { return WALLPAPER_STORAGE.as_ptr(); }
 }
 
+// Scratch de composição: pertence ao BakenFX para snapshots de backdrop.
+// O nome legado acima permanece apenas para compatibilidade do backend.
+@system
+pub fn display_get_composition_scratch() -> *mut u32 {
+    unsafe { return WALLPAPER_STORAGE.as_ptr(); }
+}
+
 @system
 pub fn display_transition_capture() -> void {
     unsafe {

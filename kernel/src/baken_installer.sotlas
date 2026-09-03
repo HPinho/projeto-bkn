@@ -6,6 +6,8 @@ module kernel::baken_installer;
 
 import kernel::graphics_engine::*;
 import kernel::baken_rasterizer::*;
+import kernel::bakenfx::*;
+import kernel::sotlas_graphics::*;
 import kernel::baken_oobe_screen::*;
 import kernel::baken_i18n::*;
 import kernel::baken_cursor::*;
@@ -377,8 +379,10 @@ pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
         if (INSTALLER.toast_tick > 0) { INSTALLER.toast_tick -= 1; }
         let step = INSTALLER.step;
 
-        // 1. Fundo Espacial Aurora Mesh com Gradiente Multicamadas e Ondas Dinamicas
-        raster_draw_aurora_parallax_bg(x, y, w, h, INSTALLER.anim_tick);
+        // 1. Fundo fixo da sessão. Não há geração procedural de imagem nem
+        // variação dependente de frame no assistente.
+        bakenfx_draw_desktop_background(sotlas_get_default_canvas(), w, h);
+        bakenfx_capture_backdrop();
 
         if (step == 0) {
             render_welcome(x, y, w, h);
@@ -508,102 +512,23 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let ch: u32 = if (h > 560) { 440 } else { h - 40 };
         let cx = x + (w - cw) / 2;
 
-        // Suspensao Flutuante Suave do Card Hero Central (Parallax Breathing)
-        let float_dy = raster_wave_i32(INSTALLER.anim_tick, 200, 4);
+        // Geometria estável: a posição da superfície não oscila com o número
+        // de frames. Movimento de interface deve vir de transições de estado.
+        let float_dy: i32 = 0;
         let base_cy = if (h > ch) { (h - ch) / 2 - 12 } else { 10 };
         let cy = (y as i32 + base_cy as i32 + float_dy) as u32;
 
-        // Card Hero Central com Ray Tracing Analítico SDF e Curvatura Especular Perfeita
-        material_raytrace_glass_panel(cx, cy, cw, ch, 0x000B132B, 210, 0x0038BDF8, 24, (w / 2) as i32, (h / 2) as i32);
+        // Card Hero central com material definido pelo design system.
+        material_draw_glass_panel(cx, cy, cw, ch, 0x000B132B, 210, 0x0038BDF8, 24);
 
         let logo_x = cx + (cw / 2);
         let logo_y = cy + 80;
         
-        let pulse_phase = (INSTALLER.anim_tick % 120);
-        let pulse_leg = if (pulse_phase < 60) { pulse_phase } else { 120 - pulse_phase };
-        let breath = ((raster_smoothstep_u8(pulse_leg, 60) as u32 * 8) / 255);
-
-        // == VORTEX NOVA — Animação Procedural Holográfica ==
-
-        // 1. Anéis de Energia Concêntricos Pulsantes (3 anéis que se expandem e dissipam)
-        let ring_phase_1 = INSTALLER.anim_tick % 90;
-        let ring_phase_2 = (INSTALLER.anim_tick + 30) % 90;
-        let ring_phase_3 = (INSTALLER.anim_tick + 60) % 90;
-        let ring_r1 = 38 + ((ring_phase_1 * 26) / 90);
-        let ring_r2 = 38 + ((ring_phase_2 * 26) / 90);
-        let ring_r3 = 38 + ((ring_phase_3 * 26) / 90);
-        let ring_a1 = (255 - ((ring_phase_1 * 255) / 90)) as u8;
-        let ring_a2 = (255 - ((ring_phase_2 * 255) / 90)) as u8;
-        let ring_a3 = (255 - ((ring_phase_3 * 255) / 90)) as u8;
-        if (ring_a1 > 20) { raster_draw_circle_alpha(logo_x, logo_y, ring_r1, 0x0000E5FF, ring_a1 / 3); }
-        if (ring_a2 > 20) { raster_draw_circle_alpha(logo_x, logo_y, ring_r2, 0x00C084FC, ring_a2 / 3); }
-        if (ring_a3 > 20) { raster_draw_circle_alpha(logo_x, logo_y, ring_r3, 0x0038BDF8, ring_a3 / 3); }
-
-        // 2. Halo de Gravidade Central Respirante
-        raster_draw_circle_alpha(logo_x, logo_y, 50 + breath, 0x000284C7, 30);
-        raster_draw_circle_alpha(logo_x, logo_y, 44 + breath, 0x0000E5FF, 55);
-
-        // 3. Raios de Luz Estelares (8 raios em rotação suave)
-        let ray_spin = ((INSTALLER.anim_tick % 240) * 256) / 240;
-        let mut ray_i: u32 = 0;
-        while (ray_i < 8) {
-            let ray_phase = (ray_spin + (ray_i * 32)) % 256;
-            let ray_cos = anim_orbit_cos(ray_phase, 1);
-            let ray_sin = anim_orbit_sin(ray_phase, 1);
-            let inner_r: i32 = 20;
-            let outer_r: i32 = 52 + (breath as i32);
-            let is_major = (ray_i % 2 == 0);
-            let actual_outer = if (is_major) { outer_r } else { outer_r - 12 };
-            let ray_color = if (is_major) { 0x0038BDF8 } else { 0x00C084FC };
-            let ray_alpha: u8 = if (is_major) { 180 } else { 120 };
-            let mut seg: i32 = inner_r;
-            while (seg < actual_outer) {
-                let rx = (logo_x as i32) + (ray_cos * seg) / 1;
-                let ry = (logo_y as i32) + (ray_sin * seg) / 1;
-                let fade = (255 - ((seg - inner_r) * 200) / (actual_outer - inner_r)) as u8;
-                let fa = ((ray_alpha as u32 * fade as u32) / 255) as u8;
-                if (rx > 0 && ry > 0 && fa > 20) {
-                    raster_put_pixel_alpha(rx as u32, ry as u32, ray_color, fa);
-                }
-                seg += 2;
-            }
-            ray_i += 1;
-        }
-
-        // 4. Fótons Orbitais 3D — Maiores e Mais Vibrantes (atrás do logo)
-        let t_spin = ((INSTALLER.anim_tick % 180) * 256) / 180;
-        let mut orb_i: u32 = 0;
-        while (orb_i < 4) {
-            let phase_i = (t_spin + (orb_i * 64)) % 256;
-            let ox = (logo_x as i32) + anim_orbit_cos(phase_i, 64);
-            let oy = (logo_y as i32) + anim_orbit_sin(phase_i, 28);
-            let sin_val = anim_orbit_sin(phase_i, 100);
-            if (sin_val < 0 && ox > 8 && oy > 8) {
-                let color = if (orb_i == 0 || orb_i == 2) { 0x0000E5FF } else { 0x00C084FC };
-                raster_draw_circle_alpha(ox as u32, oy as u32, 7, color, 100);
-                raster_draw_circle_alpha(ox as u32, oy as u32, 3, 0x00FFFFFF, 160);
-            }
-            orb_i += 1;
-        }
-
-        // 5. O Vórtice Baken OS Central em Alta Resolução
+        // Moldura estática de marca e logotipo de asset. Nenhum ícone ou
+        // efeito visual é sintetizado durante a renderização.
+        raster_draw_circle_alpha(logo_x, logo_y, 50, 0x000284C7, 28);
+        raster_draw_circle_alpha(logo_x, logo_y, 44, 0x0000E5FF, 48);
         raster_draw_baken_logo(logo_x - 42, logo_y - 42, 84, 255);
-
-        // 6. Fótons Orbitais 3D na Frente do Logo — Máximo Brilho
-        let mut orb_f: u32 = 0;
-        while (orb_f < 4) {
-            let phase_f = (t_spin + (orb_f * 64)) % 256;
-            let ox = (logo_x as i32) + anim_orbit_cos(phase_f, 64);
-            let oy = (logo_y as i32) + anim_orbit_sin(phase_f, 28);
-            let sin_val = anim_orbit_sin(phase_f, 100);
-            if (sin_val >= 0 && ox > 8 && oy > 8) {
-                let color = if (orb_f == 0 || orb_f == 2) { 0x0038BDF8 } else { 0x00E879F9 };
-                raster_draw_circle_alpha(ox as u32, oy as u32, 9, color, 80);
-                raster_draw_circle_alpha(ox as u32, oy as u32, 5, 0x0000E5FF, 200);
-                raster_draw_circle_alpha(ox as u32, oy as u32, 2, 0x00FFFFFF, 255);
-            }
-            orb_f += 1;
-        }
 
         // Título "BAKEN OS" em Alta Resolução Nativa (32px puro com curvas ultra-suaves)
         let t1 = "BAKEN OS";

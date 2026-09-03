@@ -8,6 +8,7 @@
 module kernel::sotlas_ui;
 
 import kernel::sotlas_graphics::*;
+import kernel::bakenfx::*;
 
 // -----------------------------------------------------------------------------
 // SISTEMA DECLARATIVO DE MATERIAIS
@@ -528,31 +529,13 @@ pub fn RenderTree_draw_node(self: *mut RenderTree, node_idx: i32, canvas: *mut C
         let bounds = node.bounds;
 
         if node.node_type == NODE_CONTAINER || node.node_type == NODE_SHAPE {
-            let p_fill = paint_fill(mat.tint_color);
-            if mat.kind == UI_MATERIAL_GLASS || mat.kind == UI_MATERIAL_ACRYLIC {
-                if mat.is_squircle {
-                    Canvas_draw_squircle(canvas, bounds, mat.corner_radius, p_fill);
-                } else {
-                    Canvas_draw_round_rect(canvas, bounds, mat.corner_radius, p_fill);
-                }
-            } else if mat.kind == UI_MATERIAL_SOLID {
-                if mat.corner_radius > 0 {
-                    Canvas_draw_round_rect(canvas, bounds, mat.corner_radius, p_fill);
-                } else {
-                    Canvas_draw_rect(canvas, bounds, p_fill);
-                }
-            } else if mat.kind == UI_MATERIAL_ACCENT {
-                Canvas_draw_capsule(canvas, bounds, p_fill);
-            }
-
-            if mat.border_width > 0 && mat.border_color.a > 0 {
-                let p_stroke = paint_stroke(mat.border_color, mat.border_width);
-                if mat.corner_radius > 0 {
-                    Canvas_draw_round_rect(canvas, bounds, mat.corner_radius, p_stroke);
-                } else {
-                    Canvas_draw_rect(canvas, bounds, p_stroke);
-                }
-            }
+            // Todos os materiais passam pelo BakenFX; a UI não desenha mais
+            // preenchimento, borda e sombra como operações concorrentes.
+            bakenfx_draw_material(
+                canvas, bounds, mat.kind, mat.tint_color, mat.border_color,
+                mat.border_width, mat.corner_radius, mat.shadow_color,
+                mat.shadow_blur, mat.shadow_offset_y, mat.is_squircle
+            );
         } else if node.node_type == NODE_TEXT {
             if node.text_content != (null as *const u8) {
                 let p_text = paint_fill(mat.tint_color);
