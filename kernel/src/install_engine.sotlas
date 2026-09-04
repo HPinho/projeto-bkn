@@ -1,0 +1,71 @@
+// Baken OS — motor de instalação real, separado da UI.
+//
+// Regra: progresso só pode refletir trabalho efetivamente concluído por uma
+// camada de storage nativa. Enquanto AHCI/NVMe + GPT/FAT32/BakenFS reais não
+// existirem, iniciar instalação retorna false e o estado fica UNAVAILABLE.
+
+module kernel::install_engine;
+
+import kernel::storage::block_device::*;
+
+pub const INSTALL_STATE_IDLE: u32 = 0;
+pub const INSTALL_STATE_UNAVAILABLE: u32 = 1;
+pub const INSTALL_STATE_PREPARING: u32 = 2;
+pub const INSTALL_STATE_PARTITIONING: u32 = 3;
+pub const INSTALL_STATE_FORMATTING: u32 = 4;
+pub const INSTALL_STATE_COPYING: u32 = 5;
+pub const INSTALL_STATE_FINALIZING: u32 = 6;
+pub const INSTALL_STATE_COMPLETE: u32 = 7;
+pub const INSTALL_STATE_FAILED: u32 = 8;
+
+static mut INSTALL_STATE: u32 = INSTALL_STATE_IDLE;
+static mut INSTALL_PROGRESS: u32 = 0;
+static mut INSTALL_ERROR: u32 = 0;
+
+@system
+pub fn install_engine_reset() -> void {
+    unsafe {
+        INSTALL_STATE = INSTALL_STATE_IDLE;
+        INSTALL_PROGRESS = 0;
+        INSTALL_ERROR = 0;
+    }
+}
+
+@system
+pub fn install_engine_available() -> bool {
+    return block_device_has_writable_native_target();
+}
+
+@system
+pub fn install_engine_start() -> bool {
+    unsafe {
+        INSTALL_PROGRESS = 0;
+        INSTALL_ERROR = 0;
+        if !block_device_has_writable_native_target() {
+            INSTALL_STATE = INSTALL_STATE_UNAVAILABLE;
+            return false;
+        }
+
+        // Quando GPT/FAT32/BakenFS e write path nativos estiverem ligados,
+        // esta transição passa a disparar trabalho real. Até lá não fingimos
+        // que uma instalação começou.
+        INSTALL_STATE = INSTALL_STATE_UNAVAILABLE;
+        return false;
+    }
+}
+
+@system
+pub fn install_engine_tick() -> void {
+    // Intencionalmente sem incremento temporal/fictício. Drivers e camadas de
+    // filesystem reais atualizarão estado/progresso somente após I/O concluído.
+    return;
+}
+
+@system
+pub fn install_engine_state() -> u32 { unsafe { return INSTALL_STATE; } }
+
+@system
+pub fn install_engine_progress() -> u32 { unsafe { return INSTALL_PROGRESS; } }
+
+@system
+pub fn install_engine_error() -> u32 { unsafe { return INSTALL_ERROR; } }
