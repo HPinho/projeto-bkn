@@ -1,8 +1,9 @@
 // Baken OS — layout seguro da stack usada no futuro cutover pós-UEFI.
 //
-// A primeira página fica reservada como guard page e NÃO deverá ser mapeada
-// nas page tables Baken. O restante forma a stack RW+NX. Este módulo apenas
-// calcula/valida o layout; não escreve RSP, CR3 ou page tables.
+// Página 0: guard page, deliberadamente não mapeada.
+// Página 1: contexto pós-cutover RW+NX, separado da pilha.
+// Páginas 2..N: stack RW+NX. Assim a pilha descendente nunca sobrescreve o
+// PostCutoverContext enquanto o bootstrap pós-UEFI ainda depende dele.
 
 module kernel::memory::transition_stack;
 
@@ -12,6 +13,8 @@ pub struct TransitionStackLayout {
     pub physical_base: u64;
     pub virtual_base: u64;
     pub guard_page_virtual_base: u64;
+    pub context_physical_base: u64;
+    pub context_virtual_base: u64;
     pub usable_physical_base: u64;
     pub usable_virtual_base: u64;
     pub usable_page_count: u64;
@@ -25,6 +28,8 @@ pub fn transition_stack_invalid() -> TransitionStackLayout {
         physical_base: 0,
         virtual_base: 0,
         guard_page_virtual_base: 0,
+        context_physical_base: 0,
+        context_virtual_base: 0,
         usable_physical_base: 0,
         usable_virtual_base: 0,
         usable_page_count: 0,
@@ -37,7 +42,7 @@ pub fn transition_stack_invalid() -> TransitionStackLayout {
 pub fn transition_stack_layout(physical_base: u64,
                                virtual_base: u64,
                                page_count: u64) -> TransitionStackLayout {
-    if physical_base == 0 || virtual_base == 0 || page_count < 2 {
+    if physical_base == 0 || virtual_base == 0 || page_count < 3 {
         return transition_stack_invalid();
     }
     if !x86_page_aligned(physical_base) || !x86_page_aligned(virtual_base) {
@@ -49,16 +54,26 @@ pub fn transition_stack_layout(physical_base: u64,
     let raw_top = virtual_base + byte_count;
     if raw_top <= virtual_base { return transition_stack_invalid(); }
 
-    let usable_physical_base = physical_base + X86_PAGE_SIZE;
-    let usable_virtual_base = virtual_base + X86_PAGE_SIZE;
-    let usable_page_count = page_count - 1;
+    let context_physical_base = physical_base + X86_PAGE_SIZE;
+    let context_virtual_base = virtual_base + X86_PAGE_SIZE;
+    if context_physical_base <= physical_base || context_virtual_base <= virtual_base {
+        return transition_stack_invalid();
+    }
+
+    let usable_physical_base = physical_base + (2 * X86_PAGE_SIZE);
+    let usable_virtual_base = virtual_base + (2 * X86_PAGE_SIZE);
+    let usable_page_count = page_count - 2;
     let stack_top = raw_top & ~15;
-    if stack_top <= usable_virtual_base { return transition_stack_invalid(); }
+    if usable_page_count == 0 || stack_top <= usable_virtual_base {
+        return transition_stack_invalid();
+    }
 
     return TransitionStackLayout {
         physical_base: physical_base,
         virtual_base: virtual_base,
         guard_page_virtual_base: virtual_base,
+        context_physical_base: context_physical_base,
+        context_virtual_base: context_virtual_base,
         usable_physical_base: usable_physical_base,
         usable_virtual_base: usable_virtual_base,
         usable_page_count: usable_page_count,
