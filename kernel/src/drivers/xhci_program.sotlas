@@ -1,0 +1,145 @@
+// Baken OS — programa estruturas DMA no xHC ainda parado.
+//
+// DCBAAP, CRCR, CONFIG e Interrupter 0/ERST são configurados enquanto HCHalted
+// continua 1. Bus Master, Run/Stop, interrupções xHCI e Doorbells permanecem
+// desligados. Esta separação mantém o bring-up fail-closed antes do primeiro DMA.
+
+module kernel::drivers::xhci_program;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_runtime::*;
+
+pub const XHCI_OP_CRCR: u64 = 0x18;
+pub const XHCI_OP_DCBAAP: u64 = 0x30;
+pub const XHCI_OP_CONFIG: u64 = 0x38;
+pub const XHCI_CRCR_RCS: u64 = 1;
+
+pub const XHCI_RUNTIME_INTERRUPTER0: u64 = 0x20;
+pub const XHCI_INTR_IMAN: u64 = 0x00;
+pub const XHCI_INTR_IMOD: u64 = 0x04;
+pub const XHCI_INTR_ERSTSZ: u64 = 0x08;
+pub const XHCI_INTR_ERSTBA: u64 = 0x10;
+pub const XHCI_INTR_ERDP: u64 = 0x18;
+pub const XHCI_IMAN_IE: u32 = 1 << 1;
+
+static mut XHCI_PROGRAM_READY: bool = false;
+static mut XHCI_PROGRAM_RUNTIME_BASE: u64 = 0;
+
+@system
+fn xhci_program_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_program_map_address(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_program_page_base(address));
+}
+
+@system
+fn xhci_program_write64(address: u64, value: u64) -> bool {
+    if !xhci_program_map_address(address) || !xhci_program_map_address(address + 4) {
+        return false;
+    }
+    x86_mmio_write32(address, (value & 0xFFFFFFFF) as u32);
+    x86_mmio_write32(address + 4, ((value >> 32) & 0xFFFFFFFF) as u32);
+    return true;
+}
+
+@system
+fn xhci_program_read64(address: u64) -> u64 {
+    if !xhci_program_map_address(address) || !xhci_program_map_address(address + 4) {
+        return 0;
+    }
+    let low = x86_mmio_read32(address) as u64;
+    let high = x86_mmio_read32(address + 4) as u64;
+    return low | (high << 32);
+}
+
+@system
+pub fn xhci_program_halted_runtime() -> bool {
+    unsafe {
+        XHCI_PROGRAM_READY = false;
+        XHCI_PROGRAM_RUNTIME_BASE = 0;
+    }
+    if !xhci_controller_is_ready() || !xhci_runtime_is_ready() { return false; }
+
+    let operational = xhci_controller_operational_base();
+    let mmio = xhci_controller_mmio_base();
+    if operational == 0 || mmio == 0 { return false; }
+    if (x86_mmio_read32(operational + XHCI_OP_USBSTS) & XHCI_USBSTS_HCHALTED) == 0 {
+        return false;
+    }
+
+    let dcbaa = xhci_runtime_dcbaa_physical();
+    let command = xhci_runtime_command_ring_physical();
+    let event_ring = xhci_runtime_event_ring_physical();
+    let erst = xhci_runtime_erst_physical();
+    if dcbaa == 0 || command == 0 || event_ring == 0 || erst == 0 { return false; }
+    if (dcbaa & 0x3F) != 0 || (command & 0x3F) != 0 || (event_ring & 0x3F) != 0 ||
+       (erst & 0x3F) != 0 { return false; }
+
+    let rtsoff = x86_mmio_read32(mmio + XHCI_RTSOFF) as u64;
+    let runtime_base = mmio + (rtsoff & 0xFFFFFFE0);
+    if runtime_base < mmio { return false; }
+    let intr0 = runtime_base + XHCI_RUNTIME_INTERRUPTER0;
+    if intr0 < runtime_base { return false; }
+
+    if !xhci_program_map_address(intr0 + XHCI_INTR_IMAN) ||
+       !xhci_program_map_address(intr0 + XHCI_INTR_ERDP) {
+        return false;
+    }
+
+    // Interrupter 0 fica desabilitado; nesta fase eventos serão consumidos por polling.
+    let iman = x86_mmio_read32(intr0 + XHCI_INTR_IMAN);
+    x86_mmio_write32(intr0 + XHCI_INTR_IMAN, iman & ~XHCI_IMAN_IE);
+    x86_mmio_write32(intr0 + XHCI_INTR_IMOD, 0);
+    x86_mmio_write32(intr0 + XHCI_INTR_ERSTSZ, 1);
+    if !xhci_program_write64(intr0 + XHCI_INTR_ERSTBA, erst) { return false; }
+    if !xhci_program_write64(intr0 + XHCI_INTR_ERDP, event_ring) { return false; }
+
+    if !xhci_program_write64(operational + XHCI_OP_DCBAAP, dcbaa) { return false; }
+    if !xhci_program_write64(operational + XHCI_OP_CRCR, command | XHCI_CRCR_RCS) {
+        return false;
+    }
+
+    let max_slots = xhci_controller_max_slots() as u32;
+    if max_slots == 0 { return false; }
+    x86_mmio_write32(operational + XHCI_OP_CONFIG, max_slots & 0xFF);
+
+    // Readback de registradores estáveis antes de permitir qualquer DMA.
+    if (xhci_program_read64(operational + XHCI_OP_DCBAAP) & 0xFFFFFFFFFFFFFFC0) != dcbaa {
+        return false;
+    }
+    if (xhci_program_read64(operational + XHCI_OP_CRCR) & 0xFFFFFFFFFFFFFFC0) != command {
+        return false;
+    }
+    if (xhci_program_read64(intr0 + XHCI_INTR_ERSTBA) & 0xFFFFFFFFFFFFFFC0) != erst {
+        return false;
+    }
+    if (xhci_program_read64(intr0 + XHCI_INTR_ERDP) & 0xFFFFFFFFFFFFFFF0) != event_ring {
+        return false;
+    }
+    if (x86_mmio_read32(intr0 + XHCI_INTR_ERSTSZ) & 0xFFFF) != 1 { return false; }
+    if (x86_mmio_read32(operational + XHCI_OP_CONFIG) & 0xFF) != (max_slots & 0xFF) {
+        return false;
+    }
+    if (x86_mmio_read32(intr0 + XHCI_INTR_IMAN) & XHCI_IMAN_IE) != 0 { return false; }
+    if (x86_mmio_read32(operational + XHCI_OP_USBSTS) & XHCI_USBSTS_HCHALTED) == 0 {
+        return false;
+    }
+
+    unsafe {
+        XHCI_PROGRAM_RUNTIME_BASE = runtime_base;
+        XHCI_PROGRAM_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_program_is_ready() -> bool { unsafe { return XHCI_PROGRAM_READY; } }
+
+@system
+pub fn xhci_program_runtime_base() -> u64 { unsafe { return XHCI_PROGRAM_RUNTIME_BASE; } }
