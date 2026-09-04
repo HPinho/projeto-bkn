@@ -1,8 +1,11 @@
 // Baken OS — contrato fail-closed para o futuro corte de UEFI Boot Services.
 //
-// Este módulo não chama firmware, não toca CR3 e não ativa PMM/VMM. Ele apenas
-// concentra as pré-condições que precisam ser verdadeiras ANTES de o bootstrap
-// poder executar o GetMemoryMap final + ExitBootServices.
+// Este módulo não chama firmware, não toca CR3 e não ativa PMM/VMM. Ele separa
+// duas metas diferentes:
+//  - cutover_plan_ready: kernel/desktop já pode sair do UEFI sem depender de
+//    Boot Services para memória, timer ou input;
+//  - cutover_native_foundation_ready: além do cutover, storage nativo também
+//    está operacional, fechando a fundação bare-metal completa.
 
 module kernel::memory::cutover_plan;
 
@@ -33,6 +36,9 @@ pub fn cutover_plan_blocked_hybrid() -> CutoverPlan {
     };
 }
 
+// Prontidão para o primeiro cutover real do kernel/desktop. Storage não entra
+// aqui porque o runtime atual não usa Block I/O; ele é requisito da fundação
+// nativa completa, não da troca de ownership da máquina.
 @system
 pub fn cutover_plan_ready(plan: CutoverPlan) -> bool {
     if plan.uefi_bridge_active { return false; }
@@ -43,6 +49,14 @@ pub fn cutover_plan_ready(plan: CutoverPlan) -> bool {
     if !plan.transition_stack_ready { return false; }
     if !plan.native_timer_ready { return false; }
     if !plan.native_input_ready { return false; }
+    return true;
+}
+
+// Meta mais forte: somente retorna true quando a base bare-metal operacional
+// também possui storage nativo, requisito para installer/filesystem pós-cutover.
+@system
+pub fn cutover_native_foundation_ready(plan: CutoverPlan) -> bool {
+    if !cutover_plan_ready(plan) { return false; }
     if !plan.native_storage_ready { return false; }
     return true;
 }
