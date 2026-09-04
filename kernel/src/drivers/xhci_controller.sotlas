@@ -30,6 +30,7 @@ pub const XHCI_USBSTS_HCHALTED: u32 = 1;
 pub const XHCI_USBSTS_CNR: u32 = 1 << 11;
 
 pub const XHCI_EXT_CAP_USB_LEGACY_SUPPORT: u32 = 1;
+pub const XHCI_LEGACY_CONTROL_STATUS: u64 = 0x04;
 pub const XHCI_LEGACY_BIOS_OWNED: u32 = 1 << 16;
 pub const XHCI_LEGACY_OS_OWNED: u32 = 1 << 24;
 pub const XHCI_MAX_EXT_CAPS: u32 = 64;
@@ -86,6 +87,17 @@ fn xhci_max_scratchpads(hcsparams2: u32) -> u16 {
 }
 
 @system
+fn xhci_legacy_disable_smis(address: u64) -> bool {
+    let control = address + XHCI_LEGACY_CONTROL_STATUS;
+    if control < address || !xhci_map_mmio_address(control) { return false; }
+    // USBLEGCTLSTS: zero desabilita os SMI enables de legado. Status W1C não é
+    // artificialmente reconhecido aqui; a meta é impedir firmware de competir
+    // pelo controller após ExitBootServices.
+    x86_mmio_write32(control, 0);
+    return true;
+}
+
+@system
 fn xhci_legacy_handoff(mmio: u64, hccparams1: u32) -> bool {
     let mut offset_dwords = (hccparams1 >> 16) & 0xFFFF;
     if offset_dwords == 0 { return true; }
@@ -99,23 +111,38 @@ fn xhci_legacy_handoff(mmio: u64, hccparams1: u32) -> bool {
         let next = (header >> 8) & 0xFF;
 
         if cap_id == XHCI_EXT_CAP_USB_LEGACY_SUPPORT {
-            if (header & XHCI_LEGACY_BIOS_OWNED) != 0 {
+            // Solicita ownership ao firmware sem depender de Boot Services.
+            if (header & XHCI_LEGACY_OS_OWNED) == 0 {
                 x86_mmio_write32(address, header | XHCI_LEGACY_OS_OWNED);
+            }
+
+            if (header & XHCI_LEGACY_BIOS_OWNED) != 0 {
                 let mut spins: u64 = 0;
                 while spins < XHCI_LEGACY_POLL_LIMIT {
                     let ownership = x86_mmio_read32(address);
-                    if (ownership & XHCI_LEGACY_BIOS_OWNED) == 0 &&
-                       (ownership & XHCI_LEGACY_OS_OWNED) != 0 {
+                    if (ownership & XHCI_LEGACY_BIOS_OWNED) == 0 {
+                        if !xhci_legacy_disable_smis(address) { return false; }
                         return true;
                     }
                     spins += 1;
                 }
-                return false;
+
+                // Firmware quebrado/emulado pode nunca limpar BIOS Owned. Seguir
+                // falhando aqui impede qualquer xHCI pós-EBS. A política usada
+                // por drivers maduros é forçar a desativação dos SMIs e assumir
+                // ownership do controller após o timeout.
+                if !xhci_legacy_disable_smis(address) { return false; }
+                let forced = x86_mmio_read32(address) | XHCI_LEGACY_OS_OWNED;
+                x86_mmio_write32(address, forced);
+                return true;
             }
-            if (header & XHCI_LEGACY_OS_OWNED) == 0 {
-                x86_mmio_write32(address, header | XHCI_LEGACY_OS_OWNED);
+
+            if !xhci_legacy_disable_smis(address) { return false; }
+            let ownership = x86_mmio_read32(address);
+            if (ownership & XHCI_LEGACY_OS_OWNED) == 0 {
+                x86_mmio_write32(address, ownership | XHCI_LEGACY_OS_OWNED);
             }
-            return (x86_mmio_read32(address) & XHCI_LEGACY_OS_OWNED) != 0;
+            return true;
         }
 
         if next == 0 { break; }
