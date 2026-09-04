@@ -1,0 +1,159 @@
+// Baken OS — reset de porta xHCI consciente do Supported Protocol.
+//
+// USB 2.x usa Port Reset (PR). USB 3.x já habilitado não é tocado; caso esteja
+// conectado porém desabilitado, usa Warm Port Reset (WPR). Escritas em PORTSC
+// nunca reutilizam o snapshot bruto: PED e bits RW1C são limpos da imagem-base.
+
+module kernel::drivers::xhci_port_reset;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_port::*;
+import kernel::drivers::xhci_protocol::*;
+
+pub const XHCI_PORTSC_PR: u32 = 1 << 4;
+pub const XHCI_PORTSC_LWS: u32 = 1 << 16;
+pub const XHCI_PORTSC_CSC: u32 = 1 << 17;
+pub const XHCI_PORTSC_PEC: u32 = 1 << 18;
+pub const XHCI_PORTSC_WRC: u32 = 1 << 19;
+pub const XHCI_PORTSC_OCC: u32 = 1 << 20;
+pub const XHCI_PORTSC_PRC: u32 = 1 << 21;
+pub const XHCI_PORTSC_PLC: u32 = 1 << 22;
+pub const XHCI_PORTSC_CEC: u32 = 1 << 23;
+pub const XHCI_PORTSC_WPR: u32 = 1 << 31;
+pub const XHCI_PORTSC_CHANGE_MASK: u32 = XHCI_PORTSC_CSC | XHCI_PORTSC_PEC |
+    XHCI_PORTSC_WRC | XHCI_PORTSC_OCC | XHCI_PORTSC_PRC | XHCI_PORTSC_PLC |
+    XHCI_PORTSC_CEC;
+pub const XHCI_PORT_RESET_POLL_LIMIT: u64 = 10000000;
+
+static mut XHCI_PORT_RESET_READY: bool = false;
+static mut XHCI_PORT_RESET_PORT_ID: u8 = 0;
+static mut XHCI_PORT_RESET_PROTOCOL_MAJOR: u8 = 0;
+
+@system
+fn xhci_port_reset_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_port_reset_address(port_id: u8) -> u64 {
+    if port_id == 0 { return 0; }
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return 0; }
+    let index = (port_id as u64) - 1;
+    let address = operational + XHCI_PORT_REGISTER_BASE +
+        (index * XHCI_PORT_REGISTER_STRIDE) + XHCI_PORTSC_OFFSET;
+    if address < operational { return 0; }
+    return address;
+}
+
+@system
+fn xhci_port_reset_map(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_port_reset_page_base(address));
+}
+
+// Remove campos cujo valor 1 teria efeito colateral em uma escrita de PORTSC.
+@system
+fn xhci_port_reset_safe_base(portsc: u32) -> u32 {
+    return portsc & ~(XHCI_PORTSC_PED | XHCI_PORTSC_PR | XHCI_PORTSC_LWS |
+        XHCI_PORTSC_CHANGE_MASK | XHCI_PORTSC_WPR);
+}
+
+@system
+fn xhci_port_reset_ack_change(address: u64, bit: u32) -> bool {
+    if (bit & XHCI_PORTSC_CHANGE_MASK) == 0 { return false; }
+    let current = x86_mmio_read32(address);
+    x86_mmio_write32(address, xhci_port_reset_safe_base(current) | bit);
+    return true;
+}
+
+@system
+fn xhci_port_reset_usb2(address: u64) -> bool {
+    let before = x86_mmio_read32(address);
+    if (before & XHCI_PORTSC_CCS) == 0 { return false; }
+    x86_mmio_write32(address, xhci_port_reset_safe_base(before) | XHCI_PORTSC_PR);
+
+    let mut spins: u64 = 0;
+    while spins < XHCI_PORT_RESET_POLL_LIMIT {
+        let portsc = x86_mmio_read32(address);
+        if (portsc & XHCI_PORTSC_CCS) == 0 { return false; }
+        if (portsc & XHCI_PORTSC_PR) == 0 && (portsc & XHCI_PORTSC_PRC) != 0 {
+            if (portsc & XHCI_PORTSC_PED) == 0 { return false; }
+            return xhci_port_reset_ack_change(address, XHCI_PORTSC_PRC);
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn xhci_port_reset_usb3(address: u64) -> bool {
+    let before = x86_mmio_read32(address);
+    if (before & XHCI_PORTSC_CCS) == 0 { return false; }
+    // SuperSpeed normalmente já chega Enabled após link training.
+    if (before & XHCI_PORTSC_PED) != 0 { return true; }
+
+    x86_mmio_write32(address, xhci_port_reset_safe_base(before) | XHCI_PORTSC_WPR);
+    let mut spins: u64 = 0;
+    while spins < XHCI_PORT_RESET_POLL_LIMIT {
+        let portsc = x86_mmio_read32(address);
+        if (portsc & XHCI_PORTSC_CCS) == 0 { return false; }
+        if (portsc & XHCI_PORTSC_WPR) == 0 && (portsc & XHCI_PORTSC_WRC) != 0 {
+            if (portsc & XHCI_PORTSC_PED) == 0 { return false; }
+            return xhci_port_reset_ack_change(address, XHCI_PORTSC_WRC);
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn xhci_port_reset_first_connected() -> bool {
+    unsafe {
+        XHCI_PORT_RESET_READY = false;
+        XHCI_PORT_RESET_PORT_ID = 0;
+        XHCI_PORT_RESET_PROTOCOL_MAJOR = 0;
+    }
+    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
+    if xhci_protocol_scan() == 0 { return false; }
+    if xhci_port_scan() == 0 || xhci_connected_port_count() == 0 { return false; }
+
+    let port_id = xhci_first_connected_port();
+    if port_id == 0 { return false; }
+    let protocol = xhci_protocol_major_for_port(port_id);
+    if protocol != XHCI_PROTOCOL_USB2_MAJOR && protocol != XHCI_PROTOCOL_USB3_MAJOR {
+        return false;
+    }
+
+    let address = xhci_port_reset_address(port_id);
+    if address == 0 || !xhci_port_reset_map(address) { return false; }
+    let ok = if protocol == XHCI_PROTOCOL_USB2_MAJOR {
+        xhci_port_reset_usb2(address)
+    } else {
+        xhci_port_reset_usb3(address)
+    };
+    if !ok { return false; }
+
+    let after = x86_mmio_read32(address);
+    if (after & XHCI_PORTSC_CCS) == 0 || (after & XHCI_PORTSC_PED) == 0 { return false; }
+    unsafe {
+        XHCI_PORT_RESET_PORT_ID = port_id;
+        XHCI_PORT_RESET_PROTOCOL_MAJOR = protocol;
+        XHCI_PORT_RESET_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_port_reset_is_ready() -> bool { unsafe { return XHCI_PORT_RESET_READY; } }
+
+@system
+pub fn xhci_port_reset_port_id() -> u8 { unsafe { return XHCI_PORT_RESET_PORT_ID; } }
+
+@system
+pub fn xhci_port_reset_protocol_major() -> u8 {
+    unsafe { return XHCI_PORT_RESET_PROTOCOL_MAJOR; }
+}
