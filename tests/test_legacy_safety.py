@@ -45,6 +45,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/arch/x86_64/tss.sotlas",
         "kernel/src/arch/x86_64/idt.sotlas",
         "kernel/src/arch/x86_64/cpu.sotlas",
+        "kernel/src/arch/x86_64/timer.sotlas",
         "kernel/src/arch/x86_64/exceptions.sotlas",
     }
 
