@@ -70,6 +70,7 @@ jobs:
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
             -cdrom build/baken_os.iso \
             -device qemu-xhci,id=xhci \
+            -device usb-kbd,bus=xhci.0 \
             -display none \
             -monitor stdio \
             -serial file:build/qemu-serial.log
