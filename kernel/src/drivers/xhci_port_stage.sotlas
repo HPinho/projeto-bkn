@@ -1,0 +1,73 @@
+// Baken OS — estágio pós-No-op para preparar a primeira porta USB real.
+//
+// Pré-condição: o primeiro No-op Command já foi concluído por DMA. Esta camada
+// inicializa o produtor stateful do Command Ring, lê Supported Protocol,
+// inventaria PORTSC e executa apenas o reset apropriado da primeira porta
+// conectada. Não envia Enable Slot e não aloca Device/Input Contexts.
+
+module kernel::drivers::xhci_port_stage;
+
+import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_port::*;
+import kernel::drivers::xhci_protocol::*;
+import kernel::drivers::xhci_port_reset::*;
+
+static mut XHCI_PORT_STAGE_READY: bool = false;
+static mut XHCI_PORT_STAGE_PORT_ID: u8 = 0;
+static mut XHCI_PORT_STAGE_PROTOCOL_MAJOR: u8 = 0;
+static mut XHCI_PORT_STAGE_SLOT_TYPE: u8 = 0;
+
+@system
+pub fn xhci_port_stage_prepare_first() -> bool {
+    unsafe {
+        XHCI_PORT_STAGE_READY = false;
+        XHCI_PORT_STAGE_PORT_ID = 0;
+        XHCI_PORT_STAGE_PROTOCOL_MAJOR = 0;
+        XHCI_PORT_STAGE_SLOT_TYPE = 0;
+    }
+
+    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
+    if !xhci_command_prepare_after_noop() || !xhci_command_is_ready() { return false; }
+
+    // Faça uma varredura explícita antes do reset para que falhas de capability
+    // ou ausência de dispositivo não sejam confundidas com falha de PORTSC.
+    if xhci_protocol_scan() == 0 { return false; }
+    if xhci_port_scan() == 0 || xhci_connected_port_count() == 0 { return false; }
+
+    let port_id = xhci_first_connected_port();
+    if port_id == 0 { return false; }
+    let protocol = xhci_protocol_major_for_port(port_id);
+    let slot_type = xhci_protocol_slot_type_for_port(port_id);
+    if protocol != XHCI_PROTOCOL_USB2_MAJOR && protocol != XHCI_PROTOCOL_USB3_MAJOR {
+        return false;
+    }
+
+    // O helper repete scan/protocol internamente por segurança e só retorna
+    // sucesso quando CCS=1 e PED=1 após PR/WPR (ou SuperSpeed já Enabled).
+    if !xhci_port_reset_first_connected() || !xhci_port_reset_is_ready() { return false; }
+    if xhci_port_reset_port_id() != port_id ||
+       xhci_port_reset_protocol_major() != protocol { return false; }
+
+    unsafe {
+        XHCI_PORT_STAGE_PORT_ID = port_id;
+        XHCI_PORT_STAGE_PROTOCOL_MAJOR = protocol;
+        XHCI_PORT_STAGE_SLOT_TYPE = slot_type;
+        XHCI_PORT_STAGE_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_port_stage_is_ready() -> bool { unsafe { return XHCI_PORT_STAGE_READY; } }
+
+@system
+pub fn xhci_port_stage_port_id() -> u8 { unsafe { return XHCI_PORT_STAGE_PORT_ID; } }
+
+@system
+pub fn xhci_port_stage_protocol_major() -> u8 {
+    unsafe { return XHCI_PORT_STAGE_PROTOCOL_MAJOR; }
+}
+
+@system
+pub fn xhci_port_stage_slot_type() -> u8 { unsafe { return XHCI_PORT_STAGE_SLOT_TYPE; } }
