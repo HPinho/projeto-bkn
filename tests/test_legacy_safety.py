@@ -36,7 +36,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/memory/pmm.sotlas", "kernel/src/memory/pmm_allocator.sotlas",
         "kernel/src/memory/vmm.sotlas", "kernel/src/memory/direct_map.sotlas",
         "kernel/src/memory/page_table_arena.sotlas", "kernel/src/memory/page_table_writer.sotlas",
-        "kernel/src/memory/dma.sotlas",
+        "kernel/src/memory/page_table_builder.sotlas", "kernel/src/memory/dma.sotlas",
         "kernel/src/arch/x86_64/gdt.sotlas", "kernel/src/arch/x86_64/tss.sotlas",
         "kernel/src/arch/x86_64/idt.sotlas", "kernel/src/arch/x86_64/cpu.sotlas",
         "kernel/src/arch/x86_64/paging.sotlas", "kernel/src/arch/x86_64/pat.sotlas",
