@@ -52,7 +52,12 @@ static inline void __invlpg(uint64_t address) {
  */
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
 
-__attribute__((naked)) static void __sotlas_x86_exception_common(void) {
+/*
+ * `unused` apenas suprime -Wunused-function nas unidades que recebem o
+ * preâmbulo e não usam exceptions. Ao contrário de `used`, não força emissão
+ * nem duplica stubs no binário final.
+ */
+__attribute__((naked, unused)) static void __sotlas_x86_exception_common(void) {
     __asm__(
         "movq %rsp, %rcx\n\t"
         "andq $-16, %rsp\n\t"
@@ -65,12 +70,12 @@ __attribute__((naked)) static void __sotlas_x86_exception_common(void) {
 }
 
 #define SOTLAS_X86_ISR_NOERR(n) \
-    __attribute__((naked)) static void __sotlas_x86_isr_##n(void) { \
+    __attribute__((naked, unused)) static void __sotlas_x86_isr_##n(void) { \
         __asm__("pushq $0\n\tpushq $" #n "\n\tjmp __sotlas_x86_exception_common"); \
     }
 
 #define SOTLAS_X86_ISR_ERR(n) \
-    __attribute__((naked)) static void __sotlas_x86_isr_##n(void) { \
+    __attribute__((naked, unused)) static void __sotlas_x86_isr_##n(void) { \
         __asm__("pushq $" #n "\n\tjmp __sotlas_x86_exception_common"); \
     }
 
@@ -110,8 +115,8 @@ SOTLAS_X86_ISR_NOERR(31)
 #undef SOTLAS_X86_ISR_NOERR
 #undef SOTLAS_X86_ISR_ERR
 
-/* O helper mantém os stubs alcançáveis somente na unidade que o referencia. */
-static inline uint64_t __sotlas_x86_exception_stub_address(uint16_t vector) {
+/* Mecanismo genérico da arquitetura: devolve o endereço do stub do vetor. */
+static inline uint64_t __exception_stub_address(uint16_t vector) {
     switch (vector) {
         case 0: return (uint64_t)(uintptr_t)&__sotlas_x86_isr_0;
         case 1: return (uint64_t)(uintptr_t)&__sotlas_x86_isr_1;
@@ -175,6 +180,10 @@ def install(bootstrap) -> None:
         ),
         "__invlpg": Function(
             "__invlpg", [("address", Type("u64"))], Type("void"), [],
+            public=True, attributes=["@system"],
+        ),
+        "__exception_stub_address": Function(
+            "__exception_stub_address", [("vector", Type("u16"))], Type("u64"), [],
             public=True, attributes=["@system"],
         ),
     }
