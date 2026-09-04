@@ -190,12 +190,12 @@ pub fn xhci_context_prepare_for_enabled_slot() -> bool {
         *link_slot = xhci_trb_link(ep0_ring.physical_base, true, true);
     }
 
-    // Input Control Context ocupa sempre 32 bytes; Slot Context vem logo após.
+    // Input Control, Slot e EP0 contexts seguem o Context Size anunciado pelo xHC.
     if !xhci_context_write32(input.virtual_address, 4, XHCI_INPUT_CONTROL_ADD_SLOT |
         XHCI_INPUT_CONTROL_ADD_EP0) { return false; }
 
-    let slot_context_offset = 32;
-    let ep0_context_offset = 32 + (context_size as u64);
+    let slot_context_offset = context_size as u64;
+    let ep0_context_offset = (context_size as u64) * 2;
     let slot_dw0 = (1 << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT) |
         ((speed_id as u32) << XHCI_SLOT_CONTEXT_SPEED_SHIFT);
     let slot_dw1 = (port_id as u32) << XHCI_SLOT_CONTEXT_ROOT_PORT_SHIFT;
