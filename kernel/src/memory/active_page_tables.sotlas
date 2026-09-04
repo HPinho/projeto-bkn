@@ -1,0 +1,106 @@
+// Baken OS — retomada segura da arena de page tables depois do cutover.
+//
+// A arena foi reservada como EfiLoaderData e está no direct-map. Após CR3,
+// retomamos exatamente do número de páginas já consumidas pelo construtor de
+// transição. Isso permite acrescentar mappings MMIO explícitos sem reconstruir
+// nem substituir a raiz ativa.
+
+module kernel::memory::active_page_tables;
+
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_writer::*;
+import kernel::memory::page_table_mapper::*;
+import kernel::memory::direct_map::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::cpu::*;
+
+static mut ACTIVE_PAGE_TABLE_ARENA: PageTableArena = PageTableArena {
+    physical_base: 0,
+    virtual_base: 0,
+    page_count: 0,
+    next_page_index: 0,
+    valid: false
+};
+static mut ACTIVE_PAGE_TABLE_ROOT: PageTablePage = PageTablePage {
+    physical_address: 0,
+    virtual_address: 0,
+    valid: false
+};
+static mut ACTIVE_PAGE_TABLES_READY: bool = false;
+
+@system
+pub fn active_page_tables_resume(root_physical: u64,
+                                 arena_physical_base: u64,
+                                 arena_page_count: u64,
+                                 pages_used: u64) -> bool {
+    if root_physical == 0 || arena_physical_base == 0 { return false; }
+    if !x86_page_aligned(root_physical) || !x86_page_aligned(arena_physical_base) {
+        return false;
+    }
+    if arena_page_count == 0 || pages_used == 0 || pages_used > arena_page_count {
+        return false;
+    }
+
+    let arena_virtual_base = direct_map_virtual_address(arena_physical_base);
+    let root_virtual = direct_map_virtual_address(root_physical);
+    if arena_virtual_base == 0 || root_virtual == 0 { return false; }
+
+    let mut arena = page_table_arena_make(
+        arena_physical_base,
+        arena_virtual_base,
+        arena_page_count
+    );
+    if !arena.valid { return false; }
+
+    unsafe { arena.next_page_index = pages_used; }
+    let root = page_table_arena_page_from_physical(&arena, root_physical);
+    if !root.valid || !page_table_page_writable(root) { return false; }
+    if root.virtual_address != root_virtual { return false; }
+
+    unsafe {
+        ACTIVE_PAGE_TABLE_ARENA = arena;
+        ACTIVE_PAGE_TABLE_ROOT = root;
+        ACTIVE_PAGE_TABLES_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn active_page_tables_is_ready() -> bool {
+    unsafe { return ACTIVE_PAGE_TABLES_READY; }
+}
+
+@system
+pub fn active_page_tables_remaining_pages() -> u64 {
+    unsafe {
+        if !ACTIVE_PAGE_TABLES_READY { return 0; }
+        return page_table_arena_remaining(&ACTIVE_PAGE_TABLE_ARENA);
+    }
+}
+
+// Mapeia uma única página MMIO identidade como RW+NX+UC conservador.
+// PWT+PCD evita tratar registradores como RAM cacheável; PAT/WC é outra fase.
+@system
+pub fn active_page_tables_map_mmio_identity_4k(physical_address: u64) -> bool {
+    if !x86_page_aligned(physical_address) || physical_address == 0 { return false; }
+
+    let flags = X86_PTE_PRESENT |
+        X86_PTE_WRITABLE |
+        X86_PTE_NX |
+        X86_PTE_WRITE_THROUGH |
+        X86_PTE_CACHE_DISABLE;
+
+    unsafe {
+        if !ACTIVE_PAGE_TABLES_READY { return false; }
+        if !page_table_map_4k(
+            &mut ACTIVE_PAGE_TABLE_ARENA,
+            ACTIVE_PAGE_TABLE_ROOT,
+            physical_address,
+            physical_address,
+            flags
+        ) { return false; }
+    }
+
+    x86_invlpg(physical_address);
+    return true;
+}
