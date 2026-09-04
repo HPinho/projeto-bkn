@@ -1,0 +1,62 @@
+// Baken OS — contrato de buffers DMA físicos.
+//
+// Nesta fase o PMM ainda é somente inventário e Boot Services continua ativo.
+// Portanto esta API existe para estabilizar a ABI dos drivers, mas falha
+// fechada: nenhum endereço físico/virtual é fabricado antes do cutover real.
+
+module kernel::memory::dma;
+
+import kernel::memory::pmm::*;
+
+pub const DMA_DEFAULT_ALIGNMENT: u64 = 4096;
+pub const DMA_MAX_ALIGNMENT: u64 = 2097152;
+
+pub struct DmaBuffer {
+    pub virtual_address: *mut u8;
+    pub physical_address: u64;
+    pub size: u64;
+    pub alignment: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn dma_invalid_buffer() -> DmaBuffer {
+    return DmaBuffer {
+        virtual_address: null as *mut u8,
+        physical_address: 0,
+        size: 0,
+        alignment: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn dma_alignment_valid(alignment: u64) -> bool {
+    if alignment < DMA_DEFAULT_ALIGNMENT || alignment > DMA_MAX_ALIGNMENT { return false; }
+    return (alignment & (alignment - 1)) == 0;
+}
+
+@system
+pub fn dma_allocator_available() -> bool {
+    // Inventário PMM válido não equivale a ownership da RAM. Enquanto não
+    // existir allocator físico pós-ExitBootServices, DMA deve permanecer off.
+    return false;
+}
+
+@system
+pub fn dma_alloc(size: u64, alignment: u64) -> DmaBuffer {
+    if size == 0 || !dma_alignment_valid(alignment) { return dma_invalid_buffer(); }
+    if !pmm_inventory_is_valid() { return dma_invalid_buffer(); }
+    if !dma_allocator_available() { return dma_invalid_buffer(); }
+
+    // Quando o PMM real estiver ativo, este ponto reservará páginas físicas,
+    // criará/validará o mapeamento virtual e só então retornará valid=true.
+    return dma_invalid_buffer();
+}
+
+@system
+pub fn dma_release(buffer: DmaBuffer) -> bool {
+    if !buffer.valid { return false; }
+    if !dma_allocator_available() { return false; }
+    return false;
+}
