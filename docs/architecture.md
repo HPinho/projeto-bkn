@@ -43,17 +43,7 @@ O framebuffer descoberto pelo GOP pode continuar sendo usado porque seu endereç
 
 ### Kernel
 
-O kernel é responsável por:
-
-- GDT, IDT, TSS e exceções;
-- PMM, VMM, heap e DMA;
-- PAT e atributos de cache;
-- ACPI, APIC, IOAPIC e timers;
-- PCI/PCIe;
-- scheduler;
-- input HAL e drivers;
-- block device API e storage;
-- Graphics API, compositor e backends.
+O kernel é responsável por GDT/IDT/TSS/exceções, PMM/VMM/heap/DMA, PAT, ACPI/APIC/IOAPIC/timers, PCI/PCIe, scheduler, input HAL, storage e Graphics API/compositor/backends.
 
 ### UI
 
@@ -61,28 +51,55 @@ Installer, OOBE, desktop, dock, janelas, animações e widgets devem existir em 
 
 ## Estado transitório atual
 
-A árvore atual ainda possui dívida de migração no bootloader. Em particular, o bootloader atual localiza Pointer Protocol e Block I/O e os entrega pelo `BakenBootInfo`; também chama o kernel sem uma fronteira final baseada em `GetMemoryMap` + `ExitBootServices`.
+A árvore ainda possui dívida de migração no bootloader. Pointer Protocol, Block I/O e SystemTable atravessam o handoff, e o kernel ainda roda antes do corte final de `ExitBootServices()`.
 
-Essas pontes são consideradas **legado transitório**, não arquitetura final. Nenhuma nova funcionalidade pode depender delas.
+Essas pontes são legado transitório, não arquitetura final. Nenhuma nova funcionalidade pode depender delas.
 
 A remoção deve ocorrer em ordem segura:
 
 1. implementar entrada nativa suficiente para substituir pointer UEFI;
 2. implementar block device nativo suficiente para substituir Block I/O UEFI;
 3. completar PMM/VMM e preservar o mapa de memória;
-4. mudar `BakenBootInfo` para conter apenas dados estáveis pós-ExitBootServices;
+4. estabilizar o BootInfo bare-metal;
 5. executar `ExitBootServices()` antes de `baken_kernel_main`;
 6. remover os campos e caminhos de runtime UEFI restantes.
 
-Até esse corte, a branch principal deve continuar bootável; a migração deve ser feita por commits pequenos e testáveis.
+## BakenBootInfo v2 — envelope de transição
 
-## BootInfo alvo
+Para evitar quebrar o ABI do runtime atual enquanto a migração ocorre, o v2 preserva os primeiros 80 bytes do layout legado e adiciona depois metadados necessários ao futuro handoff bare-metal:
 
-O contrato alvo é conceitualmente:
+```text
+legacy-compatible prefix (temporário)
+├── framebuffer
+├── memory map pointer/size
+├── SystemTable            [LEGADO]
+├── Pointer Protocol       [LEGADO]
+├── Block I/O              [LEGADO]
+└── Install target BlockIO [LEGADO]
+
+v2 extension
+├── version
+├── struct_size
+├── flags
+├── memory_descriptor_size
+├── memory_descriptor_version
+├── pixel_format
+└── acpi_rsdp
+```
+
+O objetivo desse envelope é permitir que o bootloader comece a produzir dados corretos de Memory Map e ACPI sem deslocar ponteiros que o runtime atual ainda interpreta.
+
+Ele **não é o contrato final**. Depois que input, timer e storage nativos substituírem as pontes de firmware, um ABI limpo removerá os quatro ponteiros UEFI e será usado somente depois de `ExitBootServices()`.
+
+## BootInfo alvo pós-cutover
+
+O contrato final é conceitualmente:
 
 ```text
 BakenBootInfo
 ├── version
+├── struct_size
+├── flags
 ├── framebuffer
 │   ├── physical_base
 │   ├── byte_size
@@ -91,13 +108,13 @@ BakenBootInfo
 │   ├── pixels_per_scanline
 │   └── pixel_format
 ├── memory_map
-│   ├── physical/virtual address
+│   ├── address
 │   ├── size
 │   ├── descriptor_size
 │   └── descriptor_version
 ├── acpi_rsdp
 ├── kernel image metadata
-└── initrd/system image metadata (quando aplicável)
+└── initrd/system image metadata
 ```
 
 Não fazem parte do BootInfo final:
@@ -112,7 +129,7 @@ EFI_BOOT_SERVICES*
 
 ## Fundação x86-64
 
-A ordem de inicialização do kernel deve ser:
+A ordem de inicialização deve ser:
 
 ```text
 kernel_entry
@@ -137,9 +154,7 @@ UEFI já entrega a CPU x86-64 em long mode em uma inicialização UEFI normal; o
 
 ## Memória e PAT
 
-O framebuffer deve ser mapeado como Write-Combining quando suportado. Não basta escrever `IA32_PAT`: a entrada PAT correta deve ser selecionada pelos bits PAT/PCD/PWT das page tables que cobrem a região.
-
-Política inicial:
+O framebuffer deve ser mapeado como Write-Combining quando suportado. Não basta escrever `IA32_PAT`: a entrada PAT correta deve ser selecionada pelos bits PAT/PCD/PWT das page tables.
 
 ```text
 normal RAM / backbuffer = WB
@@ -147,25 +162,17 @@ framebuffer GOP         = WC
 MMIO                     = UC, salvo exigência explícita do dispositivo
 ```
 
-O código deve ler o PAT existente, verificar suporte via CPUID e alterar o mínimo necessário, com invalidação/coerência apropriada dos mappings.
-
 ## ACPI e interrupções
 
 ACPI deve fornecer pelo menos RSDP/XSDT, MADT, MCFG e FADT, expandindo depois para DSDT/SSDT e AML.
 
-O IOAPIC não deve assumir mapeamento fixo de IRQ legado. O fluxo é:
+O IOAPIC não deve assumir mapeamento fixo de IRQ legado:
 
 ```text
-MADT
- -> Interrupt Source Override
- -> GSI
- -> IOAPIC redirection entry
- -> vetor IDT
+MADT -> Interrupt Source Override -> GSI -> IOAPIC -> vetor IDT
 ```
 
 ## Input
-
-Arquitetura canônica:
 
 ```text
 i8042/PS2 ----\
@@ -173,9 +180,7 @@ USB HID -------+-> Input HAL -> Event Normalizer -> Ring Buffer -> Window Manage
 I2C-HID -------/
 ```
 
-Eventos normalizados incluem `PointerMove`, `PointerDown`, `PointerUp`, `Scroll`, `KeyDown`, `KeyUp`, `TouchBegin`, `TouchMove` e `TouchEnd`.
-
-PS/2 é um backend, não garantia universal de touchpad. Notebooks modernos podem exigir ACPI + controlador I2C + HID-over-I2C.
+PS/2 é um backend, não garantia universal de touchpad. Notebooks modernos podem exigir ACPI + I2C + HID-over-I2C.
 
 ## Graphics Architecture
 
@@ -189,36 +194,11 @@ Desktop / Apps
        -> driver Intel nativo posterior
 ```
 
-O backend universal inicial usa:
+O backend universal inicial usa backbuffer WB, `DamageRegion` com múltiplos retângulos e cópia apenas das regiões alteradas para framebuffer WC.
 
-```text
-UI
- -> rasterização em backbuffer WB
- -> DamageRegion (múltiplos retângulos)
- -> cópia otimizada das regiões alteradas
- -> framebuffer WC
-```
-
-Não usar um único bounding rectangle global quando regiões distantes mudarem. O compositor deve manter uma coleção de damage rectangles e fazer merge somente quando isso reduzir custo.
-
-`movntdq`/streaming stores não são regra universal; `memops` deve escolher estratégia conforme tamanho, alinhamento e capacidades CPUID (REP MOVSB/ERMS/FSRM/SIMD quando apropriado).
-
-## GPU
-
-PCI discovery e BAR mapping apenas descobrem a GPU. Não constituem aceleração gráfica por si sós.
-
-Aceleração real exige driver específico capaz de lidar, conforme a família, com MMIO, memória da GPU, page tables/contextos, filas/rings, command buffers, sincronização/fences, interrupções e scanout/present.
-
-A ordem preferencial é:
-
-1. software framebuffer backend;
-2. VirtIO-GPU em VM;
-3. uma família Intel específica;
-4. outros fabricantes somente depois da HAL estabilizar.
+PCI discovery e BAR mapping apenas descobrem a GPU. Aceleração real exige driver específico com MMIO, memória/contexts, queues/rings, command buffers, fences e present/scanout.
 
 ## Storage
-
-A pilha é:
 
 ```text
 NVMe/AHCI
@@ -228,23 +208,19 @@ NVMe/AHCI
  -> installer
 ```
 
-O installer não escreve registradores NVMe/AHCI nem LBAs diretamente a partir da UI.
-
-GPT deve calcular dinamicamente o tamanho da partition-entry array a partir do logical block size; não assumir permanentemente LBAs 2-33. Protective MBR, primary/backup headers, arrays e CRC32 devem ser gerados e validados.
-
-FAT32 deve calcular BPB/FAT/root/FSInfo/backup boot sector a partir do volume real.
+GPT e FAT32 devem ser calculados dinamicamente a partir do tamanho lógico de bloco e do volume real.
 
 ## Scheduler e DMA
 
-xHCI, NVMe, VirtIO e GPUs dependem de DMA. Deve existir uma API central de alocação DMA que exponha endereço virtual, endereço físico, tamanho e alinhamento.
+xHCI, NVMe, VirtIO e GPUs dependem de DMA. Deve existir API central de DMA com endereço virtual, endereço físico, tamanho e alinhamento.
 
-O kernel não deve manter input, storage, compositor e USB em um único polling loop. A evolução mínima inclui kernel threads, ready queue, sleep queue, timer e context switch.
+Input, storage, compositor e USB não devem permanecer em um único polling loop; a evolução inclui kernel threads, ready queue, sleep queue, timer e context switch.
 
 ## Ordem de implementação
 
 ```text
 0. Sotlas compiler/backend e intrínsecos confiáveis
-1. BootInfo v2 + GetMemoryMap + handoff preparado
+1. BootInfo v2 + GetMemoryMap + ACPI handoff
 2. GDT/IDT/TSS/exceptions
 3. PMM/VMM/heap/PAT
 4. ACPI/APIC/IOAPIC/timers
@@ -257,34 +233,22 @@ O kernel não deve manter input, storage, compositor e USB em um único polling 
 11. AML + I2C-HID
 12. VirtIO-GPU
 13. Intel GPU nativa
-14. remoção final das pontes UEFI e `ExitBootServices()` obrigatório antes do kernel normal
+14. ExitBootServices cutover + remoção final das pontes UEFI
 ```
-
-As fases 1-13 podem possuir marcos intermediários, mas nenhum novo módulo pode aumentar a dependência do kernel em Boot Services.
 
 ## Testes arquiteturais
 
-A suíte deve continuar garantindo que `compiler.py`/`bootstrap.py` não contenham UI específica e que a antiga ponte monolítica não retorne.
+A suíte deve garantir:
 
-Devem ser adicionados gradualmente testes para:
-
+- `compiler.py`/`bootstrap.py` sem UI específica;
+- ausência da antiga ponte monolítica;
 - layout/versionamento de `BakenBootInfo`;
-- ausência de ponteiros UEFI no BootInfo v2;
-- serialização e interpretação do Memory Map;
-- PAT/PTE encoding;
-- PMM/VMM;
-- ACPI checksums e MADT/MCFG;
-- DamageRegion;
-- ring buffers;
-- PCI enumeration;
-- GPT/CRC32;
-- FAT32;
-- block drivers em QEMU;
-- boot após `ExitBootServices()`.
+- metadados de Memory Map e ACPI no v2;
+- ausência de novos consumidores das pontes UEFI;
+- PAT/PTE encoding, PMM/VMM, ACPI, DamageRegion, ring buffers, PCI, GPT/CRC32 e FAT32;
+- boot pós-`ExitBootServices()` no momento do cutover.
 
-## Critério de conclusão da migração bare-metal
-
-A migração só pode ser considerada concluída quando o caminho normal de boot for:
+## Critério de conclusão
 
 ```text
 Firmware UEFI
