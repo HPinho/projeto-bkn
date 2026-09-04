@@ -1,4 +1,4 @@
-// Baken OS — construtores puros de Command TRBs xHCI.
+// Baken OS — construtores puros de Command/Link TRBs xHCI.
 //
 // Apenas codifica bitfields definidos pela especificação xHCI. Não escreve
 // rings, não toca doorbells, não acessa MMIO e não submete comandos ao xHC.
@@ -7,6 +7,7 @@ module kernel::drivers::xhci_trb;
 
 import kernel::drivers::xhci_ring::*;
 
+pub const XHCI_TRB_TYPE_LINK: u32 = 6;
 pub const XHCI_TRB_TYPE_ENABLE_SLOT: u32 = 9;
 pub const XHCI_TRB_TYPE_DISABLE_SLOT: u32 = 10;
 pub const XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11;
@@ -14,6 +15,7 @@ pub const XHCI_TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12;
 pub const XHCI_TRB_TYPE_NOOP_COMMAND: u32 = 23;
 
 pub const XHCI_TRB_CYCLE_BIT: u32 = 1;
+pub const XHCI_TRB_TOGGLE_CYCLE_BIT: u32 = 1 << 1;
 pub const XHCI_TRB_BSR_OR_DC_BIT: u32 = 1 << 9;
 pub const XHCI_TRB_TYPE_SHIFT: u32 = 10;
 pub const XHCI_TRB_SLOT_TYPE_SHIFT: u32 = 16;
@@ -28,6 +30,21 @@ pub fn xhci_trb_type_bits(type_id: u32) -> u32 {
 pub fn xhci_trb_cycle_bits(cycle: bool) -> u32 {
     if cycle { return XHCI_TRB_CYCLE_BIT; }
     return 0;
+}
+
+@system
+pub fn xhci_trb_link(next_segment_physical: u64,
+                     toggle_cycle: bool,
+                     cycle: bool) -> XhciTrb {
+    let mut control = xhci_trb_type_bits(XHCI_TRB_TYPE_LINK) |
+        xhci_trb_cycle_bits(cycle);
+    if toggle_cycle { control = control | XHCI_TRB_TOGGLE_CYCLE_BIT; }
+
+    return XhciTrb {
+        parameter: next_segment_physical & 0xFFFFFFFFFFFFFFF0,
+        status: 0,
+        control: control
+    };
 }
 
 @system
