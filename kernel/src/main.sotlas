@@ -20,6 +20,7 @@ import kernel::interrupts::route::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::xhci_discovery::*;
 import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
@@ -97,7 +98,7 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         );
     }
 
-    // Os contratos DMA/xHCI ring já fazem parte do grafo, mas permanecem
+    // Os contratos DMA/xHCI ring/TRB já fazem parte do grafo, mas permanecem
     // fail-closed enquanto o PMM não possuir allocator físico pós-cutover.
     dma_allocator_available();
 
