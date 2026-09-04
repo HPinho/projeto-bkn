@@ -10,6 +10,7 @@ import kernel::arch::x86_64::idt::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
+import kernel::drivers::i8042::*;
 
 pub const IRQ_VECTOR_TIMER: u16 = 0x40;
 pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
@@ -93,11 +94,16 @@ pub fn sotlas_x86_irq_dispatch(vector: u64) -> void {
         return;
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
+        // O i8042 é o único dono das portas 0x60/0x64. Drena e roteia bytes
+        // antes do EOI para não perder dados quando IRQ1 for desmascarada.
+        i8042_drain_output();
         unsafe { IRQ_KEYBOARD_COUNT += 1; }
         lapic_eoi();
         return;
     }
     if vector == IRQ_VECTOR_MOUSE as u64 {
+        // IRQ12 usa o mesmo dreno: o status AUX decide qual fila recebe o byte.
+        i8042_drain_output();
         unsafe { IRQ_MOUSE_COUNT += 1; }
         lapic_eoi();
         return;
