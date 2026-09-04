@@ -13,12 +13,49 @@ _MARKER = "/* SOTLAS_X86_64_PRIVILEGED_INTRINSICS */"
 _C_INTRINSICS = r'''
 
 /* SOTLAS_X86_64_PRIVILEGED_INTRINSICS */
+typedef struct __attribute__((packed)) {
+    uint16_t limit;
+    uint64_t base;
+} __sotlas_x86_dt_ptr;
+
 static inline void __lgdt(uint64_t address) {
     __asm__ __volatile__("lgdt (%0)" : : "r"((uintptr_t)address) : "memory");
 }
 
 static inline void __lidt(uint64_t address) {
     __asm__ __volatile__("lidt (%0)" : : "r"((uintptr_t)address) : "memory");
+}
+
+/*
+ * Ativa GDT e recarrega os seletores que possuem estado visível em long mode.
+ * CS exige transferência far; apenas executar LGDT não troca o CS corrente.
+ * A sequência push(selector)+push(rip)+lretq mantém o RSP líquido inalterado.
+ */
+static inline void __gdt_activate_segments(uint64_t base,
+                                           uint16_t limit,
+                                           uint16_t code_selector,
+                                           uint16_t data_selector) {
+    __sotlas_x86_dt_ptr gdtr = { limit, base };
+    __asm__ __volatile__(
+        "lgdt %0\n\t"
+        "movw %w2, %%ax\n\t"
+        "movw %%ax, %%ds\n\t"
+        "movw %%ax, %%es\n\t"
+        "movw %%ax, %%ss\n\t"
+        "leaq 1f(%%rip), %%rax\n\t"
+        "pushq %1\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        :
+        : "m"(gdtr), "r"((uint64_t)code_selector), "r"(data_selector)
+        : "rax", "memory"
+    );
+}
+
+static inline void __lidt_table(uint64_t base, uint16_t limit) {
+    __sotlas_x86_dt_ptr idtr = { limit, base };
+    __asm__ __volatile__("lidt %0" : : "m"(idtr) : "memory");
 }
 
 static inline void __ltr(uint16_t selector) {
@@ -96,13 +133,6 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
  */
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
 
-/*
- * O common stub precisa de `used` porque sua referência nasce dentro de basic
- * asm dos stubs e, portanto, não aparece no grafo C do otimizador. Ele é
- * `static`, então a cópia mínima por unidade não cria colisão de símbolos.
- * Os 32 entry stubs permanecem `unused`: só a unidade que consulta seus
- * endereços efetivamente os materializa.
- */
 __attribute__((naked, used)) static void __sotlas_x86_exception_common(void) {
     __asm__(
         "movq %rsp, %rcx\n\t"
@@ -161,7 +191,6 @@ SOTLAS_X86_ISR_NOERR(31)
 #undef SOTLAS_X86_ISR_NOERR
 #undef SOTLAS_X86_ISR_ERR
 
-/* Mecanismo genérico da arquitetura: devolve o endereço do stub do vetor. */
 static inline uint64_t __exception_stub_address(uint16_t vector) {
     switch (vector) {
         case 0: return (uint64_t)(uintptr_t)&__sotlas_x86_isr_0;
@@ -208,50 +237,31 @@ def install(bootstrap) -> None:
     Function = bootstrap.Function
 
     builtins = {
-        "__lgdt": Function(
-            "__lgdt", [("address", Type("u64"))], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
-        "__lidt": Function(
-            "__lidt", [("address", Type("u64"))], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
-        "__ltr": Function(
-            "__ltr", [("selector", Type("u16"))], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
-        "__read_cr2": Function(
-            "__read_cr2", [], Type("u64"), [],
-            public=True, attributes=["@system"],
-        ),
-        "__read_cr3": Function(
-            "__read_cr3", [], Type("u64"), [],
-            public=True, attributes=["@system"],
-        ),
-        "__write_cr3": Function(
-            "__write_cr3", [("value", Type("u64"))], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
-        "__stack_switch_to_post_cutover": Function(
-            "__stack_switch_to_post_cutover",
-            [("stack_top", Type("u64")), ("argument", Type("u64"))],
+        "__lgdt": Function("__lgdt", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__lidt": Function("__lidt", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__gdt_activate_segments": Function(
+            "__gdt_activate_segments",
+            [("base", Type("u64")), ("limit", Type("u16")), ("code_selector", Type("u16")), ("data_selector", Type("u16"))],
             Type("void"), [], public=True, attributes=["@system"],
         ),
-        "__invlpg": Function(
-            "__invlpg", [("address", Type("u64"))], Type("void"), [],
+        "__lidt_table": Function(
+            "__lidt_table", [("base", Type("u64")), ("limit", Type("u16"))], Type("void"), [],
             public=True, attributes=["@system"],
         ),
-        "__rdtsc": Function(
-            "__rdtsc", [], Type("u64"), [],
+        "__ltr": Function("__ltr", [("selector", Type("u16"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__read_cr2": Function("__read_cr2", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__read_cr3": Function("__read_cr3", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__write_cr3": Function("__write_cr3", [("value", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__stack_switch_to_post_cutover": Function(
+            "__stack_switch_to_post_cutover",
+            [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [],
             public=True, attributes=["@system"],
         ),
-        "__cpu_pause": Function(
-            "__cpu_pause", [], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
+        "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__rdtsc": Function("__rdtsc", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__cpu_pause": Function("__cpu_pause", [], Type("void"), [], public=True, attributes=["@system"]),
         "__exception_stub_address": Function(
-            "__exception_stub_address", [("vector", Type("u16"))], Type("u64"), [],
-            public=True, attributes=["@system"],
+            "__exception_stub_address", [("vector", Type("u16"))], Type("u64"), [], public=True, attributes=["@system"]
         ),
     }
     bootstrap.BUILTIN_FUNCTIONS.update(builtins)
