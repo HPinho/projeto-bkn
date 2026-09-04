@@ -46,6 +46,7 @@ import kernel::drivers::xhci_trb::*;
 import kernel::drivers::xhci_event::*;
 import kernel::drivers::xhci_erst::*;
 import kernel::drivers::xhci_event_ring::*;
+import kernel::drivers::xhci_start::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
