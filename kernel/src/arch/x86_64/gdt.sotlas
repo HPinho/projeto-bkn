@@ -1,0 +1,88 @@
+// Baken OS - x86_64 Global Descriptor Table foundation.
+//
+// Este modulo constroi uma GDT concreta em memoria. O carregamento por LGDT
+// fica separado ate o backend Sotlas possuir um intrinseco privilegiado
+// canonico e testado.
+
+module kernel::arch::x86_64::gdt;
+
+pub const GDT_ENTRY_COUNT: usize = 8;
+pub const GDT_NULL_INDEX: usize = 0;
+pub const GDT_KERNEL_CODE_INDEX: usize = 1;
+pub const GDT_KERNEL_DATA_INDEX: usize = 2;
+pub const GDT_USER_CODE_INDEX: usize = 3;
+pub const GDT_USER_DATA_INDEX: usize = 4;
+pub const GDT_TSS_LOW_INDEX: usize = 5;
+pub const GDT_TSS_HIGH_INDEX: usize = 6;
+
+pub const GDT_KERNEL_CODE_SELECTOR: u16 = 0x08;
+pub const GDT_KERNEL_DATA_SELECTOR: u16 = 0x10;
+pub const GDT_USER_CODE_SELECTOR: u16 = 0x1B;
+pub const GDT_USER_DATA_SELECTOR: u16 = 0x23;
+pub const GDT_TSS_SELECTOR: u16 = 0x28;
+
+pub struct DescriptorTablePointer {
+    pub limit: u16;
+    pub base: u64;
+}
+
+static mut GDT_ENTRIES: [u64; GDT_ENTRY_COUNT] = [0; GDT_ENTRY_COUNT];
+static mut GDT_PREPARED: bool = false;
+
+@system
+pub fn gdt_make_code_descriptor(dpl: u8) -> u64 {
+    // Long-mode code segment: present, executable, readable, L=1.
+    let privilege: u64 = ((dpl & 3) as u64) << 45;
+    return 0x00209A0000000000 | privilege;
+}
+
+@system
+pub fn gdt_make_data_descriptor(dpl: u8) -> u64 {
+    // Long-mode data segment: present, writable. Base/limit ignorados no modo 64-bit.
+    let privilege: u64 = ((dpl & 3) as u64) << 45;
+    return 0x0000920000000000 | privilege;
+}
+
+@system
+pub fn gdt_prepare() -> void {
+    unsafe {
+        GDT_ENTRIES[GDT_NULL_INDEX] = 0;
+        GDT_ENTRIES[GDT_KERNEL_CODE_INDEX] = gdt_make_code_descriptor(0);
+        GDT_ENTRIES[GDT_KERNEL_DATA_INDEX] = gdt_make_data_descriptor(0);
+        GDT_ENTRIES[GDT_USER_CODE_INDEX] = gdt_make_code_descriptor(3);
+        GDT_ENTRIES[GDT_USER_DATA_INDEX] = gdt_make_data_descriptor(3);
+        GDT_ENTRIES[GDT_TSS_LOW_INDEX] = 0;
+        GDT_ENTRIES[GDT_TSS_HIGH_INDEX] = 0;
+        GDT_PREPARED = true;
+    }
+}
+
+@system
+pub fn gdt_set_tss_descriptor(base: u64, limit: u32) -> void {
+    let mut low: u64 = 0;
+    low = low | ((limit as u64) & 0xFFFF);
+    low = low | ((base & 0xFFFFFF) << 16);
+    low = low | (0x89 << 40); // present + available 64-bit TSS
+    low = low | ((((limit as u64) >> 16) & 0x0F) << 48);
+    low = low | (((base >> 24) & 0xFF) << 56);
+
+    unsafe {
+        GDT_ENTRIES[GDT_TSS_LOW_INDEX] = low;
+        GDT_ENTRIES[GDT_TSS_HIGH_INDEX] = (base >> 32) & 0xFFFFFFFF;
+    }
+}
+
+@system
+pub fn gdt_base() -> *const u64 {
+    unsafe { return &GDT_ENTRIES[0]; }
+}
+
+@system
+pub fn gdt_limit() -> u16 {
+    return ((GDT_ENTRY_COUNT * 8) - 1) as u16;
+}
+
+@system
+pub fn gdt_is_prepared() -> bool {
+    unsafe { return GDT_PREPARED; }
+}
