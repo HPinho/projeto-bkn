@@ -14,14 +14,22 @@ class TransitionMapTests(unittest.TestCase):
         self.transition = TRANSITION.read_text(encoding="utf-8")
         self.main = MAIN.read_text(encoding="utf-8")
 
-    def test_transition_range_uses_identity_mapping(self):
+    def test_transition_range_keeps_physical_and_virtual_addresses_separate(self):
+        self.assertIn("pub fn transition_map_range", self.transition)
+        self.assertIn("virtual_address: u64", self.transition)
+        self.assertIn("physical_address: u64", self.transition)
+        self.assertIn("page_table_map_4k(arena, root, virtual_cursor, physical_cursor, clean_flags)", self.transition)
+
+    def test_identity_mapping_is_only_explicit_wrapper(self):
         self.assertIn("pub fn transition_map_identity_range", self.transition)
-        self.assertIn("page_table_map_4k(arena, root, cursor, cursor, clean_flags)", self.transition)
+        self.assertIn("return transition_map_range(arena, root, address, address, size, flags);", self.transition)
 
     def test_transition_range_aligns_arbitrary_image_or_stack_bounds(self):
-        self.assertIn("x86_page_align_down(address)", self.transition)
+        self.assertIn("x86_page_align_down(virtual_address)", self.transition)
+        self.assertIn("x86_page_align_down(physical_address)", self.transition)
         self.assertIn("x86_page_align_up(last_byte + 1)", self.transition)
-        self.assertIn("if last_byte < address", self.transition)
+        self.assertIn("if last_byte < virtual_address", self.transition)
+        self.assertIn("(virtual_address % X86_PAGE_SIZE) != (physical_address % X86_PAGE_SIZE)", self.transition)
 
     def test_transition_range_never_requests_huge_pages(self):
         self.assertIn("& ~X86_PTE_HUGE", self.transition)
@@ -40,6 +48,7 @@ class TransitionMapTests(unittest.TestCase):
     def test_hybrid_main_only_registers_transition_mapper(self):
         self.assertIn("import kernel::memory::transition_map::*;", self.main)
         self.assertNotIn("transition_map_identity_range(", self.main)
+        self.assertNotIn("transition_map_range(", self.main)
         self.assertNotIn("x86_write_cr3(", self.main)
 
 
