@@ -1,0 +1,52 @@
+// Baken OS — helpers puros para seleção PAT em PTEs de 4 KiB.
+//
+// Para uma PTE 4 KiB, o índice PAT é composto por:
+//   bit 2 <- PAT (PTE bit 7)
+//   bit 1 <- PCD (PTE bit 4)
+//   bit 0 <- PWT (PTE bit 3)
+//
+// Este módulo NÃO lê/escreve IA32_PAT (MSR 0x277) e NÃO presume qual índice
+// contém WC. Ele apenas codifica/decodifica a seleção de uma entrada PAT.
+
+module kernel::arch::x86_64::pat;
+
+import kernel::arch::x86_64::paging::*;
+
+pub const X86_PAT_INDEX_COUNT: u8 = 8;
+pub const X86_PAT_PTE_BIT: u64 = 1 << 7;
+pub const X86_PAT_PCD_BIT: u64 = X86_PTE_CACHE_DISABLE;
+pub const X86_PAT_PWT_BIT: u64 = X86_PTE_WRITE_THROUGH;
+pub const X86_PAT_PTE_SELECTION_MASK: u64 =
+    X86_PAT_PTE_BIT | X86_PAT_PCD_BIT | X86_PAT_PWT_BIT;
+
+@system
+pub fn x86_pat_index_valid(index: u8) -> bool {
+    return index < X86_PAT_INDEX_COUNT;
+}
+
+@system
+pub fn x86_pat_pte_bits(index: u8) -> u64 {
+    if !x86_pat_index_valid(index) { return 0; }
+
+    let mut bits: u64 = 0;
+    if (index & 1) != 0 { bits |= X86_PAT_PWT_BIT; }
+    if (index & 2) != 0 { bits |= X86_PAT_PCD_BIT; }
+    if (index & 4) != 0 { bits |= X86_PAT_PTE_BIT; }
+    return bits;
+}
+
+@system
+pub fn x86_pat_index_from_pte(entry: u64) -> u8 {
+    let mut index: u8 = 0;
+    if (entry & X86_PAT_PWT_BIT) != 0 { index |= 1; }
+    if (entry & X86_PAT_PCD_BIT) != 0 { index |= 2; }
+    if (entry & X86_PAT_PTE_BIT) != 0 { index |= 4; }
+    return index;
+}
+
+@system
+pub fn x86_pat_replace_pte_selection(entry: u64, index: u8) -> u64 {
+    if !x86_pat_index_valid(index) { return entry; }
+    let cleared = entry & ~X86_PAT_PTE_SELECTION_MASK;
+    return cleared | x86_pat_pte_bits(index);
+}
