@@ -1,0 +1,91 @@
+// Baken OS — composição das page tables necessárias ao futuro cutover.
+//
+// Recebe uma arena bootstrap já válida, cria a PML4 raiz e materializa:
+//   1) direct-map somente dos ranges UEFI/RAM aprovados;
+//   2) mapping temporário da imagem carregada;
+//   3) mapping RW+NX da stack, mantendo a guard page ausente.
+//
+// Falha fechada se qualquer etapa falhar. NÃO escreve CR3, NÃO chama UEFI e
+// NÃO ativa PMM/VMM. A ativação da MMU é uma etapa posterior e separada.
+
+module kernel::memory::transition_page_tables;
+
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_writer::*;
+import kernel::memory::direct_map_ranges::*;
+import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_stack::*;
+import kernel::memory::transition_stack_map::*;
+
+pub struct TransitionPageTableResult {
+    pub root_physical: u64;
+    pub root_virtual: u64;
+    pub table_pages_used: u64;
+    pub direct_map_bytes: u64;
+    pub image_pages: u64;
+    pub stack_pages: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn transition_page_tables_invalid() -> TransitionPageTableResult {
+    return TransitionPageTableResult {
+        root_physical: 0,
+        root_virtual: 0,
+        table_pages_used: 0,
+        direct_map_bytes: 0,
+        image_pages: 0,
+        stack_pages: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn transition_page_tables_build(arena: *mut PageTableArena,
+                                    memory_map_base: *const u8,
+                                    memory_map_size: usize,
+                                    descriptor_size: usize,
+                                    image: TransitionImageLayout,
+                                    stack: TransitionStackLayout) -> TransitionPageTableResult {
+    if arena == (null as *mut PageTableArena) { return transition_page_tables_invalid(); }
+    if !image.valid || !stack.valid { return transition_page_tables_invalid(); }
+
+    unsafe {
+        if !(*arena).valid || (*arena).next_page_index != 0 {
+            return transition_page_tables_invalid();
+        }
+    }
+
+    let root = page_table_arena_alloc(arena);
+    if !root.valid { return transition_page_tables_invalid(); }
+    if !page_table_zero(root) { return transition_page_tables_invalid(); }
+
+    let direct = direct_map_build_from_uefi_ranges(
+        arena,
+        root,
+        memory_map_base,
+        memory_map_size,
+        descriptor_size
+    );
+    if !direct.valid { return transition_page_tables_invalid(); }
+
+    let image_map = transition_image_map(arena, root, image);
+    if !image_map.valid { return transition_page_tables_invalid(); }
+
+    let stack_map = transition_stack_map(arena, root, stack);
+    if !stack_map.valid { return transition_page_tables_invalid(); }
+
+    let mut table_pages_used: u64 = 0;
+    unsafe { table_pages_used = (*arena).next_page_index; }
+    if table_pages_used == 0 { return transition_page_tables_invalid(); }
+
+    return TransitionPageTableResult {
+        root_physical: root.physical_address,
+        root_virtual: root.virtual_address,
+        table_pages_used: table_pages_used,
+        direct_map_bytes: direct.bytes_mapped,
+        image_pages: image_map.mapped_page_count,
+        stack_pages: stack_map.mapped_page_count,
+        valid: true
+    };
+}
