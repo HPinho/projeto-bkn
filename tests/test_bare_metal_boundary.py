@@ -87,10 +87,21 @@ class BareMetalBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, pmm)
-        # Enquanto a ponte UEFI estiver ativa o PMM não pode consumir páginas
-        # convencionais, porque o firmware ainda pode alocá-las.
         self.assertNotRegex(pmm, r"pub\s+fn\s+pmm_(?:alloc|free)")
         self.assertIn("NAO aloca paginas ainda", pmm)
+
+    def test_display_backend_reports_only_real_capabilities(self):
+        display = (ROOT / "kernel/src/drivers/display_driver.sotlas").read_text(encoding="utf-8")
+        self.assertIn("is_hardware_accelerated: false", display)
+        self.assertIn("framebuffer_wc_active: false", display)
+        self.assertIn("display_driver_promote_hardware_backend", display)
+        self.assertIn("Vendor ID isolado nao basta", display)
+        # PAT não pode ser sobrescrito cegamente pelo driver de display.
+        self.assertNotIn("__wrmsr(0x0277", display)
+        self.assertNotIn("0x0007010600070106", display)
+        # Encontrar uma GPU não deve promover o backend automaticamente.
+        self.assertNotIn("pci_scan_all();", display)
+        self.assertNotRegex(display, r"vendor_id\s*==\s*0x(?:8086|1002|10DE|1AF4).*is_hardware_accelerated\s*=\s*true")
 
     def test_bootloader_populates_real_v2_platform_metadata(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
