@@ -63,11 +63,13 @@ static inline void __cpu_pause(void) {
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
 
 /*
- * `unused` apenas suprime -Wunused-function nas unidades que recebem o
- * preâmbulo e não usam exceptions. Ao contrário de `used`, não força emissão
- * nem duplica stubs no binário final.
+ * O common stub precisa de `used` porque sua referência nasce dentro de basic
+ * asm dos stubs e, portanto, não aparece no grafo C do otimizador. Ele é
+ * `static`, então a cópia mínima por unidade não cria colisão de símbolos.
+ * Os 32 entry stubs permanecem `unused`: só a unidade que consulta seus
+ * endereços efetivamente os materializa.
  */
-__attribute__((naked, unused)) static void __sotlas_x86_exception_common(void) {
+__attribute__((naked, used)) static void __sotlas_x86_exception_common(void) {
     __asm__(
         "movq %rsp, %rcx\n\t"
         "andq $-16, %rsp\n\t"
