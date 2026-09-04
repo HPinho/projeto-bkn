@@ -20,6 +20,7 @@ import kernel::memory::page_table_writer::*;
 import kernel::memory::page_table_mapper::*;
 import kernel::memory::page_table_builder::*;
 import kernel::memory::transition_map::*;
+import kernel::memory::cutover_plan::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
@@ -152,6 +153,11 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     x86_page_aligned(X86_PAGE_SIZE);
     x86_pat_index_valid(0);
     vmm_is_active();
+
+    // A rota canônica declara explicitamente que o cutover ainda está bloqueado.
+    // Quando todos os drivers nativos e o Memory Map final existirem, esse plano
+    // será preenchido com fatos reais em vez do estado híbrido fail-closed.
+    cutover_plan_ready(cutover_plan_blocked_hybrid());
 
     dma_allocator_available();
 
