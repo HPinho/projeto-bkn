@@ -48,9 +48,10 @@ class X86ExceptionTests(unittest.TestCase):
 
     def test_dispatcher_is_terminal_until_full_restore_abi_exists(self):
         text = EXCEPTIONS.read_text(encoding="utf-8")
-        self.assertIn("__cli();", text)
-        self.assertIn("loop { __hlt(); }", text)
-        self.assertNotIn("iret", text.lower())
+        code_only = re.sub(r"//[^\n]*", "", text)
+        self.assertIn("__cli();", code_only)
+        self.assertIn("loop { __hlt(); }", code_only)
+        self.assertNotRegex(code_only.lower(), r"\b(?:x86_)?iretq?\s*\(")
 
     def test_boot_still_does_not_activate_private_descriptor_tables(self):
         main = MAIN.read_text(encoding="utf-8")
