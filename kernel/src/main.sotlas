@@ -19,6 +19,7 @@ import kernel::memory::page_table_arena::*;
 import kernel::memory::page_table_writer::*;
 import kernel::memory::page_table_mapper::*;
 import kernel::memory::page_table_builder::*;
+import kernel::memory::transition_map::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
@@ -135,8 +136,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     pmm_allocator_is_active();
 
     // Política do Memory Map + paging/VMM/direct-map/range-builder/arena/writer/
-    // mapper/builder são contratos fail-closed. Nenhum deles materializa o mapa
-    // na rota híbrida. IA32_PAT e CR3 permanecem inalterados.
+    // mapper/builder/transition-map são contratos fail-closed. Nenhum deles
+    // materializa o mapa na rota híbrida. IA32_PAT e CR3 permanecem inalterados.
     x86_page_aligned(X86_PAGE_SIZE);
     x86_pat_index_valid(0);
     vmm_is_active();
