@@ -1,7 +1,9 @@
-// Baken OS — materialização segura da stack de transição nas page tables.
+// Baken OS — materialização segura do contexto e stack de transição.
 //
 // A guard page calculada por transition_stack_layout() permanece sem mapping.
-// Este módulo mapeia somente as páginas utilizáveis como RW+NX e não toca CR3.
+// A página de contexto e as páginas de stack são mapeadas RW+NX. O contexto
+// fica abaixo da base utilizável da pilha e não pode ser sobrescrito pelo
+// crescimento descendente normal da stack.
 
 module kernel::memory::transition_stack_map;
 
@@ -15,10 +17,15 @@ pub fn transition_stack_map(arena: *mut PageTableArena,
                             root: PageTablePage,
                             layout: TransitionStackLayout) -> TransitionMapStats {
     if !layout.valid { return transition_map_stats_invalid(); }
+    if layout.context_virtual_base == 0 || layout.context_physical_base == 0 {
+        return transition_map_stats_invalid();
+    }
     if layout.usable_page_count == 0 { return transition_map_stats_invalid(); }
 
-    let usable_size = layout.usable_page_count * X86_PAGE_SIZE;
-    if (usable_size / X86_PAGE_SIZE) != layout.usable_page_count {
+    let mapped_page_count = layout.usable_page_count + 1;
+    if mapped_page_count <= layout.usable_page_count { return transition_map_stats_invalid(); }
+    let mapped_size = mapped_page_count * X86_PAGE_SIZE;
+    if (mapped_size / X86_PAGE_SIZE) != mapped_page_count {
         return transition_map_stats_invalid();
     }
 
@@ -26,9 +33,9 @@ pub fn transition_stack_map(arena: *mut PageTableArena,
     return transition_map_range(
         arena,
         root,
-        layout.usable_virtual_base,
-        layout.usable_physical_base,
-        usable_size,
+        layout.context_virtual_base,
+        layout.context_physical_base,
+        mapped_size,
         flags
     );
 }
