@@ -37,12 +37,24 @@ fn fat32_is_power_of_two(v: u32) -> bool {
 @system
 fn fat32_choose_sectors_per_cluster(bytes_per_sector: u32, total_sectors: u64) -> u32 {
     let total_bytes = total_sectors * (bytes_per_sector as u64);
-    // Mantém cluster <= 32 KiB para interoperabilidade ampla da ESP.
-    if total_bytes <= 260046848 { return 1; }
-    if total_bytes <= 8589934592 { return 8; }
-    if total_bytes <= 17179869184 { return 16; }
-    if total_bytes <= 34359738368 { return 32; }
-    return 64;
+
+    // Escolhemos primeiro o tamanho do cluster em bytes e só depois o
+    // convertemos em setores. Assim 512e e 4Kn produzem geometria equivalente.
+    let cluster_bytes: u32 = if total_bytes <= 8589934592 {
+        4096
+    } else if total_bytes <= 17179869184 {
+        8192
+    } else if total_bytes <= 34359738368 {
+        16384
+    } else {
+        32768
+    };
+
+    let mut spc = cluster_bytes / bytes_per_sector;
+    if spc == 0 { spc = 1; }
+    if spc > 128 { spc = 128; }
+    if !fat32_is_power_of_two(spc) { return 0; }
+    return spc;
 }
 
 @system
