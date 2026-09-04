@@ -13,9 +13,11 @@ O documento canônico é [`docs/architecture.md`](docs/architecture.md).
 
 ## Estado atual da migração bare-metal
 
-`BakenBootInfo v2` já transporta framebuffer, snapshot real do UEFI Memory Map, metadados dos descriptors e ACPI RSDP, e o ponto de entrada Sotlas valida o contrato antes de iniciar a sessão gráfica.
+`BakenBootInfo v2` já transporta framebuffer, snapshot real do UEFI Memory Map, metadados dos descriptors e ACPI RSDP. O ponto de entrada Sotlas valida o contrato antes de iniciar a sessão gráfica.
 
 O runtime ainda mantém pontes UEFI temporárias para input/storage/timing; `ExitBootServices()` será movido para antes da entrada normal do kernel quando esses serviços forem substituídos por drivers nativos.
+
+Próxima fundação: GDT/IDT/TSS/exceções e, em seguida, PMM/VMM/PAT.
 
 ## Verificação
 
