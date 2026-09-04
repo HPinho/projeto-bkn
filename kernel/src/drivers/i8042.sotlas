@@ -19,6 +19,8 @@ static mut I8042_INITIALIZED: bool = false;
 static mut I8042_FIRST_PORT_OK: bool = false;
 static mut I8042_SECOND_PORT_OK: bool = false;
 static mut I8042_NATIVE_IRQS_ENABLED: bool = false;
+static mut I8042_KEYBOARD_IRQ_ENABLED: bool = false;
+static mut I8042_AUX_IRQ_ENABLED: bool = false;
 
 static mut KBD_QUEUE: [u8; 64] = [0; 64];
 static mut KBD_HEAD: u32 = 0;
@@ -66,7 +68,6 @@ fn i8042_queue_kbd(data: u8) -> void {
     unsafe {
         let next = (KBD_HEAD + 1) % I8042_QUEUE_CAPACITY;
         if next == KBD_TAIL {
-            // Overflow fail-soft: descarta o byte mais antigo, nunca bloqueia ISR.
             KBD_TAIL = (KBD_TAIL + 1) % I8042_QUEUE_CAPACITY;
         }
         KBD_QUEUE[KBD_HEAD as usize] = data;
@@ -119,23 +120,21 @@ pub fn i8042_initialize_polling() -> bool {
         AUX_HEAD = 0;
         AUX_TAIL = 0;
         I8042_NATIVE_IRQS_ENABLED = false;
+        I8042_KEYBOARD_IRQ_ENABLED = false;
+        I8042_AUX_IRQ_ENABLED = false;
 
-        // Desliga ambos os canais durante reconfiguração.
         if !i8042_command(0xAD) { return false; }
         if !i8042_command(0xA7) { return false; }
         i8042_flush_hardware_output();
 
-        // Lê byte de configuração.
         if !i8042_command(0x20) { return false; }
         if !i8042_wait_output() { return false; }
         let mut config = __inb(I8042_DATA_PORT);
 
-        // Polling: IRQ1/IRQ12 desligadas e clocks das portas liberados.
         config = config & 0xCC;
         if !i8042_command(0x60) { return false; }
         if !i8042_write_data(config) { return false; }
 
-        // Testes elétricos das portas. 0x00 = interface OK.
         I8042_FIRST_PORT_OK = false;
         if i8042_command(0xAB) && i8042_wait_output() {
             I8042_FIRST_PORT_OK = __inb(I8042_DATA_PORT) == 0;
@@ -154,7 +153,6 @@ pub fn i8042_initialize_polling() -> bool {
     }
 }
 
-// Polling: pode inicializar o controlador porque é chamado fora de ISR.
 @system
 pub fn i8042_drain_output() -> void {
     if !i8042_initialize_polling() { return; }
@@ -162,7 +160,6 @@ pub fn i8042_drain_output() -> void {
     i8042_drain_ready_output();
 }
 
-// IRQ: caminho estritamente curto. Nunca inicializa, testa portas ou espera ACK.
 @system
 pub fn i8042_drain_irq_output() -> void {
     unsafe {
@@ -195,8 +192,6 @@ pub fn i8042_pop_aux(out_byte: *mut u8) -> bool {
     }
 }
 
-// Comando síncrono só é permitido antes da transição para IRQ. Caso contrário
-// o ACK poderia ser consumido concorrentemente pelo handler IRQ12.
 @system
 pub fn i8042_aux_command(data: u8) -> bool {
     if i8042_native_irqs_enabled() { return false; }
@@ -238,36 +233,54 @@ pub fn i8042_native_irqs_enabled() -> bool {
 }
 
 @system
-fn i8042_set_native_irq_state(enabled: bool) -> bool {
+pub fn i8042_keyboard_irq_enabled() -> bool {
+    unsafe { return I8042_INITIALIZED && I8042_KEYBOARD_IRQ_ENABLED; }
+}
+
+@system
+pub fn i8042_aux_irq_enabled() -> bool {
+    unsafe { return I8042_INITIALIZED && I8042_AUX_IRQ_ENABLED; }
+}
+
+@system
+fn i8042_set_native_irq_mask(keyboard: bool, aux: bool) -> bool {
     if !i8042_initialize_polling() { return false; }
+    if keyboard && !i8042_first_port_present() { return false; }
+    if aux && !i8042_second_port_present() { return false; }
+
     if !i8042_command(0x20) { return false; }
     if !i8042_wait_output() { return false; }
     let mut config = __inb(I8042_DATA_PORT);
-
-    if enabled {
-        let mut irq_bits: u8 = 0;
-        if i8042_first_port_present() { irq_bits = irq_bits | 0x01; }
-        if i8042_second_port_present() { irq_bits = irq_bits | 0x02; }
-        if irq_bits == 0 { return false; }
-        config = config | irq_bits;
-    } else {
-        config = config & 0xFC;
-    }
+    config = config & 0xFC;
+    if keyboard { config = config | 0x01; }
+    if aux { config = config | 0x02; }
 
     if !i8042_command(0x60) { return false; }
     if !i8042_write_data(config) { return false; }
-    unsafe { I8042_NATIVE_IRQS_ENABLED = enabled; }
+    unsafe {
+        I8042_KEYBOARD_IRQ_ENABLED = keyboard;
+        I8042_AUX_IRQ_ENABLED = aux;
+        I8042_NATIVE_IRQS_ENABLED = keyboard || aux;
+    }
     return true;
 }
 
-// Só deve ser chamado depois de IDT + APIC/IOAPIC estarem ativos e antes de
-// desmascarar as respectivas redirection entries.
+// Bring-up seguro: apenas IRQ1 no config byte do i8042.
+@system
+pub fn i8042_enable_keyboard_irq_only() -> bool {
+    return i8042_set_native_irq_mask(true, false);
+}
+
+// Compatibilidade para a etapa futura que abrirá ambas as rotas no IOAPIC.
 @system
 pub fn i8042_enable_native_irqs() -> bool {
-    return i8042_set_native_irq_state(true);
+    let keyboard = i8042_first_port_present();
+    let aux = i8042_second_port_present();
+    if !keyboard && !aux { return false; }
+    return i8042_set_native_irq_mask(keyboard, aux);
 }
 
 @system
 pub fn i8042_disable_native_irqs() -> bool {
-    return i8042_set_native_irq_state(false);
+    return i8042_set_native_irq_mask(false, false);
 }
