@@ -4,49 +4,27 @@
 from pathlib import Path
 import unittest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
-
 class LegacySafetyTests(unittest.TestCase):
-    # Módulos canônicos conhecidos. Infraestrutura bare-metal entra aqui
-    # explicitamente para que adicionar um arquivo .sotlas continue exigindo
-    # uma decisão arquitetural consciente, sem congelar o projeto na antiga
-    # rota puramente visual.
     CANONICAL_SOTLAS_MODULES = {
-        "kernel/src/main.sotlas",
-        "kernel/src/graphics_engine.sotlas",
-        "kernel/src/baken_rasterizer.sotlas",
-        "kernel/src/baken_animation.sotlas",
-        "kernel/src/baken_materials.sotlas",
-        "kernel/src/baken_cursor.sotlas",
-        "kernel/src/baken_i18n.sotlas",
-        "kernel/src/baken_runtime.sotlas",
-        "kernel/src/baken_ui_oop.sotlas",
-        "kernel/src/window_manager.sotlas",
-        "kernel/src/desktop_shell.sotlas",
-        "kernel/src/desktop_compositor.sotlas",
-        "kernel/src/app_files.sotlas",
-        "kernel/src/app_notes.sotlas",
-        "kernel/src/app_settings.sotlas",
-        "kernel/src/app_terminal.sotlas",
-        "kernel/src/app_about.sotlas",
-        "kernel/src/baken_installer.sotlas",
-        "kernel/src/baken_oobe_screen.sotlas",
-        "kernel/src/sotlas_graphics.sotlas",
-        "kernel/src/sotlas_ui.sotlas",
-        "kernel/src/bakenfx.sotlas",
-        "kernel/src/baken_design.sotlas",
-        "kernel/src/drivers/display_driver.sotlas",
-        "kernel/src/drivers/pci_bus.sotlas",
-        "kernel/src/drivers/i8042.sotlas",
-        "kernel/src/drivers/ps2_mouse.sotlas",
-        "kernel/src/memory/pmm.sotlas",
-        "kernel/src/arch/x86_64/gdt.sotlas",
-        "kernel/src/arch/x86_64/tss.sotlas",
-        "kernel/src/arch/x86_64/idt.sotlas",
-        "kernel/src/arch/x86_64/cpu.sotlas",
-        "kernel/src/arch/x86_64/timer.sotlas",
+        "kernel/src/main.sotlas", "kernel/src/graphics_engine.sotlas",
+        "kernel/src/baken_rasterizer.sotlas", "kernel/src/baken_animation.sotlas",
+        "kernel/src/baken_materials.sotlas", "kernel/src/baken_cursor.sotlas",
+        "kernel/src/baken_i18n.sotlas", "kernel/src/baken_runtime.sotlas",
+        "kernel/src/baken_ui_oop.sotlas", "kernel/src/window_manager.sotlas",
+        "kernel/src/desktop_shell.sotlas", "kernel/src/desktop_compositor.sotlas",
+        "kernel/src/app_files.sotlas", "kernel/src/app_notes.sotlas",
+        "kernel/src/app_settings.sotlas", "kernel/src/app_terminal.sotlas",
+        "kernel/src/app_about.sotlas", "kernel/src/baken_installer.sotlas",
+        "kernel/src/baken_oobe_screen.sotlas", "kernel/src/sotlas_graphics.sotlas",
+        "kernel/src/sotlas_ui.sotlas", "kernel/src/bakenfx.sotlas",
+        "kernel/src/baken_design.sotlas", "kernel/src/drivers/display_driver.sotlas",
+        "kernel/src/drivers/pci_bus.sotlas", "kernel/src/drivers/i8042.sotlas",
+        "kernel/src/drivers/ps2_mouse.sotlas", "kernel/src/drivers/ps2_keyboard.sotlas",
+        "kernel/src/memory/pmm.sotlas", "kernel/src/arch/x86_64/gdt.sotlas",
+        "kernel/src/arch/x86_64/tss.sotlas", "kernel/src/arch/x86_64/idt.sotlas",
+        "kernel/src/arch/x86_64/cpu.sotlas", "kernel/src/arch/x86_64/timer.sotlas",
         "kernel/src/arch/x86_64/exceptions.sotlas",
     }
 
@@ -97,7 +75,6 @@ class LegacySafetyTests(unittest.TestCase):
             if count > 0:
                 offenders[f.name] = count
         self.assertEqual(offenders, {}, f"Ainda existem chamadas gfx_ no kernel: {offenders}")
-
 
 if __name__ == "__main__":
     unittest.main()
