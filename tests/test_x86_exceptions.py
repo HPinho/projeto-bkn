@@ -8,6 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
 EXCEPTIONS = ROOT / "kernel/src/arch/x86_64/exceptions.sotlas"
+CPU = ROOT / "kernel/src/arch/x86_64/cpu.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 
 
@@ -23,6 +24,7 @@ class X86ExceptionTests(unittest.TestCase):
         self.assertIn("call sotlas_x86_exception_dispatch", text)
         self.assertNotIn("baken_exception_dispatch", text)
         self.assertNotIn("__attribute__((naked, used))", text)
+        self.assertIn("__attribute__((naked, unused))", text)
 
     def test_error_code_vectors_are_not_given_synthetic_error_codes(self):
         text = BACKEND.read_text(encoding="utf-8")
@@ -34,6 +36,15 @@ class X86ExceptionTests(unittest.TestCase):
         self.assertEqual(actual, expected)
         for vector in set(range(32)) - expected:
             self.assertIn(f"SOTLAS_X86_ISR_NOERR({vector})", text)
+
+    def test_generic_stub_address_builtin_is_exposed_without_idt_policy(self):
+        backend = BACKEND.read_text(encoding="utf-8")
+        cpu = CPU.read_text(encoding="utf-8")
+        self.assertIn("static inline uint64_t __exception_stub_address(uint16_t vector)", backend)
+        self.assertIn('"__exception_stub_address": Function(', backend)
+        self.assertIn("pub fn x86_exception_stub_address(vector: u16) -> u64", cpu)
+        self.assertNotIn("IDT_GATE_INTERRUPT", backend)
+        self.assertNotIn("IDT_VECTOR_DOUBLE_FAULT", backend)
 
     def test_exception_frame_matches_normalized_stack_prefix(self):
         text = EXCEPTIONS.read_text(encoding="utf-8")
@@ -70,6 +81,7 @@ class X86ExceptionTests(unittest.TestCase):
     def test_boot_still_does_not_activate_private_descriptor_tables(self):
         main = MAIN.read_text(encoding="utf-8")
         self.assertIn("exception_state_reset()", main)
+        self.assertIn("idt_prepare_exceptions()", main)
         self.assertNotIn("x86_lgdt_raw(", main)
         self.assertNotIn("x86_lidt_raw(", main)
         self.assertNotIn("x86_ltr_raw(", main)
