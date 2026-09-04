@@ -1,0 +1,107 @@
+// Baken OS — discovery PCI read-only de controladores de armazenamento.
+//
+// Identifica candidatos AHCI e NVMe já enumerados por pci_bus. Esta camada
+// NÃO habilita Memory Space, Bus Master, MSI/MSI-X e não escreve em BARs.
+// Encontrar um controlador não significa que existe um driver funcional.
+
+module kernel::drivers::storage_discovery;
+
+import kernel::drivers::pci_bus::*;
+
+pub const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
+pub const PCI_SUBCLASS_SATA: u8 = 0x06;
+pub const PCI_PROGIF_AHCI: u8 = 0x01;
+pub const PCI_SUBCLASS_NVM: u8 = 0x08;
+pub const PCI_PROGIF_NVME: u8 = 0x02;
+
+pub const STORAGE_CONTROLLER_NONE: u32 = 0;
+pub const STORAGE_CONTROLLER_AHCI: u32 = 1;
+pub const STORAGE_CONTROLLER_NVME: u32 = 2;
+
+pub struct StorageControllerCandidate {
+    pub kind: u32;
+    pub pci_index: u32;
+    pub bus: u8;
+    pub slot: u8;
+    pub func: u8;
+    pub vendor_id: u16;
+    pub device_id: u16;
+    pub abar_or_mmio_base: u64;
+    pub command_before_driver: u16;
+}
+
+static mut STORAGE_CANDIDATE: StorageControllerCandidate = StorageControllerCandidate {
+    kind: STORAGE_CONTROLLER_NONE,
+    pci_index: 0,
+    bus: 0,
+    slot: 0,
+    func: 0,
+    vendor_id: 0,
+    device_id: 0,
+    abar_or_mmio_base: 0,
+    command_before_driver: 0,
+};
+
+@system
+fn storage_candidate_kind(dev: *const PciDevice) -> u32 {
+    unsafe {
+        if dev == (null as *const PciDevice) { return STORAGE_CONTROLLER_NONE; }
+        if (*dev).class_code != PCI_CLASS_MASS_STORAGE { return STORAGE_CONTROLLER_NONE; }
+
+        if (*dev).subclass == PCI_SUBCLASS_NVM && (*dev).prog_if == PCI_PROGIF_NVME {
+            return STORAGE_CONTROLLER_NVME;
+        }
+        if (*dev).subclass == PCI_SUBCLASS_SATA && (*dev).prog_if == PCI_PROGIF_AHCI {
+            return STORAGE_CONTROLLER_AHCI;
+        }
+        return STORAGE_CONTROLLER_NONE;
+    }
+}
+
+@system
+pub fn storage_discovery_scan() -> u32 {
+    unsafe {
+        STORAGE_CANDIDATE.kind = STORAGE_CONTROLLER_NONE;
+        STORAGE_CANDIDATE.abar_or_mmio_base = 0;
+
+        let count = pci_get_device_count();
+        for mut index in 0..count {
+            let dev = pci_get_device(index);
+            let kind = storage_candidate_kind(dev);
+            if kind == STORAGE_CONTROLLER_NONE { continue; }
+
+            STORAGE_CANDIDATE.kind = kind;
+            STORAGE_CANDIDATE.pci_index = index;
+            STORAGE_CANDIDATE.bus = (*dev).bus;
+            STORAGE_CANDIDATE.slot = (*dev).slot;
+            STORAGE_CANDIDATE.func = (*dev).func;
+            STORAGE_CANDIDATE.vendor_id = (*dev).vendor_id;
+            STORAGE_CANDIDATE.device_id = (*dev).device_id;
+            STORAGE_CANDIDATE.command_before_driver = (*dev).command;
+
+            // AHCI usa tipicamente BAR5 (ABAR); NVMe usa BAR0/1 MMIO.
+            if kind == STORAGE_CONTROLLER_AHCI {
+                STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[5].base_address;
+            } else {
+                STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address;
+            }
+            return kind;
+        }
+        return STORAGE_CONTROLLER_NONE;
+    }
+}
+
+@system
+pub fn storage_discovery_kind() -> u32 {
+    unsafe { return STORAGE_CANDIDATE.kind; }
+}
+
+@system
+pub fn storage_discovery_candidate() -> *const StorageControllerCandidate {
+    unsafe {
+        if STORAGE_CANDIDATE.kind == STORAGE_CONTROLLER_NONE {
+            return null as *const StorageControllerCandidate;
+        }
+        return &STORAGE_CANDIDATE;
+    }
+}
