@@ -57,7 +57,9 @@ fn pe_read_u16(base: *const u8, size: u64, offset: u64) -> u16 {
         if end_address < address { return 0; }
         let p0 = address as *const u8;
         let p1 = (address + 1) as *const u8;
-        return (*p0 as u16) | ((*p1 as u16) << 8);
+        let b0: u8 = *p0;
+        let b1: u8 = *p1;
+        return (b0 as u16) | ((b1 as u16) << 8);
     }
 }
 
@@ -74,10 +76,14 @@ fn pe_read_u32(base: *const u8, size: u64, offset: u64) -> u32 {
         let p1 = (address + 1) as *const u8;
         let p2 = (address + 2) as *const u8;
         let p3 = (address + 3) as *const u8;
-        return (*p0 as u32) |
-            ((*p1 as u32) << 8) |
-            ((*p2 as u32) << 16) |
-            ((*p3 as u32) << 24);
+        let b0: u8 = *p0;
+        let b1: u8 = *p1;
+        let b2: u8 = *p2;
+        let b3: u8 = *p3;
+        return (b0 as u32) |
+            ((b1 as u32) << 8) |
+            ((b2 as u32) << 16) |
+            ((b3 as u32) << 24);
     }
 }
 
