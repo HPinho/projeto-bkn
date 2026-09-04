@@ -50,7 +50,7 @@ static inline void __invlpg(uint64_t address) {
 extern void baken_exception_dispatch(uint64_t frame_address);
 
 __attribute__((naked, used)) static void __baken_exception_common(void) {
-    __asm__ __volatile__(
+    __asm__(
         "movq %rsp, %rcx\n\t"
         "andq $-16, %rsp\n\t"
         "subq $32, %rsp\n\t"
@@ -63,12 +63,12 @@ __attribute__((naked, used)) static void __baken_exception_common(void) {
 
 #define BAKEN_ISR_NOERR(n) \
     __attribute__((naked, used)) static void __baken_isr_##n(void) { \
-        __asm__ __volatile__("pushq $0\n\tpushq $" #n "\n\tjmp __baken_exception_common"); \
+        __asm__("pushq $0\n\tpushq $" #n "\n\tjmp __baken_exception_common"); \
     }
 
 #define BAKEN_ISR_ERR(n) \
     __attribute__((naked, used)) static void __baken_isr_##n(void) { \
-        __asm__ __volatile__("pushq $" #n "\n\tjmp __baken_exception_common"); \
+        __asm__("pushq $" #n "\n\tjmp __baken_exception_common"); \
     }
 
 BAKEN_ISR_NOERR(0)
