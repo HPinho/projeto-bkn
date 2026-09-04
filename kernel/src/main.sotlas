@@ -15,6 +15,7 @@ import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::exceptions::*;
 
 // Envelope de transição BakenBootInfo v2.
 // Os primeiros campos preservam o ABI legado enquanto input/storage/timing
@@ -63,8 +64,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     }
 
     // Prepara estruturas x86-64 concretas em memória antes das demais camadas.
-    // O backend já sabe emitir LGDT/LIDT/LTR, mas NAO carregamos essas tabelas
-    // enquanto Boot Services ainda é usado e a IDT ainda não possui stubs.
+    // O backend já contém entry stubs 0-31 e LGDT/LIDT/LTR, mas NAO carregamos
+    // as tabelas enquanto Boot Services ainda é usado. A IDT continua inativa.
+    exception_state_reset();
     tss_prepare(0, 0, 0, 0);
     gdt_prepare();
     gdt_set_tss_descriptor(tss_base(), tss_limit());
