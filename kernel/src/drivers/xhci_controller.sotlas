@@ -127,12 +127,10 @@ pub fn xhci_controller_prepare_first() -> bool {
     if (command_after & PCI_COMMAND_MEMORY_SPACE) == 0 { return false; }
 
     let mmio = candidate.mmio_base;
-    let cap0 = x86_mmio_read32(mmio);
-    // A primeira leitura só é segura após mapear a página do BAR.
-    // Como o mapper é idempotente para o mesmo endereço, fazemos o mapping
-    // antes de usar qualquer outro registrador e repetimos cap0 depois.
     let capability_page = xhci_page_base(mmio);
     if !active_page_tables_map_mmio_identity_4k(capability_page) { return false; }
+
+    // Nenhuma leitura MMIO do xHC ocorre antes do mapping UC acima.
     let capability = x86_mmio_read32(mmio + XHCI_CAPLENGTH_HCIVERSION);
     let caplength = (capability & 0xFF) as u8;
     let version = ((capability >> 16) & 0xFFFF) as u16;
