@@ -16,6 +16,21 @@ pub fn x86_lidt_raw(descriptor_address: u64) -> void {
     __lidt(descriptor_address);
 }
 
+// Ativação completa da GDT em long mode: LGDT + DS/ES/SS + recarga far de CS.
+// Deve ser chamada somente após ExitBootServices, numa stack própria válida.
+@system
+pub fn x86_gdt_activate_segments_raw(base: u64,
+                                     limit: u16,
+                                     code_selector: u16,
+                                     data_selector: u16) -> void {
+    __gdt_activate_segments(base, limit, code_selector, data_selector);
+}
+
+@system
+pub fn x86_lidt_table_raw(base: u64, limit: u16) -> void {
+    __lidt_table(base, limit);
+}
+
 @system
 pub fn x86_ltr_raw(selector: u16) -> void {
     __ltr(selector);
@@ -34,6 +49,11 @@ pub fn x86_read_cr3_raw() -> u64 {
 @system
 pub fn x86_write_cr3_raw(root_physical: u64) -> void {
     __write_cr3(root_physical);
+}
+
+@system
+pub fn x86_stack_switch_to_post_cutover_raw(stack_top: u64, argument: u64) -> void {
+    __stack_switch_to_post_cutover(stack_top, argument);
 }
 
 @system
