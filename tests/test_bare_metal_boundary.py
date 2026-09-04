@@ -54,7 +54,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(assertion=assertion):
                 self.assertIn(assertion, header)
 
-    def test_sotlas_entry_mirrors_bootinfo_v2_extension(self):
+    def test_sotlas_entry_mirrors_and_validates_bootinfo_v2(self):
         main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
         for field in (
             "version: u32",
@@ -67,6 +67,9 @@ class BareMetalBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(field=field):
                 self.assertIn(field, main)
+        self.assertIn("baken_bootinfo_v2_valid", main)
+        self.assertIn("boot_info.version != 2", main)
+        self.assertIn("boot_info.struct_size < 120", main)
 
     def test_bootloader_populates_real_v2_platform_metadata(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
