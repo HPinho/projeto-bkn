@@ -1,8 +1,8 @@
 // Baken OS - wrappers x86-64 privilegiados do backend Sotlas.
 //
 // Estes wrappers existem no grafo canônico para que o build produza e valide
-// as instruções reais. Carregar GDT/IDT/TSS continua proibido enquanto o kernel
-// depender de UEFI Boot Services.
+// as instruções reais. Carregar GDT/IDT/TSS ou substituir CR3 continua proibido
+// enquanto o kernel depender de UEFI Boot Services.
 
 module kernel::arch::x86_64::cpu;
 
@@ -24,6 +24,16 @@ pub fn x86_ltr_raw(selector: u16) -> void {
 @system
 pub fn x86_read_cr2() -> u64 {
     return __read_cr2();
+}
+
+@system
+pub fn x86_read_cr3_raw() -> u64 {
+    return __read_cr3();
+}
+
+@system
+pub fn x86_write_cr3_raw(root_physical: u64) -> void {
+    __write_cr3(root_physical);
 }
 
 @system
