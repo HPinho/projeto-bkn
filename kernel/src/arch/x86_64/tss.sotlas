@@ -1,10 +1,13 @@
 // Baken OS - x86_64 Task State Segment foundation.
 //
 // A TSS em long mode fornece RSP0 e ISTs para transicoes de privilegio e
-// excecoes criticas. Este modulo prepara a estrutura; LTR sera conectado ao
-// backend privilegiado Sotlas em etapa separada.
+// excecoes criticas. Este modulo prepara estrutura e stacks dedicadas; LTR
+// permanece bloqueado ate o cutover real de UEFI Boot Services.
 
 module kernel::arch::x86_64::tss;
+
+pub const TSS_STACK_QWORDS: usize = 2049;
+pub const TSS_STACK_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0;
 
 @repr(C)
 @packed
@@ -44,7 +47,21 @@ static mut TSS: Tss64 = Tss64 {
     io_map_base: 0,
 };
 
+// Cada buffer possui pouco mais de 16 KiB. O topo e arredondado para baixo
+// em 16 bytes, portanto continua dentro da alocacao mesmo se o array base
+// tiver apenas alinhamento natural de u64.
+static mut KERNEL_RSP0_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
+static mut DOUBLE_FAULT_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
+static mut NMI_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
+static mut MACHINE_CHECK_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
+
 static mut TSS_PREPARED: bool = false;
+
+@system
+pub fn tss_stack_top(base: *const u64) -> u64 {
+    let bytes: u64 = (TSS_STACK_QWORDS as u64) * 8;
+    return (((base as u64) + bytes) & TSS_STACK_ALIGNMENT_MASK);
+}
 
 @system
 pub fn tss_prepare(kernel_rsp0: u64, ist_double_fault: u64, ist_nmi: u64, ist_machine_check: u64) -> void {
@@ -64,6 +81,22 @@ pub fn tss_prepare(kernel_rsp0: u64, ist_double_fault: u64, ist_nmi: u64, ist_ma
         // for implementado explicitamente.
         TSS.io_map_base = 104;
         TSS_PREPARED = true;
+    }
+}
+
+@system
+pub fn tss_prepare_default_stacks() -> void {
+    unsafe {
+        let rsp0_base: *const u64 = &KERNEL_RSP0_STACK[0];
+        let df_base: *const u64 = &DOUBLE_FAULT_STACK[0];
+        let nmi_base: *const u64 = &NMI_STACK[0];
+        let mc_base: *const u64 = &MACHINE_CHECK_STACK[0];
+        tss_prepare(
+            tss_stack_top(rsp0_base),
+            tss_stack_top(df_base),
+            tss_stack_top(nmi_base),
+            tss_stack_top(mc_base)
+        );
     }
 }
 
@@ -88,4 +121,24 @@ pub fn tss_size() -> u32 {
 @system
 pub fn tss_is_prepared() -> bool {
     unsafe { return TSS_PREPARED; }
+}
+
+@system
+pub fn tss_rsp0() -> u64 {
+    unsafe { return TSS.rsp0; }
+}
+
+@system
+pub fn tss_ist1_double_fault() -> u64 {
+    unsafe { return TSS.ist1; }
+}
+
+@system
+pub fn tss_ist2_nmi() -> u64 {
+    unsafe { return TSS.ist2; }
+}
+
+@system
+pub fn tss_ist3_machine_check() -> u64 {
+    unsafe { return TSS.ist3; }
 }
