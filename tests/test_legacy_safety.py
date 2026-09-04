@@ -9,6 +9,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LegacySafetyTests(unittest.TestCase):
+    # Módulos canônicos conhecidos. Infraestrutura bare-metal entra aqui
+    # explicitamente para que adicionar um arquivo .sotlas continue exigindo
+    # uma decisão arquitetural consciente, sem congelar o projeto na antiga
+    # rota puramente visual.
     CANONICAL_SOTLAS_MODULES = {
         "kernel/src/main.sotlas",
         "kernel/src/graphics_engine.sotlas",
@@ -36,9 +40,10 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/drivers/display_driver.sotlas",
         "kernel/src/drivers/pci_bus.sotlas",
         "kernel/src/drivers/ps2_mouse.sotlas",
+        "kernel/src/memory/pmm.sotlas",
     }
 
-    def test_sotlas_tree_contains_only_the_canonical_desktop_route(self):
+    def test_sotlas_tree_contains_only_known_canonical_modules(self):
         discovered = {
             path.relative_to(ROOT).as_posix()
             for root in (ROOT / "kernel", ROOT / "libbkn", ROOT / "boot", ROOT / "apps")
@@ -64,11 +69,14 @@ class LegacySafetyTests(unittest.TestCase):
         self.assertTrue((ROOT / "tools/vscode-sotlas/icons/sotlas-icon.svg").is_file())
         self.assertTrue((ROOT / "tools/vscode-sotlas/icons/sotlas-logo.svg").is_file())
 
-    def test_uefi_handoff_uses_one_shared_contract(self):
+    def test_uefi_handoff_uses_one_shared_versioned_contract(self):
         header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
         bootloader = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertIn("_Static_assert(sizeof(BakenBootInfo) == 80", header)
+        self.assertIn("BAKEN_BOOT_INFO_VERSION 2U", header)
+        self.assertIn("offsetof(BakenBootInfo, version) == 80", header)
+        self.assertIn("_Static_assert(sizeof(BakenBootInfo) == 120", header)
         self.assertIn('#include "baken_boot_info.h"', bootloader)
+        self.assertIn("boot_info.version = BAKEN_BOOT_INFO_VERSION", bootloader)
         self.assertIn("return EFI_UNSUPPORTED;", bootloader)
         self.assertIn("return EFI_ABORTED;", bootloader)
 
