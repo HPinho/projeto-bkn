@@ -93,6 +93,47 @@ pub fn page_table_arena_alloc(arena: *mut PageTableArena) -> PageTablePage {
     }
 }
 
+// Converte um PA de page table já alocada pela arena no alias virtual bootstrap
+// correspondente. Não aceita páginas futuras, endereços externos nem PA == VA
+// por inferência: a tradução nasce exclusivamente do par base PA/VA da arena.
+@system
+pub fn page_table_arena_page_from_physical(arena: *const PageTableArena,
+                                           physical_address: u64) -> PageTablePage {
+    if arena == (null as *const PageTableArena) { return page_table_page_invalid(); }
+    if physical_address == 0 || !x86_page_aligned(physical_address) {
+        return page_table_page_invalid();
+    }
+
+    unsafe {
+        if !(*arena).valid || (*arena).next_page_index == 0 {
+            return page_table_page_invalid();
+        }
+        if physical_address < (*arena).physical_base {
+            return page_table_page_invalid();
+        }
+
+        let offset = physical_address - (*arena).physical_base;
+        let allocated_bytes = (*arena).next_page_index * X86_PAGE_SIZE;
+        if allocated_bytes / X86_PAGE_SIZE != (*arena).next_page_index {
+            return page_table_page_invalid();
+        }
+        if offset >= allocated_bytes || (offset % X86_PAGE_SIZE) != 0 {
+            return page_table_page_invalid();
+        }
+
+        let virtual_address = (*arena).virtual_base + offset;
+        if virtual_address < (*arena).virtual_base || !x86_page_aligned(virtual_address) {
+            return page_table_page_invalid();
+        }
+
+        return PageTablePage {
+            physical_address: physical_address,
+            virtual_address: virtual_address,
+            valid: true
+        };
+    }
+}
+
 @system
 pub fn page_table_arena_remaining(arena: *const PageTableArena) -> u64 {
     if arena == (null as *const PageTableArena) { return 0; }
