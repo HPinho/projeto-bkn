@@ -1,7 +1,6 @@
 // Baken OS - Runtime do Kernel e Despacho de Eventos 100% em Sotlas (@system)
-// Implementacao completa e exclusiva em linguagem Sotlas de baixo nivel com vtables EFI.
-// Orquestra a integracao de hardware, o controle de quadros a 60 FPS,
-// a propagacao do mouse Logitech MX Anywhere 3, as janelas e o chaveamento de sessao.
+// A ponte UEFI desta fase é transitória e limitada a descoberta/input legado
+// e calibração inicial. O pacing de quadros já usa apenas temporização x86.
 
 module kernel::baken_runtime;
 
@@ -14,9 +13,10 @@ import kernel::baken_oobe_screen::*;
 import kernel::window_manager::*;
 import kernel::baken_cursor::*;
 import kernel::drivers::ps2_mouse::*;
+import kernel::arch::x86_64::timer::*;
 
 // =============================================================================
-// ESTRUTURAS UEFI COM VTABLES NATIVAS EM SOTLAS
+// ESTRUTURAS UEFI DE TRANSIÇÃO — REMOVER ANTES DO CUTOVER DEFINITIVO
 // =============================================================================
 
 pub struct EfiGuid {
@@ -173,7 +173,6 @@ static mut G_SIMPLE_POINTERS: [*mut EfiSimplePointer; 8] = [null as *mut EfiSimp
 static mut G_SIMPLE_COUNT: u32 = 0;
 static mut G_ABS_POINTERS: [*mut EfiAbsolutePointer; 8] = [null as *mut EfiAbsolutePointer; 8];
 static mut G_ABS_COUNT: u32 = 0;
-static mut G_CYCLES_PER_US: u64 = 3000;
 static mut G_LAST_ABS_X: i32 = -1;
 static mut G_LAST_ABS_Y: i32 = -1;
 
@@ -243,7 +242,7 @@ pub fn baken_runtime_init_assets() -> void {
 }
 
 // =============================================================================
-// INICIALIZAÇÃO DE HARDWARE UEFI 100% EM SOTLAS
+// INICIALIZAÇÃO DE HARDWARE UEFI TRANSITÓRIA
 // =============================================================================
 
 @system
@@ -257,7 +256,7 @@ pub fn baken_efi_init(boot_info: *const void) -> void {
     G_BOOT_SERVICES = bs;
     G_KEYBOARD = st.ConIn;
 
-    // Busca e conecta dispositivos Absolute Pointer (USB Tablet) e Simple Pointer (USB Mouse) separadamente
+    // Busca e conecta dispositivos Absolute Pointer (USB Tablet) e Simple Pointer (USB Mouse) separadamente.
     if (bs != (null as *mut EfiBootServicesPrefix)) {
         let mut abs_ptr: *mut void = null as *mut void;
         if (bs.LocateProtocol(&G_ABSOLUTE_GUID, null as *mut void, &mut abs_ptr) == 0 && abs_ptr != (null as *mut void)) {
@@ -281,22 +280,29 @@ pub fn baken_efi_init(boot_info: *const void) -> void {
         G_SIMPLE_COUNT = 1;
     }
 
-    // Calibracao de ciclos por microsegundo via TSC e Stall
-    let start = baken_efi_read_tsc();
+    // Dívida transitória isolada: usa Stall somente uma vez como referência de
+    // 10 ms para calibrar o TSC. Depois disso, frame pacing é CPU-only.
     if (bs != (null as *mut EfiBootServicesPrefix)) {
+        let start = x86_timer_read_tsc();
         bs.Stall(10000);
-        let end = baken_efi_read_tsc();
-        if (end > start) {
-            G_CYCLES_PER_US = (end - start) / 10000;
+        let finish = x86_timer_read_tsc();
+        if finish > start {
+            let cycles_per_us = (finish - start) / 10000;
+            if !x86_timer_set_cycles_per_us(cycles_per_us) {
+                x86_timer_set_cycles_per_us(3000);
+            }
+        } else {
+            x86_timer_set_cycles_per_us(3000);
         }
-        if (G_CYCLES_PER_US == 0) {
-            G_CYCLES_PER_US = 3000;
-        }
+    } else {
+        // Fallback temporário para a fase híbrida. Antes do cutover definitivo,
+        // CPUID/HPET/APIC timer substituirá esta aproximação.
+        x86_timer_set_cycles_per_us(3000);
     }
 }
 
 // =============================================================================
-// POLLING DE ENTRADA (TECLADO, MOUSE RELATIVO E TABLET ABSOLUTO)
+// POLLING DE ENTRADA UEFI TRANSITÓRIO
 // =============================================================================
 
 @system
@@ -396,55 +402,47 @@ pub fn baken_efi_poll_mouse_abs(screen_w: u32, screen_h: u32, out_x: *mut i32, o
 }
 
 // =============================================================================
-// TEMPORIZAÇÃO E PACING DE QUADROS A 60 FPS EXATOS
+// TEMPORIZAÇÃO NATIVA x86-64 E PACING DE QUADROS
 // =============================================================================
 
 @system
 pub fn baken_efi_read_tsc() -> u64 {
-    return baken_rdtsc();
+    // Nome mantido por compatibilidade temporária; a implementação já é CPU-only.
+    return x86_timer_read_tsc();
 }
 
 @system
 pub fn baken_efi_frame_wait(frame_start: u64) -> void {
-    let frame_end = baken_efi_read_tsc();
-    let cycles_per_us = G_CYCLES_PER_US;
-    let bs = G_BOOT_SERVICES;
+    let frame_end = x86_timer_read_tsc();
+    let cycles_per_us = x86_timer_cycles_per_us();
 
-    // Alvo adaptativo baseado na taxa de atualização do monitor
     let reported_refresh = display_get_refresh_hz();
-    // Cada painel recebe seu orçamento real: 60, 90, 120, 144, 165 e 240 Hz
-    // deixam de ser agrupados artificialmente em apenas três velocidades.
     let refresh_hz: u32 = if reported_refresh < 30 { 60 } else if reported_refresh > 240 { 240 } else { reported_refresh };
     let target_us: u64 = 1000000 / refresh_hz as u64;
     unsafe { G_TARGET_FRAME_US = target_us; }
 
     if (cycles_per_us > 0 && frame_end > frame_start) {
-        let work_us = (frame_end - frame_start) / cycles_per_us;
+        let work_us = x86_timer_elapsed_us(frame_start, frame_end);
         if (work_us < target_us) {
             let remain = target_us - work_us;
             unsafe { G_TELEMETRY_BUDGET_REMAIN_US = remain; }
-            if (bs != (null as *mut EfiBootServicesPrefix)) {
-                bs.Stall(remain);
-            }
+            // Não chama UEFI Stall: pacing continua funcional após ExitBootServices.
+            x86_timer_spin_wait_us(remain);
         } else {
-            // Quadro excedeu o orçamento: registra frame atrasado e NÃO penaliza com stall punitivo
-            unsafe { G_TELEMETRY_DROPPED_FRAMES += 1; }
-            if (bs != (null as *mut EfiBootServicesPrefix)) {
-                bs.Stall(15); // cooperação mínima para descritores USB
+            unsafe {
+                G_TELEMETRY_DROPPED_FRAMES += 1;
+                G_TELEMETRY_BUDGET_REMAIN_US = 0;
             }
         }
     } else {
-        if (bs != (null as *mut EfiBootServicesPrefix)) {
-            bs.Stall(target_us);
-        }
+        unsafe { G_TELEMETRY_BUDGET_REMAIN_US = 0; }
     }
 
-    // Medição real do delta de tempo decorrido desde o início do quadro anterior
-    let now_tsc = baken_efi_read_tsc();
+    let now_tsc = x86_timer_read_tsc();
     let mut dt: f32 = 0.0166667;
     unsafe {
         if (G_LAST_FRAME_TSC > 0 && now_tsc > G_LAST_FRAME_TSC && cycles_per_us > 0) {
-            let total_us = (now_tsc - G_LAST_FRAME_TSC) / cycles_per_us;
+            let total_us = x86_timer_elapsed_us(G_LAST_FRAME_TSC, now_tsc);
             dt = (total_us as f32) / 1000000.0;
             if (dt < 0.001) { dt = 0.001; }
             if (dt > 0.066) { dt = 0.066; }
@@ -546,9 +544,9 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
     raster_set_cursor_parallax(mouse_x, mouse_y);
 
     loop {
-        let frame_start: u64 = baken_efi_read_tsc();
+        let frame_start: u64 = x86_timer_read_tsc();
 
-        // 1. Polling de Teclado UEFI
+        // 1. Polling de Teclado UEFI — dívida transitória até PS/2 + USB HID.
         let mut scancode: u16 = 0;
         let mut unicode: u16 = 0;
         while (baken_efi_poll_key(&mut scancode, &mut unicode) == 1) {
@@ -569,11 +567,10 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             }
         }
 
-        // 2. Polling de Mouse (Hardware Direto i8042 Touchpad/Mouse -> Tablet Absoluto -> Simple Pointer)
+        // 2. Polling de Mouse (i8042 direto -> UEFI Absolute -> UEFI Simple Pointer).
         let mut mouse_updated: u8 = 0;
         let mut curr_btn: u8 = left_down;
 
-        // A. Sinal Elétrico Direto do Touchpad / Mouse PS/2 (Portas 0x60 / 0x64)
         let mut ps2_dx: i32 = 0;
         let mut ps2_dy: i32 = 0;
         let mut ps2_btn: u8 = 0;
@@ -588,7 +585,6 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             mouse_updated = 1;
         }
 
-        // B. Dispositivo Absoluto (USB Tablet / VM / Touchscreen)
         if (mouse_updated == 0 && G_ABS_COUNT > 0) {
             let mut abs_x: i32 = 0;
             let mut abs_y: i32 = 0;
@@ -601,7 +597,6 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             }
         }
 
-        // C. Mouse Relativo UEFI USB (Simple Pointer)
         if (mouse_updated == 0 && G_SIMPLE_COUNT > 0) {
             let mut rel_dx: i32 = 0;
             let mut rel_dy: i32 = 0;
@@ -638,7 +633,7 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
         }
         left_down = curr_btn;
 
-        // 4. Renderizacao de Quadro a 60 FPS Fluidos
+        // 4. Renderização e pacing sem BootServices.Stall por frame.
         desktop_compositor_render_frame();
         baken_efi_frame_wait(frame_start);
     }
