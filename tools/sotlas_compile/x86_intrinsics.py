@@ -1,6 +1,6 @@
 """Extensão de backend x86-64 para o frontend Sotlas Bootstrap.
 
-Mantém instruções privilegiadas e entry stubs fora do compilador de alto nível.
+Mantém instruções privilegiadas, MMIO e entry stubs fora do compilador de alto nível.
 O módulo registra assinaturas Sotlas e injeta somente wrappers C/assembly
 freestanding mínimos, que o GCC reduz para instruções reais da CPU.
 """
@@ -26,11 +26,6 @@ static inline void __lidt(uint64_t address) {
     __asm__ __volatile__("lidt (%0)" : : "r"((uintptr_t)address) : "memory");
 }
 
-/*
- * Ativa GDT e recarrega os seletores que possuem estado visível em long mode.
- * CS exige transferência far; apenas executar LGDT não troca o CS corrente.
- * A sequência push(selector)+push(rip)+lretq mantém o RSP líquido inalterado.
- */
 static inline void __gdt_activate_segments(uint64_t base,
                                            uint16_t limit,
                                            uint16_t code_selector,
@@ -92,15 +87,18 @@ static inline void __cpu_pause(void) {
     __asm__ __volatile__("pause");
 }
 
-/*
- * ABI terminal de troca de stack pós-cutover (Windows x64 / PE32+):
- *   RCX = novo topo da stack
- *   RDX = argumento entregue em RCX à continuação Sotlas
- *
- * O trampoline descarta a stack antiga, realinha RSP, reserva os 32 bytes de
- * shadow space exigidos pelo ABI e chama um callback genérico do frontend.
- * A continuação não deve retornar; se retornar, a CPU entra em HLT terminal.
- */
+static inline uint32_t __mmio_read32(uint64_t address) {
+    uint32_t value = *(volatile uint32_t *)(uintptr_t)address;
+    __asm__ __volatile__("" : : : "memory");
+    return value;
+}
+
+static inline void __mmio_write32(uint64_t address, uint32_t value) {
+    __asm__ __volatile__("" : : : "memory");
+    *(volatile uint32_t *)(uintptr_t)address = value;
+    __asm__ __volatile__("" : : : "memory");
+}
+
 extern void sotlas_x86_post_cutover_entry(uint64_t argument);
 __attribute__((naked, noreturn, unused)) static void
 __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
@@ -116,21 +114,6 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
     );
 }
 
-/*
- * Exception entry ABI (fase inicial, terminal):
- *
- *   rsp + 0  = vector
- *   rsp + 8  = error code (real ou zero sintetico)
- *   rsp + 16 = RIP empilhado pela CPU
- *   rsp + 24 = CS
- *   rsp + 32 = RFLAGS
- *
- * Em mudança de CPL/uso de IST a CPU pode acrescentar RSP/SS depois desses
- * campos. O dispatcher inicial não retorna; não há restauração/IRETQ ainda.
- *
- * O nome do callback pertence à ABI x86 do frontend, não ao Baken OS. Isso
- * evita acoplar o backend da linguagem a uma identidade de sistema operacional.
- */
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
 
 __attribute__((naked, used)) static void __sotlas_x86_exception_common(void) {
@@ -239,30 +222,19 @@ def install(bootstrap) -> None:
     builtins = {
         "__lgdt": Function("__lgdt", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__lidt": Function("__lidt", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
-        "__gdt_activate_segments": Function(
-            "__gdt_activate_segments",
-            [("base", Type("u64")), ("limit", Type("u16")), ("code_selector", Type("u16")), ("data_selector", Type("u16"))],
-            Type("void"), [], public=True, attributes=["@system"],
-        ),
-        "__lidt_table": Function(
-            "__lidt_table", [("base", Type("u64")), ("limit", Type("u16"))], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
+        "__gdt_activate_segments": Function("__gdt_activate_segments", [("base", Type("u64")), ("limit", Type("u16")), ("code_selector", Type("u16")), ("data_selector", Type("u16"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__lidt_table": Function("__lidt_table", [("base", Type("u64")), ("limit", Type("u16"))], Type("void"), [], public=True, attributes=["@system"]),
         "__ltr": Function("__ltr", [("selector", Type("u16"))], Type("void"), [], public=True, attributes=["@system"]),
         "__read_cr2": Function("__read_cr2", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__read_cr3": Function("__read_cr3", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__write_cr3": Function("__write_cr3", [("value", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
-        "__stack_switch_to_post_cutover": Function(
-            "__stack_switch_to_post_cutover",
-            [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [],
-            public=True, attributes=["@system"],
-        ),
+        "__stack_switch_to_post_cutover": Function("__stack_switch_to_post_cutover", [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__rdtsc": Function("__rdtsc", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__cpu_pause": Function("__cpu_pause", [], Type("void"), [], public=True, attributes=["@system"]),
-        "__exception_stub_address": Function(
-            "__exception_stub_address", [("vector", Type("u16"))], Type("u64"), [], public=True, attributes=["@system"]
-        ),
+        "__mmio_read32": Function("__mmio_read32", [("address", Type("u64"))], Type("u32"), [], public=True, attributes=["@system"]),
+        "__mmio_write32": Function("__mmio_write32", [("address", Type("u64")), ("value", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__exception_stub_address": Function("__exception_stub_address", [("vector", Type("u16"))], Type("u64"), [], public=True, attributes=["@system"]),
     }
     bootstrap.BUILTIN_FUNCTIONS.update(builtins)
 
