@@ -1,0 +1,104 @@
+// Baken OS — planejamento FAT32 nativo para a EFI System Partition.
+//
+// Calcula BPB/FAT geometry a partir do tamanho lógico de setor e do volume.
+// Não escreve mídia nesta etapa. O formatter real usará este plano sobre a
+// Block Device API quando o write path AHCI/NVMe estiver ativo.
+
+module kernel::storage::fat32;
+
+pub const FAT32_FAT_COUNT: u32 = 2;
+pub const FAT32_RESERVED_SECTORS: u32 = 32;
+pub const FAT32_ROOT_CLUSTER: u32 = 2;
+pub const FAT32_FSINFO_SECTOR: u32 = 1;
+pub const FAT32_BACKUP_BOOT_SECTOR: u32 = 6;
+
+pub struct Fat32Layout {
+    pub valid: bool;
+    pub bytes_per_sector: u32;
+    pub sectors_per_cluster: u32;
+    pub reserved_sectors: u32;
+    pub fat_count: u32;
+    pub fat_size_sectors: u32;
+    pub total_sectors: u64;
+    pub data_start_sector: u64;
+    pub data_sectors: u64;
+    pub cluster_count: u64;
+    pub root_cluster: u32;
+    pub fsinfo_sector: u32;
+    pub backup_boot_sector: u32;
+}
+
+@system
+fn fat32_is_power_of_two(v: u32) -> bool {
+    if v == 0 { return false; }
+    return (v & (v - 1)) == 0;
+}
+
+@system
+fn fat32_choose_sectors_per_cluster(bytes_per_sector: u32, total_sectors: u64) -> u32 {
+    let total_bytes = total_sectors * (bytes_per_sector as u64);
+    // Mantém cluster <= 32 KiB para interoperabilidade ampla da ESP.
+    if total_bytes <= 260046848 { return 1; }
+    if total_bytes <= 8589934592 { return 8; }
+    if total_bytes <= 17179869184 { return 16; }
+    if total_bytes <= 34359738368 { return 32; }
+    return 64;
+}
+
+@system
+pub fn fat32_plan_layout(bytes_per_sector: u32, total_sectors: u64) -> Fat32Layout {
+    let mut out = Fat32Layout {
+        valid: false,
+        bytes_per_sector: bytes_per_sector,
+        sectors_per_cluster: 0,
+        reserved_sectors: FAT32_RESERVED_SECTORS,
+        fat_count: FAT32_FAT_COUNT,
+        fat_size_sectors: 0,
+        total_sectors: total_sectors,
+        data_start_sector: 0,
+        data_sectors: 0,
+        cluster_count: 0,
+        root_cluster: FAT32_ROOT_CLUSTER,
+        fsinfo_sector: FAT32_FSINFO_SECTOR,
+        backup_boot_sector: FAT32_BACKUP_BOOT_SECTOR,
+    };
+
+    if bytes_per_sector < 512 || bytes_per_sector > 4096 || !fat32_is_power_of_two(bytes_per_sector) { return out; }
+    if total_sectors <= FAT32_RESERVED_SECTORS as u64 { return out; }
+
+    let spc = fat32_choose_sectors_per_cluster(bytes_per_sector, total_sectors);
+    if spc == 0 { return out; }
+
+    // Resolve FATSize32 iterativamente, pois o tamanho da FAT reduz a área de
+    // dados e portanto altera o número de clusters que a própria FAT indexa.
+    let mut fat_size: u64 = 1;
+    for mut pass in 0..16 {
+        let overhead = (FAT32_RESERVED_SECTORS as u64) + (FAT32_FAT_COUNT as u64) * fat_size;
+        if total_sectors <= overhead { return out; }
+        let data_sectors = total_sectors - overhead;
+        let clusters = data_sectors / (spc as u64);
+        let fat_entries = clusters + 2;
+        let fat_bytes = fat_entries * 4;
+        let needed = (fat_bytes + (bytes_per_sector as u64) - 1) / (bytes_per_sector as u64);
+        if needed == fat_size { break; }
+        fat_size = needed;
+    }
+
+    let data_start = (FAT32_RESERVED_SECTORS as u64) + (FAT32_FAT_COUNT as u64) * fat_size;
+    if total_sectors <= data_start { return out; }
+    let data_sectors = total_sectors - data_start;
+    let clusters = data_sectors / (spc as u64);
+
+    // FAT32 válido usa 28 bits de cluster. A faixa mínima evita formatar como
+    // FAT32 volumes que deveriam ser FAT12/16.
+    if clusters < 65525 || clusters > 0x0FFFFFF5 { return out; }
+    if fat_size > 0xFFFFFFFF { return out; }
+
+    out.sectors_per_cluster = spc;
+    out.fat_size_sectors = fat_size as u32;
+    out.data_start_sector = data_start;
+    out.data_sectors = data_sectors;
+    out.cluster_count = clusters;
+    out.valid = true;
+    return out;
+}
