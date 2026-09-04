@@ -1,8 +1,8 @@
 // Baken OS - x86_64 Interrupt Descriptor Table foundation.
 //
-// Constroi gates de 16 bytes em memoria. O carregamento com LIDT e os stubs
-// de entrada de interrupcao serao conectados quando o backend Sotlas possuir
-// os intrinsecos privilegiados e a ABI de handlers estiver estabilizada.
+// Constroi gates de 16 bytes em memoria. O backend ja possui LIDT real, mas o
+// carregamento permanece bloqueado ate existirem stubs de excecao completos e
+// o kernel deixar de depender de UEFI Boot Services.
 
 module kernel::arch::x86_64::idt;
 
@@ -10,6 +10,8 @@ pub const IDT_VECTOR_COUNT: usize = 256;
 pub const IDT_GATE_INTERRUPT: u8 = 0x8E;
 pub const IDT_GATE_TRAP: u8 = 0x8F;
 
+@repr(C)
+@packed
 pub struct IdtGate {
     pub offset_low: u16;
     pub selector: u16;
@@ -18,6 +20,13 @@ pub struct IdtGate {
     pub offset_mid: u16;
     pub offset_high: u32;
     pub zero: u32;
+}
+
+@repr(C)
+@packed
+pub struct IdtDescriptorTablePointer {
+    pub limit: u16;
+    pub base: u64;
 }
 
 static mut IDT: [IdtGate; IDT_VECTOR_COUNT] = [
