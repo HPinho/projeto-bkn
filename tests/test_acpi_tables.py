@@ -35,8 +35,18 @@ class AcpiTableTests(unittest.TestCase):
     def test_main_initializes_acpi_from_bootinfo_before_pci_scan(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::acpi::tables::*;", text)
-        self.assertIn("acpi_init(boot_info.acpi_rsdp);", text)
-        self.assertLess(text.index("acpi_init(boot_info.acpi_rsdp);"), text.index("pci_scan_all();"))
+        acpi_call = "acpi_init(boot_info.acpi_rsdp)"
+        pci_call = "pci_scan_all();"
+        self.assertIn(acpi_call, text)
+        self.assertIn("if acpi_init(boot_info.acpi_rsdp) {", text)
+        self.assertIn("madt_init();", text)
+        self.assertIn("mcfg_init();", text)
+        self.assertLess(text.index(acpi_call), text.index(pci_call))
+        acpi_block_start = text.index("if acpi_init(boot_info.acpi_rsdp) {")
+        pci_start = text.index(pci_call)
+        acpi_block = text[acpi_block_start:pci_start]
+        self.assertIn("madt_init();", acpi_block)
+        self.assertIn("mcfg_init();", acpi_block)
 
     def test_acpi_layer_is_read_only(self):
         text = ACPI.read_text(encoding="utf-8")
