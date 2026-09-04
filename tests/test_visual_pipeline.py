@@ -8,10 +8,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class VisualPipelineTests(unittest.TestCase):
     def test_gop_mode_cannot_keep_an_unbuffered_4k_default(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertIn("uint64_t best_area = 0", boot)
-        self.assertIn("found_budget_mode", boot)
+        # Valida o comportamento, não nomes locais de variáveis do bootloader.
+        self.assertIn("choose_high_density_gop_mode", boot)
         self.assertIn("HorizontalResolution <= 1920", boot)
         self.assertIn("VerticalResolution <= 1200", boot)
+        self.assertIn("gop->SetMode", boot)
+        self.assertIn("PixelFormat == PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR", boot)
 
     def test_runtime_uses_real_frame_time_and_not_cpu_dependent_spin_delay(self):
         runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
@@ -78,13 +80,10 @@ class VisualPipelineTests(unittest.TestCase):
         dock = (ROOT / "kernel/src/baken_ui_oop.sotlas").read_text(encoding="utf-8")
         windows = (ROOT / "kernel/src/window_manager.sotlas").read_text(encoding="utf-8")
 
-        # Firmware escolhe o modo antes do handoff; não é apenas um helper órfão.
         self.assertIn("choose_high_density_gop_mode(gop, bs);", boot)
-        # Efeitos otimizados são chamados pelo material e pelo frame do shell.
         self.assertIn("baken_runtime_init_assets();", main)
         self.assertIn("baken_runtime_run(", main)
         self.assertIn("bakenfx_draw_desktop_background", shell)
-        # O dt medido alcança as molas do dock e o installer é despachado pelo WM.
         self.assertIn("desktop_shell_update(SHELL.frame_delta)", shell)
         self.assertIn("dock_update(&mut MAIN_DOCK, dt", shell)
         self.assertIn("spring_update(&mut (*dock).item_springs", dock)
