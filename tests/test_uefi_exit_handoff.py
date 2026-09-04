@@ -21,10 +21,16 @@ class UefiExitHandoffTests(unittest.TestCase):
 
     def test_retry_contract_handles_map_key_changes(self):
         text = HANDOFF.read_text(encoding="utf-8")
-        self.assertIn("status == EFI_INVALID_PARAMETER", text)
         self.assertIn("BAKEN_UEFI_EXIT_MAX_ATTEMPTS", text)
         self.assertIn("baken_refresh_final_memory_map", text)
         self.assertIn("exit_boot_services(image_handle, state->map_key)", text)
+        # Qualquer status diferente de INVALID_PARAMETER encerra; quando é
+        # INVALID_PARAMETER o fluxo cai no fim do loop e refaz GetMemoryMap.
+        self.assertIn("if (status != EFI_INVALID_PARAMETER)", text)
+        self.assertRegex(
+            text,
+            r"if \(status != EFI_INVALID_PARAMETER\) \{\s*return status;\s*\}.*?Map key mudou",
+        )
 
     def test_no_boot_service_call_is_inserted_between_final_map_and_exit(self):
         text = HANDOFF.read_text(encoding="utf-8")
@@ -33,7 +39,6 @@ class UefiExitHandoffTests(unittest.TestCase):
         start = text.index(marker)
         end = text.index(exit_call, start)
         between = text[start:end]
-        # Allocation/free in this interval would invalidate the freshly acquired key.
         self.assertNotIn("allocate_pool(", between)
         self.assertNotIn("free_pool(", between)
         self.assertNotIn("Stall(", between)
@@ -41,8 +46,6 @@ class UefiExitHandoffTests(unittest.TestCase):
 
     def test_cutover_helper_remains_staged_not_active(self):
         bootloader = BOOTLOADER.read_text(encoding="utf-8")
-        # Current boot still enters kernel before ExitBootServices. This guardrail
-        # must be inverted only when all UEFI runtime bridges are removed.
         self.assertNotIn("baken_exit_boot_services_final(", bootloader)
         self.assertIn("baken_kernel_main(&boot_info);", bootloader)
 
