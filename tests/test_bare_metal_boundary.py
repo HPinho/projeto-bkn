@@ -68,6 +68,23 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(field=field):
                 self.assertIn(field, main)
 
+    def test_bootloader_populates_real_v2_platform_metadata(self):
+        boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
+        required = [
+            "capture_memory_map",
+            "EFI_BUFFER_TOO_SMALL",
+            "GetMemoryMap",
+            "memory_descriptor_size",
+            "memory_descriptor_version",
+            "find_acpi_rsdp",
+            "BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID",
+            "BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID",
+            "boot_info.version = BAKEN_BOOT_INFO_VERSION",
+        ]
+        for token in required:
+            with self.subTest(token=token):
+                self.assertIn(token, boot)
+
     def test_compiler_remains_host_tool_not_ui_runtime(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
         forbidden = {
