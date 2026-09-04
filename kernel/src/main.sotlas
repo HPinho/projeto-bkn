@@ -12,6 +12,7 @@ import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
+import kernel::memory::pmm_bitmap::*;
 import kernel::memory::vmm::*;
 import kernel::memory::memory_map_policy::*;
 import kernel::memory::direct_map::*;

@@ -26,9 +26,7 @@ class XhciRingTests(unittest.TestCase):
 
     def test_ring_requires_real_dma_buffer(self):
         text = RING.read_text(encoding="utf-8")
-        self.assertIn("if !buffer.valid", text)
-        self.assertIn("buffer.virtual_address == (null as *mut u8)", text)
-        self.assertIn("buffer.physical_address == 0", text)
+        self.assertIn("if !dma_buffer_cpu_owned(&buffer)", text)
         self.assertIn("buffer.size < required", text)
         self.assertIn("buffer.physical_address & (XHCI_RING_ALIGNMENT - 1)", text)
 

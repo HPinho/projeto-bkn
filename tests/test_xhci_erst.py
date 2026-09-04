@@ -34,9 +34,7 @@ class XhciErstTests(unittest.TestCase):
 
     def test_erst_requires_real_dma_segment(self):
         text = ERST.read_text(encoding="utf-8")
-        self.assertIn("if !segment.valid", text)
-        self.assertIn("segment.virtual_address == (null as *mut u8)", text)
-        self.assertIn("segment.physical_address == 0", text)
+        self.assertIn("if !dma_buffer_cpu_owned(&segment)", text)
         self.assertIn("segment.size < required_bytes", text)
 
     def test_erst_contract_does_not_program_runtime_registers(self):

@@ -1,0 +1,89 @@
+// Baken OS — bitmap físico sem heap para o PMM pós-cutover.
+//
+// O armazenamento é fornecido pelo chamador: este módulo não aloca, não toca
+// UEFI e não presume identidade entre endereço físico e virtual.
+
+module kernel::memory::pmm_bitmap;
+
+pub struct PmmBitmap {
+    pub storage: *mut u8;
+    pub byte_count: u64;
+    pub page_count: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn pmm_bitmap_invalid() -> PmmBitmap {
+    return PmmBitmap { storage: null as *mut u8, byte_count: 0, page_count: 0, valid: false };
+}
+
+@system
+pub fn pmm_bitmap_required_bytes(page_count: u64) -> u64 {
+    if page_count == 0 { return 0; }
+    let rounded = page_count + 7;
+    if rounded < page_count { return 0; }
+    return rounded / 8;
+}
+
+@system
+pub fn pmm_bitmap_make(storage: *mut u8, byte_count: u64, page_count: u64) -> PmmBitmap {
+    let required = pmm_bitmap_required_bytes(page_count);
+    if storage == (null as *mut u8) || required == 0 || byte_count < required {
+        return pmm_bitmap_invalid();
+    }
+    return PmmBitmap { storage: storage, byte_count: byte_count, page_count: page_count, valid: true };
+}
+
+@system
+pub fn pmm_bitmap_valid(bitmap: *const PmmBitmap) -> bool {
+    if bitmap == (null as *const PmmBitmap) { return false; }
+    unsafe {
+        return (*bitmap).valid && (*bitmap).storage != (null as *mut u8) &&
+            (*bitmap).page_count != 0 && (*bitmap).byte_count >= pmm_bitmap_required_bytes((*bitmap).page_count);
+    }
+}
+
+@system
+pub fn pmm_bitmap_test(bitmap: *const PmmBitmap, page: u64) -> bool {
+    if !pmm_bitmap_valid(bitmap) { return true; }
+    unsafe {
+        if page >= (*bitmap).page_count { return true; }
+        let byte_index = page / 8;
+        let mask: u8 = (1 as u8) << (page % 8);
+        return ((*bitmap).storage[byte_index] & mask) != 0;
+    }
+}
+
+@system
+pub fn pmm_bitmap_mark(bitmap: *mut PmmBitmap, page: u64, used: bool) -> bool {
+    if bitmap == (null as *mut PmmBitmap) || !pmm_bitmap_valid(bitmap as *const PmmBitmap) { return false; }
+    unsafe {
+        if page >= (*bitmap).page_count { return false; }
+        let byte_index = page / 8;
+        let mask: u8 = (1 as u8) << (page % 8);
+        if used { (*bitmap).storage[byte_index] = (*bitmap).storage[byte_index] | mask; }
+        else { (*bitmap).storage[byte_index] = (*bitmap).storage[byte_index] & !mask; }
+        return true;
+    }
+}
+
+// Retorna o primeiro intervalo contíguo livre; 0 é reservado como sentinela
+// para manter compatibilidade com APIs PMM que usam 0 como falha.
+@system
+pub fn pmm_bitmap_find_free_run(bitmap: *const PmmBitmap, count: u64) -> u64 {
+    if !pmm_bitmap_valid(bitmap) || count == 0 { return 0; }
+    unsafe {
+        let mut start: u64 = 1;
+        let mut run: u64 = 0;
+        let mut page: u64 = 1;
+        while page < (*bitmap).page_count {
+            if !pmm_bitmap_test(bitmap, page) {
+                if run == 0 { start = page; }
+                run += 1;
+                if run == count { return start; }
+            } else { run = 0; }
+            page += 1;
+        }
+    }
+    return 0;
+}

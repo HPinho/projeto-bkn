@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do contrato DMA fail-closed antes do cutover UEFI."""
+"""Guardrails do DMA físico pós-cutover, sem dependência UEFI."""
 
 from pathlib import Path
 import unittest
@@ -23,15 +23,37 @@ class DmaContractTests(unittest.TestCase):
         self.assertIn("virtual_address: *mut u8", text)
         self.assertIn("physical_address: u64", text)
         self.assertIn("alignment: u64", text)
+        self.assertIn("owner: u32", text)
+        self.assertIn("fence: u64", text)
         self.assertIn("valid: bool", text)
+        self.assertIn("pub fn dma_buffer_valid(buffer: *const DmaBuffer) -> bool", text)
 
-    def test_dma_allocator_is_fail_closed_before_pmm_allocator(self):
+    def test_dma_requires_active_pmm_and_vmm_before_exposing_memory(self):
         text = DMA.read_text(encoding="utf-8")
         self.assertIn("pub fn dma_allocator_available() -> bool", text)
-        self.assertIn("return false;", text)
+        self.assertIn("pmm_allocator_is_active()", text)
+        self.assertIn("vmm_is_active()", text)
+        self.assertIn("vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE", text)
         self.assertIn("if !pmm_inventory_is_valid()", text)
         self.assertIn("if !dma_allocator_available()", text)
-        self.assertIn("return dma_invalid_buffer();", text)
+        self.assertIn("pmm_alloc_pages_aligned(page_count, alignment)", text)
+        self.assertIn("direct_map_virtual_address(physical)", text)
+        self.assertIn("if rounded < size { return dma_invalid_buffer(); }", text)
+        self.assertIn("if !dma_buffer_valid(&buffer) { return dma_invalid_buffer(); }", text)
+        self.assertIn("valid: true", text)
+        self.assertIn("pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool", text)
+        self.assertIn("pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool", text)
+        self.assertIn("pub fn dma_release(buffer: *mut DmaBuffer) -> bool", text)
+        self.assertIn("pmm_free_pages_lifo((*buffer).physical_address, page_count)", text)
+
+    def test_dma_ownership_requires_a_matching_completion_fence(self):
+        text = DMA.read_text(encoding="utf-8")
+        self.assertIn("DMA_OWNER_CPU", text)
+        self.assertIn("DMA_OWNER_DEVICE", text)
+        self.assertIn("DMA_OWNER_COMPLETED", text)
+        self.assertIn("if (*buffer).fence != fence { return false; }", text)
+        self.assertIn("if !dma_buffer_cpu_owned(buffer as *const DmaBuffer)", text)
+        self.assertIn("if !dma_buffer_device_owned(buffer as *const DmaBuffer)", text)
 
     def test_dma_does_not_fabricate_memory_or_call_uefi(self):
         code = code_without_comments(DMA).lower()
@@ -47,7 +69,7 @@ class DmaContractTests(unittest.TestCase):
         self.assertIn("DMA_DEFAULT_ALIGNMENT: u64 = 4096", text)
         self.assertIn("(alignment & (alignment - 1)) == 0", text)
 
-    def test_main_keeps_dma_contract_disabled(self):
+    def test_main_registers_dma_without_allocating_from_hybrid_path(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::memory::dma::*;", text)
         self.assertIn("dma_allocator_available();", text)

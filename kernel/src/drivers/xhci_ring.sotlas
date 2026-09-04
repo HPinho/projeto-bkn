@@ -43,9 +43,9 @@ pub fn xhci_ring_invalid() -> XhciRing {
 
 @system
 pub fn xhci_ring_bind(buffer: DmaBuffer, trb_count: u32) -> XhciRing {
-    if !buffer.valid { return xhci_ring_invalid(); }
-    if buffer.virtual_address == (null as *mut u8) { return xhci_ring_invalid(); }
-    if buffer.physical_address == 0 { return xhci_ring_invalid(); }
+    // Não basta confiar no flag do chamador: valida alinhamento, tamanho e a
+    // relação físico→direct-map antes de expor memória a um controller xHCI.
+    if !dma_buffer_cpu_owned(&buffer) { return xhci_ring_invalid(); }
     if trb_count < XHCI_RING_MIN_TRBS || trb_count > XHCI_RING_MAX_TRBS {
         return xhci_ring_invalid();
     }

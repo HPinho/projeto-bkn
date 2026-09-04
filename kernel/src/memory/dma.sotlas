@@ -1,21 +1,29 @@
 // Baken OS — contrato de buffers DMA físicos.
 //
-// Nesta fase o PMM ainda é somente inventário e Boot Services continua ativo.
-// Portanto esta API existe para estabilizar a ABI dos drivers, mas falha
-// fechada: nenhum endereço físico/virtual é fabricado antes do cutover real.
+// A API só opera após o cutover: páginas vêm do PMM pós-ExitBootServices e a
+// CPU as acessa pelo direct-map já confirmado pelo VMM. Antes disso ela falha
+// fechada; nenhum endereço físico/virtual é fabricado.
 
 module kernel::memory::dma;
 
 import kernel::memory::pmm::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::memory::vmm::*;
+import kernel::memory::direct_map::*;
 
 pub const DMA_DEFAULT_ALIGNMENT: u64 = 4096;
 pub const DMA_MAX_ALIGNMENT: u64 = 2097152;
+pub const DMA_OWNER_CPU: u32 = 0;
+pub const DMA_OWNER_DEVICE: u32 = 1;
+pub const DMA_OWNER_COMPLETED: u32 = 2;
 
 pub struct DmaBuffer {
     pub virtual_address: *mut u8;
     pub physical_address: u64;
     pub size: u64;
     pub alignment: u64;
+    pub owner: u32;
+    pub fence: u64;
     pub valid: bool;
 }
 
@@ -26,6 +34,8 @@ pub fn dma_invalid_buffer() -> DmaBuffer {
         physical_address: 0,
         size: 0,
         alignment: 0,
+        owner: DMA_OWNER_CPU,
+        fence: 0,
         valid: false
     };
 }
@@ -37,10 +47,42 @@ pub fn dma_alignment_valid(alignment: u64) -> bool {
 }
 
 @system
+pub fn dma_buffer_valid(buffer: *const DmaBuffer) -> bool {
+    if buffer == (null as *const DmaBuffer) { return false; }
+    unsafe {
+        if !(*buffer).valid || (*buffer).physical_address == 0 ||
+           (*buffer).virtual_address == (null as *mut u8) || (*buffer).size == 0 {
+            return false;
+        }
+        if !dma_alignment_valid((*buffer).alignment) { return false; }
+        if (*buffer).owner != DMA_OWNER_CPU && (*buffer).owner != DMA_OWNER_DEVICE &&
+            (*buffer).owner != DMA_OWNER_COMPLETED { return false; }
+        if (*buffer).owner == DMA_OWNER_DEVICE && (*buffer).fence == 0 { return false; }
+        if ((*buffer).physical_address & ((*buffer).alignment - 1)) != 0 { return false; }
+        if ((*buffer).size % BAKEN_PAGE_SIZE) != 0 { return false; }
+        return direct_map_virtual_address((*buffer).physical_address) ==
+            ((*buffer).virtual_address as u64);
+    }
+}
+
+@system
+pub fn dma_buffer_cpu_owned(buffer: *const DmaBuffer) -> bool {
+    if !dma_buffer_valid(buffer) { return false; }
+    unsafe { return (*buffer).owner == DMA_OWNER_CPU || (*buffer).owner == DMA_OWNER_COMPLETED; }
+}
+
+@system
+pub fn dma_buffer_device_owned(buffer: *const DmaBuffer) -> bool {
+    if !dma_buffer_valid(buffer) { return false; }
+    unsafe { return (*buffer).owner == DMA_OWNER_DEVICE && (*buffer).fence != 0; }
+}
+
+@system
 pub fn dma_allocator_available() -> bool {
-    // Inventário PMM válido não equivale a ownership da RAM. Enquanto não
-    // existir allocator físico pós-ExitBootServices, DMA deve permanecer off.
-    return false;
+    // DMA só existe depois do cutover: ownership físico no PMM e direct-map
+    // ativo no VMM. Nenhuma ponte UEFI participa deste caminho.
+    return pmm_allocator_is_active() && vmm_is_active() &&
+        vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE;
 }
 
 @system
@@ -49,14 +91,66 @@ pub fn dma_alloc(size: u64, alignment: u64) -> DmaBuffer {
     if !pmm_inventory_is_valid() { return dma_invalid_buffer(); }
     if !dma_allocator_available() { return dma_invalid_buffer(); }
 
-    // Quando o PMM real estiver ativo, este ponto reservará páginas físicas,
-    // criará/validará o mapeamento virtual e só então retornará valid=true.
-    return dma_invalid_buffer();
+    let rounded = size + BAKEN_PAGE_SIZE - 1;
+    if rounded < size { return dma_invalid_buffer(); }
+    let page_count = rounded / BAKEN_PAGE_SIZE;
+    if page_count == 0 { return dma_invalid_buffer(); }
+    let physical = pmm_alloc_pages_aligned(page_count, alignment);
+    if physical == 0 { return dma_invalid_buffer(); }
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 { return dma_invalid_buffer(); }
+    let allocated_size = page_count * BAKEN_PAGE_SIZE;
+    if (allocated_size / BAKEN_PAGE_SIZE) != page_count { return dma_invalid_buffer(); }
+    let buffer = DmaBuffer {
+        virtual_address: virtual_address as *mut u8,
+        physical_address: physical,
+        size: allocated_size,
+        alignment: alignment,
+        owner: DMA_OWNER_CPU,
+        fence: 0,
+        valid: true
+    };
+    if !dma_buffer_valid(&buffer) { return dma_invalid_buffer(); }
+    return buffer;
 }
 
 @system
-pub fn dma_release(buffer: DmaBuffer) -> bool {
-    if !buffer.valid { return false; }
+pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
+    if buffer == (null as *mut DmaBuffer) || fence == 0 { return false; }
+    if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
+    unsafe {
+        (*buffer).owner = DMA_OWNER_DEVICE;
+        (*buffer).fence = fence;
+        return true;
+    }
+}
+
+// A conclusão deve trazer o mesmo fence submetido. Antes dela a memória não
+// pode ser reutilizada nem alterada pela CPU como buffer de transporte.
+@system
+pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
+    if buffer == (null as *mut DmaBuffer) || fence == 0 { return false; }
+    if !dma_buffer_device_owned(buffer as *const DmaBuffer) { return false; }
+    unsafe {
+        if (*buffer).fence != fence { return false; }
+        (*buffer).owner = DMA_OWNER_COMPLETED;
+        return true;
+    }
+}
+
+// O PMM bootstrap só aceita LIFO. A API invalida o descritor quando a liberação
+// é bem-sucedida, e recusa todo buffer ainda pertencente ao dispositivo.
+@system
+pub fn dma_release(buffer: *mut DmaBuffer) -> bool {
+    if buffer == (null as *mut DmaBuffer) { return false; }
+    if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
     if !dma_allocator_available() { return false; }
-    return false;
+    unsafe {
+        let page_count = (*buffer).size / BAKEN_PAGE_SIZE;
+        if page_count == 0 || !pmm_free_pages_lifo((*buffer).physical_address, page_count) {
+            return false;
+        }
+        (*buffer) = dma_invalid_buffer();
+        return true;
+    }
 }

@@ -131,7 +131,8 @@ pub fn post_cutover_activate_pmm(context: *const PostCutoverContext) -> bool {
     let memory_map = post_cutover_memory_map_virtual(context);
     if memory_map == (null as *const u8) { return false; }
     if !pmm_inventory_init(memory_map, context.memory_map_size as usize, context.memory_descriptor_size as usize) { return false; }
-    if !pmm_allocator_activate_after_exit_boot_services() || !pmm_allocator_is_active() { return false; }
+    if !pmm_allocator_activate_after_exit_boot_services() || !pmm_allocator_is_active() ||
+        !pmm_allocator_bitmap_is_active() { return false; }
     unsafe { POST_CUTOVER_PMM_ACTIVE = true; }
     return true;
 }

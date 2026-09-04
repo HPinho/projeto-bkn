@@ -4,18 +4,22 @@
 // a maior região EfiConventionalMemory já inventariada pelo PMM e fornece um
 // allocator monotônico de páginas para o primeiro estágio pós-cutover.
 //
-// É propositalmente simples: não há free-list/bitmap ainda. O objetivo é dar ao
-// VMM/DMA uma fonte física inicial segura depois que o firmware deixou de possuir
-// Boot Services. O allocator definitivo poderá substituir este bootstrap sem
-// mudar o contrato externo.
+// O primeiro estágio usa bitmaps fixos, fornecidos estaticamente pelo kernel.
+// Cada região cobre até 512 MiB; até oito regiões convencionais são aceitas,
+// sem heap e sem depender de estruturas UEFI após o cutover.
 
 module kernel::memory::pmm_allocator;
 
 import kernel::memory::pmm::*;
+import kernel::memory::pmm_bitmap::*;
 
 pub const PMM_ALLOCATOR_STATE_LOCKED: u32 = 0;
 pub const PMM_ALLOCATOR_STATE_ACTIVE: u32 = 1;
 pub const PMM_ALLOCATOR_STATE_EXHAUSTED: u32 = 2;
+pub const PMM_BOOTSTRAP_BITMAP_MAX_PAGES: u64 = 131072;
+pub const PMM_BOOTSTRAP_BITMAP_BYTES: u64 = 16384;
+pub const PMM_BOOTSTRAP_MAX_REGIONS: u64 = 8;
+pub const PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES: u64 = 131072;
 
 pub struct PmmAllocatorState {
     pub state: u32;
@@ -23,6 +27,11 @@ pub struct PmmAllocatorState {
     pub region_end: u64;
     pub next_page: u64;
     pub allocated_pages: u64;
+    pub last_base: u64;
+    pub last_previous_next: u64;
+    pub last_page_count: u64;
+    pub active_region_count: u64;
+    pub last_region_index: u64;
 }
 
 static mut PMM_ALLOCATOR: PmmAllocatorState = PmmAllocatorState {
@@ -30,8 +39,22 @@ static mut PMM_ALLOCATOR: PmmAllocatorState = PmmAllocatorState {
     region_base: 0,
     region_end: 0,
     next_page: 0,
-    allocated_pages: 0
+    allocated_pages: 0,
+    last_base: 0,
+    last_previous_next: 0,
+    last_page_count: 0,
+    active_region_count: 0,
+    last_region_index: 0
 };
+
+static mut PMM_REGION_BASES: [u64; PMM_BOOTSTRAP_MAX_REGIONS] = [0; PMM_BOOTSTRAP_MAX_REGIONS];
+static mut PMM_REGION_ENDS: [u64; PMM_BOOTSTRAP_MAX_REGIONS] = [0; PMM_BOOTSTRAP_MAX_REGIONS];
+static mut PMM_REGION_NEXT: [u64; PMM_BOOTSTRAP_MAX_REGIONS] = [0; PMM_BOOTSTRAP_MAX_REGIONS];
+static mut PMM_REGION_BITMAPS: [PmmBitmap; PMM_BOOTSTRAP_MAX_REGIONS] = [
+    PmmBitmap { storage: null as *mut u8, byte_count: 0, page_count: 0, valid: false };
+    PMM_BOOTSTRAP_MAX_REGIONS
+];
+static mut PMM_BOOTSTRAP_BITMAP_STORAGE: [u8; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES] = [0; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES];
 
 @system
 pub fn pmm_allocator_is_active() -> bool {
@@ -46,6 +69,47 @@ pub fn pmm_allocator_state() -> u32 {
 }
 
 @system
+pub fn pmm_allocator_bitmap_is_active() -> bool {
+    unsafe {
+        return PMM_ALLOCATOR.active_region_count != 0 &&
+            pmm_bitmap_valid(&PMM_REGION_BITMAPS[0]);
+    }
+}
+
+@system
+pub fn pmm_allocator_region_count() -> u64 {
+    unsafe { return PMM_ALLOCATOR.active_region_count; }
+}
+
+// Espelha as alocações visíveis no bitmap. A política de alocação ainda é
+// monotônica nesta fase; o bitmap dá uma fonte de verdade verificável para a
+// futura transição a free-runs multi-região.
+@system
+fn pmm_allocator_mark_pages(base: u64, count: u64, used: bool) -> bool {
+    if base == 0 || count == 0 { return false; }
+    unsafe {
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            if base >= PMM_REGION_BASES[region] && base < PMM_REGION_ENDS[region] {
+                let offset = base - PMM_REGION_BASES[region];
+                if (offset % BAKEN_PAGE_SIZE) != 0 { return false; }
+                let first = offset / BAKEN_PAGE_SIZE;
+                let last = first + count;
+                if last < first || last > PMM_REGION_BITMAPS[region].page_count { return false; }
+                let mut page = first;
+                while page < last {
+                    if !pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[region], page, used) { return false; }
+                    page += 1;
+                }
+                return true;
+            }
+            region += 1;
+        }
+        return false;
+    }
+}
+
+@system
 pub fn pmm_allocator_reset_locked() {
     unsafe {
         PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_LOCKED;
@@ -53,6 +117,19 @@ pub fn pmm_allocator_reset_locked() {
         PMM_ALLOCATOR.region_end = 0;
         PMM_ALLOCATOR.next_page = 0;
         PMM_ALLOCATOR.allocated_pages = 0;
+        PMM_ALLOCATOR.last_base = 0;
+        PMM_ALLOCATOR.last_previous_next = 0;
+        PMM_ALLOCATOR.last_page_count = 0;
+        PMM_ALLOCATOR.active_region_count = 0;
+        PMM_ALLOCATOR.last_region_index = 0;
+        let mut region: u64 = 0;
+        while region < PMM_BOOTSTRAP_MAX_REGIONS {
+            PMM_REGION_BASES[region] = 0;
+            PMM_REGION_ENDS[region] = 0;
+            PMM_REGION_NEXT[region] = 0;
+            PMM_REGION_BITMAPS[region] = pmm_bitmap_invalid();
+            region += 1;
+        }
     }
 }
 
@@ -63,39 +140,58 @@ pub fn pmm_allocator_reset_locked() {
 pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
     if !pmm_inventory_is_valid() { return false; }
 
-    let base = pmm_get_largest_conventional_base();
-    let pages = pmm_get_largest_conventional_pages();
-    if base == 0 || pages == 0 { return false; }
-
-    let byte_count = pages * BAKEN_PAGE_SIZE;
-    let end = base + byte_count;
-    if end <= base { return false; }
-
     unsafe {
+        pmm_allocator_reset_locked();
+        let mut storage_index: u64 = 0;
+        while storage_index < PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES {
+            PMM_BOOTSTRAP_BITMAP_STORAGE[storage_index] = 0;
+            storage_index += 1;
+        }
+        let mut source_index: u64 = 0;
+        let mut slot: u64 = 0;
+        while slot < PMM_BOOTSTRAP_MAX_REGIONS {
+            let source = pmm_get_conventional_region(source_index);
+            if !source.valid { break; }
+            source_index += 1;
+            if source.base == 0 || source.page_count < 2 { continue; }
+            let tracked_pages = if source.page_count > PMM_BOOTSTRAP_BITMAP_MAX_PAGES {
+                PMM_BOOTSTRAP_BITMAP_MAX_PAGES
+            } else { source.page_count };
+            let byte_count = tracked_pages * BAKEN_PAGE_SIZE;
+            let end = source.base + byte_count;
+            if tracked_pages < 2 || end <= source.base { continue; }
+            let storage_offset = slot * PMM_BOOTSTRAP_BITMAP_BYTES;
+            PMM_REGION_BITMAPS[slot] = pmm_bitmap_make(
+                &mut PMM_BOOTSTRAP_BITMAP_STORAGE[storage_offset],
+                PMM_BOOTSTRAP_BITMAP_BYTES,
+                tracked_pages
+            );
+            if !pmm_bitmap_valid(&PMM_REGION_BITMAPS[slot]) { return false; }
+            // Página zero de cada região permanece reservada como sentinela.
+            if !pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], 0, true) { return false; }
+            PMM_REGION_BASES[slot] = source.base;
+            PMM_REGION_ENDS[slot] = end;
+            PMM_REGION_NEXT[slot] = source.base + BAKEN_PAGE_SIZE;
+            slot += 1;
+        }
+        if slot == 0 { return false; }
         PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_ACTIVE;
-        PMM_ALLOCATOR.region_base = base;
-        PMM_ALLOCATOR.region_end = end;
-        PMM_ALLOCATOR.next_page = base;
+        PMM_ALLOCATOR.region_base = PMM_REGION_BASES[0];
+        PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[0];
+        PMM_ALLOCATOR.next_page = PMM_REGION_NEXT[0];
         PMM_ALLOCATOR.allocated_pages = 0;
+        PMM_ALLOCATOR.last_base = 0;
+        PMM_ALLOCATOR.last_previous_next = 0;
+        PMM_ALLOCATOR.last_page_count = 0;
+        PMM_ALLOCATOR.active_region_count = slot;
+        PMM_ALLOCATOR.last_region_index = 0;
     }
     return true;
 }
 
 @system
 pub fn pmm_alloc_page() -> u64 {
-    unsafe {
-        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
-        if PMM_ALLOCATOR.next_page == 0 { return 0; }
-        if PMM_ALLOCATOR.next_page + BAKEN_PAGE_SIZE > PMM_ALLOCATOR.region_end {
-            PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
-            return 0;
-        }
-
-        let page = PMM_ALLOCATOR.next_page;
-        PMM_ALLOCATOR.next_page += BAKEN_PAGE_SIZE;
-        PMM_ALLOCATOR.allocated_pages += 1;
-        return page;
-    }
+    return pmm_alloc_pages(1);
 }
 
 @system
@@ -107,16 +203,92 @@ pub fn pmm_alloc_pages(count: u64) -> u64 {
 
         let bytes = count * BAKEN_PAGE_SIZE;
         if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
-        let end = PMM_ALLOCATOR.next_page + bytes;
-        if end < PMM_ALLOCATOR.next_page || end > PMM_ALLOCATOR.region_end {
-            PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
-            return 0;
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            let base = PMM_REGION_NEXT[region];
+            let end = base + bytes;
+            if base != 0 && end >= base && end <= PMM_REGION_ENDS[region] {
+                if !pmm_allocator_mark_pages(base, count, true) { return 0; }
+                PMM_REGION_NEXT[region] = end;
+                PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
+                PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
+                PMM_ALLOCATOR.next_page = end;
+                PMM_ALLOCATOR.allocated_pages += count;
+                PMM_ALLOCATOR.last_base = base;
+                PMM_ALLOCATOR.last_previous_next = base;
+                PMM_ALLOCATOR.last_page_count = count;
+                PMM_ALLOCATOR.last_region_index = region;
+                return base;
+            }
+            region += 1;
         }
+        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
+        return 0;
+    }
+}
 
-        let base = PMM_ALLOCATOR.next_page;
-        PMM_ALLOCATOR.next_page = end;
-        PMM_ALLOCATOR.allocated_pages += count;
-        return base;
+// Reserva contígua para consumidores físicos (DMA/page tables). O bootstrap é
+// monotônico, portanto o padding de alinhamento é consumido de propósito e
+// nunca devolvido ao firmware depois de ExitBootServices.
+@system
+pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64 {
+    if count == 0 || alignment < BAKEN_PAGE_SIZE { return 0; }
+    if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 {
+        return 0;
+    }
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+        let bytes = count * BAKEN_PAGE_SIZE;
+        if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            let previous_next = PMM_REGION_NEXT[region];
+            let aligned = (previous_next + alignment - 1) & ~(alignment - 1);
+            if aligned < previous_next { region += 1; continue; }
+            let end = aligned + bytes;
+            if end >= aligned && end <= PMM_REGION_ENDS[region] {
+                if !pmm_allocator_mark_pages(aligned, count, true) { return 0; }
+                PMM_REGION_NEXT[region] = end;
+                PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
+                PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
+                PMM_ALLOCATOR.next_page = end;
+                PMM_ALLOCATOR.allocated_pages += count;
+                PMM_ALLOCATOR.last_base = aligned;
+                PMM_ALLOCATOR.last_previous_next = previous_next;
+                PMM_ALLOCATOR.last_page_count = count;
+                PMM_ALLOCATOR.last_region_index = region;
+                return aligned;
+            }
+            region += 1;
+        }
+        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
+        return 0;
+    }
+}
+
+// Liberação LIFO: segura para arenas de bootstrap e impede reutilizar uma
+// alocação no meio da região. Free-list/bitmap arbitrário virá com ownership
+// de drivers e fences DMA.
+@system
+pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool {
+    if base == 0 || count == 0 { return false; }
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return false; }
+        if base != PMM_ALLOCATOR.last_base || count != PMM_ALLOCATOR.last_page_count {
+            return false;
+        }
+        if PMM_ALLOCATOR.allocated_pages < count { return false; }
+        if !pmm_allocator_mark_pages(base, count, false) { return false; }
+        let region = PMM_ALLOCATOR.last_region_index;
+        if region >= PMM_ALLOCATOR.active_region_count { return false; }
+        PMM_REGION_NEXT[region] = PMM_ALLOCATOR.last_previous_next;
+        PMM_ALLOCATOR.next_page = PMM_ALLOCATOR.last_previous_next;
+        PMM_ALLOCATOR.allocated_pages -= count;
+        PMM_ALLOCATOR.last_base = 0;
+        PMM_ALLOCATOR.last_previous_next = 0;
+        PMM_ALLOCATOR.last_page_count = 0;
+        PMM_ALLOCATOR.last_region_index = 0;
+        return true;
     }
 }
 

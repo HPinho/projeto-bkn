@@ -23,6 +23,14 @@ pub struct EfiMemoryDescriptor {
     pub attribute: u64;
 }
 
+// Região física normalizada. Ela não expõe descritores UEFI ao restante do
+// kernel e permanece válida enquanto o buffer do mapa final existir.
+pub struct PmmPhysicalRegion {
+    pub base: u64;
+    pub page_count: u64;
+    pub valid: bool;
+}
+
 pub struct PmmInventory {
     pub descriptor_count: u64;
     pub total_pages: u64;
@@ -33,6 +41,9 @@ pub struct PmmInventory {
     pub largest_conventional_base: u64;
     pub largest_conventional_pages: u64;
     pub highest_physical_address: u64;
+    pub memory_map_base: *const u8;
+    pub memory_map_size: usize;
+    pub descriptor_size: usize;
     pub valid: bool;
 }
 
@@ -46,8 +57,16 @@ static mut PMM_INVENTORY: PmmInventory = PmmInventory {
     largest_conventional_base: 0,
     largest_conventional_pages: 0,
     highest_physical_address: 0,
+    memory_map_base: null as *const u8,
+    memory_map_size: 0,
+    descriptor_size: 0,
     valid: false
 };
+
+@system
+pub fn pmm_physical_region_invalid() -> PmmPhysicalRegion {
+    return PmmPhysicalRegion { base: 0, page_count: 0, valid: false };
+}
 
 @system
 pub fn pmm_inventory_init(memory_map_base: *const u8,
@@ -68,6 +87,9 @@ pub fn pmm_inventory_init(memory_map_base: *const u8,
         PMM_INVENTORY.largest_conventional_base = 0;
         PMM_INVENTORY.largest_conventional_pages = 0;
         PMM_INVENTORY.highest_physical_address = 0;
+        PMM_INVENTORY.memory_map_base = memory_map_base;
+        PMM_INVENTORY.memory_map_size = memory_map_size;
+        PMM_INVENTORY.descriptor_size = descriptor_size;
         PMM_INVENTORY.valid = false;
 
         let mut offset: usize = 0;
@@ -140,4 +162,60 @@ pub fn pmm_get_largest_conventional_pages() -> u64 {
 @system
 pub fn pmm_get_highest_physical_address() -> u64 {
     unsafe { return PMM_INVENTORY.highest_physical_address; }
+}
+
+// Enumeração determinística das regiões EfiConventionalMemory do mapa final.
+// O índice é ordinal entre regiões convencionais, não entre todos os descritores.
+// Isso prepara o PMM multi-região sem permitir que o bootstrap use memória que
+// não foi explicitamente inventariada após ExitBootServices.
+@system
+pub fn pmm_get_conventional_region(index: u64) -> PmmPhysicalRegion {
+    unsafe {
+        if !PMM_INVENTORY.valid || PMM_INVENTORY.memory_map_base == (null as *const u8) ||
+            PMM_INVENTORY.descriptor_size == 0 { return pmm_physical_region_invalid(); }
+        let mut ordinal: u64 = 0;
+        let mut offset: usize = 0;
+        while (offset + PMM_INVENTORY.descriptor_size) <= PMM_INVENTORY.memory_map_size {
+            let address: usize = (PMM_INVENTORY.memory_map_base as usize) + offset;
+            let descriptor = address as *const EfiMemoryDescriptor;
+            if descriptor.type_code == EFI_CONVENTIONAL_MEMORY && descriptor.number_of_pages != 0 {
+                if ordinal == index {
+                    return PmmPhysicalRegion {
+                        base: descriptor.physical_start,
+                        page_count: descriptor.number_of_pages,
+                        valid: true
+                    };
+                }
+                ordinal += 1;
+            }
+            offset += PMM_INVENTORY.descriptor_size;
+        }
+    }
+    return pmm_physical_region_invalid();
+}
+
+// Confere se um intervalo inteiro pertence a uma única região convencional.
+// Drivers usam esta função antes de programar endereços físicos em hardware;
+// intervalos que atravessam descritores ou sofrem overflow são sempre recusados.
+@system
+pub fn pmm_range_is_conventional(base: u64, page_count: u64) -> bool {
+    if base == 0 || page_count == 0 || (base % BAKEN_PAGE_SIZE) != 0 { return false; }
+    let bytes = page_count * BAKEN_PAGE_SIZE;
+    if (bytes / BAKEN_PAGE_SIZE) != page_count { return false; }
+    let end = base + bytes;
+    if end <= base { return false; }
+
+    let mut index: u64 = 0;
+    while true {
+        let region = pmm_get_conventional_region(index);
+        if !region.valid { return false; }
+        let region_bytes = region.page_count * BAKEN_PAGE_SIZE;
+        if (region_bytes / BAKEN_PAGE_SIZE) != region.page_count { return false; }
+        let region_end = region.base + region_bytes;
+        if region_end > region.base && base >= region.base && end <= region_end {
+            return true;
+        }
+        index += 1;
+    }
+    return false;
 }
