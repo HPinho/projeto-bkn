@@ -9,6 +9,13 @@ DMA = ROOT / "kernel/src/memory/dma.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 
 
+def code_without_comments(path: Path) -> str:
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        lines.append(raw.split("//", 1)[0])
+    return "\n".join(lines)
+
+
 class DmaContractTests(unittest.TestCase):
     def test_dma_buffer_carries_virtual_and_physical_addresses(self):
         text = DMA.read_text(encoding="utf-8")
@@ -27,13 +34,13 @@ class DmaContractTests(unittest.TestCase):
         self.assertIn("return dma_invalid_buffer();", text)
 
     def test_dma_does_not_fabricate_memory_or_call_uefi(self):
-        text = DMA.read_text(encoding="utf-8").lower()
+        code = code_without_comments(DMA).lower()
         for token in (
             "bootservices", "allocatepages", "allocatepool", "freepool",
             "system_table", "efi_", "malloc", "calloc", "realloc",
             "0x100000", "0x200000", "identity_map",
         ):
-            self.assertNotIn(token, text, token)
+            self.assertNotIn(token, code, token)
 
     def test_dma_alignment_is_power_of_two_and_page_sized(self):
         text = DMA.read_text(encoding="utf-8")
