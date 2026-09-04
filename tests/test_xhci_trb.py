@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails dos construtores puros de Command TRBs xHCI."""
+"""Guardrails dos construtores puros de Command/Link TRBs xHCI."""
 
 from pathlib import Path
 import unittest
@@ -11,6 +11,7 @@ TRB = ROOT / "kernel/src/drivers/xhci_trb.sotlas"
 class XhciTrbTests(unittest.TestCase):
     def test_command_type_ids_match_xhci_contract(self):
         text = TRB.read_text(encoding="utf-8")
+        self.assertIn("XHCI_TRB_TYPE_LINK: u32 = 6", text)
         self.assertIn("XHCI_TRB_TYPE_ENABLE_SLOT: u32 = 9", text)
         self.assertIn("XHCI_TRB_TYPE_DISABLE_SLOT: u32 = 10", text)
         self.assertIn("XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11", text)
@@ -20,6 +21,7 @@ class XhciTrbTests(unittest.TestCase):
     def test_type_cycle_slot_and_flag_bitfields_are_explicit(self):
         text = TRB.read_text(encoding="utf-8")
         self.assertIn("XHCI_TRB_CYCLE_BIT: u32 = 1", text)
+        self.assertIn("XHCI_TRB_TOGGLE_CYCLE_BIT: u32 = 1 << 1", text)
         self.assertIn("XHCI_TRB_BSR_OR_DC_BIT: u32 = 1 << 9", text)
         self.assertIn("XHCI_TRB_TYPE_SHIFT: u32 = 10", text)
         self.assertIn("XHCI_TRB_SLOT_TYPE_SHIFT: u32 = 16", text)
@@ -28,6 +30,13 @@ class XhciTrbTests(unittest.TestCase):
     def test_input_context_pointer_is_16_byte_aligned(self):
         text = TRB.read_text(encoding="utf-8")
         self.assertGreaterEqual(text.count("input_context_physical & 0xFFFFFFFFFFFFFFF0"), 2)
+
+    def test_link_pointer_is_16_byte_aligned_and_toggle_is_optional(self):
+        text = TRB.read_text(encoding="utf-8")
+        self.assertIn("pub fn xhci_trb_link", text)
+        self.assertIn("next_segment_physical & 0xFFFFFFFFFFFFFFF0", text)
+        self.assertIn("if toggle_cycle", text)
+        self.assertIn("XHCI_TRB_TOGGLE_CYCLE_BIT", text)
 
     def test_trb_constructors_have_no_submission_side_effects(self):
         text = TRB.read_text(encoding="utf-8").lower()
