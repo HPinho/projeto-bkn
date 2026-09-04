@@ -53,13 +53,16 @@ jobs:
           OVMF_VARS="${OVMF_CODE/CODE/VARS}"
           test -f "$OVMF_VARS"
           cp "$OVMF_VARS" build/OVMF_VARS.fd
+          rm -f build/qemu-serial.log
           set +e
           timeout 15s qemu-system-x86_64 \
             -machine q35 -m 512M -no-reboot \
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
             -cdrom build/baken_os.iso \
-            -display none -serial stdio
+            -display none -serial file:build/qemu-serial.log
           status=$?
           set -e
+          cat build/qemu-serial.log || true
           test "$status" -eq 124
+          grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
