@@ -19,9 +19,15 @@ class PageTableWriterTests(unittest.TestCase):
         self.assertIn("while index < X86_PAGE_TABLE_ENTRY_COUNT", self.writer)
         self.assertIn("index >= X86_PAGE_TABLE_ENTRY_COUNT", self.writer)
 
+    def test_writer_accepts_metadata_by_value(self):
+        self.assertIn("pub fn page_table_page_writable(page: PageTablePage)", self.writer)
+        self.assertIn("pub fn page_table_zero(page: PageTablePage)", self.writer)
+        self.assertIn("pub fn page_table_write_entry(page: PageTablePage", self.writer)
+        self.assertNotIn("*const PageTablePage", self.writer)
+
     def test_writer_uses_virtual_address_only_for_dereference(self):
-        self.assertIn("(*page).virtual_address as *mut u64", self.writer)
-        self.assertIn("(*page).virtual_address as usize", self.writer)
+        self.assertIn("page.virtual_address as *mut u64", self.writer)
+        self.assertIn("page.virtual_address as usize", self.writer)
         code = "\n".join(line.split("//", 1)[0] for line in self.writer.splitlines())
         for token in (
             "physical_address as *mut", "physical_address as usize",
@@ -30,8 +36,8 @@ class PageTableWriterTests(unittest.TestCase):
             self.assertNotIn(token, code)
 
     def test_writer_validates_both_physical_and_virtual_alignment(self):
-        self.assertIn("x86_page_aligned((*page).physical_address)", self.writer)
-        self.assertIn("x86_page_aligned((*page).virtual_address)", self.writer)
+        self.assertIn("x86_page_aligned(page.physical_address)", self.writer)
+        self.assertIn("x86_page_aligned(page.virtual_address)", self.writer)
 
     def test_writer_does_not_activate_mmu_or_allocate(self):
         code = "\n".join(line.split("//", 1)[0] for line in self.writer.splitlines())
