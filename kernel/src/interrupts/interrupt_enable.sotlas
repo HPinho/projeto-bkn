@@ -1,7 +1,7 @@
-// Baken OS — porta fail-closed para habilitação de interrupções externas.
+// Baken OS — porta fail-closed para habilitação progressiva de interrupções.
 //
-// Esta função existe para centralizar a transição de IRQs mascarados para live.
-// Enquanto não for chamada pelo post-cutover, STI permanece totalmente inativo.
+// Ordem de bring-up: primeiro LAPIC timer; depois IRQ1 do teclado. IRQ12/mouse e
+// todas as demais fontes externas permanecem mascaradas até etapas próprias.
 
 module kernel::interrupts::interrupt_enable;
 
@@ -10,8 +10,11 @@ import kernel::interrupts::irq::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::lapic_timer::*;
+import kernel::interrupts::route::*;
+import kernel::drivers::i8042::*;
 
 static mut EXTERNAL_INTERRUPTS_ENABLED: bool = false;
+static mut KEYBOARD_IRQ_ENABLED: bool = false;
 
 @system
 pub fn interrupt_enable_timer_only() -> bool {
@@ -22,23 +25,80 @@ pub fn interrupt_enable_timer_only() -> bool {
     if !irq_idt_ready() || !irq_routes_ready() { return false; }
     if !lapic_timer_is_ready() { return false; }
 
-    // Mantemos teclado/mouse mascarados no IOAPIC. Só a fonte local do timer
-    // é aberta antes do STI, garantindo que a primeira IRQ live seja conhecida.
     x86_cli_raw();
     if !lapic_timer_unmask_periodic() {
         lapic_timer_mask();
         return false;
     }
-    unsafe { EXTERNAL_INTERRUPTS_ENABLED = true; }
+    unsafe {
+        EXTERNAL_INTERRUPTS_ENABLED = true;
+        KEYBOARD_IRQ_ENABLED = false;
+    }
+    x86_sti_raw();
+    return true;
+}
+
+// Habilita IRQ1 em duas camadas: bit IRQ1 no config byte do i8042 e rota do
+// teclado no IOAPIC. IRQ12 permanece desligada tanto no i8042 quanto no IOAPIC.
+@system
+pub fn interrupt_enable_keyboard_after_timer() -> bool {
+    unsafe {
+        if !EXTERNAL_INTERRUPTS_ENABLED || KEYBOARD_IRQ_ENABLED { return false; }
+    }
+    if !lapic_timer_is_ready() || !irq_idt_ready() || !irq_routes_ready() { return false; }
+
+    // O timer já está live. Suspende interrupções durante toda a transição do
+    // i8042 + IOAPIC para que nenhum ISR observe o controlador pela metade.
+    x86_cli_raw();
+    if !i8042_initialize_polling() || !i8042_first_port_present() {
+        x86_sti_raw();
+        return false;
+    }
+
+    let keyboard = interrupt_route_keyboard(IRQ_VECTOR_KEYBOARD);
+    if !keyboard.valid {
+        x86_sti_raw();
+        return false;
+    }
+    let destination = lapic_id();
+
+    if !i8042_enable_keyboard_irq_only() || !i8042_keyboard_irq_enabled() || i8042_aux_irq_enabled() {
+        i8042_disable_native_irqs();
+        x86_sti_raw();
+        return false;
+    }
+    if !ioapic_program_route_unmasked(&keyboard, destination) {
+        i8042_disable_native_irqs();
+        ioapic_program_route_masked(&keyboard, destination);
+        x86_sti_raw();
+        return false;
+    }
+
+    unsafe { KEYBOARD_IRQ_ENABLED = true; }
     x86_sti_raw();
     return true;
 }
 
 @system
+pub fn keyboard_interrupt_enabled() -> bool {
+    unsafe { return KEYBOARD_IRQ_ENABLED; }
+}
+
+@system
 pub fn interrupt_disable_all() -> void {
     x86_cli_raw();
+    if irq_routes_ready() && ioapic_is_ready() && lapic_is_ready() {
+        let keyboard = interrupt_route_keyboard(IRQ_VECTOR_KEYBOARD);
+        if keyboard.valid {
+            ioapic_program_route_masked(&keyboard, lapic_id());
+        }
+    }
+    if i8042_native_irqs_enabled() { i8042_disable_native_irqs(); }
     lapic_timer_mask();
-    unsafe { EXTERNAL_INTERRUPTS_ENABLED = false; }
+    unsafe {
+        KEYBOARD_IRQ_ENABLED = false;
+        EXTERNAL_INTERRUPTS_ENABLED = false;
+    }
 }
 
 @system

@@ -46,6 +46,28 @@ class I8042RoutingTests(unittest.TestCase):
         self.assertIn("pub fn i8042_enable_native_irqs()", text)
         main = MAIN.read_text(encoding="utf-8")
         self.assertNotIn("i8042_enable_native_irqs(", main)
+        self.assertNotIn("i8042_enable_keyboard_irq_only(", main)
+
+    def test_keyboard_only_mode_sets_irq1_and_explicitly_keeps_aux_off(self):
+        text = I8042.read_text(encoding="utf-8")
+        self.assertIn("pub fn i8042_enable_keyboard_irq_only()", text)
+        body = text.split("pub fn i8042_enable_keyboard_irq_only()", 1)[1].split(
+            "pub fn i8042_enable_native_irqs()", 1
+        )[0]
+        self.assertIn("i8042_set_native_irq_mask(true, false)", body)
+        self.assertIn("pub fn i8042_keyboard_irq_enabled()", text)
+        self.assertIn("pub fn i8042_aux_irq_enabled()", text)
+
+    def test_irq_mask_rewrites_both_bits_from_scratch(self):
+        text = I8042.read_text(encoding="utf-8")
+        body = text.split("fn i8042_set_native_irq_mask", 1)[1].split(
+            "pub fn i8042_enable_keyboard_irq_only", 1
+        )[0]
+        self.assertIn("config = config & 0xFC", body)
+        self.assertIn("if keyboard { config = config | 0x01; }", body)
+        self.assertIn("if aux { config = config | 0x02; }", body)
+        self.assertIn("I8042_KEYBOARD_IRQ_ENABLED = keyboard", body)
+        self.assertIn("I8042_AUX_IRQ_ENABLED = aux", body)
 
     def test_mouse_consumes_only_aux_queue(self):
         text = MOUSE.read_text(encoding="utf-8")
