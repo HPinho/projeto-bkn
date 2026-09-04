@@ -9,12 +9,17 @@ HID = ROOT / "kernel/src/drivers/xhci_hid_context.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 
 
+def code_only(text: str) -> str:
+    return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+
+
 class XhciHidContextTests(unittest.TestCase):
     def test_dci_is_derived_from_interrupt_in_endpoint_number(self):
         text = HID.read_text(encoding="utf-8")
         self.assertIn("USB_ENDPOINT_DIRECTION_IN", text)
         self.assertIn("((endpoint as u16) * 2) + 1", text)
         self.assertIn("XHCI_HID_MAX_CONTEXT_INDEX", text)
+        self.assertIn("xhci_hid_context_compute_dci(endpoint_address)", text)
 
     def test_hid_ring_is_pmm_dma_backed_and_linked(self):
         text = HID.read_text(encoding="utf-8")
@@ -37,7 +42,7 @@ class XhciHidContextTests(unittest.TestCase):
         self.assertIn("XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH", text)
 
     def test_stage_has_no_command_or_doorbell_side_effects(self):
-        text = HID.read_text(encoding="utf-8").lower()
+        text = code_only(HID.read_text(encoding="utf-8")).lower()
         self.assertNotIn("configure_endpoint", text)
         self.assertNotIn("xhci_command_submit", text)
         self.assertNotIn("doorbell", text)
