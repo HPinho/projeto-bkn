@@ -30,15 +30,16 @@ Critério de status:
 | ACPI pós-CR3 | ✅ | 100% | 100% | `BAKEN:STEP=A` observado |
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
-| DMA real | ⚙️ | 82% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas, buffers de descriptors, ring HID e buffer de reports estão implementados; DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 86% | 22% | QEMU validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Enumeração, Configure Endpoint, SET_CONFIGURATION, Interrupt IN report producer e parser Boot Keyboard/Mouse já existem; faltam integração ativa pós-`STEP=N`, ciclo contínuo de reports e validação runtime |
+| DMA real | ⚙️ | 86% | 80% | PMM-backed DMA, ownership/shared state, DCBAA, Command Ring, Event Ring, ERST e programação real do xHC foram observados até `STEP=D/N`; ainda faltam DMA de transferências USB/HID e storage |
+| xHCI controller | ✅/⚙️ | 95% | 90% | QEMU observou `STEP=8/g/r/s/p/h/j/9/q/w/X/D/N`, incluindo reset, runtime DMA, Bus Master, Run/Stop, Doorbell 0 e Command Completion Event real |
+| xHCI → USB HID | ⚙️ | 88% | 35% | Controller está provado até `STEP=N`; CI agora anexa `usb-kbd` real ao `qemu-xhci`. Port/slot/address/descriptors/configuração/HID já têm fundações; Evaluate Context de EP0 foi adicionado para o fluxo correto de MPS0. Falta ativação incremental e prova runtime |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~80%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e a pilha USB já chega estruturalmente ao parsing de reports HID. O gate runtime imediato continua no controller entre `STEP=8` e `STEP=9`, instrumentado com `h/j` |
+| **Fundação bare-metal geral** | ⚙️ | **~82%** | **~69%** | CPU/memória/ACPI/IRQ e xHCI Command/DMA rodam pós-EBS. O gate imediato mudou de bring-up do controller para enumeração de um dispositivo USB real |
 
 ## Estado xHCI atual
 
-Último smoke QEMU confirmado:
+Smoke QEMU confirmado no CI #590:
 
 ```text
 BAKEN:STEP=B
@@ -60,6 +61,21 @@ BAKEN:STEP=5
 BAKEN:STEP=6
 BAKEN:STEP=7
 BAKEN:STEP=8
+BAKEN:STEP=g
+BAKEN:HEX=1:08001040
+BAKEN:HEX=2:0000000F
+BAKEN:HEX=C:00087001
+BAKEN:STEP=r
+BAKEN:STEP=s
+BAKEN:STEP=p
+BAKEN:STEP=h
+BAKEN:STEP=j
+BAKEN:STEP=9
+BAKEN:STEP=q
+BAKEN:STEP=w
+BAKEN:STEP=X
+BAKEN:STEP=D
+BAKEN:STEP=N
 ```
 
 Isso prova em runtime:
@@ -70,19 +86,32 @@ STEP=5  xHCI PCI candidate encontrado              ✅
 STEP=6  BAR/MMIO válido                            ✅
 STEP=7  PCI Memory Space habilitado                ✅
 STEP=8  capability/version válidos                 ✅
-STEP=h  HCSPARAMS1 / MaxSlots / MaxPorts válidos  ⬜ novo diagnóstico
-STEP=j  entrada no Legacy handoff                  ⬜ novo diagnóstico
-STEP=9  legacy ownership concluído                 ⚙️ em investigação
-STEP=q  page size 4 KiB suportado                  ⬜ aguardando gate anterior
-STEP=w  halt/HCRST/CNR concluídos                  ⬜ aguardando gate anterior
-STEP=X  controller pronto                          ⬜ aguardando gate anterior
-STEP=D  DCBAA/CRCR/ERST/ERDP programados           ⬜ aguardando gate anterior
-STEP=N  No-op Command Completion real              ⬜ aguardando gate anterior
+STEP=g  operational MMIO mapeado                   ✅
+STEP=r  capability parameters lidos                ✅
+STEP=s  MaxSlots válido                            ✅
+STEP=p  MaxPorts válido                            ✅
+STEP=h  HCSPARAMS estruturais válidos              ✅
+STEP=j  entrada no Legacy handoff                  ✅
+STEP=9  legacy ownership concluído                 ✅
+STEP=q  page size 4 KiB suportado                  ✅
+STEP=w  halt/HCRST/CNR concluídos                  ✅
+STEP=X  controller pronto                          ✅
+STEP=D  DCBAA/CRCR/ERST/ERDP programados           ✅
+STEP=N  No-op Command Completion real              ✅
 ```
 
-O smoke que validou o fallback anterior ainda parou em `STEP=8`. Como `STEP=8` ocorre antes da validação de `HCSPARAMS1`, os subcheckpoints `h` e `j` distinguem falha em parâmetros estruturais do controller de falha real no Legacy Support capability.
+A correção que destravou `STEP=8 → g` tornou o mapper de page tables idempotente diante dos bits `Accessed/Dirty` modificados pela CPU, sem aceitar mudanças de endereço físico ou de política da PTE.
 
-Depois de `STEP=N`, a sequência já preparada é:
+## Próximo gate: dispositivo USB real
+
+O QEMU CI passa a anexar:
+
+```text
+-device qemu-xhci,id=xhci
+-device usb-kbd,bus=xhci.0
+```
+
+A sequência a validar incrementalmente é:
 
 ```text
 Supported Protocol
@@ -90,15 +119,17 @@ Supported Protocol
 → Enable Slot
 → Device/Input Context + EP0 ring
 → Address Device
-→ Setup/Data/Status Transfer TRBs
-→ produtor EP0 + Event Ring consumer
-→ GET_DESCRIPTOR(Device)
+→ GET_DESCRIPTOR(Device, primeiros 8 bytes)
+→ obter bMaxPacketSize0
+→ Evaluate Context do EP0 quando necessário
+→ GET_DESCRIPTOR(Device, 18 bytes)
 → GET_DESCRIPTOR(Configuration)
 → parser Interface/HID/Endpoint
 → seleção HID Boot keyboard/mouse + Interrupt IN
 → HID Endpoint Context + Transfer Ring dedicada
 → Configure Endpoint
 → SET_CONFIGURATION
+→ SET_PROTOCOL(Boot) / SET_IDLE quando aplicável
 → HID Interrupt IN Normal TRB producer
 → Doorbell Slot/DCI
 → Transfer Event compartilhado
