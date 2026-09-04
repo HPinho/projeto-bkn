@@ -94,16 +94,15 @@ pub fn sotlas_x86_irq_dispatch(vector: u64) -> void {
         return;
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
-        // O i8042 é o único dono das portas 0x60/0x64. Drena e roteia bytes
-        // antes do EOI para não perder dados quando IRQ1 for desmascarada.
-        i8042_drain_output();
+        // ISR nunca inicializa/reconfigura o i8042. O caminho abaixo só drena
+        // bytes já prontos quando IRQ nativa foi previamente habilitada.
+        i8042_drain_irq_output();
         unsafe { IRQ_KEYBOARD_COUNT += 1; }
         lapic_eoi();
         return;
     }
     if vector == IRQ_VECTOR_MOUSE as u64 {
-        // IRQ12 usa o mesmo dreno: o status AUX decide qual fila recebe o byte.
-        i8042_drain_output();
+        i8042_drain_irq_output();
         unsafe { IRQ_MOUSE_COUNT += 1; }
         lapic_eoi();
         return;
