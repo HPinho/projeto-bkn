@@ -1,7 +1,8 @@
 // Baken OS — contrato de rings xHCI sobre buffers DMA reais.
 //
-// Define a unidade TRB de 16 bytes e valida um buffer já fornecido pelo
-// allocator DMA. Não aloca memória, não escreve doorbells e não toca MMIO.
+// Define a unidade TRB de 16 bytes, valida um buffer já fornecido pelo
+// allocator DMA e mantém somente a semântica lógica do Producer Cycle State.
+// Não aloca memória, não escreve TRBs/doorbells e não toca MMIO.
 
 module kernel::drivers::xhci_ring;
 
@@ -11,6 +12,7 @@ pub const XHCI_TRB_SIZE: u64 = 16;
 pub const XHCI_RING_ALIGNMENT: u64 = 64;
 pub const XHCI_RING_MIN_TRBS: u32 = 16;
 pub const XHCI_RING_MAX_TRBS: u32 = 4096;
+pub const XHCI_RING_RESERVED_LINK_TRBS: u32 = 1;
 
 pub struct XhciTrb {
     pub parameter: u64;
@@ -72,5 +74,35 @@ pub fn xhci_ring_is_ready(ring: *const XhciRing) -> bool {
             (*ring).virtual_base != (null as *mut XhciTrb) &&
             (*ring).physical_base != 0 &&
             (*ring).trb_count >= XHCI_RING_MIN_TRBS;
+    }
+}
+
+@system
+pub fn xhci_ring_usable_trbs(ring: *const XhciRing) -> u32 {
+    if !xhci_ring_is_ready(ring) { return 0; }
+    unsafe {
+        if (*ring).trb_count <= XHCI_RING_RESERVED_LINK_TRBS { return 0; }
+        return (*ring).trb_count - XHCI_RING_RESERVED_LINK_TRBS;
+    }
+}
+
+// Avança apenas o cursor lógico. O último slot físico é reservado ao Link TRB.
+// Ao segui-lo, um ring de um segmento retorna ao início e alterna o Producer
+// Cycle State. Esta função não escreve nenhum TRB na memória.
+@system
+pub fn xhci_ring_advance_cursor(ring: *mut XhciRing) -> bool {
+    if ring == (null as *mut XhciRing) { return false; }
+    if !xhci_ring_is_ready(ring as *const XhciRing) { return false; }
+
+    unsafe {
+        let usable = (*ring).trb_count - XHCI_RING_RESERVED_LINK_TRBS;
+        if usable == 0 { return false; }
+
+        (*ring).enqueue_index += 1;
+        if (*ring).enqueue_index >= usable {
+            (*ring).enqueue_index = 0;
+            (*ring).cycle_state = !(*ring).cycle_state;
+        }
+        return true;
     }
 }
