@@ -37,7 +37,8 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/memory/dma.sotlas",
         "kernel/src/arch/x86_64/gdt.sotlas", "kernel/src/arch/x86_64/tss.sotlas",
         "kernel/src/arch/x86_64/idt.sotlas", "kernel/src/arch/x86_64/cpu.sotlas",
-        "kernel/src/arch/x86_64/timer.sotlas", "kernel/src/arch/x86_64/exceptions.sotlas",
+        "kernel/src/arch/x86_64/paging.sotlas", "kernel/src/arch/x86_64/timer.sotlas",
+        "kernel/src/arch/x86_64/exceptions.sotlas",
     }
 
     def test_sotlas_tree_contains_only_known_canonical_modules(self):
