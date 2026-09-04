@@ -21,6 +21,9 @@ pub struct XhciControllerCandidate {
     pub vendor_id: u16;
     pub device_id: u16;
     pub mmio_base: u64;
+    pub bar_is_64bit: bool;
+    pub bar_prefetchable: bool;
+    pub mmio_usable: bool;
     pub command_before_driver: u16;
     pub valid: bool;
 }
@@ -34,6 +37,9 @@ static mut XHCI_CANDIDATES: [XhciControllerCandidate; XHCI_MAX_CANDIDATES] = [
         vendor_id: 0,
         device_id: 0,
         mmio_base: 0,
+        bar_is_64bit: false,
+        bar_prefetchable: false,
+        mmio_usable: false,
         command_before_driver: 0,
         valid: false
     };
@@ -41,6 +47,7 @@ static mut XHCI_CANDIDATES: [XhciControllerCandidate; XHCI_MAX_CANDIDATES] = [
 ];
 
 static mut XHCI_CANDIDATE_COUNT: u32 = 0;
+static mut XHCI_USABLE_MMIO_COUNT: u32 = 0;
 
 @system
 fn xhci_is_candidate(dev: *const PciDevice) -> bool {
@@ -56,9 +63,13 @@ fn xhci_is_candidate(dev: *const PciDevice) -> bool {
 pub fn xhci_discovery_scan() -> u32 {
     unsafe {
         XHCI_CANDIDATE_COUNT = 0;
+        XHCI_USABLE_MMIO_COUNT = 0;
         for mut clear_index in 0..XHCI_MAX_CANDIDATES {
             XHCI_CANDIDATES[clear_index].valid = false;
             XHCI_CANDIDATES[clear_index].mmio_base = 0;
+            XHCI_CANDIDATES[clear_index].bar_is_64bit = false;
+            XHCI_CANDIDATES[clear_index].bar_prefetchable = false;
+            XHCI_CANDIDATES[clear_index].mmio_usable = false;
         }
 
         let count = pci_get_device_count();
@@ -69,16 +80,23 @@ pub fn xhci_discovery_scan() -> u32 {
             if !xhci_is_candidate(dev) { continue; }
 
             let dst = XHCI_CANDIDATE_COUNT as usize;
+            let bar0 = &(*dev).bars[0];
+            let mmio_usable = !bar0.is_io && bar0.base_address != 0;
+
             XHCI_CANDIDATES[dst].pci_index = pci_index;
             XHCI_CANDIDATES[dst].bus = (*dev).bus;
             XHCI_CANDIDATES[dst].slot = (*dev).slot;
             XHCI_CANDIDATES[dst].func = (*dev).func;
             XHCI_CANDIDATES[dst].vendor_id = (*dev).vendor_id;
             XHCI_CANDIDATES[dst].device_id = (*dev).device_id;
-            XHCI_CANDIDATES[dst].mmio_base = (*dev).bars[0].base_address;
+            XHCI_CANDIDATES[dst].mmio_base = bar0.base_address;
+            XHCI_CANDIDATES[dst].bar_is_64bit = bar0.is_64bit;
+            XHCI_CANDIDATES[dst].bar_prefetchable = bar0.is_prefetchable;
+            XHCI_CANDIDATES[dst].mmio_usable = mmio_usable;
             XHCI_CANDIDATES[dst].command_before_driver = (*dev).command;
             XHCI_CANDIDATES[dst].valid = true;
             XHCI_CANDIDATE_COUNT += 1;
+            if mmio_usable { XHCI_USABLE_MMIO_COUNT += 1; }
         }
 
         return XHCI_CANDIDATE_COUNT;
@@ -88,6 +106,11 @@ pub fn xhci_discovery_scan() -> u32 {
 @system
 pub fn xhci_discovery_count() -> u32 {
     unsafe { return XHCI_CANDIDATE_COUNT; }
+}
+
+@system
+pub fn xhci_discovery_usable_mmio_count() -> u32 {
+    unsafe { return XHCI_USABLE_MMIO_COUNT; }
 }
 
 @system
