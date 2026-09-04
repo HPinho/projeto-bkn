@@ -25,6 +25,7 @@ import kernel::memory::transition_stack_map::*;
 import kernel::memory::pe_image::*;
 import kernel::memory::pe_wx_policy::*;
 import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_image_wx::*;
 import kernel::memory::transition_page_tables::*;
 import kernel::memory::cutover_plan::*;
 import kernel::memory::dma::*;
