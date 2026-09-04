@@ -26,6 +26,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/acpi/pm_timer.sotlas", "kernel/src/interrupts/route.sotlas",
         "kernel/src/interrupts/lapic.sotlas", "kernel/src/interrupts/ioapic.sotlas",
         "kernel/src/interrupts/irq.sotlas", "kernel/src/interrupts/lapic_timer.sotlas",
+        "kernel/src/interrupts/interrupt_enable.sotlas",
         "kernel/src/drivers/display_driver.sotlas",
         "kernel/src/drivers/pci_bus.sotlas", "kernel/src/drivers/storage_discovery.sotlas",
         "kernel/src/drivers/xhci_discovery.sotlas", "kernel/src/drivers/xhci_ring.sotlas",
