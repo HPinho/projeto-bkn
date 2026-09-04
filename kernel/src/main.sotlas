@@ -20,6 +20,7 @@ import kernel::memory::page_table_writer::*;
 import kernel::memory::page_table_mapper::*;
 import kernel::memory::page_table_builder::*;
 import kernel::memory::transition_map::*;
+import kernel::memory::transition_stack::*;
 import kernel::memory::cutover_plan::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
