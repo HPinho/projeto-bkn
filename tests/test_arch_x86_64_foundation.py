@@ -21,7 +21,7 @@ class X8664FoundationTests(unittest.TestCase):
             "gdt_set_tss_descriptor",
         ):
             self.assertIn(token, text)
-        self.assertIn("@packed\npub struct DescriptorTablePointer", text)
+        self.assertIn("@repr(C)\n@packed\npub struct DescriptorTablePointer", text)
 
     def test_tss_is_packed_and_uses_104_byte_long_mode_layout(self):
         text = (ARCH / "tss.sotlas").read_text(encoding="utf-8")
@@ -32,9 +32,11 @@ class X8664FoundationTests(unittest.TestCase):
         self.assertIn("pub fn tss_size() -> u32", text)
         self.assertIn("return 104;", text)
 
-    def test_idt_owns_256_concrete_16_byte_gates(self):
+    def test_idt_owns_256_concrete_packed_16_byte_gates(self):
         text = (ARCH / "idt.sotlas").read_text(encoding="utf-8")
         self.assertIn("IDT_VECTOR_COUNT: usize = 256", text)
+        self.assertIn("@repr(C)\n@packed\npub struct IdtGate", text)
+        self.assertIn("@repr(C)\n@packed\npub struct IdtDescriptorTablePointer", text)
         self.assertIn("static mut IDT: [IdtGate; IDT_VECTOR_COUNT]", text)
         self.assertIn("handler >> 32", text)
         self.assertIn("IDT[idx].ist = ist & 7", text)
