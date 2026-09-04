@@ -30,11 +30,11 @@ Critério de status:
 | ACPI pós-CR3 | ✅ | 100% | 100% | `BAKEN:STEP=A` observado |
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
-| DMA real | ⚙️ | 75% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 63% | 22% | QEMU já validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Legacy handoff possui fallback forçado; rings, port reset, Enable Slot, contexts, Address Device, Transfer TRBs, produtor EP0 stateful e consumidor único compartilhado do Event Ring estão implementados. GET_DESCRIPTOR, parser de descriptors, Configure Endpoint e HID ainda pendentes |
+| DMA real | ⚙️ | 76% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas e buffer DMA do primeiro descriptor implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
+| xHCI → USB HID | ⚙️ | 68% | 22% | QEMU já validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Legacy handoff possui fallback forçado; rings, port reset, Enable Slot, contexts, Address Device, Transfer TRBs, produtor EP0, consumidor compartilhado, waiter de Transfer Event e GET_DESCRIPTOR(Device) estão implementados. Configuration/HID descriptors, Configure Endpoint e HID ainda pendentes |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~75%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e o xHCI já chega a capability validation. O gate imediato é provar `STEP=9/q/w/X`, depois DMA ativo/USB HID, storage e PAT/WC final |
+| **Fundação bare-metal geral** | ⚙️ | **~76%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e o xHCI já chega a capability validation. O gate imediato é provar `STEP=9/q/w/X`, depois `STEP=D/N`, ativar enumeração USB, storage e PAT/WC final |
 
 ## Estado xHCI atual
 
@@ -80,7 +80,7 @@ STEP=N  No-op Command Completion real              ⬜ aguardando gate anterior
 
 A falha do smoke anterior foi localizada exatamente entre `STEP=8` e `STEP=9`. O handoff agora solicita OS Owned, espera BIOS Owned limpar e, se firmware/emulação não liberar o semáforo, desabilita USB Legacy SMIs e assume ownership após timeout em vez de abortar todo o bring-up.
 
-Depois de `STEP=N`, a sequência preparada/planejada é:
+Depois de `STEP=N`, a sequência já preparada é:
 
 ```text
 Supported Protocol
@@ -91,8 +91,10 @@ Supported Protocol
 → Setup/Data/Status Transfer TRBs
 → produtor EP0 stateful + doorbell
 → consumidor único compartilhado do Event Ring
-→ GET_DESCRIPTOR
-→ parser de descriptors USB
+→ waiter de Transfer Event
+→ GET_DESCRIPTOR(Device) de 18 bytes
+→ Configuration Descriptor
+→ HID Descriptor / Endpoint Descriptor
 → Configure Endpoint
 → HID keyboard/mouse
 ```
