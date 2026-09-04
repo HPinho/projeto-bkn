@@ -1,0 +1,35 @@
+// Baken OS — materialização segura da stack de transição nas page tables.
+//
+// A guard page calculada por transition_stack_layout() permanece sem mapping.
+// Este módulo mapeia somente as páginas utilizáveis como RW+NX e não toca CR3.
+
+module kernel::memory::transition_stack_map;
+
+import kernel::memory::transition_stack::*;
+import kernel::memory::transition_map::*;
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_builder::*;
+import kernel::arch::x86_64::paging::*;
+
+@system
+pub fn transition_stack_map(arena: *mut PageTableArena,
+                            root: PageTablePage,
+                            layout: TransitionStackLayout) -> TransitionMapStats {
+    if !layout.valid { return transition_map_stats_invalid(); }
+    if layout.usable_page_count == 0 { return transition_map_stats_invalid(); }
+
+    let usable_size = layout.usable_page_count * X86_PAGE_SIZE;
+    if (usable_size / X86_PAGE_SIZE) != layout.usable_page_count {
+        return transition_map_stats_invalid();
+    }
+
+    let flags = X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_NX;
+    return transition_map_range(
+        arena,
+        root,
+        layout.usable_virtual_base,
+        layout.usable_physical_base,
+        usable_size,
+        flags
+    );
+}
