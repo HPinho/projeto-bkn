@@ -13,6 +13,7 @@ pub const IA32_APIC_BASE_ENABLE: u64 = 1 << 11;
 pub const IA32_APIC_BASE_X2APIC: u64 = 1 << 10;
 pub const IA32_APIC_BASE_ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
 
+pub const LAPIC_REG_ID: u64 = 0x020;
 pub const LAPIC_REG_VERSION: u64 = 0x030;
 pub const LAPIC_REG_EOI: u64 = 0x0B0;
 pub const LAPIC_REG_SVR: u64 = 0x0F0;
@@ -30,11 +31,12 @@ pub const LAPIC_SPURIOUS_VECTOR: u32 = 0xFF;
 static mut LAPIC_READY: bool = false;
 static mut LAPIC_BASE: u64 = 0;
 static mut LAPIC_VERSION: u32 = 0;
+static mut LAPIC_ID: u8 = 0;
 
 @system
 fn lapic_read(offset: u64) -> u32 {
     unsafe {
-        if !LAPIC_READY && offset != LAPIC_REG_VERSION { return 0; }
+        if !LAPIC_READY && offset != LAPIC_REG_VERSION && offset != LAPIC_REG_ID { return 0; }
         if LAPIC_BASE == 0 { return 0; }
         return x86_mmio_read32(LAPIC_BASE + offset);
     }
@@ -54,6 +56,7 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
         LAPIC_READY = false;
         LAPIC_BASE = 0;
         LAPIC_VERSION = 0;
+        LAPIC_ID = 0;
     }
     if madt_base == 0 || (madt_base & 0xFFF) != 0 { return false; }
 
@@ -73,20 +76,19 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
 
     let version = x86_mmio_read32(madt_base + LAPIC_REG_VERSION);
     if (version & 0xFF) == 0 { return false; }
+    let apic_id = ((x86_mmio_read32(madt_base + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
 
-    // Mantém todas as fontes locais mascaradas até handlers/rotas existirem.
     lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
-
-    // Software-enable do LAPIC com vetor espúrio reservado, ainda sem STI.
     lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
 
     unsafe {
         LAPIC_VERSION = version;
+        LAPIC_ID = apic_id;
         LAPIC_READY = true;
     }
     return true;
@@ -100,6 +102,9 @@ pub fn lapic_base() -> u64 { unsafe { return LAPIC_BASE; } }
 
 @system
 pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
+
+@system
+pub fn lapic_id() -> u8 { unsafe { return LAPIC_ID; } }
 
 @system
 pub fn lapic_eoi() -> void {
