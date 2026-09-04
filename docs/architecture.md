@@ -16,6 +16,31 @@ A regra central é:
 
 > O compilador não desenha o sistema operacional. Ele apenas permite que o sistema operacional exista.
 
+## Marcos já implementados nesta migração
+
+- `BakenBootInfo v2` versionado, preservando temporariamente o prefixo legado;
+- coleta real de `GetMemoryMap`, `descriptor_size` e `descriptor_version`;
+- localização real da ACPI RSDP por GUID completa;
+- inventário PMM do Memory Map sem alocar páginas enquanto Boot Services ainda vivem;
+- enumeração PCI por `0xCF8/0xCFC` em modo somente leitura;
+- leitura de BARs sem sizing destrutivo por `0xFFFFFFFF` durante varredura global;
+- nenhuma habilitação automática de Bus Master/I/O Space durante discovery;
+- backend GOP identificado corretamente como rasterização por CPU;
+- remoção da escrita cega de `IA32_PAT` no driver de display;
+- guardrails de testes para impedir regressão dessas fronteiras.
+
+Ainda não estão implementados e não devem ser simulados:
+
+- `ExitBootServices()` antes do kernel normal;
+- PMM allocator ativo;
+- VMM/page tables próprias;
+- mapping PAT/WC real do framebuffer;
+- GDT/IDT/TSS próprios carregados pelo kernel;
+- APIC/IOAPIC e interrupções nativas completas;
+- USB xHCI/HID e I2C-HID completos;
+- NVMe/AHCI nativos na rota normal;
+- command submission real para GPU.
+
 ## Fronteiras obrigatórias
 
 ### Python
@@ -137,7 +162,7 @@ EFI_BOOT_SERVICES*
 
 ## Fundação x86-64
 
-A ordem de inicialização deve ser:
+A ordem de inicialização deve evoluir para:
 
 ```text
 kernel_entry
@@ -160,6 +185,16 @@ kernel_entry
 
 UEFI já entrega a CPU x86-64 em long mode em uma inicialização UEFI normal; o trabalho do Baken é assumir o controle desse ambiente e estabelecer suas próprias tabelas, descritores e políticas.
 
+O compilador canônico ainda precisa de lowering explícito para `lgdt`, `lidt`, `ltr`, leitura de `CR2` e operações relacionadas antes que GDT/IDT/TSS possam ser declarados ativos. Esses recursos não serão simulados em UI/runtime.
+
+## PMM
+
+O estágio atual é um **inventário**, não um allocator. Ele interpreta descritores UEFI reais, contabiliza regiões convencionais, ACPI e MMIO e identifica limites físicos.
+
+Enquanto `BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE` existir, `EfiConventionalMemory` não pode ser entregue como página livre pelo PMM: Boot Services ainda podem consumir essa memória.
+
+`pmm_alloc_page`/`pmm_free_page` só serão ativados depois do cutover, usando o último Memory Map válido obtido imediatamente antes de `ExitBootServices()`.
+
 ## Memória e PAT
 
 O framebuffer deve ser mapeado como Write-Combining quando suportado. Não basta escrever `IA32_PAT`: a entrada PAT correta deve ser selecionada pelos bits PAT/PCD/PWT das page tables.
@@ -170,6 +205,8 @@ framebuffer GOP         = WC
 MMIO                     = UC, salvo exigência explícita do dispositivo
 ```
 
+O `display_driver` não escreve `IA32_PAT`. Ele só poderá registrar `framebuffer_wc_active=true` depois que o VMM tiver instalado e confirmado o mapping correto.
+
 ## ACPI e interrupções
 
 ACPI deve fornecer pelo menos RSDP/XSDT, MADT, MCFG e FADT, expandindo depois para DSDT/SSDT e AML.
@@ -179,6 +216,22 @@ O IOAPIC não deve assumir mapeamento fixo de IRQ legado:
 ```text
 MADT -> Interrupt Source Override -> GSI -> IOAPIC -> vetor IDT
 ```
+
+## PCI / PCIe
+
+A enumeração global PCI é somente leitura:
+
+```text
+pci_scan_all()
+ -> Vendor/Device/Class
+ -> Header Type
+ -> Command atual
+ -> BAR base/flags atuais
+```
+
+Durante discovery ela não habilita Bus Master, I/O Space ou Memory Space e não dimensiona BARs escrevendo `0xFFFFFFFF`. Cada driver deve solicitar explicitamente somente os command bits que utiliza, depois de validar recursos, DMA e MMIO.
+
+PCIe ECAM será adicionado a partir da tabela ACPI MCFG.
 
 ## Input
 
@@ -202,7 +255,9 @@ Desktop / Apps
        -> driver Intel nativo posterior
 ```
 
-O backend universal inicial usa backbuffer WB, `DamageRegion` com múltiplos retângulos e cópia apenas das regiões alteradas para framebuffer WC.
+O backend GOP atual é software e deve reportar `is_hardware_accelerated=false`. Encontrar uma GPU por PCI não promove o backend.
+
+O backend universal inicial usa backbuffer WB, `DamageRegion` com múltiplos retângulos e cópia apenas das regiões alteradas para framebuffer WC depois que o VMM/PAT estiver ativo.
 
 PCI discovery e BAR mapping apenas descobrem a GPU. Aceleração real exige driver específico com MMIO, memória/contexts, queues/rings, command buffers, fences e present/scanout.
 
@@ -218,6 +273,8 @@ NVMe/AHCI
 
 GPT e FAT32 devem ser calculados dinamicamente a partir do tamanho lógico de bloco e do volume real.
 
+A leitura GPT fixa de 512 bytes ainda presente no bootloader é compatibilidade temporária da mídia atual e não deve migrar para a camada storage nativa.
+
 ## Scheduler e DMA
 
 xHCI, NVMe, VirtIO e GPUs dependem de DMA. Deve existir API central de DMA com endereço virtual, endereço físico, tamanho e alinhamento.
@@ -229,19 +286,22 @@ Input, storage, compositor e USB não devem permanecer em um único polling loop
 ```text
 0. Sotlas compiler/backend e intrínsecos confiáveis
 1. BootInfo v2 + GetMemoryMap + ACPI handoff            [IMPLEMENTADO]
-2. GDT/IDT/TSS/exceptions                              [PRÓXIMO]
-3. PMM/VMM/heap/PAT
-4. ACPI/APIC/IOAPIC/timers
-5. scheduler + PCI/PCIe + DMA
-6. framebuffer/backbuffer/DamageRegion/compositor
-7. i8042 + Input HAL
-8. xHCI + USB HID
-9. AHCI/NVMe + Block API
-10. GPT/FAT32 + installer real
-11. AML + I2C-HID
-12. VirtIO-GPU
-13. Intel GPU nativa
-14. ExitBootServices cutover + remoção final das pontes UEFI
+2. PMM inventory                                       [IMPLEMENTADO]
+3. PCI discovery read-only                             [IMPLEMENTADO]
+4. corrigir intrínsecos x86-64 para GDT/IDT/TSS       [PRÓXIMO]
+5. GDT/IDT/TSS/exceptions
+6. PMM allocator pós-cutover + VMM/heap/PAT
+7. ACPI/APIC/IOAPIC/timers
+8. scheduler + PCIe ECAM + DMA
+9. framebuffer/backbuffer/DamageRegion/compositor
+10. i8042 + Input HAL
+11. xHCI + USB HID
+12. AHCI/NVMe + Block API
+13. GPT/FAT32 + installer real
+14. AML + I2C-HID
+15. VirtIO-GPU
+16. Intel GPU nativa
+17. ExitBootServices cutover + remoção final das pontes UEFI
 ```
 
 ## Testes arquiteturais
@@ -252,9 +312,13 @@ A suíte deve garantir:
 - ausência da antiga ponte monolítica;
 - layout/versionamento de `BakenBootInfo`;
 - metadados de Memory Map e ACPI no v2;
-- validação do BootInfo no kernel;
+- PMM sem allocator enquanto a ponte UEFI existir;
+- PCI scan sem habilitação automática de dispositivos;
+- BAR discovery sem sizing destrutivo;
+- backend GOP sem aceleração GPU fictícia;
+- ausência de escrita cega de PAT no display;
 - ausência de novos consumidores das pontes UEFI;
-- PAT/PTE encoding, PMM/VMM, ACPI, DamageRegion, ring buffers, PCI, GPT/CRC32 e FAT32;
+- PAT/PTE encoding, VMM, ACPI, DamageRegion, ring buffers, GPT/CRC32 e FAT32 conforme entrarem na rota;
 - boot pós-`ExitBootServices()` no momento do cutover.
 
 ## Critério de conclusão
