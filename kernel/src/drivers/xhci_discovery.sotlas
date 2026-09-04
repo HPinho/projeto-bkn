@@ -1,0 +1,100 @@
+// Baken OS — discovery PCI read-only de controladores USB xHCI.
+//
+// Identifica candidatos xHCI já enumerados por pci_bus. Esta camada não
+// habilita Memory Space/Bus Master, não reseta o xHC, não acessa MMIO e não
+// cria command/event rings. Encontrar 0C/03/30 não significa driver funcional.
+
+module kernel::drivers::xhci_discovery;
+
+import kernel::drivers::pci_bus::*;
+
+pub const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;
+pub const PCI_SUBCLASS_USB: u8 = 0x03;
+pub const PCI_PROGIF_XHCI: u8 = 0x30;
+pub const XHCI_MAX_CANDIDATES: usize = 8;
+
+pub struct XhciControllerCandidate {
+    pub pci_index: u32;
+    pub bus: u8;
+    pub slot: u8;
+    pub func: u8;
+    pub vendor_id: u16;
+    pub device_id: u16;
+    pub mmio_base: u64;
+    pub command_before_driver: u16;
+    pub valid: bool;
+}
+
+static mut XHCI_CANDIDATES: [XhciControllerCandidate; XHCI_MAX_CANDIDATES] = [
+    XhciControllerCandidate {
+        pci_index: 0,
+        bus: 0,
+        slot: 0,
+        func: 0,
+        vendor_id: 0,
+        device_id: 0,
+        mmio_base: 0,
+        command_before_driver: 0,
+        valid: false
+    };
+    XHCI_MAX_CANDIDATES
+];
+
+static mut XHCI_CANDIDATE_COUNT: u32 = 0;
+
+@system
+fn xhci_is_candidate(dev: *const PciDevice) -> bool {
+    unsafe {
+        if dev == (null as *const PciDevice) { return false; }
+        return (*dev).class_code == PCI_CLASS_SERIAL_BUS &&
+            (*dev).subclass == PCI_SUBCLASS_USB &&
+            (*dev).prog_if == PCI_PROGIF_XHCI;
+    }
+}
+
+@system
+pub fn xhci_discovery_scan() -> u32 {
+    unsafe {
+        XHCI_CANDIDATE_COUNT = 0;
+        for mut clear_index in 0..XHCI_MAX_CANDIDATES {
+            XHCI_CANDIDATES[clear_index].valid = false;
+            XHCI_CANDIDATES[clear_index].mmio_base = 0;
+        }
+
+        let count = pci_get_device_count();
+        for mut pci_index in 0..count {
+            if XHCI_CANDIDATE_COUNT >= XHCI_MAX_CANDIDATES as u32 { break; }
+
+            let dev = pci_get_device(pci_index);
+            if !xhci_is_candidate(dev) { continue; }
+
+            let dst = XHCI_CANDIDATE_COUNT as usize;
+            XHCI_CANDIDATES[dst].pci_index = pci_index;
+            XHCI_CANDIDATES[dst].bus = (*dev).bus;
+            XHCI_CANDIDATES[dst].slot = (*dev).slot;
+            XHCI_CANDIDATES[dst].func = (*dev).func;
+            XHCI_CANDIDATES[dst].vendor_id = (*dev).vendor_id;
+            XHCI_CANDIDATES[dst].device_id = (*dev).device_id;
+            XHCI_CANDIDATES[dst].mmio_base = (*dev).bars[0].base_address;
+            XHCI_CANDIDATES[dst].command_before_driver = (*dev).command;
+            XHCI_CANDIDATES[dst].valid = true;
+            XHCI_CANDIDATE_COUNT += 1;
+        }
+
+        return XHCI_CANDIDATE_COUNT;
+    }
+}
+
+@system
+pub fn xhci_discovery_count() -> u32 {
+    unsafe { return XHCI_CANDIDATE_COUNT; }
+}
+
+@system
+pub fn xhci_discovery_candidate(index: u32) -> *const XhciControllerCandidate {
+    unsafe {
+        if index >= XHCI_CANDIDATE_COUNT { return null as *const XhciControllerCandidate; }
+        if !XHCI_CANDIDATES[index as usize].valid { return null as *const XhciControllerCandidate; }
+        return &XHCI_CANDIDATES[index as usize];
+    }
+}
