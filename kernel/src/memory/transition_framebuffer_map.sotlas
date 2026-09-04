@@ -1,0 +1,69 @@
+// Baken OS — mapping explícito do framebuffer GOP para o cutover de CR3.
+//
+// O framebuffer é MMIO e, corretamente, não participa do direct-map WB de RAM.
+// Para o primeiro cutover mantemos o endereço identidade que a UI já conhece,
+// mas com política conservadora UC (PWT+PCD), RW e NX. PAT/WC será uma etapa
+// posterior, quando o kernel possuir política PAT/MTRR final.
+
+module kernel::memory::transition_framebuffer_map;
+
+import kernel::memory::transition_map::*;
+import kernel::memory::page_table_arena::*;
+import kernel::arch::x86_64::paging::*;
+
+pub struct TransitionFramebufferLayout {
+    pub physical_base: u64;
+    pub virtual_base: u64;
+    pub size: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn transition_framebuffer_invalid() -> TransitionFramebufferLayout {
+    return TransitionFramebufferLayout {
+        physical_base: 0,
+        virtual_base: 0,
+        size: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn transition_framebuffer_layout(physical_base: u64, size: u64) -> TransitionFramebufferLayout {
+    if physical_base == 0 || size == 0 { return transition_framebuffer_invalid(); }
+    let end = physical_base + size;
+    if end <= physical_base { return transition_framebuffer_invalid(); }
+
+    return TransitionFramebufferLayout {
+        physical_base: physical_base,
+        virtual_base: physical_base,
+        size: size,
+        valid: true
+    };
+}
+
+@system
+pub fn transition_framebuffer_map(arena: *mut PageTableArena,
+                                  root: PageTablePage,
+                                  layout: TransitionFramebufferLayout) -> TransitionMapStats {
+    if arena == (null as *mut PageTableArena) || !layout.valid {
+        return transition_map_stats_invalid();
+    }
+
+    // Default x86 PAT: PCD=1 + PWT=1 seleciona UC para PTEs 4 KiB.
+    // Nunca executável; framebuffer deve ser somente dado MMIO gravável.
+    let flags = X86_PTE_PRESENT |
+        X86_PTE_WRITABLE |
+        X86_PTE_WRITE_THROUGH |
+        X86_PTE_CACHE_DISABLE |
+        X86_PTE_NX;
+
+    return transition_map_range(
+        arena,
+        root,
+        layout.virtual_base,
+        layout.physical_base,
+        layout.size,
+        flags
+    );
+}
