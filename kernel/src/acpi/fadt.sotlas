@@ -1,0 +1,174 @@
+// Baken OS — inventário read-only do FADT / ACPI PM Timer.
+//
+// Descobre a fonte PM_TMR descrita pelo firmware, preferindo X_PM_TMR_BLK
+// (Generic Address Structure) quando utilizável. Não executa I/O nem MMIO.
+
+module kernel::acpi::fadt;
+
+import kernel::acpi::tables::*;
+
+pub const FADT_MIN_FLAGS_LENGTH: usize = 116;
+pub const FADT_X_PM_TMR_END: usize = 220;
+pub const FADT_PM_TMR_BLK_OFFSET: usize = 76;
+pub const FADT_PM_TMR_LEN_OFFSET: usize = 91;
+pub const FADT_FLAGS_OFFSET: usize = 112;
+pub const FADT_X_PM_TMR_OFFSET: usize = 208;
+
+pub const FADT_FLAG_TMR_VAL_EXT: u32 = 1 << 8;
+pub const FADT_FLAG_HW_REDUCED_ACPI: u32 = 1 << 20;
+
+pub const ACPI_GAS_SYSTEM_MEMORY: u8 = 0;
+pub const ACPI_GAS_SYSTEM_IO: u8 = 1;
+pub const ACPI_PM_TIMER_FREQUENCY_HZ: u64 = 3579545;
+
+pub struct AcpiPmTimerInventory {
+    pub address_space_id: u8;
+    pub register_bit_width: u8;
+    pub register_bit_offset: u8;
+    pub access_size: u8;
+    pub address: u64;
+    pub counter_bits: u8;
+    pub frequency_hz: u64;
+    pub uses_extended_gas: bool;
+    pub valid: bool;
+}
+
+static mut PM_TIMER: AcpiPmTimerInventory = AcpiPmTimerInventory {
+    address_space_id: 0,
+    register_bit_width: 0,
+    register_bit_offset: 0,
+    access_size: 0,
+    address: 0,
+    counter_bits: 0,
+    frequency_hz: 0,
+    uses_extended_gas: false,
+    valid: false
+};
+
+@system
+fn fadt_read_u32(base: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn fadt_read_u64(base: *const u8, offset: usize) -> u64 {
+    return (fadt_read_u32(base, offset) as u64) |
+        ((fadt_read_u32(base, offset + 4) as u64) << 32);
+}
+
+@system
+fn fadt_address_space_supported(address_space_id: u8) -> bool {
+    return address_space_id == ACPI_GAS_SYSTEM_MEMORY ||
+        address_space_id == ACPI_GAS_SYSTEM_IO;
+}
+
+@system
+pub fn fadt_pm_timer_init() -> bool {
+    unsafe { PM_TIMER.valid = false; }
+
+    let table = acpi_fadt();
+    if table == (null as *const u8) { return false; }
+
+    let length = fadt_read_u32(table, 4) as usize;
+    if length < FADT_MIN_FLAGS_LENGTH || length > ACPI_MAX_SDT_LENGTH { return false; }
+
+    let flags = fadt_read_u32(table, FADT_FLAGS_OFFSET);
+    if (flags & FADT_FLAG_HW_REDUCED_ACPI) != 0 {
+        // Em plataformas Hardware-Reduced ACPI, os fixed hardware blocks do
+        // FADT não descrevem uma interface PM timer utilizável pelo OSPM.
+        return false;
+    }
+
+    let counter_bits: u8 = if (flags & FADT_FLAG_TMR_VAL_EXT) != 0 { 32 } else { 24 };
+
+    // ACPI requer preferência pelo campo de endereço estendido quando ele é
+    // não-zero e utilizável pelo OSPM.
+    if length >= FADT_X_PM_TMR_END {
+        let mut space_id: u8 = 0;
+        let mut bit_width: u8 = 0;
+        let mut bit_offset: u8 = 0;
+        let mut access_size: u8 = 0;
+        unsafe {
+            space_id = table[FADT_X_PM_TMR_OFFSET];
+            bit_width = table[FADT_X_PM_TMR_OFFSET + 1];
+            bit_offset = table[FADT_X_PM_TMR_OFFSET + 2];
+            access_size = table[FADT_X_PM_TMR_OFFSET + 3];
+        }
+        let address = fadt_read_u64(table, FADT_X_PM_TMR_OFFSET + 4);
+
+        if address != 0 && fadt_address_space_supported(space_id) {
+            unsafe {
+                PM_TIMER.address_space_id = space_id;
+                PM_TIMER.register_bit_width = bit_width;
+                PM_TIMER.register_bit_offset = bit_offset;
+                PM_TIMER.access_size = access_size;
+                PM_TIMER.address = address;
+                PM_TIMER.counter_bits = counter_bits;
+                PM_TIMER.frequency_hz = ACPI_PM_TIMER_FREQUENCY_HZ;
+                PM_TIMER.uses_extended_gas = true;
+                PM_TIMER.valid = true;
+                return true;
+            }
+        }
+    }
+
+    // Fallback ACPI legado: PM_TMR_BLK é um endereço de 32 bits e a presença
+    // do bloco é indicada por PM_TMR_LEN == 4. Inventário apenas; nenhum IN.
+    let mut pm_timer_len: u8 = 0;
+    unsafe { pm_timer_len = table[FADT_PM_TMR_LEN_OFFSET]; }
+    let legacy_address = fadt_read_u32(table, FADT_PM_TMR_BLK_OFFSET) as u64;
+    if pm_timer_len != 4 || legacy_address == 0 { return false; }
+
+    unsafe {
+        PM_TIMER.address_space_id = ACPI_GAS_SYSTEM_IO;
+        PM_TIMER.register_bit_width = 32;
+        PM_TIMER.register_bit_offset = 0;
+        PM_TIMER.access_size = 3;
+        PM_TIMER.address = legacy_address;
+        PM_TIMER.counter_bits = counter_bits;
+        PM_TIMER.frequency_hz = ACPI_PM_TIMER_FREQUENCY_HZ;
+        PM_TIMER.uses_extended_gas = false;
+        PM_TIMER.valid = true;
+        return true;
+    }
+}
+
+@system
+pub fn fadt_pm_timer_is_ready() -> bool { unsafe { return PM_TIMER.valid; } }
+
+@system
+pub fn fadt_pm_timer_address_space() -> u8 {
+    unsafe {
+        if !PM_TIMER.valid { return 0xFF; }
+        return PM_TIMER.address_space_id;
+    }
+}
+
+@system
+pub fn fadt_pm_timer_address() -> u64 {
+    unsafe {
+        if !PM_TIMER.valid { return 0; }
+        return PM_TIMER.address;
+    }
+}
+
+@system
+pub fn fadt_pm_timer_counter_bits() -> u8 {
+    unsafe {
+        if !PM_TIMER.valid { return 0; }
+        return PM_TIMER.counter_bits;
+    }
+}
+
+@system
+pub fn fadt_pm_timer_frequency_hz() -> u64 {
+    unsafe {
+        if !PM_TIMER.valid { return 0; }
+        return PM_TIMER.frequency_hz;
+    }
+}
