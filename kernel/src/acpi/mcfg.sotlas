@@ -1,0 +1,131 @@
+// Baken OS — parser read-only da ACPI MCFG para PCI Express ECAM.
+//
+// Descobre janelas ECAM e calcula endereços de configuração PCIe. Não mapeia
+// MMIO, não acessa o endereço calculado e não substitui ainda o PCI mechanism #1.
+
+module kernel::acpi::mcfg;
+
+import kernel::acpi::tables::*;
+
+pub const MCFG_ENTRY_SIZE: usize = 16;
+pub const MCFG_ENTRIES_OFFSET: usize = 44;
+pub const MCFG_MAX_SEGMENTS: usize = 16;
+
+pub struct McfgSegment {
+    pub base_address: u64;
+    pub segment_group: u16;
+    pub start_bus: u8;
+    pub end_bus: u8;
+    pub valid: bool;
+}
+
+static mut MCFG_READY: bool = false;
+static mut MCFG_SEGMENT_COUNT: u32 = 0;
+static mut MCFG_SEGMENTS: [McfgSegment; MCFG_MAX_SEGMENTS] = [
+    McfgSegment { base_address: 0, segment_group: 0, start_bus: 0, end_bus: 0, valid: false };
+    MCFG_MAX_SEGMENTS
+];
+
+@system
+fn mcfg_read_u16(base: *const u8, offset: usize) -> u16 {
+    unsafe { return (base[offset] as u16) | ((base[offset + 1] as u16) << 8); }
+}
+
+@system
+fn mcfg_read_u32(base: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn mcfg_read_u64(base: *const u8, offset: usize) -> u64 {
+    return (mcfg_read_u32(base, offset) as u64) |
+        ((mcfg_read_u32(base, offset + 4) as u64) << 32);
+}
+
+@system
+pub fn mcfg_init() -> bool {
+    unsafe {
+        MCFG_READY = false;
+        MCFG_SEGMENT_COUNT = 0;
+        for mut i in 0..MCFG_MAX_SEGMENTS { MCFG_SEGMENTS[i].valid = false; }
+    }
+
+    let table = acpi_mcfg();
+    if table == (null as *const u8) { return false; }
+    let length = mcfg_read_u32(table, 4) as usize;
+    if length < MCFG_ENTRIES_OFFSET || length > ACPI_MAX_SDT_LENGTH { return false; }
+
+    let payload = length - MCFG_ENTRIES_OFFSET;
+    if (payload % MCFG_ENTRY_SIZE) != 0 { return false; }
+    let count = payload / MCFG_ENTRY_SIZE;
+
+    for mut index in 0..count {
+        let offset = MCFG_ENTRIES_OFFSET + index * MCFG_ENTRY_SIZE;
+        let base = mcfg_read_u64(table, offset);
+        let segment = mcfg_read_u16(table, offset + 8);
+        let mut start_bus: u8 = 0;
+        let mut end_bus: u8 = 0;
+        unsafe {
+            start_bus = table[offset + 10];
+            end_bus = table[offset + 11];
+        }
+        if base == 0 || start_bus > end_bus { continue; }
+
+        unsafe {
+            if MCFG_SEGMENT_COUNT < MCFG_MAX_SEGMENTS as u32 {
+                let dst = MCFG_SEGMENT_COUNT as usize;
+                MCFG_SEGMENTS[dst].base_address = base;
+                MCFG_SEGMENTS[dst].segment_group = segment;
+                MCFG_SEGMENTS[dst].start_bus = start_bus;
+                MCFG_SEGMENTS[dst].end_bus = end_bus;
+                MCFG_SEGMENTS[dst].valid = true;
+                MCFG_SEGMENT_COUNT += 1;
+            }
+        }
+    }
+
+    unsafe {
+        MCFG_READY = MCFG_SEGMENT_COUNT > 0;
+        return MCFG_READY;
+    }
+}
+
+@system
+pub fn mcfg_is_ready() -> bool { unsafe { return MCFG_READY; } }
+
+@system
+pub fn mcfg_segment_count() -> u32 { unsafe { return MCFG_SEGMENT_COUNT; } }
+
+@system
+pub fn mcfg_segment(index: u32) -> *const McfgSegment {
+    unsafe {
+        if index >= MCFG_SEGMENT_COUNT { return null as *const McfgSegment; }
+        return &MCFG_SEGMENTS[index as usize];
+    }
+}
+
+@system
+pub fn mcfg_ecam_address(segment_group: u16, bus: u8, device: u8, function: u8, offset: u16) -> u64 {
+    if device >= 32 || function >= 8 || offset >= 4096 { return 0; }
+
+    unsafe {
+        for mut index in 0..MCFG_SEGMENT_COUNT {
+            let entry = &MCFG_SEGMENTS[index as usize];
+            if !entry.valid || entry.segment_group != segment_group { continue; }
+            if bus < entry.start_bus || bus > entry.end_bus { continue; }
+
+            let relative_bus = (bus - entry.start_bus) as u64;
+            return entry.base_address |
+                (relative_bus << 20) |
+                ((device as u64) << 15) |
+                ((function as u64) << 12) |
+                (offset as u64);
+        }
+    }
+    return 0;
+}
