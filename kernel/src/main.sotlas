@@ -9,6 +9,7 @@ import kernel::desktop_compositor::*;
 import kernel::baken_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
+import kernel::memory::pmm::*;
 
 // Envelope de transição BakenBootInfo v2.
 // Os primeiros campos preservam o ABI legado enquanto input/storage/timing
@@ -54,6 +55,19 @@ pub fn baken_bootinfo_v2_valid(boot_info: *const BakenBootInfo) -> bool {
 pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     if (!baken_bootinfo_v2_valid(boot_info)) {
         loop {}
+    }
+
+    // O bit 1 indica que o bootloader entregou um snapshot real do UEFI
+    // Memory Map. Por enquanto o PMM apenas inventaria/classifica as regiões:
+    // nenhuma EfiConventionalMemory é reutilizada enquanto Boot Services vive.
+    if ((boot_info.flags & 2) != 0 &&
+        boot_info.memory_map_base != (null as *const u8) &&
+        boot_info.memory_descriptor_size >= 40) {
+        pmm_inventory_init(
+            boot_info.memory_map_base,
+            boot_info.memory_map_size,
+            boot_info.memory_descriptor_size as usize
+        );
     }
 
     // O framebuffer GOP é transportado como endereço físico/passivo no handoff.
