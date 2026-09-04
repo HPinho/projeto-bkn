@@ -1,0 +1,35 @@
+// Baken OS — política W^X para a imagem PE32+ carregada.
+//
+// x86-64 não possui bit "readable" separado em PTE: uma página presente pode
+// ser lida. Portanto as permissões finais relevantes aqui são WRITE e NX.
+// Qualquer seção PE que peça WRITE + EXECUTE ao mesmo tempo é rejeitada.
+//
+// Este módulo é política pura: não escreve page tables nem toca CR3.
+
+module kernel::memory::pe_wx_policy;
+
+import kernel::memory::pe_image::*;
+import kernel::arch::x86_64::paging::*;
+
+@system
+pub fn pe_section_wx_safe(section: PeSectionInfo) -> bool {
+    if !section.valid { return false; }
+    if section.writable && section.executable { return false; }
+    return true;
+}
+
+@system
+pub fn pe_section_pte_flags(section: PeSectionInfo) -> u64 {
+    if !pe_section_wx_safe(section) { return 0; }
+
+    let mut flags = X86_PTE_PRESENT;
+    if section.writable { flags |= X86_PTE_WRITABLE; }
+    if !section.executable { flags |= X86_PTE_NX; }
+    return flags;
+}
+
+@system
+pub fn pe_header_pte_flags() -> u64 {
+    // Headers precisam ser consultáveis, mas não devem ser escritos/executados.
+    return X86_PTE_PRESENT | X86_PTE_NX;
+}
