@@ -29,6 +29,7 @@ import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
 
@@ -106,6 +107,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // porém NÃO é ativado aqui. O boot atual ainda usa UEFI; ativá-lo nesta
     // função seria reutilizar memória física antes do firmware liberar ownership.
     pmm_allocator_is_active();
+
+    // Paging x86-64 também já é compilado pelo grafo, porém permanece somente
+    // como contrato puro de índices/PTE. Nenhum CR3 ou page table ativa muda aqui.
+    x86_page_aligned(X86_PAGE_SIZE);
 
     // Os contratos DMA/xHCI ring/TRB/event/ERST/event-ring já fazem parte do
     // grafo, mas permanecem fail-closed enquanto o PMM não possuir allocator físico.
