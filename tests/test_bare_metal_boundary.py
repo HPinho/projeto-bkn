@@ -85,6 +85,11 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, boot)
 
+    def test_bootloader_labels_uefi_bridge_as_transitional(self):
+        boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
+        self.assertIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
+        self.assertIn("Ainda não chamamos ExitBootServices", boot)
+
     def test_compiler_remains_host_tool_not_ui_runtime(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
         forbidden = {
@@ -102,11 +107,11 @@ class BareMetalBoundaryTests(unittest.TestCase):
     def test_bootloader_has_completed_exit_boot_services_cutover(self):
         """Flip to a normal test once native input/storage replace UEFI bridges."""
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertIn("GetMemoryMap", boot)
-        self.assertIn("ExitBootServices", boot)
+        self.assertNotIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
         self.assertNotIn("pointer_protocol", boot)
         self.assertNotIn("block_io_protocol", boot)
         self.assertNotIn("system_table", boot)
+        self.assertRegex(boot, r"ExitBootServices\s*\(")
 
 
 if __name__ == "__main__":
