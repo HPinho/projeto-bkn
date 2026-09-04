@@ -1,13 +1,15 @@
 // Baken OS — IOAPIC pós-cutover.
 //
 // Descobre a capacidade de cada IOAPIC via register-select/window e mascara
-// todas as redirection entries antes de qualquer STI. Não programa vetores ainda.
+// todas as redirection entries antes de qualquer STI. Rotas podem ser preparadas
+// ainda mascaradas e só serão abertas numa fase posterior.
 
 module kernel::interrupts::ioapic;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::memory::active_page_tables::*;
 import kernel::acpi::madt::*;
+import kernel::interrupts::route::*;
 
 pub const IOAPIC_REGSEL_OFFSET: u64 = 0x00;
 pub const IOAPIC_WINDOW_OFFSET: u64 = 0x10;
@@ -15,6 +17,8 @@ pub const IOAPIC_REG_ID: u32 = 0x00;
 pub const IOAPIC_REG_VERSION: u32 = 0x01;
 pub const IOAPIC_REDIR_BASE: u32 = 0x10;
 pub const IOAPIC_REDIR_MASKED: u32 = 1 << 16;
+pub const IOAPIC_REDIR_ACTIVE_LOW: u32 = 1 << 13;
+pub const IOAPIC_REDIR_LEVEL: u32 = 1 << 15;
 
 static mut IOAPIC_READY: bool = false;
 static mut IOAPIC_COUNT: u32 = 0;
@@ -32,9 +36,13 @@ fn ioapic_write(base: u64, register_index: u32, value: u32) -> void {
 }
 
 @system
+fn ioapic_max_redirection(base: u64) -> u32 {
+    return (ioapic_read(base, IOAPIC_REG_VERSION) >> 16) & 0xFF;
+}
+
+@system
 fn ioapic_mask_all_at(base: u64) -> bool {
-    let version = ioapic_read(base, IOAPIC_REG_VERSION);
-    let max_redirection = (version >> 16) & 0xFF;
+    let max_redirection = ioapic_max_redirection(base);
     if max_redirection > 239 { return false; }
 
     let mut index: u32 = 0;
@@ -76,6 +84,45 @@ pub fn ioapic_init_all_masked() -> bool {
         IOAPIC_READY = true;
     }
     return true;
+}
+
+@system
+pub fn ioapic_program_route_masked(route: *const InterruptRoute,
+                                    destination_apic_id: u8) -> bool {
+    if route == (null as *const InterruptRoute) { return false; }
+    unsafe {
+        if !IOAPIC_READY || !(*route).valid { return false; }
+        if (*route).vector < IRQ_ROUTE_MIN_VECTOR || (*route).vector >= 255 { return false; }
+
+        let mut controller_index: u32 = 0;
+        while controller_index < madt_ioapic_count() {
+            let descriptor = madt_ioapic(controller_index);
+            if descriptor == (null as *const MadtIoApic) { return false; }
+            let base = (*descriptor).mmio_address as u64;
+            let max_redirection = ioapic_max_redirection(base);
+            let first_gsi = (*descriptor).gsi_base;
+            let last_gsi = first_gsi + max_redirection;
+            if last_gsi < first_gsi { return false; }
+
+            if (*route).gsi >= first_gsi && (*route).gsi <= last_gsi {
+                let redir_index = (*route).gsi - first_gsi;
+                let low_reg = IOAPIC_REDIR_BASE + (redir_index * 2);
+                let high_reg = low_reg + 1;
+
+                let mut low = ((*route).vector as u32) | IOAPIC_REDIR_MASKED;
+                if (*route).active_low { low |= IOAPIC_REDIR_ACTIVE_LOW; }
+                if (*route).level_triggered { low |= IOAPIC_REDIR_LEVEL; }
+                let high = (destination_apic_id as u32) << 24;
+
+                // High primeiro, low ainda mascarado: nunca existe janela de IRQ ativa.
+                ioapic_write(base, high_reg, high);
+                ioapic_write(base, low_reg, low);
+                return true;
+            }
+            controller_index += 1;
+        }
+    }
+    return false;
 }
 
 @system
