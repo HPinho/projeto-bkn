@@ -41,6 +41,9 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/drivers/pci_bus.sotlas",
         "kernel/src/drivers/ps2_mouse.sotlas",
         "kernel/src/memory/pmm.sotlas",
+        "kernel/src/arch/x86_64/gdt.sotlas",
+        "kernel/src/arch/x86_64/tss.sotlas",
+        "kernel/src/arch/x86_64/idt.sotlas",
     }
 
     def test_sotlas_tree_contains_only_known_canonical_modules(self):
