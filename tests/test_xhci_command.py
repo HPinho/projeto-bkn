@@ -25,16 +25,16 @@ class XhciCommandTests(unittest.TestCase):
         self.assertIn("xhci_trb_link(xhci_runtime_command_ring_physical(), true, cycle)", text)
         self.assertIn("XHCI_COMMAND_PRODUCER_CYCLE = !XHCI_COMMAND_PRODUCER_CYCLE", text)
 
-    def test_submit_overrides_cycle_bit_and_rings_doorbell_after_publish(self):
+    def test_submit_overrides_cycle_bit_and_advances_only_after_doorbell(self):
         text = COMMAND.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_command_submit(command: XhciTrb)", 1)[1]
         write = body.index("*slot = published")
         barrier = body.index("x86_read_cr3_raw()")
-        advance = body.index("xhci_command_advance_producer()")
         doorbell = body.index("xhci_command_ring_doorbell0()")
+        advance = body.index("xhci_command_advance_producer()")
         self.assertLess(write, barrier)
-        self.assertLess(barrier, advance)
-        self.assertLess(advance, doorbell)
+        self.assertLess(barrier, doorbell)
+        self.assertLess(doorbell, advance)
         self.assertIn("published.control = (published.control & ~XHCI_TRB_CYCLE_BIT)", body)
 
     def test_completion_matches_pointer_and_advances_erdp(self):
@@ -47,6 +47,7 @@ class XhciCommandTests(unittest.TestCase):
         self.assertIn("xhci_command_advance_event()", body)
         self.assertIn("xhci_command_update_erdp()", body)
         self.assertIn("XHCI_EVENT_CONSUMER_CYCLE = !XHCI_EVENT_CONSUMER_CYCLE", text)
+        self.assertIn("XHCI_COMMAND_ERDP_EHB", text)
 
     def test_command_module_is_in_canonical_graph(self):
         text = MAIN.read_text(encoding="utf-8")
