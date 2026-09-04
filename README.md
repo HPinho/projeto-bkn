@@ -2,22 +2,20 @@
 
 Baken OS é um projeto de sistema operacional x86-64 em Sotlas.
 
-A arquitetura em desenvolvimento separa explicitamente:
+A arquitetura separa:
 
 - **Python/Sotlas Compile**: toolchain de host;
 - **UEFI/BOOTX64.EFI**: bootstrap;
 - **Sotlas compilado**: kernel, drivers, gráficos, UI e serviços;
 - **Baken kernel**: responsável pelo hardware após o cutover bare-metal.
 
-O documento canônico é [`docs/architecture.md`](docs/architecture.md).
+Veja [`docs/architecture.md`](docs/architecture.md) para o plano canônico.
 
-## Estado atual da migração bare-metal
+## Estado atual
 
 `BakenBootInfo v2` já transporta framebuffer, snapshot real do UEFI Memory Map, metadados dos descriptors e ACPI RSDP. O ponto de entrada Sotlas valida o contrato antes de iniciar a sessão gráfica.
 
-O runtime ainda mantém pontes UEFI temporárias para input/storage/timing; `ExitBootServices()` será movido para antes da entrada normal do kernel quando esses serviços forem substituídos por drivers nativos.
-
-Próxima fundação: GDT/IDT/TSS/exceções e, em seguida, PMM/VMM/PAT.
+O runtime ainda mantém pontes UEFI temporárias para input/storage/timing. A próxima fundação é GDT/IDT/TSS/exceções, seguida de PMM/VMM/PAT; `ExitBootServices()` será antecipado quando as pontes de firmware puderem ser removidas.
 
 ## Verificação
 
