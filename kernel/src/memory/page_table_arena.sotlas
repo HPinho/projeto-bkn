@@ -1,0 +1,103 @@
+// Baken OS — arena explícita para construção bootstrap de page tables.
+//
+// O construtor real de tabelas precisa de DUAS identidades para cada página:
+//  - endereço físico, que será gravado nas entries/CR3;
+//  - endereço virtual temporariamente acessível, usado pelo kernel para zerar e
+//    preencher a página antes da troca para as próprias page tables.
+//
+// Este módulo NÃO presume PA == VA, não aloca memória e não escreve CR3.
+
+module kernel::memory::page_table_arena;
+
+import kernel::arch::x86_64::paging::*;
+
+pub struct PageTablePage {
+    pub physical_address: u64;
+    pub virtual_address: u64;
+    pub valid: bool;
+}
+
+pub struct PageTableArena {
+    pub physical_base: u64;
+    pub virtual_base: u64;
+    pub page_count: u64;
+    pub next_page_index: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn page_table_page_invalid() -> PageTablePage {
+    return PageTablePage {
+        physical_address: 0,
+        virtual_address: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn page_table_arena_invalid() -> PageTableArena {
+    return PageTableArena {
+        physical_base: 0,
+        virtual_base: 0,
+        page_count: 0,
+        next_page_index: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn page_table_arena_make(physical_base: u64,
+                             virtual_base: u64,
+                             page_count: u64) -> PageTableArena {
+    if physical_base == 0 || virtual_base == 0 || page_count == 0 {
+        return page_table_arena_invalid();
+    }
+    if !x86_page_aligned(physical_base) || !x86_page_aligned(virtual_base) {
+        return page_table_arena_invalid();
+    }
+
+    let bytes = page_count * X86_PAGE_SIZE;
+    if (bytes / X86_PAGE_SIZE) != page_count { return page_table_arena_invalid(); }
+    if physical_base + bytes <= physical_base { return page_table_arena_invalid(); }
+    if virtual_base + bytes <= virtual_base { return page_table_arena_invalid(); }
+
+    return PageTableArena {
+        physical_base: physical_base,
+        virtual_base: virtual_base,
+        page_count: page_count,
+        next_page_index: 0,
+        valid: true
+    };
+}
+
+@system
+pub fn page_table_arena_alloc(arena: *mut PageTableArena) -> PageTablePage {
+    if arena == (null as *mut PageTableArena) { return page_table_page_invalid(); }
+
+    unsafe {
+        if !(*arena).valid { return page_table_page_invalid(); }
+        if (*arena).next_page_index >= (*arena).page_count {
+            return page_table_page_invalid();
+        }
+
+        let offset = (*arena).next_page_index * X86_PAGE_SIZE;
+        let physical_address = (*arena).physical_base + offset;
+        let virtual_address = (*arena).virtual_base + offset;
+        (*arena).next_page_index += 1;
+
+        return PageTablePage {
+            physical_address: physical_address,
+            virtual_address: virtual_address,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn page_table_arena_remaining(arena: *const PageTableArena) -> u64 {
+    if arena == (null as *const PageTableArena) { return 0; }
+    unsafe {
+        if !(*arena).valid || (*arena).next_page_index >= (*arena).page_count { return 0; }
+        return (*arena).page_count - (*arena).next_page_index;
+    }
+}
