@@ -14,15 +14,17 @@ class TransitionStackTests(unittest.TestCase):
         self.stack = STACK.read_text(encoding="utf-8")
         self.main = MAIN.read_text(encoding="utf-8")
 
-    def test_first_page_is_reserved_as_guard(self):
+    def test_layout_reserves_guard_then_context_then_stack(self):
         self.assertIn("guard_page_virtual_base: virtual_base", self.stack)
-        self.assertIn("usable_physical_base = physical_base + X86_PAGE_SIZE", self.stack)
-        self.assertIn("usable_virtual_base = virtual_base + X86_PAGE_SIZE", self.stack)
-        self.assertIn("usable_page_count = page_count - 1", self.stack)
+        self.assertIn("context_physical_base = physical_base + X86_PAGE_SIZE", self.stack)
+        self.assertIn("context_virtual_base = virtual_base + X86_PAGE_SIZE", self.stack)
+        self.assertIn("usable_physical_base = physical_base + (2 * X86_PAGE_SIZE)", self.stack)
+        self.assertIn("usable_virtual_base = virtual_base + (2 * X86_PAGE_SIZE)", self.stack)
+        self.assertIn("usable_page_count = page_count - 2", self.stack)
 
     def test_stack_top_is_16_byte_aligned(self):
         self.assertIn("let stack_top = raw_top & ~15", self.stack)
-        self.assertIn("page_count < 2", self.stack)
+        self.assertIn("page_count < 3", self.stack)
         self.assertIn("x86_page_aligned(physical_base)", self.stack)
         self.assertIn("x86_page_aligned(virtual_base)", self.stack)
 
