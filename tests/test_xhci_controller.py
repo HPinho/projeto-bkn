@@ -20,9 +20,11 @@ class XhciControllerTests(unittest.TestCase):
     def test_mmio_is_mapped_before_first_controller_read(self):
         text = CTRL.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_controller_prepare_first()", 1)[1]
-        mapping = body.index("active_page_tables_map_mmio_identity_4k(capability_page)")
+        mapping = body.index("xhci_map_mmio_address(mmio)")
         first_read = body.index("x86_mmio_read32(mmio + XHCI_CAPLENGTH_HCIVERSION)")
         self.assertLess(mapping, first_read)
+        helper = text.split("fn xhci_map_mmio_address", 1)[1].split("fn xhci_map_required_mmio", 1)[0]
+        self.assertIn("active_page_tables_map_mmio_identity_4k", helper)
 
     def test_reset_contract_halts_then_hcrst_then_waits_cnr(self):
         text = CTRL.read_text(encoding="utf-8")
@@ -33,10 +35,19 @@ class XhciControllerTests(unittest.TestCase):
         self.assertIn("xhci_wait_halted", text)
         self.assertIn("xhci_wait_reset_complete", text)
 
+    def test_controller_handles_legacy_handoff_and_scratchpads(self):
+        text = CTRL.read_text(encoding="utf-8")
+        self.assertIn("XHCI_EXT_CAP_USB_LEGACY_SUPPORT", text)
+        self.assertIn("XHCI_LEGACY_BIOS_OWNED", text)
+        self.assertIn("XHCI_LEGACY_OS_OWNED", text)
+        self.assertIn("xhci_legacy_handoff", text)
+        self.assertIn("xhci_max_scratchpads", text)
+        self.assertIn("xhci_controller_max_scratchpads", text)
+
     def test_post_cutover_requires_keyboard_before_xhci(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_prepare_xhci_controller()", 1)[1].split(
-            "pub fn sotlas_x86_post_cutover_entry", 1
+            "pub fn post_cutover_prepare_xhci_dma_tables()", 1
         )[0]
         self.assertIn("post_cutover_keyboard_live()", body)
         self.assertIn("pci_scan_all()", body)
