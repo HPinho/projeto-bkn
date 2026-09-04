@@ -29,9 +29,11 @@ class PeImageTests(unittest.TestCase):
 
     def test_parser_bounds_every_header_and_section_table(self):
         self.assertIn("fn pe_range_valid", self.text)
+        self.assertIn("loaded_end <= image_base", self.text)
         self.assertIn("section_count > PE_MAX_SECTION_COUNT", self.text)
         self.assertIn("!pe_range_valid(loaded_size, optional_offset, optional_size)", self.text)
         self.assertIn("!pe_range_valid(loaded_size, section_table_offset, section_bytes)", self.text)
+        self.assertIn("section_table_end > (size_of_headers as u64)", self.text)
         self.assertIn("section_end > (image.size_of_image as u64)", self.text)
 
     def test_section_permissions_come_from_pe_characteristics(self):
