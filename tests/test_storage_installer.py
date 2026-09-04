@@ -64,9 +64,12 @@ class StorageInstallerTests(unittest.TestCase):
 
     def test_bootloader_recognizes_installed_gpt_as_boot_media(self):
         bootloader = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertIn("GUID de tipo Baken Data", bootloader)
-        self.assertIn("sector[0]!='E'", bootloader)
+        # O contrato relevante é a assinatura GPT + GUID binário Baken Data;
+        # comentários e espaçamento C não fazem parte da ABI.
+        self.assertIn("sector[0] != 'E'", bootloader)
         self.assertIn("data_guid", bootloader)
+        self.assertIn("0x58, 0x72, 0x3C, 0x7F", bootloader)
+        self.assertIn("0x42, 0x41, 0x4B, 0x45, 0x4E, 0x31", bootloader)
 
 
 if __name__ == "__main__":
