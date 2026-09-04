@@ -86,9 +86,13 @@ pub fn acpi_init(rsdp: *const u8) -> bool {
     if !acpi_rsdp_signature_valid(rsdp) { return false; }
     if !acpi_checksum_zero(rsdp, ACPI_RSDP_V1_LENGTH) { return false; }
 
-    unsafe { ACPI_REVISION = rsdp[15]; }
+    let mut revision: u8 = 0;
+    unsafe {
+        revision = rsdp[15];
+        ACPI_REVISION = revision;
+    }
 
-    if unsafe { rsdp[15] } >= 2 {
+    if revision >= 2 {
         let rsdp_length = acpi_read_u32(rsdp, 20) as usize;
         if rsdp_length < ACPI_RSDP_V2_MIN_LENGTH || rsdp_length > ACPI_MAX_RSDP_LENGTH { return false; }
         if !acpi_checksum_zero(rsdp, rsdp_length) { return false; }
