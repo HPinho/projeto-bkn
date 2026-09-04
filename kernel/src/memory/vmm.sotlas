@@ -1,12 +1,14 @@
 // Baken OS — contrato fail-closed do Virtual Memory Manager.
 //
-// Esta fase representa mappings e valida alinhamento/overflow/flags, mas NÃO
-// escreve page tables e NÃO troca CR3. Isso evita assumir incorretamente que um
-// endereço físico do PMM já é dereferenciável no endereço virtual atual.
+// O VMM não troca CR3 por conta própria. Ele representa mappings e só pode
+// declarar-se ACTIVE quando a CPU já estiver executando exatamente a PML4 Baken
+// construída no cutover. Isso mantém mecanismo de ativação da MMU separado da
+// política/metadados do VMM.
 
 module kernel::memory::vmm;
 
 import kernel::arch::x86_64::paging::*;
+import kernel::memory::mmu_activate::*;
 
 pub const VMM_STATE_OFFLINE: u32 = 0;
 pub const VMM_STATE_TABLES_READY: u32 = 1;
@@ -103,8 +105,7 @@ pub fn vmm_mapping_valid(mapping: *const VmmMapping) -> bool {
     }
 }
 
-// Apenas registra metadados depois que um futuro construtor de page tables tiver
-// materializado uma PML4 real. Esta função NÃO ativa CR3.
+// Registra metadados de uma PML4 que já foi materializada. Não toca CR3.
 @system
 pub fn vmm_mark_tables_ready(root_table_physical: u64, direct_map_base: u64) -> bool {
     if root_table_physical == 0 || !x86_page_aligned(root_table_physical) { return false; }
@@ -117,6 +118,26 @@ pub fn vmm_mark_tables_ready(root_table_physical: u64, direct_map_base: u64) -> 
         VMM.mapping_count = 0;
         VMM.state = VMM_STATE_TABLES_READY;
     }
+    return true;
+}
+
+// Transição formal TABLES_READY -> ACTIVE. Falha se a CPU estiver em qualquer
+// CR3 diferente da raiz registrada, impedindo uma flag VMM falsa/adiantada.
+@system
+pub fn vmm_activate_current_tables(root_table_physical: u64,
+                                   direct_map_base: u64) -> bool {
+    if !vmm_mark_tables_ready(root_table_physical, direct_map_base) { return false; }
+    if x86_mmu_current_root() != root_table_physical {
+        unsafe {
+            VMM.state = VMM_STATE_OFFLINE;
+            VMM.root_table_physical = 0;
+            VMM.direct_map_base = 0;
+            VMM.mapping_count = 0;
+        }
+        return false;
+    }
+
+    unsafe { VMM.state = VMM_STATE_ACTIVE; }
     return true;
 }
 
