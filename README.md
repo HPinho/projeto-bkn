@@ -1,19 +1,24 @@
 # Baken OS
 
-O Baken OS usa uma rota UEFI única para o desktop nativo. Consulte
-[a arquitetura](docs/architecture.md) e execute `run_baken.ps1` para gerar e
-iniciar a imagem local.
+Baken OS é um projeto de sistema operacional x86-64 em Sotlas.
 
-O escopo e os comandos de validação da versão inicial estão em
-[docs/initial-release.md](docs/initial-release.md).
+A arquitetura em desenvolvimento separa explicitamente:
 
-As correções de nitidez, double buffering, frame pacing e transições do
-installer/OOBE estão documentadas em
-[README_AUDITORIA_VISUAL.md](README_AUDITORIA_VISUAL.md).
+- **Python/Sotlas Compile**: toolchain de host;
+- **UEFI/BOOTX64.EFI**: bootstrap;
+- **Sotlas compilado**: kernel, drivers, gráficos, UI e serviços;
+- **Baken kernel**: responsável pelo hardware após o cutover bare-metal.
 
-A remoção da UI embutida no compilador e o lowering nativo dos módulos estão
-documentados em [README-LOWERING-SOTLAS.md](README-LOWERING-SOTLAS.md).
+O documento canônico é [`docs/architecture.md`](docs/architecture.md).
 
-A limpeza do código legado e os limites honestos desta etapa estão em
-[docs/legacy-audit.md](docs/legacy-audit.md). A próxima ISO permanece adiada
-até as integrações indicadas ali serem concluídas.
+## Estado atual da migração bare-metal
+
+`BakenBootInfo v2` já transporta framebuffer, snapshot real do UEFI Memory Map, metadados dos descriptors e ACPI RSDP. O runtime ainda mantém pontes UEFI temporárias para input/storage/timing; `ExitBootServices()` será movido para antes da entrada normal do kernel quando esses serviços forem substituídos por drivers nativos.
+
+## Verificação
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py"
+python tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
+& tools\build_uefi_desktop.ps1
+```
