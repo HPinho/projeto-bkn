@@ -72,7 +72,7 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
     let mut physical_cursor: u64 = 0;
     let mut huge_pages_mapped: u64 = 0;
     let mut pages_4k_mapped: u64 = 0;
-    let physical_limit: u64;
+    let mut physical_limit: u64 = 0;
     unsafe { physical_limit = (*plan).physical_limit; }
 
     while physical_cursor < physical_limit {
@@ -162,7 +162,7 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
         }
     }
 
-    let table_pages_used: u64;
+    let mut table_pages_used: u64 = 0;
     unsafe { table_pages_used = (*arena).next_page_index; }
 
     return PageTableBuildResult {
