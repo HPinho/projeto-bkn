@@ -1,0 +1,126 @@
+// Baken OS - teclado PS/2 nativo sobre a fila KBD do controlador i8042.
+//
+// Nesta fase não reprogramamos o scan set do dispositivo: o controlador pode
+// manter a tradução compatível que o firmware já configurou. O decoder trata
+// Set 1 básico, suficiente para remover a dependência UEFI em hardware legado;
+// USB HID/xHCI continuará sendo o caminho moderno posterior.
+
+module kernel::drivers::ps2_keyboard;
+
+import kernel::drivers::i8042::*;
+
+static mut PS2_KEYBOARD_INITIALIZED: bool = false;
+static mut PS2_KEYBOARD_PRESENT: bool = false;
+static mut PS2_KEYBOARD_EXTENDED: bool = false;
+static mut PS2_KEYBOARD_SHIFT: bool = false;
+
+@system
+pub fn ps2_keyboard_init() -> void {
+    unsafe {
+        PS2_KEYBOARD_EXTENDED = false;
+        PS2_KEYBOARD_SHIFT = false;
+        PS2_KEYBOARD_PRESENT = i8042_initialize_polling() && i8042_first_port_present();
+        PS2_KEYBOARD_INITIALIZED = true;
+    }
+}
+
+@system
+pub fn ps2_keyboard_is_present() -> bool {
+    unsafe {
+        if !PS2_KEYBOARD_INITIALIZED { ps2_keyboard_init(); }
+        return PS2_KEYBOARD_PRESENT;
+    }
+}
+
+@system
+fn ps2_keyboard_ascii(scancode: u8, shifted: bool) -> u16 {
+    // Linha numérica e teclas usadas atualmente por installer/OOBE/shell.
+    if scancode == 0x02 { return if shifted { 33 } else { 49 }; }
+    if scancode == 0x03 { return if shifted { 64 } else { 50 }; }
+    if scancode == 0x04 { return if shifted { 35 } else { 51 }; }
+    if scancode == 0x05 { return if shifted { 36 } else { 52 }; }
+    if scancode == 0x06 { return if shifted { 37 } else { 53 }; }
+    if scancode == 0x07 { return if shifted { 94 } else { 54 }; }
+    if scancode == 0x08 { return if shifted { 38 } else { 55 }; }
+    if scancode == 0x09 { return if shifted { 42 } else { 56 }; }
+    if scancode == 0x0A { return if shifted { 40 } else { 57 }; }
+    if scancode == 0x0B { return if shifted { 41 } else { 48 }; }
+
+    if scancode == 0x1C { return 13; }
+    if scancode == 0x39 { return 32; }
+
+    // Letras Set 1. Unicode ASCII minúsculo/maiúsculo conforme Shift.
+    if scancode == 0x1E { return if shifted { 65 } else { 97 }; }   // A
+    if scancode == 0x30 { return if shifted { 66 } else { 98 }; }   // B
+    if scancode == 0x2E { return if shifted { 67 } else { 99 }; }   // C
+    if scancode == 0x20 { return if shifted { 68 } else { 100 }; }  // D
+    if scancode == 0x12 { return if shifted { 69 } else { 101 }; }  // E
+    if scancode == 0x21 { return if shifted { 70 } else { 102 }; }  // F
+    if scancode == 0x22 { return if shifted { 71 } else { 103 }; }  // G
+    if scancode == 0x23 { return if shifted { 72 } else { 104 }; }  // H
+    if scancode == 0x17 { return if shifted { 73 } else { 105 }; }  // I
+    if scancode == 0x24 { return if shifted { 74 } else { 106 }; }  // J
+    if scancode == 0x25 { return if shifted { 75 } else { 107 }; }  // K
+    if scancode == 0x26 { return if shifted { 76 } else { 108 }; }  // L
+    if scancode == 0x32 { return if shifted { 77 } else { 109 }; }  // M
+    if scancode == 0x31 { return if shifted { 78 } else { 110 }; }  // N
+    if scancode == 0x18 { return if shifted { 79 } else { 111 }; }  // O
+    if scancode == 0x19 { return if shifted { 80 } else { 112 }; }  // P
+    if scancode == 0x10 { return if shifted { 81 } else { 113 }; }  // Q
+    if scancode == 0x13 { return if shifted { 82 } else { 114 }; }  // R
+    if scancode == 0x1F { return if shifted { 83 } else { 115 }; }  // S
+    if scancode == 0x14 { return if shifted { 84 } else { 116 }; }  // T
+    if scancode == 0x16 { return if shifted { 85 } else { 117 }; }  // U
+    if scancode == 0x2F { return if shifted { 86 } else { 118 }; }  // V
+    if scancode == 0x11 { return if shifted { 87 } else { 119 }; }  // W
+    if scancode == 0x2D { return if shifted { 88 } else { 120 }; }  // X
+    if scancode == 0x15 { return if shifted { 89 } else { 121 }; }  // Y
+    if scancode == 0x2C { return if shifted { 90 } else { 122 }; }  // Z
+    return 0;
+}
+
+// Retorna apenas key-down. Releases atualizam modificadores e são consumidos.
+@system
+pub fn ps2_keyboard_poll(out_scan: *mut u16, out_unicode: *mut u16) -> u8 {
+    if out_scan == (null as *mut u16) || out_unicode == (null as *mut u16) { return 0; }
+    if !ps2_keyboard_is_present() { return 0; }
+
+    for mut attempt in 0..32 {
+        let mut raw: u8 = 0;
+        if !i8042_pop_keyboard(&mut raw) { return 0; }
+
+        unsafe {
+            if raw == 0xE0 {
+                PS2_KEYBOARD_EXTENDED = true;
+                continue;
+            }
+
+            let released = (raw & 0x80) != 0;
+            let code = raw & 0x7F;
+
+            if code == 0x2A || code == 0x36 {
+                PS2_KEYBOARD_SHIFT = !released;
+                PS2_KEYBOARD_EXTENDED = false;
+                continue;
+            }
+
+            if released {
+                PS2_KEYBOARD_EXTENDED = false;
+                continue;
+            }
+
+            // Mantém bit 8 para distinguir prefixo E0 no scancode nativo.
+            let scan16: u16 = if PS2_KEYBOARD_EXTENDED {
+                0x0100 | code as u16
+            } else {
+                code as u16
+            };
+            PS2_KEYBOARD_EXTENDED = false;
+
+            *out_scan = scan16;
+            *out_unicode = ps2_keyboard_ascii(code, PS2_KEYBOARD_SHIFT);
+            return 1;
+        }
+    }
+    return 0;
+}
