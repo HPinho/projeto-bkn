@@ -32,6 +32,9 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertEqual(builtins["__lidt"].params[0][1].name, "u64")
         self.assertEqual(builtins["__ltr"].params[0][1].name, "u16")
         self.assertEqual(builtins["__read_cr2"].result.name, "u64")
+        self.assertEqual(builtins["__read_cr3"].result.name, "u64")
+        self.assertEqual(builtins["__write_cr3"].params[0][1].name, "u64")
+        self.assertEqual(builtins["__write_cr3"].result.name, "void")
         self.assertEqual(builtins["__invlpg"].params[0][1].name, "u64")
         self.assertEqual(builtins["__exception_stub_address"].params[0][1].name, "u16")
         self.assertEqual(builtins["__exception_stub_address"].result.name, "u64")
@@ -42,6 +45,8 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertIn('"lidt (%0)"', preamble)
         self.assertIn('"ltr %w0"', preamble)
         self.assertIn('"mov %%cr2, %0"', preamble)
+        self.assertIn('"mov %%cr3, %0"', preamble)
+        self.assertIn('"mov %0, %%cr3"', preamble)
         self.assertIn('"invlpg (%0)"', preamble)
         self.assertIn("static inline uint64_t __exception_stub_address", preamble)
 
@@ -62,6 +67,8 @@ pub fn exercise(gdt: u64, idt: u64, selector: u16, page: u64, vector: u16) -> u6
     __lgdt(gdt);
     __lidt(idt);
     __ltr(selector);
+    let old_cr3: u64 = __read_cr3();
+    __write_cr3(old_cr3);
     __invlpg(page);
     let stub: u64 = __exception_stub_address(vector);
     if stub != 0 { return stub; }
@@ -74,6 +81,8 @@ pub fn exercise(gdt: u64, idt: u64, selector: u16, page: u64, vector: u16) -> u6
         self.assertIn("__lgdt(gdt)", generated)
         self.assertIn("__lidt(idt)", generated)
         self.assertIn("__ltr(selector)", generated)
+        self.assertIn("__read_cr3()", generated)
+        self.assertIn("__write_cr3(old_cr3)", generated)
         self.assertIn("__invlpg(page)", generated)
         self.assertIn("__exception_stub_address(vector)", generated)
         self.assertIn("__read_cr2()", generated)
