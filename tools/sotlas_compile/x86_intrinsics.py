@@ -31,6 +31,16 @@ static inline uint64_t __read_cr2(void) {
     return value;
 }
 
+static inline uint64_t __read_cr3(void) {
+    uint64_t value;
+    __asm__ __volatile__("mov %%cr3, %0" : "=r"(value) : : "memory");
+    return value;
+}
+
+static inline void __write_cr3(uint64_t value) {
+    __asm__ __volatile__("mov %0, %%cr3" : : "r"(value) : "memory");
+}
+
 static inline void __invlpg(uint64_t address) {
     __asm__ __volatile__("invlpg (%0)" : : "r"((uintptr_t)address) : "memory");
 }
@@ -188,6 +198,14 @@ def install(bootstrap) -> None:
         ),
         "__read_cr2": Function(
             "__read_cr2", [], Type("u64"), [],
+            public=True, attributes=["@system"],
+        ),
+        "__read_cr3": Function(
+            "__read_cr3", [], Type("u64"), [],
+            public=True, attributes=["@system"],
+        ),
+        "__write_cr3": Function(
+            "__write_cr3", [("value", Type("u64"))], Type("void"), [],
             public=True, attributes=["@system"],
         ),
         "__invlpg": Function(
