@@ -30,7 +30,15 @@ class XhciDiscoveryTests(unittest.TestCase):
         for token in forbidden:
             self.assertNotIn(token, body.lower(), token)
         self.assertIn("command_before_driver", text)
-        self.assertIn("(*dev).bars[0].base_address", text)
+        self.assertIn("let bar0 = &(*dev).bars[0]", text)
+        self.assertIn("mmio_usable", text)
+
+    def test_bar0_must_be_memory_and_nonzero_to_be_usable(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("let mmio_usable = !bar0.is_io && bar0.base_address != 0", text)
+        self.assertIn("bar_is_64bit", text)
+        self.assertIn("bar_prefetchable", text)
+        self.assertIn("xhci_discovery_usable_mmio_count", text)
 
     def test_multiple_controllers_are_inventory_only(self):
         text = XHCI.read_text(encoding="utf-8")
