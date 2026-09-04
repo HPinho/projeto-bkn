@@ -31,10 +31,10 @@ Critério de status:
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
 | DMA real | ⚙️ | 75% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 55% | 15% | Controller/discovery/reset, rings, protocol ranges, port reset, Enable Slot, contexts e Address Device estão implementados em camadas; QEMU atualmente para antes de `STEP=X`; transfers/descritores/HID ainda pendentes |
+| xHCI → USB HID | ⚙️ | 58% | 15% | Controller/discovery/reset, rings, protocol ranges, port reset, Enable Slot, contexts, Address Device e construtores puros de Setup/Data/Status/Normal Transfer TRBs estão implementados; QEMU ainda precisa ultrapassar `STEP=X`; publicação EP0, GET_DESCRIPTOR, Configure Endpoint e HID continuam pendentes |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~72%** | **~60%** | Base CPU/memória/ACPI/IRQ já roda pós-EBS; principal bloqueio atual é xHCI antes de `STEP=X`, seguido por USB HID, storage e PAT/WC final |
+| **Fundação bare-metal geral** | ⚙️ | **~73%** | **~60%** | Base CPU/memória/ACPI/IRQ já roda pós-EBS; principal bloqueio runtime atual é xHCI antes de `STEP=X`, seguido por USB HID, storage e PAT/WC final |
 
 ## Estado xHCI atual
 
@@ -73,7 +73,7 @@ STEP=D  DCBAA/CRCR/ERST/ERDP programados
 STEP=N  No-op Command Completion real
 ```
 
-Depois de `STEP=N`, a sequência planejada é:
+Depois de `STEP=N`, a sequência preparada/planejada é:
 
 ```text
 Supported Protocol
@@ -81,6 +81,8 @@ Supported Protocol
 → Enable Slot
 → Device/Input Context + EP0 ring
 → Address Device
+→ Setup/Data/Status Transfer TRBs
+→ publicação/doorbell EP0
 → GET_DESCRIPTOR
 → Configure Endpoint
 → HID keyboard/mouse
