@@ -163,6 +163,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         );
     }
 
+    // Arena, imagem carregada e stack própria podem estar presentes no handoff,
+    // mas continuam apenas como metadados durante a rota híbrida. Os mappings de
+    // transição NÃO são executados enquanto Boot Services ainda for necessário.
     pmm_allocator_is_active();
     x86_page_aligned(X86_PAGE_SIZE);
     x86_pat_index_valid(0);
