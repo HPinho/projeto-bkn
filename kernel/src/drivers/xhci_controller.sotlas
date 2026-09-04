@@ -1,9 +1,9 @@
 // Baken OS — bring-up xHCI pós-cutover até estado resetado/quiescente.
 //
 // Esta etapa assume ownership somente do MMIO do controller: habilita Memory
-// Space no PCI, mapeia BAR0 como UC, valida capability registers, para o xHC se
-// necessário e executa HCRST. Bus Master, DCBAA, command/event rings, interrupções
-// MSI/MSI-X e enumeração USB continuam desligados até a fase DMA/rings.
+// Space no PCI, mapeia BAR0 como UC, faz handoff BIOS->OS quando USB Legacy
+// Support existe, valida capability registers, para o xHC e executa HCRST.
+// Bus Master, DCBAA, rings, MSI/MSI-X e enumeração USB seguem desligados.
 
 module kernel::drivers::xhci_controller;
 
@@ -14,6 +14,7 @@ import kernel::drivers::xhci_discovery::*;
 
 pub const XHCI_CAPLENGTH_HCIVERSION: u64 = 0x00;
 pub const XHCI_HCSPARAMS1: u64 = 0x04;
+pub const XHCI_HCSPARAMS2: u64 = 0x08;
 pub const XHCI_HCCPARAMS1: u64 = 0x10;
 pub const XHCI_DBOFF: u64 = 0x14;
 pub const XHCI_RTSOFF: u64 = 0x18;
@@ -27,7 +28,13 @@ pub const XHCI_USBCMD_HCRST: u32 = 1 << 1;
 pub const XHCI_USBSTS_HCHALTED: u32 = 1;
 pub const XHCI_USBSTS_CNR: u32 = 1 << 11;
 
+pub const XHCI_EXT_CAP_USB_LEGACY_SUPPORT: u32 = 1;
+pub const XHCI_LEGACY_BIOS_OWNED: u32 = 1 << 16;
+pub const XHCI_LEGACY_OS_OWNED: u32 = 1 << 24;
+pub const XHCI_MAX_EXT_CAPS: u32 = 64;
+
 pub const XHCI_RESET_POLL_LIMIT: u64 = 10000000;
+pub const XHCI_LEGACY_POLL_LIMIT: u64 = 10000000;
 pub const XHCI_MIN_VERSION: u16 = 0x0096;
 pub const XHCI_MAX_VERSION: u16 = 0x0120;
 
@@ -38,7 +45,9 @@ static mut XHCI_CONTROLLER_OPERATIONAL_BASE: u64 = 0;
 static mut XHCI_CONTROLLER_VERSION: u16 = 0;
 static mut XHCI_CONTROLLER_MAX_SLOTS: u8 = 0;
 static mut XHCI_CONTROLLER_MAX_PORTS: u8 = 0;
+static mut XHCI_CONTROLLER_MAX_SCRATCHPADS: u16 = 0;
 static mut XHCI_CONTROLLER_PAGE_SIZE_MASK: u32 = 0;
+static mut XHCI_CONTROLLER_LEGACY_HANDOFF_DONE: bool = false;
 
 @system
 fn xhci_page_base(address: u64) -> u64 {
@@ -46,15 +55,69 @@ fn xhci_page_base(address: u64) -> u64 {
 }
 
 @system
+fn xhci_map_mmio_address(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_page_base(address));
+}
+
+@system
 fn xhci_map_required_mmio(base: u64, operational: u64) -> bool {
     if base == 0 || operational < base { return false; }
-    let capability_page = xhci_page_base(base);
-    let operational_page = xhci_page_base(operational);
-    if !active_page_tables_map_mmio_identity_4k(capability_page) { return false; }
-    if operational_page != capability_page {
-        if !active_page_tables_map_mmio_identity_4k(operational_page) { return false; }
+    if !xhci_map_mmio_address(base) { return false; }
+    if xhci_page_base(operational) != xhci_page_base(base) {
+        if !xhci_map_mmio_address(operational) { return false; }
     }
     return true;
+}
+
+@system
+fn xhci_max_scratchpads(hcsparams2: u32) -> u16 {
+    let high = ((hcsparams2 >> 21) & 0x1F) as u16;
+    let low = ((hcsparams2 >> 27) & 0x1F) as u16;
+    return (high << 5) | low;
+}
+
+// Percorre a lista de xHCI Extended Capabilities. Se encontrar USB Legacy
+// Support, solicita OS Owned e espera BIOS Owned cair antes de qualquer reset.
+@system
+fn xhci_legacy_handoff(mmio: u64, hccparams1: u32) -> bool {
+    let mut offset_dwords = (hccparams1 >> 16) & 0xFFFF;
+    if offset_dwords == 0 { return true; }
+
+    let mut visited: u32 = 0;
+    while offset_dwords != 0 && visited < XHCI_MAX_EXT_CAPS {
+        let address = mmio + ((offset_dwords as u64) * 4);
+        if address < mmio || !xhci_map_mmio_address(address) { return false; }
+        let header = x86_mmio_read32(address);
+        let cap_id = header & 0xFF;
+        let next = (header >> 8) & 0xFF;
+
+        if cap_id == XHCI_EXT_CAP_USB_LEGACY_SUPPORT {
+            if (header & XHCI_LEGACY_BIOS_OWNED) != 0 {
+                x86_mmio_write32(address, header | XHCI_LEGACY_OS_OWNED);
+                let mut spins: u64 = 0;
+                while spins < XHCI_LEGACY_POLL_LIMIT {
+                    let ownership = x86_mmio_read32(address);
+                    if (ownership & XHCI_LEGACY_BIOS_OWNED) == 0 &&
+                       (ownership & XHCI_LEGACY_OS_OWNED) != 0 {
+                        return true;
+                    }
+                    spins += 1;
+                }
+                return false;
+            }
+
+            if (header & XHCI_LEGACY_OS_OWNED) == 0 {
+                x86_mmio_write32(address, header | XHCI_LEGACY_OS_OWNED);
+            }
+            return (x86_mmio_read32(address) & XHCI_LEGACY_OS_OWNED) != 0;
+        }
+
+        if next == 0 { break; }
+        offset_dwords += next;
+        visited += 1;
+    }
+    return visited < XHCI_MAX_EXT_CAPS;
 }
 
 @system
@@ -110,7 +173,9 @@ pub fn xhci_controller_prepare_first() -> bool {
         XHCI_CONTROLLER_VERSION = 0;
         XHCI_CONTROLLER_MAX_SLOTS = 0;
         XHCI_CONTROLLER_MAX_PORTS = 0;
+        XHCI_CONTROLLER_MAX_SCRATCHPADS = 0;
         XHCI_CONTROLLER_PAGE_SIZE_MASK = 0;
+        XHCI_CONTROLLER_LEGACY_HANDOFF_DONE = false;
     }
 
     if !active_page_tables_is_ready() { return false; }
@@ -120,17 +185,14 @@ pub fn xhci_controller_prepare_first() -> bool {
     if candidate == (null as *const XhciControllerCandidate) { return false; }
     if !candidate.valid || !candidate.mmio_usable || candidate.mmio_base == 0 { return false; }
 
-    // Nesta fase o controller ainda não possui estruturas DMA. Habilitamos
-    // somente Memory Space; Bus Master permanece exatamente como estava.
+    // Sem rings/DMA ainda: só Memory Space. Bus Master não é solicitado aqui.
     pci_enable_command_bits(candidate.bus, candidate.slot, candidate.func, PCI_COMMAND_MEMORY_SPACE);
     let command_after = pci_read_config16(candidate.bus, candidate.slot, candidate.func, 0x04);
     if (command_after & PCI_COMMAND_MEMORY_SPACE) == 0 { return false; }
 
     let mmio = candidate.mmio_base;
-    let capability_page = xhci_page_base(mmio);
-    if !active_page_tables_map_mmio_identity_4k(capability_page) { return false; }
+    if !xhci_map_mmio_address(mmio) { return false; }
 
-    // Nenhuma leitura MMIO do xHC ocorre antes do mapping UC acima.
     let capability = x86_mmio_read32(mmio + XHCI_CAPLENGTH_HCIVERSION);
     let caplength = (capability & 0xFF) as u8;
     let version = ((capability >> 16) & 0xFFFF) as u16;
@@ -141,9 +203,15 @@ pub fn xhci_controller_prepare_first() -> bool {
     if !xhci_map_required_mmio(mmio, operational) { return false; }
 
     let hcsparams1 = x86_mmio_read32(mmio + XHCI_HCSPARAMS1);
+    let hcsparams2 = x86_mmio_read32(mmio + XHCI_HCSPARAMS2);
+    let hccparams1 = x86_mmio_read32(mmio + XHCI_HCCPARAMS1);
     let max_slots = (hcsparams1 & 0xFF) as u8;
     let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
+    let scratchpads = xhci_max_scratchpads(hcsparams2);
     if max_slots == 0 || max_ports == 0 { return false; }
+
+    if !xhci_legacy_handoff(mmio, hccparams1) { return false; }
+    unsafe { XHCI_CONTROLLER_LEGACY_HANDOFF_DONE = true; }
 
     let page_size_mask = x86_mmio_read32(operational + XHCI_OP_PAGESIZE);
     if (page_size_mask & 1) == 0 { return false; }
@@ -160,6 +228,7 @@ pub fn xhci_controller_prepare_first() -> bool {
         XHCI_CONTROLLER_VERSION = version;
         XHCI_CONTROLLER_MAX_SLOTS = max_slots;
         XHCI_CONTROLLER_MAX_PORTS = max_ports;
+        XHCI_CONTROLLER_MAX_SCRATCHPADS = scratchpads;
         XHCI_CONTROLLER_PAGE_SIZE_MASK = page_size_mask;
         XHCI_CONTROLLER_READY = true;
     }
@@ -185,4 +254,12 @@ pub fn xhci_controller_max_slots() -> u8 { unsafe { return XHCI_CONTROLLER_MAX_S
 pub fn xhci_controller_max_ports() -> u8 { unsafe { return XHCI_CONTROLLER_MAX_PORTS; } }
 
 @system
+pub fn xhci_controller_max_scratchpads() -> u16 { unsafe { return XHCI_CONTROLLER_MAX_SCRATCHPADS; } }
+
+@system
 pub fn xhci_controller_page_size_mask() -> u32 { unsafe { return XHCI_CONTROLLER_PAGE_SIZE_MASK; } }
+
+@system
+pub fn xhci_controller_legacy_handoff_done() -> bool {
+    unsafe { return XHCI_CONTROLLER_LEGACY_HANDOFF_DONE; }
+}
