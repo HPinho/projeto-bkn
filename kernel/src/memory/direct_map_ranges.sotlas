@@ -1,0 +1,143 @@
+// Baken OS — materialização range-aware do direct physical map.
+//
+// Percorre um UEFI Memory Map explícito e solicita mappings somente para
+// descritores aprovados pela memory_map_policy. MMIO, Runtime Services e ranges
+// sem atributo WB ficam fora. O módulo usa o mapper genérico, mas não toca CR3.
+
+module kernel::memory::direct_map_ranges;
+
+import kernel::memory::pmm::*;
+import kernel::memory::memory_map_policy::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_writer::*;
+import kernel::memory::page_table_mapper::*;
+import kernel::arch::x86_64::paging::*;
+
+pub struct DirectMapRangeStats {
+    pub descriptor_count: u64;
+    pub mapped_descriptor_count: u64;
+    pub skipped_descriptor_count: u64;
+    pub huge_pages_mapped: u64;
+    pub pages_4k_mapped: u64;
+    pub bytes_mapped: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn direct_map_range_stats_invalid() -> DirectMapRangeStats {
+    return DirectMapRangeStats {
+        descriptor_count: 0,
+        mapped_descriptor_count: 0,
+        skipped_descriptor_count: 0,
+        huge_pages_mapped: 0,
+        pages_4k_mapped: 0,
+        bytes_mapped: 0,
+        valid: false
+    };
+}
+
+@system
+fn direct_map_range_flags() -> u64 {
+    return X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_GLOBAL | X86_PTE_NX;
+}
+
+@system
+pub fn direct_map_build_from_uefi_ranges(arena: *mut PageTableArena,
+                                         root: PageTablePage,
+                                         memory_map_base: *const u8,
+                                         memory_map_size: usize,
+                                         descriptor_size: usize) -> DirectMapRangeStats {
+    if arena == (null as *mut PageTableArena) { return direct_map_range_stats_invalid(); }
+    if memory_map_base == (null as *const u8) { return direct_map_range_stats_invalid(); }
+    if memory_map_size == 0 || descriptor_size < 40 || descriptor_size > memory_map_size {
+        return direct_map_range_stats_invalid();
+    }
+    if !page_table_page_writable(root) { return direct_map_range_stats_invalid(); }
+
+    let mut descriptor_count: u64 = 0;
+    let mut mapped_descriptor_count: u64 = 0;
+    let mut skipped_descriptor_count: u64 = 0;
+    let mut huge_pages_mapped: u64 = 0;
+    let mut pages_4k_mapped: u64 = 0;
+    let mut bytes_mapped: u64 = 0;
+    let mut offset: usize = 0;
+
+    while (offset + descriptor_size) <= memory_map_size {
+        let address = (memory_map_base as usize) + offset;
+        if address < (memory_map_base as usize) {
+            return direct_map_range_stats_invalid();
+        }
+        let descriptor = address as *const EfiMemoryDescriptor;
+        descriptor_count += 1;
+
+        let type_code = descriptor.type_code;
+        let attribute = descriptor.attribute;
+        let physical_start = descriptor.physical_start;
+        let page_count = descriptor.number_of_pages;
+
+        if !uefi_memory_descriptor_is_direct_map_wb(type_code, attribute) || page_count == 0 {
+            skipped_descriptor_count += 1;
+            offset += descriptor_size;
+            continue;
+        }
+
+        if !x86_page_aligned(physical_start) {
+            return direct_map_range_stats_invalid();
+        }
+        let byte_count = page_count * X86_PAGE_SIZE;
+        if (byte_count / X86_PAGE_SIZE) != page_count {
+            return direct_map_range_stats_invalid();
+        }
+        let physical_end = physical_start + byte_count;
+        if physical_end <= physical_start || physical_end > BAKEN_DIRECT_MAP_SPAN {
+            return direct_map_range_stats_invalid();
+        }
+
+        let mut physical_cursor = physical_start;
+        while physical_cursor < physical_end {
+            let virtual_cursor = direct_map_virtual_address(physical_cursor);
+            if virtual_cursor == 0 { return direct_map_range_stats_invalid(); }
+            let remaining = physical_end - physical_cursor;
+
+            if remaining >= X86_PAGE_SIZE_2M &&
+               (physical_cursor % X86_PAGE_SIZE_2M) == 0 &&
+               (virtual_cursor % X86_PAGE_SIZE_2M) == 0 {
+                if !page_table_map_2m(
+                    arena,
+                    root,
+                    virtual_cursor,
+                    physical_cursor,
+                    direct_map_range_flags()
+                ) { return direct_map_range_stats_invalid(); }
+                physical_cursor += X86_PAGE_SIZE_2M;
+                bytes_mapped += X86_PAGE_SIZE_2M;
+                huge_pages_mapped += 1;
+            } else {
+                if !page_table_map_4k(
+                    arena,
+                    root,
+                    virtual_cursor,
+                    physical_cursor,
+                    direct_map_range_flags()
+                ) { return direct_map_range_stats_invalid(); }
+                physical_cursor += X86_PAGE_SIZE;
+                bytes_mapped += X86_PAGE_SIZE;
+                pages_4k_mapped += 1;
+            }
+        }
+
+        mapped_descriptor_count += 1;
+        offset += descriptor_size;
+    }
+
+    return DirectMapRangeStats {
+        descriptor_count: descriptor_count,
+        mapped_descriptor_count: mapped_descriptor_count,
+        skipped_descriptor_count: skipped_descriptor_count,
+        huge_pages_mapped: huge_pages_mapped,
+        pages_4k_mapped: pages_4k_mapped,
+        bytes_mapped: bytes_mapped,
+        valid: descriptor_count > 0
+    };
+}
