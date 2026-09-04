@@ -79,7 +79,7 @@ fn xhci_hid_context_endpoint_number(address: u8) -> u8 {
 }
 
 @system
-fn xhci_hid_context_dci(address: u8) -> u8 {
+fn xhci_hid_context_compute_dci(address: u8) -> u8 {
     let endpoint = xhci_hid_context_endpoint_number(address);
     if endpoint == 0 || (address & USB_ENDPOINT_DIRECTION_IN) == 0 { return 0; }
     let dci = ((endpoint as u16) * 2) + 1;
@@ -133,7 +133,7 @@ pub fn xhci_hid_context_prepare() -> bool {
     let endpoint_address = xhci_hid_endpoint_address();
     let max_packet = xhci_hid_endpoint_max_packet();
     let usb_interval = xhci_hid_endpoint_interval();
-    let dci = xhci_hid_context_dci(endpoint_address);
+    let dci = xhci_hid_context_compute_dci(endpoint_address);
     if dci <= 1 || max_packet == 0 || usb_interval == 0 { return false; }
 
     let port_id = xhci_slot_port_id();
