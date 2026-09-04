@@ -59,8 +59,8 @@ fn transition_image_wx_map_region(arena: *mut PageTableArena,
         mapped_size,
         flags
     );
-    if !stats.valid || stats.pages_mapped == 0 { return 0; }
-    return stats.pages_mapped;
+    if !stats.valid || stats.mapped_page_count == 0 { return 0; }
+    return stats.mapped_page_count;
 }
 
 @system
@@ -92,9 +92,9 @@ pub fn transition_image_map_wx(arena: *mut PageTableArena,
 
     while index < image.section_count {
         let section = pe_image_section(image_base, image, index);
-        if !section.valid || !pe_section_wx_safe(section) {
-            return transition_image_wx_invalid();
-        }
+        if !section.valid { return transition_image_wx_invalid(); }
+        if section.writable && section.executable { return transition_image_wx_invalid(); }
+        if !pe_section_wx_safe(section) { return transition_image_wx_invalid(); }
 
         let mapped_size_u32 = if section.virtual_size > section.raw_size {
             section.virtual_size
