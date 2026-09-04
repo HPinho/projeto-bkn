@@ -1,8 +1,8 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
-// -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas.
-// Mouse/IRQ12 permanece mascarado.
+// -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
+// -> primeiro No-op Command DMA concluído. Mouse/IRQ12 permanece mascarado.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -29,6 +29,7 @@ import kernel::drivers::pci_bus::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_runtime::*;
 import kernel::drivers::xhci_program::*;
+import kernel::drivers::xhci_start::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 pub const POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS: u64 = 10000;
@@ -64,6 +65,7 @@ static mut POST_CUTOVER_TIMER_LIVE: bool = false;
 static mut POST_CUTOVER_KEYBOARD_LIVE: bool = false;
 static mut POST_CUTOVER_XHCI_READY: bool = false;
 static mut POST_CUTOVER_XHCI_DMA_READY: bool = false;
+static mut POST_CUTOVER_XHCI_NOOP_LIVE: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -221,6 +223,7 @@ pub fn post_cutover_prepare_timer() -> bool {
         POST_CUTOVER_KEYBOARD_LIVE = false;
         POST_CUTOVER_XHCI_READY = false;
         POST_CUTOVER_XHCI_DMA_READY = false;
+        POST_CUTOVER_XHCI_NOOP_LIVE = false;
     }
     return true;
 }
@@ -239,6 +242,9 @@ pub fn post_cutover_xhci_ready() -> bool { unsafe { return POST_CUTOVER_XHCI_REA
 
 @system
 pub fn post_cutover_xhci_dma_ready() -> bool { unsafe { return POST_CUTOVER_XHCI_DMA_READY; } }
+
+@system
+pub fn post_cutover_xhci_noop_live() -> bool { unsafe { return POST_CUTOVER_XHCI_NOOP_LIVE; } }
 
 @system
 pub fn post_cutover_enable_timer_interrupts() -> bool {
@@ -292,6 +298,7 @@ pub fn post_cutover_prepare_xhci_controller() -> bool {
     unsafe {
         POST_CUTOVER_XHCI_READY = false;
         POST_CUTOVER_XHCI_DMA_READY = false;
+        POST_CUTOVER_XHCI_NOOP_LIVE = false;
     }
     if !post_cutover_keyboard_live() || !active_page_tables_is_ready() { return false; }
     if pci_scan_all() == 0 { return false; }
@@ -304,13 +311,28 @@ pub fn post_cutover_prepare_xhci_controller() -> bool {
 // Master, Run/Stop ou Doorbell é permitido nesta etapa.
 @system
 pub fn post_cutover_prepare_xhci_dma_tables() -> bool {
-    unsafe { POST_CUTOVER_XHCI_DMA_READY = false; }
+    unsafe {
+        POST_CUTOVER_XHCI_DMA_READY = false;
+        POST_CUTOVER_XHCI_NOOP_LIVE = false;
+    }
     if !post_cutover_xhci_ready() || !xhci_controller_is_ready() { return false; }
     if !xhci_runtime_prepare() || !xhci_runtime_is_ready() { return false; }
     if !xhci_program_halted_runtime() || !xhci_program_is_ready() { return false; }
     if (x86_mmio_read32(xhci_controller_operational_base() + XHCI_OP_USBSTS) &
         XHCI_USBSTS_HCHALTED) == 0 { return false; }
     unsafe { POST_CUTOVER_XHCI_DMA_READY = true; }
+    return true;
+}
+
+// N só é considerado live quando o xHC sai de HCHalted, consome um No-op TRB
+// via DMA e produz um Command Completion Event de sucesso no Event Ring.
+@system
+pub fn post_cutover_start_xhci_and_prove_noop() -> bool {
+    unsafe { POST_CUTOVER_XHCI_NOOP_LIVE = false; }
+    if !post_cutover_xhci_dma_ready() || !xhci_program_is_ready() { return false; }
+    if !xhci_start_and_prove_noop() || !xhci_start_is_ready() ||
+       !xhci_start_noop_completed() { return false; }
+    unsafe { POST_CUTOVER_XHCI_NOOP_LIVE = true; }
     return true;
 }
 
@@ -355,6 +377,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     // D prova arena DMA + DCBAAP/CRCR/ERST programados com readback e xHC parado.
     if !post_cutover_prepare_xhci_dma_tables() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('D' as u8); }
+
+    // N prova Bus Master + Run/Stop + Doorbell 0 + Command Completion real.
+    if !post_cutover_start_xhci_and_prove_noop() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('N' as u8); }
 
     loop {}
 }
