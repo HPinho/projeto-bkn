@@ -17,40 +17,42 @@ class BareMetalBoundaryTests(unittest.TestCase):
 
     def test_final_bootinfo_contract_forbids_runtime_uefi_pointers(self):
         text = (ROOT / "docs/architecture.md").read_text(encoding="utf-8")
-        forbidden = [
+        section = text.split("## BootInfo alvo", 1)[1].split("## Fundação x86-64", 1)[0]
+        for token in (
             "EFI_SYSTEM_TABLE*",
             "EFI_SIMPLE_POINTER_PROTOCOL*",
             "EFI_ABSOLUTE_POINTER_PROTOCOL*",
             "EFI_BLOCK_IO_PROTOCOL*",
             "EFI_BOOT_SERVICES*",
-        ]
-        section = text.split("## BootInfo alvo", 1)[1].split("## Fundação x86-64", 1)[0]
-        for token in forbidden:
+        ):
             with self.subTest(token=token):
                 self.assertIn(token, section)
 
     def test_bootinfo_v2_has_versioned_bare_metal_metadata(self):
         header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
-        self.assertIn("BAKEN_BOOT_INFO_VERSION 2U", header)
-        self.assertIn("struct_size", header)
-        self.assertIn("memory_descriptor_size", header)
-        self.assertIn("memory_descriptor_version", header)
-        self.assertIn("pixel_format", header)
-        self.assertIn("acpi_rsdp", header)
-        self.assertIn("BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID", header)
-        self.assertIn("BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID", header)
+        for token in (
+            "BAKEN_BOOT_INFO_VERSION 2U",
+            "struct_size",
+            "memory_descriptor_size",
+            "memory_descriptor_version",
+            "pixel_format",
+            "acpi_rsdp",
+            "BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID",
+            "BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, header)
 
     def test_bootinfo_v2_preserves_legacy_offsets_during_transition(self):
         header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
-        required_assertions = [
+        for assertion in (
             "offsetof(BakenBootInfo, framebuffer_base) == 0",
             "offsetof(BakenBootInfo, memory_map_base) == 32",
             "offsetof(BakenBootInfo, system_table) == 48",
             "offsetof(BakenBootInfo, install_target_block_io_protocol) == 72",
             "offsetof(BakenBootInfo, version) == 80",
             "sizeof(BakenBootInfo) == 120",
-        ]
-        for assertion in required_assertions:
+        ):
             with self.subTest(assertion=assertion):
                 self.assertIn(assertion, header)
 
@@ -73,7 +75,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
 
     def test_bootloader_populates_real_v2_platform_metadata(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        required = [
+        for token in (
             "capture_memory_map",
             "EFI_BUFFER_TOO_SMALL",
             "GetMemoryMap",
@@ -83,8 +85,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID",
             "BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID",
             "boot_info.version = BAKEN_BOOT_INFO_VERSION",
-        ]
-        for token in required:
+        ):
             with self.subTest(token=token):
                 self.assertIn(token, boot)
 
