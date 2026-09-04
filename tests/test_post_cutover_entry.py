@@ -23,6 +23,14 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertNotIn("sotlas_x86_post_cutover_entry(", main_body)
         self.assertNotIn("post_cutover_activate_cpu(", main_body)
 
+    def test_handoff_pointers_are_translated_through_direct_map(self):
+        text = POST.read_text(encoding="utf-8")
+        self.assertIn("import kernel::memory::direct_map::*;", text)
+        map_body = text.split("pub fn post_cutover_memory_map_virtual", 1)[1].split("pub fn post_cutover_acpi_rsdp_virtual", 1)[0]
+        acpi_body = text.split("pub fn post_cutover_acpi_rsdp_virtual", 1)[1].split("pub fn post_cutover_context_valid", 1)[0]
+        self.assertIn("direct_map_virtual_address(context.memory_map_base)", map_body)
+        self.assertIn("direct_map_virtual_address(context.acpi_rsdp)", acpi_body)
+
     def test_cpu_activation_order_is_cr3_gdt_ltr_lidt(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_activate_cpu", 1)[1].split("pub fn post_cutover_cpu_tables_active", 1)[0]
