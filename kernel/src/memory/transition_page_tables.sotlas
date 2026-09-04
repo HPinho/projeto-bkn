@@ -2,7 +2,7 @@
 //
 // Recebe uma arena bootstrap já válida, cria a PML4 raiz e materializa:
 //   1) direct-map somente dos ranges UEFI/RAM aprovados;
-//   2) mapping temporário da imagem carregada;
+//   2) imagem PE com política W^X por seção (headers R+NX, código RX, dados RW+NX);
 //   3) mapping RW+NX da stack, mantendo a guard page ausente.
 //
 // Falha fechada se qualquer etapa falhar. NÃO escreve CR3, NÃO chama UEFI e
@@ -14,6 +14,7 @@ import kernel::memory::page_table_arena::*;
 import kernel::memory::page_table_writer::*;
 import kernel::memory::direct_map_ranges::*;
 import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_image_wx::*;
 import kernel::memory::transition_stack::*;
 import kernel::memory::transition_stack_map::*;
 
@@ -69,7 +70,9 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
     );
     if !direct.valid { return transition_page_tables_invalid(); }
 
-    let image_map = transition_image_map(arena, root, image);
+    let image_base = image.virtual_base as *const u8;
+    if image_base == (null as *const u8) { return transition_page_tables_invalid(); }
+    let image_map = transition_image_map_wx(arena, root, image, image_base);
     if !image_map.valid { return transition_page_tables_invalid(); }
 
     let stack_map = transition_stack_map(arena, root, stack);
@@ -84,7 +87,7 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
         root_virtual: root.virtual_address,
         table_pages_used: table_pages_used,
         direct_map_bytes: direct.bytes_mapped,
-        image_pages: image_map.mapped_page_count,
+        image_pages: image_map.pages_mapped,
         stack_pages: stack_map.mapped_page_count,
         valid: true
     };
