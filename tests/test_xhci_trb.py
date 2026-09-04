@@ -23,6 +23,7 @@ class XhciTrbTests(unittest.TestCase):
         self.assertIn("XHCI_TRB_TYPE_DISABLE_SLOT: u32 = 10", text)
         self.assertIn("XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11", text)
         self.assertIn("XHCI_TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12", text)
+        self.assertIn("XHCI_TRB_TYPE_EVALUATE_CONTEXT: u32 = 13", text)
         self.assertIn("XHCI_TRB_TYPE_NOOP_COMMAND: u32 = 23", text)
 
     def test_type_cycle_slot_and_flag_bitfields_are_explicit(self):
@@ -36,7 +37,7 @@ class XhciTrbTests(unittest.TestCase):
 
     def test_input_context_pointer_is_16_byte_aligned(self):
         text = TRB.read_text(encoding="utf-8")
-        self.assertGreaterEqual(text.count("input_context_physical & 0xFFFFFFFFFFFFFFF0"), 2)
+        self.assertGreaterEqual(text.count("input_context_physical & 0xFFFFFFFFFFFFFFF0"), 3)
 
     def test_link_pointer_is_16_byte_aligned_and_toggle_is_optional(self):
         text = TRB.read_text(encoding="utf-8")
@@ -53,11 +54,12 @@ class XhciTrbTests(unittest.TestCase):
         ):
             self.assertNotIn(token, code, token)
 
-    def test_address_and_configure_encode_slot_id(self):
+    def test_address_configure_and_evaluate_encode_slot_id(self):
         text = TRB.read_text(encoding="utf-8")
-        self.assertGreaterEqual(text.count("(slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT"), 3)
+        self.assertGreaterEqual(text.count("(slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT"), 4)
         self.assertIn("if block_set_address_request", text)
         self.assertIn("if deconfigure", text)
+        self.assertIn("pub fn xhci_trb_evaluate_context", text)
 
 
 if __name__ == "__main__":
