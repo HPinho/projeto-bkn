@@ -232,17 +232,23 @@ pub fn xhci_controller_prepare_first() -> bool {
 
     let operational = mmio + (caplength as u64);
     if !xhci_map_required_mmio(mmio, operational) { return false; }
+    xhci_controller_checkpoint(50, 'g' as u8);
 
     let hcsparams1 = x86_mmio_read32(mmio + XHCI_HCSPARAMS1);
     let hcsparams2 = x86_mmio_read32(mmio + XHCI_HCSPARAMS2);
     let hccparams1 = x86_mmio_read32(mmio + XHCI_HCCPARAMS1);
+    xhci_controller_checkpoint(51, 'r' as u8);
+
     let max_slots = (hcsparams1 & 0xFF) as u8;
     let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
     let scratchpads = xhci_max_scratchpads(hcsparams2);
-    if max_slots == 0 || max_ports == 0 { return false; }
-    xhci_controller_checkpoint(51, 'h' as u8);
+    if max_slots == 0 { return false; }
+    xhci_controller_checkpoint(52, 's' as u8);
+    if max_ports == 0 { return false; }
+    xhci_controller_checkpoint(53, 'p' as u8);
+    xhci_controller_checkpoint(54, 'h' as u8);
 
-    xhci_controller_checkpoint(52, 'j' as u8);
+    xhci_controller_checkpoint(55, 'j' as u8);
     if !xhci_legacy_handoff(mmio, hccparams1) { return false; }
     unsafe { XHCI_CONTROLLER_LEGACY_HANDOFF_DONE = true; }
     xhci_controller_checkpoint(6, '9' as u8);
