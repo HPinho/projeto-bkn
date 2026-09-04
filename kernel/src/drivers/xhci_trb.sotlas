@@ -1,0 +1,91 @@
+// Baken OS — construtores puros de Command TRBs xHCI.
+//
+// Apenas codifica bitfields definidos pela especificação xHCI. Não escreve
+// rings, não toca doorbells, não acessa MMIO e não submete comandos ao xHC.
+
+module kernel::drivers::xhci_trb;
+
+import kernel::drivers::xhci_ring::*;
+
+pub const XHCI_TRB_TYPE_ENABLE_SLOT: u32 = 9;
+pub const XHCI_TRB_TYPE_DISABLE_SLOT: u32 = 10;
+pub const XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11;
+pub const XHCI_TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12;
+pub const XHCI_TRB_TYPE_NOOP_COMMAND: u32 = 23;
+
+pub const XHCI_TRB_CYCLE_BIT: u32 = 1;
+pub const XHCI_TRB_BSR_OR_DC_BIT: u32 = 1 << 9;
+pub const XHCI_TRB_TYPE_SHIFT: u32 = 10;
+pub const XHCI_TRB_SLOT_TYPE_SHIFT: u32 = 16;
+pub const XHCI_TRB_SLOT_ID_SHIFT: u32 = 24;
+
+@system
+pub fn xhci_trb_type_bits(type_id: u32) -> u32 {
+    return (type_id & 0x3F) << XHCI_TRB_TYPE_SHIFT;
+}
+
+@system
+pub fn xhci_trb_cycle_bits(cycle: bool) -> u32 {
+    if cycle { return XHCI_TRB_CYCLE_BIT; }
+    return 0;
+}
+
+@system
+pub fn xhci_trb_noop_command(cycle: bool) -> XhciTrb {
+    return XhciTrb {
+        parameter: 0,
+        status: 0,
+        control: xhci_trb_type_bits(XHCI_TRB_TYPE_NOOP_COMMAND) |
+            xhci_trb_cycle_bits(cycle)
+    };
+}
+
+@system
+pub fn xhci_trb_enable_slot(slot_type: u8, cycle: bool) -> XhciTrb {
+    let control = xhci_trb_type_bits(XHCI_TRB_TYPE_ENABLE_SLOT) |
+        (((slot_type as u32) & 0x1F) << XHCI_TRB_SLOT_TYPE_SHIFT) |
+        xhci_trb_cycle_bits(cycle);
+    return XhciTrb { parameter: 0, status: 0, control: control };
+}
+
+@system
+pub fn xhci_trb_disable_slot(slot_id: u8, cycle: bool) -> XhciTrb {
+    let control = xhci_trb_type_bits(XHCI_TRB_TYPE_DISABLE_SLOT) |
+        ((slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT) |
+        xhci_trb_cycle_bits(cycle);
+    return XhciTrb { parameter: 0, status: 0, control: control };
+}
+
+@system
+pub fn xhci_trb_address_device(input_context_physical: u64,
+                               slot_id: u8,
+                               block_set_address_request: bool,
+                               cycle: bool) -> XhciTrb {
+    let mut control = xhci_trb_type_bits(XHCI_TRB_TYPE_ADDRESS_DEVICE) |
+        ((slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT) |
+        xhci_trb_cycle_bits(cycle);
+    if block_set_address_request { control = control | XHCI_TRB_BSR_OR_DC_BIT; }
+
+    return XhciTrb {
+        parameter: input_context_physical & 0xFFFFFFFFFFFFFFF0,
+        status: 0,
+        control: control
+    };
+}
+
+@system
+pub fn xhci_trb_configure_endpoint(input_context_physical: u64,
+                                   slot_id: u8,
+                                   deconfigure: bool,
+                                   cycle: bool) -> XhciTrb {
+    let mut control = xhci_trb_type_bits(XHCI_TRB_TYPE_CONFIGURE_ENDPOINT) |
+        ((slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT) |
+        xhci_trb_cycle_bits(cycle);
+    if deconfigure { control = control | XHCI_TRB_BSR_OR_DC_BIT; }
+
+    return XhciTrb {
+        parameter: input_context_physical & 0xFFFFFFFFFFFFFFF0,
+        status: 0,
+        control: control
+    };
+}
