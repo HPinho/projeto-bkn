@@ -1,0 +1,137 @@
+// Baken OS — mapping W^X por seção da imagem PE32+ durante a transição.
+//
+// Headers são mapeados R+NX. Cada seção recebe permissões derivadas das
+// características PE e qualquer seção W+X é rejeitada. O mapper trabalha em
+// granularidade de 4 KiB; sobreposições com flags incompatíveis falham através
+// do page_table_mapper em vez de ampliar permissões silenciosamente.
+//
+// Este módulo prepara tabelas em memória; não toca CR3, UEFI ou PMM.
+
+module kernel::memory::transition_image_wx;
+
+import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_map::*;
+import kernel::memory::page_table_arena::*;
+import kernel::memory::pe_image::*;
+import kernel::memory::pe_wx_policy::*;
+import kernel::arch::x86_64::paging::*;
+
+pub struct TransitionImageWxStats {
+    pub headers_mapped: bool;
+    pub sections_mapped: u16;
+    pub pages_mapped: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn transition_image_wx_invalid() -> TransitionImageWxStats {
+    return TransitionImageWxStats {
+        headers_mapped: false,
+        sections_mapped: 0,
+        pages_mapped: 0,
+        valid: false
+    };
+}
+
+@system
+fn transition_image_wx_map_region(arena: *mut PageTableArena,
+                                  root: PageTablePage,
+                                  virtual_base: u64,
+                                  physical_base: u64,
+                                  size: u64,
+                                  flags: u64) -> u64 {
+    if size == 0 || flags == 0 { return 0; }
+    if (virtual_base % X86_PAGE_SIZE) != (physical_base % X86_PAGE_SIZE) { return 0; }
+
+    let virtual_start = x86_page_align_down(virtual_base);
+    let physical_start = x86_page_align_down(physical_base);
+    let virtual_end_raw = virtual_base + size;
+    if virtual_end_raw <= virtual_base { return 0; }
+    let virtual_end = x86_page_align_up(virtual_end_raw);
+    if virtual_end == 0 || virtual_end <= virtual_start { return 0; }
+    let mapped_size = virtual_end - virtual_start;
+
+    let stats = transition_map_range(
+        arena,
+        root,
+        virtual_start,
+        physical_start,
+        mapped_size,
+        flags
+    );
+    if !stats.valid || stats.pages_mapped == 0 { return 0; }
+    return stats.pages_mapped;
+}
+
+@system
+pub fn transition_image_map_wx(arena: *mut PageTableArena,
+                               root: PageTablePage,
+                               layout: TransitionImageLayout,
+                               image_base: *const u8) -> TransitionImageWxStats {
+    if arena == (null as *mut PageTableArena) { return transition_image_wx_invalid(); }
+    if image_base == (null as *const u8) || !layout.valid { return transition_image_wx_invalid(); }
+
+    let image = pe_image_parse(image_base, layout.size);
+    if !image.valid { return transition_image_wx_invalid(); }
+    if (image.image_base as u64) != layout.virtual_base { return transition_image_wx_invalid(); }
+    if (image.size_of_image as u64) > layout.size { return transition_image_wx_invalid(); }
+
+    let header_pages = transition_image_wx_map_region(
+        arena,
+        root,
+        layout.virtual_base,
+        layout.physical_base,
+        image.size_of_headers as u64,
+        pe_header_pte_flags()
+    );
+    if header_pages == 0 { return transition_image_wx_invalid(); }
+
+    let mut index: u16 = 0;
+    let mut sections_mapped: u16 = 0;
+    let mut pages_mapped: u64 = header_pages;
+
+    while index < image.section_count {
+        let section = pe_image_section(image_base, image, index);
+        if !section.valid || !pe_section_wx_safe(section) {
+            return transition_image_wx_invalid();
+        }
+
+        let mapped_size_u32 = if section.virtual_size > section.raw_size {
+            section.virtual_size
+        } else {
+            section.raw_size
+        };
+        if mapped_size_u32 == 0 { return transition_image_wx_invalid(); }
+        let section_offset = section.virtual_address as u64;
+        let section_virtual = layout.virtual_base + section_offset;
+        let section_physical = layout.physical_base + section_offset;
+        if section_virtual < layout.virtual_base || section_physical < layout.physical_base {
+            return transition_image_wx_invalid();
+        }
+
+        let flags = pe_section_pte_flags(section);
+        if flags == 0 { return transition_image_wx_invalid(); }
+        let mapped_pages = transition_image_wx_map_region(
+            arena,
+            root,
+            section_virtual,
+            section_physical,
+            mapped_size_u32 as u64,
+            flags
+        );
+        if mapped_pages == 0 { return transition_image_wx_invalid(); }
+
+        let new_total = pages_mapped + mapped_pages;
+        if new_total < pages_mapped { return transition_image_wx_invalid(); }
+        pages_mapped = new_total;
+        sections_mapped += 1;
+        index += 1;
+    }
+
+    return TransitionImageWxStats {
+        headers_mapped: true,
+        sections_mapped: sections_mapped,
+        pages_mapped: pages_mapped,
+        valid: sections_mapped == image.section_count
+    };
+}
