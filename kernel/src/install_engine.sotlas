@@ -8,6 +8,7 @@ module kernel::install_engine;
 
 import kernel::storage::block_device::*;
 import kernel::storage::gpt::*;
+import kernel::storage::fat32::*;
 
 pub const INSTALL_STATE_IDLE: u32 = 0;
 pub const INSTALL_STATE_UNAVAILABLE: u32 = 1;
@@ -18,6 +19,8 @@ pub const INSTALL_STATE_COPYING: u32 = 5;
 pub const INSTALL_STATE_FINALIZING: u32 = 6;
 pub const INSTALL_STATE_COMPLETE: u32 = 7;
 pub const INSTALL_STATE_FAILED: u32 = 8;
+
+pub const INSTALL_ESP_BYTES: u64 = 536870912;
 
 static mut INSTALL_STATE: u32 = INSTALL_STATE_IDLE;
 static mut INSTALL_PROGRESS: u32 = 0;
@@ -35,8 +38,26 @@ pub fn install_engine_reset() -> void {
 @system
 pub fn install_engine_available() -> bool {
     if !block_device_has_writable_native_target() { return false; }
-    let layout = gpt_plan_default(block_device_block_size(), block_device_last_lba());
-    return layout.valid;
+
+    let block_size = block_device_block_size();
+    let last_lba = block_device_last_lba();
+    let gpt = gpt_plan_default(block_size, last_lba);
+    if !gpt.valid { return false; }
+
+    if block_size == 0 { return false; }
+    let esp_sectors = INSTALL_ESP_BYTES / (block_size as u64);
+    if esp_sectors == 0 { return false; }
+
+    let fat = fat32_plan_layout(block_size, esp_sectors);
+    if !fat.valid { return false; }
+
+    // A ESP deve caber dentro da área utilizável planejada, preservando a GPT
+    // de backup no fim do dispositivo.
+    if gpt.first_usable_lba > gpt.last_usable_lba { return false; }
+    let usable_sectors = gpt.last_usable_lba - gpt.first_usable_lba + 1;
+    if esp_sectors >= usable_sectors { return false; }
+
+    return true;
 }
 
 @system
@@ -49,7 +70,7 @@ pub fn install_engine_start() -> bool {
             return false;
         }
 
-        // O alvo e a geometria GPT podem ser válidos, mas isso ainda não
+        // O alvo, GPT e ESP FAT32 podem ser válidos, mas isso ainda não
         // equivale a possuir um write path de particionamento/filesystem
         // completo. Até GPT/FAT32/BakenFS efetuarem I/O e verificarem o que foi
         // gravado, não declaramos instalação em andamento nem sucesso.
