@@ -33,6 +33,8 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertEqual(builtins["__ltr"].params[0][1].name, "u16")
         self.assertEqual(builtins["__read_cr2"].result.name, "u64")
         self.assertEqual(builtins["__invlpg"].params[0][1].name, "u64")
+        self.assertEqual(builtins["__exception_stub_address"].params[0][1].name, "u16")
+        self.assertEqual(builtins["__exception_stub_address"].result.name, "u64")
 
     def test_preamble_contains_real_privileged_instructions(self):
         preamble = bootstrap.PREAMBLE
@@ -41,6 +43,7 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertIn('"ltr %w0"', preamble)
         self.assertIn('"mov %%cr2, %0"', preamble)
         self.assertIn('"invlpg (%0)"', preamble)
+        self.assertIn("static inline uint64_t __exception_stub_address", preamble)
 
     def test_install_is_idempotent(self):
         x86_intrinsics.install(bootstrap)
@@ -55,11 +58,13 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
 module kernel::arch::x86_64::intrinsic_fixture;
 
 @system
-pub fn exercise(gdt: u64, idt: u64, selector: u16, page: u64) -> u64 {
+pub fn exercise(gdt: u64, idt: u64, selector: u16, page: u64, vector: u16) -> u64 {
     __lgdt(gdt);
     __lidt(idt);
     __ltr(selector);
     __invlpg(page);
+    let stub: u64 = __exception_stub_address(vector);
+    if stub != 0 { return stub; }
     return __read_cr2();
 }
 """
@@ -70,6 +75,7 @@ pub fn exercise(gdt: u64, idt: u64, selector: u16, page: u64) -> u64 {
         self.assertIn("__lidt(idt)", generated)
         self.assertIn("__ltr(selector)", generated)
         self.assertIn("__invlpg(page)", generated)
+        self.assertIn("__exception_stub_address(vector)", generated)
         self.assertIn("__read_cr2()", generated)
 
 
