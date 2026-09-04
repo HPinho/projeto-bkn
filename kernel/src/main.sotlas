@@ -42,6 +42,8 @@ import kernel::arch::x86_64::pat::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
 
+pub const BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID: u64 = 8;
+
 // Envelope de transição BakenBootInfo v2.
 // Os primeiros campos preservam o ABI legado enquanto input/storage/timing
 // ainda usam pontes UEFI. Os campos finais já carregam metadados necessários
@@ -66,6 +68,10 @@ pub struct BakenBootInfo {
     pub memory_descriptor_version: u32;
     pub pixel_format: u32;
     pub acpi_rsdp: *const u8;
+
+    pub page_table_arena_physical_base: u64;
+    pub page_table_arena_virtual_base: *mut u8;
+    pub page_table_arena_page_count: u64;
 }
 
 @system
@@ -76,6 +82,17 @@ pub fn baken_bootinfo_v2_valid(boot_info: *const BakenBootInfo) -> bool {
     if (boot_info.framebuffer_base == (null as *mut u32)) { return false; }
     if (boot_info.screen_width == 0 || boot_info.screen_height == 0) { return false; }
     if (boot_info.pixels_per_scanline < boot_info.screen_width) { return false; }
+
+    if (boot_info.flags & BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID) != 0 {
+        if boot_info.struct_size < 144 { return false; }
+        if boot_info.page_table_arena_physical_base == 0 { return false; }
+        if boot_info.page_table_arena_virtual_base == (null as *mut u8) { return false; }
+        if boot_info.page_table_arena_page_count == 0 { return false; }
+        if (boot_info.page_table_arena_physical_base % X86_PAGE_SIZE) != 0 { return false; }
+        if ((boot_info.page_table_arena_virtual_base as usize) % (X86_PAGE_SIZE as usize)) != 0 {
+            return false;
+        }
+    }
     return true;
 }
 
@@ -112,9 +129,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         );
     }
 
-    // O bootstrap allocator pós-ExitBootServices já é compilado pelo grafo,
-    // porém NÃO é ativado aqui. O boot atual ainda usa UEFI; ativá-lo nesta
-    // função seria reutilizar memória física antes do firmware liberar ownership.
+    // A arena de page tables já pode ser reservada pelo bootstrap, mas ainda
+    // não é consumida nesta rota híbrida. O alias permanece apenas metadado até
+    // o caminho pós-ExitBootServices possuir imagem/stack de transição mapeadas.
     pmm_allocator_is_active();
 
     // Política do Memory Map + paging/VMM/direct-map/range-builder/arena/writer/
