@@ -17,9 +17,10 @@
 #include <stddef.h>
 
 #define BAKEN_BOOT_INFO_VERSION 2U
-#define BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE (1ULL << 0)
-#define BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID    (1ULL << 1)
-#define BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID     (1ULL << 2)
+#define BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE       (1ULL << 0)
+#define BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID          (1ULL << 1)
+#define BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID           (1ULL << 2)
+#define BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID    (1ULL << 3)
 
 typedef struct {
     /* ABI legado congelado (offsets 0..79). */
@@ -43,6 +44,13 @@ typedef struct {
     uint32_t memory_descriptor_version;
     uint32_t pixel_format;
     void *acpi_rsdp;
+
+    /* Reserva bootstrap page-aligned para page tables próprias. O endereço
+     * físico será gravado nas entries/CR3; o alias virtual é válido somente
+     * sob o address space herdado durante a transição e nunca é inferido do PA. */
+    uint64_t page_table_arena_physical_base;
+    void *page_table_arena_virtual_base;
+    uint64_t page_table_arena_page_count;
 } BakenBootInfo;
 
 _Static_assert(offsetof(BakenBootInfo, framebuffer_base) == 0, "handoff framebuffer deslocado");
@@ -55,6 +63,9 @@ _Static_assert(offsetof(BakenBootInfo, install_target_block_io_protocol) == 72, 
 _Static_assert(offsetof(BakenBootInfo, version) == 80, "extensão v2 deslocada");
 _Static_assert(offsetof(BakenBootInfo, memory_descriptor_size) == 96, "descritor de mapa deslocado");
 _Static_assert(offsetof(BakenBootInfo, acpi_rsdp) == 112, "ACPI RSDP deslocada");
-_Static_assert(sizeof(BakenBootInfo) == 120, "handoff BakenBootInfo v2 x86_64 inválido");
+_Static_assert(offsetof(BakenBootInfo, page_table_arena_physical_base) == 120, "PA da arena deslocado");
+_Static_assert(offsetof(BakenBootInfo, page_table_arena_virtual_base) == 128, "VA da arena deslocado");
+_Static_assert(offsetof(BakenBootInfo, page_table_arena_page_count) == 136, "contagem da arena deslocada");
+_Static_assert(sizeof(BakenBootInfo) == 144, "handoff BakenBootInfo v2 x86_64 inválido");
 
 #endif
