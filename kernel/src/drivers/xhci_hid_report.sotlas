@@ -1,0 +1,248 @@
+// Baken OS — caminho polling de reports HID Boot via Interrupt IN.
+//
+// Usa a Transfer Ring dedicada preparada pelo Endpoint Context HID, publica um
+// Normal TRB por report, toca o Doorbell do Slot/DCI, espera o Transfer Event
+// pelo consumidor global e interpreta o formato Boot Keyboard ou Boot Mouse.
+// Esta fase ainda não é chamada pelo boot pós-cutover.
+
+module kernel::drivers::xhci_hid_report;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::dma::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_set_configuration::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
+import kernel::drivers::xhci_transfer::*;
+
+pub const XHCI_HID_REPORT_DMA_SIZE: u64 = 4096;
+pub const XHCI_HID_REPORT_FIRST_INDEX: u32 = 0;
+pub const XHCI_HID_BOOT_KEYBOARD_LENGTH: u32 = 8;
+pub const XHCI_HID_BOOT_MOUSE_MIN_LENGTH: u32 = 3;
+
+static mut XHCI_HID_REPORT_READY: bool = false;
+static mut XHCI_HID_REPORT_ENQUEUE_INDEX: u32 = XHCI_HID_REPORT_FIRST_INDEX;
+static mut XHCI_HID_REPORT_PRODUCER_CYCLE: bool = true;
+static mut XHCI_HID_REPORT_BUFFER: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+static mut XHCI_HID_REPORT_LAST_LENGTH: u32 = 0;
+static mut XHCI_HID_KEYBOARD_MODIFIERS: u8 = 0;
+static mut XHCI_HID_KEYBOARD_KEY0: u8 = 0;
+static mut XHCI_HID_KEYBOARD_KEY1: u8 = 0;
+static mut XHCI_HID_KEYBOARD_KEY2: u8 = 0;
+static mut XHCI_HID_KEYBOARD_KEY3: u8 = 0;
+static mut XHCI_HID_KEYBOARD_KEY4: u8 = 0;
+static mut XHCI_HID_KEYBOARD_KEY5: u8 = 0;
+static mut XHCI_HID_MOUSE_BUTTONS: u8 = 0;
+static mut XHCI_HID_MOUSE_X_RAW: u8 = 0;
+static mut XHCI_HID_MOUSE_Y_RAW: u8 = 0;
+
+@system
+fn xhci_hid_report_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_hid_report_map_mmio(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_hid_report_page_base(address));
+}
+
+@system
+fn xhci_hid_report_zero(base: *mut u8, size: u64) -> bool {
+    if base == (null as *mut u8) || size == 0 { return false; }
+    unsafe {
+        let mut i: u64 = 0;
+        while i < size {
+            *(((base as usize) + (i as usize)) as *mut u8) = 0;
+            i += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_report_ring_slot(index: u32) -> *mut XhciTrb {
+    let usable = XHCI_HID_RING_TRBS - XHCI_RING_RESERVED_LINK_TRBS;
+    if index >= usable { return null as *mut XhciTrb; }
+    let base = direct_map_virtual_address(xhci_hid_context_ring_physical());
+    if base == 0 { return null as *mut XhciTrb; }
+    return (base + ((index as u64) * XHCI_TRB_SIZE)) as *mut XhciTrb;
+}
+
+@system
+fn xhci_hid_report_ring_physical(index: u32) -> u64 {
+    let usable = XHCI_HID_RING_TRBS - XHCI_RING_RESERVED_LINK_TRBS;
+    if index >= usable { return 0; }
+    let base = xhci_hid_context_ring_physical();
+    if base == 0 { return 0; }
+    return base + ((index as u64) * XHCI_TRB_SIZE);
+}
+
+@system
+fn xhci_hid_report_publish_link(cycle: bool) -> bool {
+    let base = direct_map_virtual_address(xhci_hid_context_ring_physical());
+    if base == 0 { return false; }
+    let link_index = XHCI_HID_RING_TRBS - 1;
+    unsafe {
+        let slot = (base + ((link_index as u64) * XHCI_TRB_SIZE)) as *mut XhciTrb;
+        *slot = xhci_trb_link(xhci_hid_context_ring_physical(), true, cycle);
+    }
+    return x86_read_cr3_raw() != 0;
+}
+
+@system
+fn xhci_hid_report_advance() -> bool {
+    unsafe {
+        let usable = XHCI_HID_RING_TRBS - XHCI_RING_RESERVED_LINK_TRBS;
+        if usable == 0 || XHCI_HID_REPORT_ENQUEUE_INDEX >= usable { return false; }
+        XHCI_HID_REPORT_ENQUEUE_INDEX += 1;
+        if XHCI_HID_REPORT_ENQUEUE_INDEX >= usable {
+            XHCI_HID_REPORT_ENQUEUE_INDEX = 0;
+            XHCI_HID_REPORT_PRODUCER_CYCLE = !XHCI_HID_REPORT_PRODUCER_CYCLE;
+        }
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_report_ring_doorbell(slot_id: u8, dci: u8) -> bool {
+    if slot_id == 0 || dci <= 1 { return false; }
+    let mmio = xhci_controller_mmio_base();
+    if mmio == 0 { return false; }
+    let dboff = (x86_mmio_read32(mmio + XHCI_DBOFF) as u64) & 0xFFFFFFFC;
+    let doorbell = mmio + dboff + ((slot_id as u64) * 4);
+    if doorbell < mmio || !xhci_hid_report_map_mmio(doorbell) { return false; }
+    x86_mmio_write32(doorbell, dci as u32);
+    return true;
+}
+
+@system
+fn xhci_hid_report_parse(length: u32) -> bool {
+    let base = unsafe { XHCI_HID_REPORT_BUFFER.virtual_address };
+    if base == (null as *mut u8) || length == 0 { return false; }
+    let protocol = xhci_hid_protocol();
+    unsafe {
+        if protocol == USB_HID_PROTOCOL_KEYBOARD {
+            if length < XHCI_HID_BOOT_KEYBOARD_LENGTH { return false; }
+            XHCI_HID_KEYBOARD_MODIFIERS = *base;
+            XHCI_HID_KEYBOARD_KEY0 = *(((base as usize) + 2) as *const u8);
+            XHCI_HID_KEYBOARD_KEY1 = *(((base as usize) + 3) as *const u8);
+            XHCI_HID_KEYBOARD_KEY2 = *(((base as usize) + 4) as *const u8);
+            XHCI_HID_KEYBOARD_KEY3 = *(((base as usize) + 5) as *const u8);
+            XHCI_HID_KEYBOARD_KEY4 = *(((base as usize) + 6) as *const u8);
+            XHCI_HID_KEYBOARD_KEY5 = *(((base as usize) + 7) as *const u8);
+            return true;
+        }
+        if protocol == USB_HID_PROTOCOL_MOUSE {
+            if length < XHCI_HID_BOOT_MOUSE_MIN_LENGTH { return false; }
+            XHCI_HID_MOUSE_BUTTONS = *base;
+            XHCI_HID_MOUSE_X_RAW = *(((base as usize) + 1) as *const u8);
+            XHCI_HID_MOUSE_Y_RAW = *(((base as usize) + 2) as *const u8);
+            return true;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn xhci_hid_report_prepare() -> bool {
+    unsafe {
+        XHCI_HID_REPORT_READY = false;
+        XHCI_HID_REPORT_ENQUEUE_INDEX = XHCI_HID_REPORT_FIRST_INDEX;
+        XHCI_HID_REPORT_PRODUCER_CYCLE = true;
+        XHCI_HID_REPORT_BUFFER = dma_invalid_buffer();
+        XHCI_HID_REPORT_LAST_LENGTH = 0;
+    }
+    if !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() { return false; }
+    if xhci_hid_context_dci() <= 1 || xhci_slot_id() == 0 { return false; }
+
+    let max_packet = xhci_hid_endpoint_max_packet() as u64;
+    if max_packet == 0 || max_packet > XHCI_HID_REPORT_DMA_SIZE { return false; }
+    let mut buffer = dma_alloc(XHCI_HID_REPORT_DMA_SIZE, XHCI_HID_REPORT_DMA_SIZE);
+    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    if !xhci_hid_report_zero(buffer.virtual_address, buffer.size) { return false; }
+    if !dma_share_with_device(&mut buffer) { return false; }
+
+    unsafe {
+        XHCI_HID_REPORT_BUFFER = buffer;
+        XHCI_HID_REPORT_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_hid_report_poll_once() -> bool {
+    if !xhci_hid_report_is_ready() { return false; }
+    let slot_id = xhci_slot_id();
+    let dci = xhci_hid_context_dci();
+    let transfer_length = xhci_hid_endpoint_max_packet() as u32;
+    if slot_id == 0 || dci <= 1 || transfer_length == 0 { return false; }
+
+    unsafe {
+        let index = XHCI_HID_REPORT_ENQUEUE_INDEX;
+        let cycle = XHCI_HID_REPORT_PRODUCER_CYCLE;
+        let usable = XHCI_HID_RING_TRBS - XHCI_RING_RESERVED_LINK_TRBS;
+        if index >= usable { return false; }
+        if index == (usable - 1) && !xhci_hid_report_publish_link(cycle) { return false; }
+        let slot = xhci_hid_report_ring_slot(index);
+        let physical = xhci_hid_report_ring_physical(index);
+        if slot == (null as *mut XhciTrb) || physical == 0 { return false; }
+        if !xhci_hid_report_zero(XHCI_HID_REPORT_BUFFER.virtual_address, transfer_length as u64) {
+            return false;
+        }
+        *slot = xhci_trb_normal(
+            XHCI_HID_REPORT_BUFFER.physical_address,
+            transfer_length,
+            0,
+            true,
+            cycle
+        );
+        if x86_read_cr3_raw() == 0 { return false; }
+        if !xhci_hid_report_ring_doorbell(slot_id, dci) { return false; }
+        if !xhci_hid_report_advance() { return false; }
+        if !xhci_transfer_wait_completion(slot_id, dci, physical) { return false; }
+        let residual = xhci_transfer_last_residual_length();
+        if residual > transfer_length { return false; }
+        let actual = transfer_length - residual;
+        XHCI_HID_REPORT_LAST_LENGTH = actual;
+        return xhci_hid_report_parse(actual);
+    }
+}
+
+@system
+pub fn xhci_hid_report_is_ready() -> bool { unsafe { return XHCI_HID_REPORT_READY; } }
+@system
+pub fn xhci_hid_report_last_length() -> u32 { unsafe { return XHCI_HID_REPORT_LAST_LENGTH; } }
+@system
+pub fn xhci_hid_keyboard_modifiers() -> u8 { unsafe { return XHCI_HID_KEYBOARD_MODIFIERS; } }
+@system
+pub fn xhci_hid_keyboard_key0() -> u8 { unsafe { return XHCI_HID_KEYBOARD_KEY0; } }
+@system
+pub fn xhci_hid_keyboard_key1() -> u8 { unsafe { return XHCI_HID_KEYBOARD_KEY1; } }
+@system
+pub fn xhci_hid_keyboard_key2() -> u8 { unsafe { return XHCI_HID_KEYBOARD_KEY2; } }
+@system
+pub fn xhci_hid_keyboard_key3() -> u8 { unsafe { return XHCI_HID_KEYBOARD_KEY3; } }
+@system
+pub fn xhci_hid_keyboard_key4() -> u8 { unsafe { return XHCI_HID_KEYBOARD_KEY4; } }
+@system
+pub fn xhci_hid_keyboard_key5() -> u8 { unsafe { return XHCI_HID_KEYBOARD_KEY5; } }
+@system
+pub fn xhci_hid_mouse_buttons() -> u8 { unsafe { return XHCI_HID_MOUSE_BUTTONS; } }
+@system
+pub fn xhci_hid_mouse_x_raw() -> u8 { unsafe { return XHCI_HID_MOUSE_X_RAW; } }
+@system
+pub fn xhci_hid_mouse_y_raw() -> u8 { unsafe { return XHCI_HID_MOUSE_Y_RAW; } }
