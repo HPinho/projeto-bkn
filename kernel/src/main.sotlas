@@ -15,6 +15,7 @@ import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
 import kernel::acpi::hpet::*;
 import kernel::acpi::fadt::*;
+import kernel::interrupts::route::*;
 import kernel::drivers::pci_bus::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
@@ -100,7 +101,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         if acpi_init(boot_info.acpi_rsdp) {
             // Inventários passivos: nenhum LAPIC/IOAPIC/HPET/PM timer é
             // ativado e nenhum endereço ECAM/MMIO é acessado enquanto
-            // VMM/page tables próprios ainda não existem.
+            // VMM/page tables próprios ainda não existem. O módulo de rotas
+            // consome MADT apenas quando um IRQ for planejado futuramente.
             madt_init();
             mcfg_init();
             hpet_init();
