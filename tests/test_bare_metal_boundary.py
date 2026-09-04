@@ -40,9 +40,17 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "page_table_arena_physical_base",
             "page_table_arena_virtual_base",
             "page_table_arena_page_count",
+            "loaded_image_physical_base",
+            "loaded_image_virtual_base",
+            "loaded_image_size",
+            "transition_stack_physical_base",
+            "transition_stack_virtual_base",
+            "transition_stack_page_count",
             "BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID",
             "BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID",
             "BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID",
+            "BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID",
+            "BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, header)
@@ -59,7 +67,13 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "offsetof(BakenBootInfo, page_table_arena_physical_base) == 120",
             "offsetof(BakenBootInfo, page_table_arena_virtual_base) == 128",
             "offsetof(BakenBootInfo, page_table_arena_page_count) == 136",
-            "sizeof(BakenBootInfo) == 144",
+            "offsetof(BakenBootInfo, loaded_image_physical_base) == 144",
+            "offsetof(BakenBootInfo, loaded_image_virtual_base) == 152",
+            "offsetof(BakenBootInfo, loaded_image_size) == 160",
+            "offsetof(BakenBootInfo, transition_stack_physical_base) == 168",
+            "offsetof(BakenBootInfo, transition_stack_virtual_base) == 176",
+            "offsetof(BakenBootInfo, transition_stack_page_count) == 184",
+            "sizeof(BakenBootInfo) == 192",
         ):
             with self.subTest(assertion=assertion):
                 self.assertIn(assertion, header)
@@ -77,6 +91,12 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "page_table_arena_physical_base: u64",
             "page_table_arena_virtual_base: *mut u8",
             "page_table_arena_page_count: u64",
+            "loaded_image_physical_base: u64",
+            "loaded_image_virtual_base: *mut u8",
+            "loaded_image_size: u64",
+            "transition_stack_physical_base: u64",
+            "transition_stack_virtual_base: *mut u8",
+            "transition_stack_page_count: u64",
         ):
             with self.subTest(field=field):
                 self.assertIn(field, main)
@@ -84,7 +104,10 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertIn("boot_info.version != 2", main)
         self.assertIn("boot_info.struct_size < 120", main)
         self.assertIn("boot_info.struct_size < 144", main)
+        self.assertIn("boot_info.struct_size < 192", main)
         self.assertIn("BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID", main)
+        self.assertIn("BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID", main)
+        self.assertIn("BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID", main)
         self.assertIn("import kernel::memory::pmm::*;", main)
         self.assertIn("pmm_inventory_init", main)
 
@@ -130,10 +153,32 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, boot)
 
+    def test_bootloader_reserves_cutover_resources_before_memory_map_snapshot(self):
+        boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
+        for token in (
+            "reserve_page_table_arena",
+            "capture_loaded_image",
+            "reserve_transition_stack",
+            "EFI_LOADED_IMAGE_PROTOCOL_GUID",
+            "BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID",
+            "BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, boot)
+        self.assertLess(boot.index("reserve_page_table_arena(bs, &boot_info)"), boot.index("capture_memory_map(bs,"))
+        self.assertLess(boot.index("capture_loaded_image(bs, ImageHandle, &boot_info)"), boot.index("capture_memory_map(bs,"))
+        self.assertLess(boot.index("reserve_transition_stack(bs, &boot_info)"), boot.index("capture_memory_map(bs,"))
+
     def test_bootloader_labels_uefi_bridge_as_transitional(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
         self.assertIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
         self.assertIn("Ainda não chamamos ExitBootServices", boot)
+
+    def test_transition_resources_remain_metadata_only_in_hybrid_entry(self):
+        main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
+        self.assertIn("continuam apenas como metadados", main)
+        self.assertNotIn("write_cr3(", main)
+        self.assertNotIn("transition_map_identity_range(", main)
 
     def test_compiler_remains_host_tool_not_ui_runtime(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
