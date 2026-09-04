@@ -1,14 +1,22 @@
 // Baken OS - x86_64 Interrupt Descriptor Table foundation.
 //
-// Constroi gates de 16 bytes em memoria. O backend ja possui LIDT real, mas o
-// carregamento permanece bloqueado ate existirem stubs de excecao completos e
-// o kernel deixar de depender de UEFI Boot Services.
+// Constroi gates de 16 bytes em memoria. O backend ja possui LIDT real e entry
+// stubs 0-31, mas o carregamento permanece bloqueado enquanto o kernel depende
+// de UEFI Boot Services.
 
 module kernel::arch::x86_64::idt;
+
+import kernel::arch::x86_64::gdt::*;
 
 pub const IDT_VECTOR_COUNT: usize = 256;
 pub const IDT_GATE_INTERRUPT: u8 = 0x8E;
 pub const IDT_GATE_TRAP: u8 = 0x8F;
+
+pub const IDT_VECTOR_NMI: u16 = 2;
+pub const IDT_VECTOR_BREAKPOINT: u16 = 3;
+pub const IDT_VECTOR_OVERFLOW: u16 = 4;
+pub const IDT_VECTOR_DOUBLE_FAULT: u16 = 8;
+pub const IDT_VECTOR_MACHINE_CHECK: u16 = 18;
 
 @repr(C)
 @packed
@@ -61,8 +69,36 @@ pub fn idt_set_gate(vector: u16, handler: u64, selector: u16, ist: u8, type_attr
 }
 
 @system
+pub fn idt_exception_ist(vector: u16) -> u8 {
+    if vector == IDT_VECTOR_DOUBLE_FAULT { return 1; }
+    if vector == IDT_VECTOR_NMI { return 2; }
+    if vector == IDT_VECTOR_MACHINE_CHECK { return 3; }
+    return 0;
+}
+
+@system
+pub fn idt_exception_type_attr(vector: u16) -> u8 {
+    if vector == IDT_VECTOR_BREAKPOINT || vector == IDT_VECTOR_OVERFLOW {
+        return IDT_GATE_TRAP;
+    }
+    return IDT_GATE_INTERRUPT;
+}
+
+@system
+pub fn idt_set_exception_gate(vector: u16, handler: u64) -> bool {
+    if vector >= 32 { return false; }
+    return idt_set_gate(
+        vector,
+        handler,
+        GDT_KERNEL_CODE_SELECTOR,
+        idt_exception_ist(vector),
+        idt_exception_type_attr(vector)
+    );
+}
+
+@system
 pub fn idt_prepare_empty() -> void {
-    // Zero-init estatico garante que vetores nao registrados permaneçam non-present.
+    // Zero-init estatico garante que vetores nao registrados permanecam non-present.
     unsafe { IDT_PREPARED = true; }
 }
 
