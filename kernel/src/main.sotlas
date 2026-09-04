@@ -15,6 +15,7 @@ import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
 
 // Envelope de transição BakenBootInfo v2.
@@ -74,6 +75,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         loop {}
     }
 
+    // Mantém a fundação de temporização nativa no grafo. A calibração ainda
+    // será fornecida pela fase transitória do runtime até CPUID/HPET/APIC timer.
+    let timer_ready: bool = x86_timer_is_calibrated();
+
     // O bit 1 indica que o bootloader entregou um snapshot real do UEFI
     // Memory Map. Por enquanto o PMM apenas inventaria/classifica as regiões:
     // nenhuma EfiConventionalMemory é reutilizada enquanto Boot Services vive.
@@ -102,6 +107,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
 
     // A composição é dona do ciclo visual; nenhum aplicativo grava no GOP.
     desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
+
+    // Evita tratar a consulta acima como estado semântico do boot; ela apenas
+    // mantém o módulo de timer no grafo enquanto a integração é concluída.
+    if timer_ready { }
 
     // Compatibilidade temporária: baken_runtime ainda interpreta o prefixo
     // legado do BootInfo. Isso será removido quando Input HAL, timer e storage
