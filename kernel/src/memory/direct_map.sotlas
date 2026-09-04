@@ -1,0 +1,103 @@
+// Baken OS — plano puro do direct physical map x86-64.
+//
+// Este módulo NÃO escreve page tables e NÃO ativa CR3. Ele apenas calcula a
+// cobertura e a quantidade mínima de tabelas necessárias para mapear RAM física
+// em uma janela virtual alta. Usa páginas de 2 MiB sempre que possível e uma
+// única PT de 4 KiB apenas para o tail não alinhado a 2 MiB.
+
+module kernel::memory::direct_map;
+
+import kernel::arch::x86_64::paging::*;
+
+pub const BAKEN_DIRECT_MAP_BASE: u64 = 0xFFFF800000000000;
+pub const BAKEN_DIRECT_MAP_SPAN: u64 = 0x0000800000000000;
+pub const X86_PAGE_SIZE_2M: u64 = 2 * 1024 * 1024;
+pub const X86_PAGE_SIZE_1G: u64 = 1024 * 1024 * 1024;
+pub const X86_PML4_ENTRY_SPAN: u64 = 512 * X86_PAGE_SIZE_1G;
+
+pub struct DirectMapPlan {
+    pub virtual_base: u64;
+    pub physical_limit: u64;
+    pub huge_page_count: u64;
+    pub tail_4k_page_count: u64;
+    pub pd_table_count: u64;
+    pub pdpt_table_count: u64;
+    pub pt_table_count: u64;
+    pub table_page_count: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn direct_map_invalid_plan() -> DirectMapPlan {
+    return DirectMapPlan {
+        virtual_base: 0,
+        physical_limit: 0,
+        huge_page_count: 0,
+        tail_4k_page_count: 0,
+        pd_table_count: 0,
+        pdpt_table_count: 0,
+        pt_table_count: 0,
+        table_page_count: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn direct_map_plan_make(highest_physical_address: u64) -> DirectMapPlan {
+    if highest_physical_address == 0 { return direct_map_invalid_plan(); }
+    if highest_physical_address > BAKEN_DIRECT_MAP_SPAN {
+        return direct_map_invalid_plan();
+    }
+
+    let physical_limit = x86_page_align_up(highest_physical_address);
+    if physical_limit == 0 || physical_limit > BAKEN_DIRECT_MAP_SPAN {
+        return direct_map_invalid_plan();
+    }
+
+    let huge_page_count = physical_limit / X86_PAGE_SIZE_2M;
+    let tail_bytes = physical_limit % X86_PAGE_SIZE_2M;
+    let tail_4k_page_count = tail_bytes / X86_PAGE_SIZE;
+    let pt_table_count: u64 = if tail_4k_page_count != 0 { 1 } else { 0 };
+
+    let pd_table_count =
+        (physical_limit + X86_PAGE_SIZE_1G - 1) / X86_PAGE_SIZE_1G;
+    let pdpt_table_count =
+        (physical_limit + X86_PML4_ENTRY_SPAN - 1) / X86_PML4_ENTRY_SPAN;
+
+    // 1 página PML4 + N PDPT + N PD + no máximo uma PT para o tail.
+    let table_page_count = 1 + pdpt_table_count + pd_table_count + pt_table_count;
+
+    return DirectMapPlan {
+        virtual_base: BAKEN_DIRECT_MAP_BASE,
+        physical_limit: physical_limit,
+        huge_page_count: huge_page_count,
+        tail_4k_page_count: tail_4k_page_count,
+        pd_table_count: pd_table_count,
+        pdpt_table_count: pdpt_table_count,
+        pt_table_count: pt_table_count,
+        table_page_count: table_page_count,
+        valid: true
+    };
+}
+
+@system
+pub fn direct_map_plan_valid(plan: *const DirectMapPlan) -> bool {
+    if plan == (null as *const DirectMapPlan) { return false; }
+    unsafe {
+        if !(*plan).valid { return false; }
+        if (*plan).virtual_base != BAKEN_DIRECT_MAP_BASE { return false; }
+        if (*plan).physical_limit == 0 || (*plan).physical_limit > BAKEN_DIRECT_MAP_SPAN {
+            return false;
+        }
+        if !x86_page_aligned((*plan).physical_limit) { return false; }
+        return (*plan).table_page_count >= 3;
+    }
+}
+
+@system
+pub fn direct_map_virtual_address(physical_address: u64) -> u64 {
+    if physical_address >= BAKEN_DIRECT_MAP_SPAN { return 0; }
+    let virtual_address = BAKEN_DIRECT_MAP_BASE + physical_address;
+    if virtual_address < BAKEN_DIRECT_MAP_BASE { return 0; }
+    return virtual_address;
+}
