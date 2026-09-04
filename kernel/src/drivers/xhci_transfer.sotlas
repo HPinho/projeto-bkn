@@ -9,6 +9,7 @@ module kernel::drivers::xhci_transfer;
 import kernel::arch::x86_64::cpu::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_ring::*;
 import kernel::drivers::xhci_event::*;
 import kernel::drivers::xhci_event_consumer::*;
 
