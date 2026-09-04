@@ -20,14 +20,15 @@ static mut XHCI_TRANSFER_LAST_RESIDUAL_LENGTH: u32 = 0;
 static mut XHCI_TRANSFER_LAST_COMPLETION_CODE: u8 = 0;
 
 @system
-pub fn xhci_transfer_wait_ep0_completion(slot_id: u8,
-                                          completion_trb_physical: u64) -> bool {
+pub fn xhci_transfer_wait_completion(slot_id: u8,
+                                     endpoint_id: u8,
+                                     completion_trb_physical: u64) -> bool {
     unsafe {
         XHCI_TRANSFER_LAST_RESIDUAL_LENGTH = 0;
         XHCI_TRANSFER_LAST_COMPLETION_CODE = 0;
     }
     if !xhci_start_is_ready() || !xhci_event_consumer_is_ready() { return false; }
-    if slot_id == 0 || completion_trb_physical == 0 { return false; }
+    if slot_id == 0 || endpoint_id == 0 || completion_trb_physical == 0 { return false; }
 
     let operational = xhci_controller_operational_base();
     if operational == 0 { return false; }
@@ -41,9 +42,7 @@ pub fn xhci_transfer_wait_ep0_completion(slot_id: u8,
         if event != (null as *const XhciTrb) {
             if xhci_event_type(event) != XHCI_TRB_TYPE_TRANSFER_EVENT { return false; }
             if xhci_event_slot_id(event) != slot_id { return false; }
-            if xhci_transfer_event_endpoint_id(event) != XHCI_TRANSFER_EP0_ENDPOINT_ID {
-                return false;
-            }
+            if xhci_transfer_event_endpoint_id(event) != endpoint_id { return false; }
             if xhci_transfer_event_has_event_data(event) { return false; }
             if xhci_transfer_event_trb_pointer(event) != completion_trb_physical {
                 return false;
@@ -62,6 +61,16 @@ pub fn xhci_transfer_wait_ep0_completion(slot_id: u8,
         spins += 1;
     }
     return false;
+}
+
+@system
+pub fn xhci_transfer_wait_ep0_completion(slot_id: u8,
+                                          completion_trb_physical: u64) -> bool {
+    return xhci_transfer_wait_completion(
+        slot_id,
+        XHCI_TRANSFER_EP0_ENDPOINT_ID,
+        completion_trb_physical
+    );
 }
 
 @system
