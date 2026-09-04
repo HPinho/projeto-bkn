@@ -13,6 +13,7 @@ import kernel::memory::pmm::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
+import kernel::acpi::hpet::*;
 import kernel::drivers::pci_bus::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
@@ -96,10 +97,12 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // apenas mantém essas capacidades indisponíveis.
     if boot_info.acpi_rsdp != (null as *const u8) {
         if acpi_init(boot_info.acpi_rsdp) {
-            // Inventários passivos: nenhum LAPIC/IOAPIC é ativado e nenhum
-            // endereço ECAM é acessado enquanto VMM/MMIO próprios não existem.
+            // Inventários passivos: nenhum LAPIC/IOAPIC/HPET é ativado e
+            // nenhum endereço ECAM é acessado enquanto VMM/MMIO próprios
+            // ainda não existem.
             madt_init();
             mcfg_init();
+            hpet_init();
         }
     }
 
