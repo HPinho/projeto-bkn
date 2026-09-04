@@ -72,6 +72,25 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertIn("baken_bootinfo_v2_valid", main)
         self.assertIn("boot_info.version != 2", main)
         self.assertIn("boot_info.struct_size < 120", main)
+        self.assertIn("import kernel::memory::pmm::*;", main)
+        self.assertIn("pmm_inventory_init", main)
+
+    def test_pmm_inventory_parses_real_uefi_descriptors_without_allocating(self):
+        pmm = (ROOT / "kernel/src/memory/pmm.sotlas").read_text(encoding="utf-8")
+        for token in (
+            "pub struct EfiMemoryDescriptor",
+            "descriptor_size < 40",
+            "EFI_CONVENTIONAL_MEMORY",
+            "largest_conventional_base",
+            "highest_physical_address",
+            "pmm_inventory_init",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, pmm)
+        # Enquanto a ponte UEFI estiver ativa o PMM não pode consumir páginas
+        # convencionais, porque o firmware ainda pode alocá-las.
+        self.assertNotRegex(pmm, r"pub\s+fn\s+pmm_(?:alloc|free)")
+        self.assertIn("NAO aloca paginas ainda", pmm)
 
     def test_bootloader_populates_real_v2_platform_metadata(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
