@@ -6,6 +6,7 @@
 
 module kernel::install_engine;
 
+import kernel::drivers::storage_discovery::*;
 import kernel::storage::block_device::*;
 import kernel::storage::gpt::*;
 import kernel::storage::fat32::*;
@@ -37,6 +38,10 @@ pub fn install_engine_reset() -> void {
 
 @system
 pub fn install_engine_available() -> bool {
+    // Discovery só prova que existe um controlador PCI compatível. A condição
+    // seguinte exige que um driver nativo real já tenha registrado I/O pronto.
+    let controller_kind = storage_discovery_scan();
+    if controller_kind == STORAGE_CONTROLLER_NONE { return false; }
     if !block_device_has_writable_native_target() { return false; }
 
     let block_size = block_device_block_size();
