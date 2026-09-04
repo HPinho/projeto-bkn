@@ -38,9 +38,8 @@ pub fn interrupt_enable_timer_only() -> bool {
     return true;
 }
 
-// Habilita somente a entrega IOAPIC de IRQ1. O i8042 pode anunciar também a
-// porta auxiliar em seu config byte, porém IRQ12 continua mascarada no IOAPIC,
-// portanto nenhuma interrupção de mouse pode chegar ao CPU nesta etapa.
+// Habilita IRQ1 em duas camadas: bit IRQ1 no config byte do i8042 e rota do
+// teclado no IOAPIC. IRQ12 permanece desligada tanto no i8042 quanto no IOAPIC.
 @system
 pub fn interrupt_enable_keyboard_after_timer() -> bool {
     unsafe {
@@ -63,7 +62,8 @@ pub fn interrupt_enable_keyboard_after_timer() -> bool {
     }
     let destination = lapic_id();
 
-    if !i8042_enable_native_irqs() {
+    if !i8042_enable_keyboard_irq_only() || !i8042_keyboard_irq_enabled() || i8042_aux_irq_enabled() {
+        i8042_disable_native_irqs();
         x86_sti_raw();
         return false;
     }
