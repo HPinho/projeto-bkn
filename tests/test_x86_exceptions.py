@@ -40,11 +40,23 @@ class X86ExceptionTests(unittest.TestCase):
             self.assertIn(field, text)
         self.assertIn("@repr(C)\n@packed\npub struct ExceptionRawFrame", text)
 
-    def test_page_fault_records_cr2(self):
+    def test_page_fault_records_cr2_and_decodes_error_bits(self):
         text = EXCEPTIONS.read_text(encoding="utf-8")
         self.assertIn("EXCEPTION_PAGE_FAULT: u64 = 14", text)
         self.assertIn("LAST_EXCEPTION.cr2 = x86_read_cr2()", text)
         self.assertIn("@export\npub fn baken_exception_dispatch", text)
+        for token in (
+            "PAGE_FAULT_PRESENT: u64 = 1",
+            "PAGE_FAULT_WRITE: u64 = 2",
+            "PAGE_FAULT_USER: u64 = 4",
+            "PAGE_FAULT_RESERVED_BIT: u64 = 8",
+            "PAGE_FAULT_INSTRUCTION_FETCH: u64 = 16",
+            "PAGE_FAULT_PROTECTION_KEY: u64 = 32",
+            "PAGE_FAULT_SHADOW_STACK: u64 = 64",
+            "page_fault_was_protection_violation",
+            "page_fault_was_instruction_fetch",
+        ):
+            self.assertIn(token, text)
 
     def test_dispatcher_is_terminal_until_full_restore_abi_exists(self):
         text = EXCEPTIONS.read_text(encoding="utf-8")
