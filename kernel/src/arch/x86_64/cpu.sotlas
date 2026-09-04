@@ -7,14 +7,10 @@
 module kernel::arch::x86_64::cpu;
 
 @system
-pub fn x86_lgdt_raw(descriptor_address: u64) -> void {
-    __lgdt(descriptor_address);
-}
+pub fn x86_lgdt_raw(descriptor_address: u64) -> void { __lgdt(descriptor_address); }
 
 @system
-pub fn x86_lidt_raw(descriptor_address: u64) -> void {
-    __lidt(descriptor_address);
-}
+pub fn x86_lidt_raw(descriptor_address: u64) -> void { __lidt(descriptor_address); }
 
 @system
 pub fn x86_gdt_activate_segments_raw(base: u64,
@@ -25,29 +21,25 @@ pub fn x86_gdt_activate_segments_raw(base: u64,
 }
 
 @system
-pub fn x86_lidt_table_raw(base: u64, limit: u16) -> void {
-    __lidt_table(base, limit);
-}
+pub fn x86_lidt_table_raw(base: u64, limit: u16) -> void { __lidt_table(base, limit); }
 
 @system
-pub fn x86_ltr_raw(selector: u16) -> void {
-    __ltr(selector);
-}
+pub fn x86_ltr_raw(selector: u16) -> void { __ltr(selector); }
 
 @system
-pub fn x86_read_cr2() -> u64 {
-    return __read_cr2();
-}
+pub fn x86_read_cr2() -> u64 { return __read_cr2(); }
 
 @system
-pub fn x86_read_cr3_raw() -> u64 {
-    return __read_cr3();
-}
+pub fn x86_read_cr3_raw() -> u64 { return __read_cr3(); }
 
 @system
-pub fn x86_write_cr3_raw(root_physical: u64) -> void {
-    __write_cr3(root_physical);
-}
+pub fn x86_write_cr3_raw(root_physical: u64) -> void { __write_cr3(root_physical); }
+
+@system
+pub fn x86_read_msr(msr: u32) -> u64 { return __rdmsr(msr); }
+
+@system
+pub fn x86_write_msr(msr: u32, value: u64) -> void { __wrmsr(msr, value); }
 
 @system
 pub fn x86_stack_switch_to_post_cutover_raw(stack_top: u64, argument: u64) -> void {
@@ -55,19 +47,13 @@ pub fn x86_stack_switch_to_post_cutover_raw(stack_top: u64, argument: u64) -> vo
 }
 
 @system
-pub fn x86_invlpg(address: u64) -> void {
-    __invlpg(address);
-}
+pub fn x86_invlpg(address: u64) -> void { __invlpg(address); }
 
 @system
-pub fn x86_mmio_read32(address: u64) -> u32 {
-    return __mmio_read32(address);
-}
+pub fn x86_mmio_read32(address: u64) -> u32 { return __mmio_read32(address); }
 
 @system
-pub fn x86_mmio_write32(address: u64, value: u32) -> void {
-    __mmio_write32(address, value);
-}
+pub fn x86_mmio_write32(address: u64, value: u32) -> void { __mmio_write32(address, value); }
 
 @system
 pub fn x86_exception_stub_address(vector: u16) -> u64 {
