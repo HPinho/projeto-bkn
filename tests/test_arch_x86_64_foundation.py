@@ -64,13 +64,23 @@ class X8664FoundationTests(unittest.TestCase):
         self.assertIn("if vector == IDT_VECTOR_MACHINE_CHECK { return 3; }", text)
         self.assertIn("pub fn idt_set_exception_gate(vector: u16, handler: u64)", text)
 
+    def test_idt_populates_0_through_31_from_native_stub_addresses(self):
+        text = (ARCH / "idt.sotlas").read_text(encoding="utf-8")
+        cpu = (ARCH / "cpu.sotlas").read_text(encoding="utf-8")
+        self.assertIn("IDT_EXCEPTION_COUNT: u16 = 32", text)
+        self.assertIn("pub fn idt_prepare_exceptions() -> bool", text)
+        self.assertIn("x86_exception_stub_address(vector)", text)
+        self.assertIn("idt_set_exception_gate(vector, handler)", text)
+        self.assertIn("pub fn x86_exception_stub_address(vector: u16) -> u64", cpu)
+        self.assertIn("return __exception_stub_address(vector);", cpu)
+
     def test_kernel_prepares_but_does_not_claim_cpu_tables_are_loaded(self):
         main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
         for token in (
             "tss_prepare_default_stacks()",
             "gdt_prepare()",
             "gdt_set_tss_descriptor(tss_base(), tss_limit())",
-            "idt_prepare_empty()",
+            "idt_prepare_exceptions()",
         ):
             self.assertIn(token, main)
         self.assertNotIn("__lgdt(", main)
