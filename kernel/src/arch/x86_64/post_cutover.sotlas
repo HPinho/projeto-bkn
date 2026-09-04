@@ -1,9 +1,7 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
-// O trampoline do backend troca para a stack de transição e chama o símbolo
-// exportado abaixo. A ordem é deliberada: primeiro CR3/tabelas da CPU, depois
-// PMM e VMM assumem formalmente o estado de memória. Interrupções continuam
-// desabilitadas; APIC/IOAPIC/timer entram em fase posterior.
+// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC mascarados.
+// STI continua proibido até existirem gates, handlers e rotas de IRQ válidos.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -18,6 +16,10 @@ import kernel::memory::pmm_allocator::*;
 import kernel::memory::vmm::*;
 import kernel::memory::active_page_tables::*;
 import kernel::arch::x86_64::paging::*;
+import kernel::acpi::tables::*;
+import kernel::acpi::madt::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::ioapic::*;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -29,12 +31,10 @@ pub struct PostCutoverContext {
     pub screen_height: u32;
     pub pixels_per_scanline: u32;
     pub reserved0: u32;
-    // Endereços físicos de handoff; consumidores pós-CR3 usam direct-map.
     pub memory_map_base: u64;
     pub memory_map_size: u64;
     pub memory_descriptor_size: u64;
     pub acpi_rsdp: u64;
-    // Reserva bootstrap das próprias page tables, retomada após CR3 pelo alias alto.
     pub page_table_arena_physical_base: u64;
     pub page_table_arena_page_count: u64;
     pub page_table_pages_used: u64;
@@ -44,6 +44,8 @@ pub struct PostCutoverContext {
 static mut POST_CUTOVER_CPU_TABLES_ACTIVE: bool = false;
 static mut POST_CUTOVER_PMM_ACTIVE: bool = false;
 static mut POST_CUTOVER_VMM_ACTIVE: bool = false;
+static mut POST_CUTOVER_ACPI_READY: bool = false;
+static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -77,7 +79,7 @@ pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
     if context.memory_map_base == 0 || context.memory_map_size == 0 { return false; }
     if context.memory_descriptor_size < 40 { return false; }
     if post_cutover_memory_map_virtual(context) == (null as *const u8) { return false; }
-    if context.acpi_rsdp != 0 && post_cutover_acpi_rsdp_virtual(context) == (null as *const u8) { return false; }
+    if context.acpi_rsdp == 0 || post_cutover_acpi_rsdp_virtual(context) == (null as *const u8) { return false; }
     if context.page_table_arena_physical_base == 0 ||
        !x86_page_aligned(context.page_table_arena_physical_base) { return false; }
     if context.page_table_arena_page_count == 0 || context.page_table_pages_used == 0 ||
@@ -92,7 +94,6 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
 
     tss_prepare_default_stacks();
     if !tss_is_prepared() { return false; }
-
     gdt_prepare();
     gdt_set_tss_descriptor(tss_base(), tss_limit());
     if !gdt_is_prepared() { return false; }
@@ -102,58 +103,34 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     let idt_address = idt_base() as u64;
     if gdt_address == 0 || idt_address == 0 { return false; }
 
-    x86_gdt_activate_segments_raw(
-        gdt_address,
-        gdt_limit(),
-        GDT_KERNEL_CODE_SELECTOR,
-        GDT_KERNEL_DATA_SELECTOR
-    );
+    x86_gdt_activate_segments_raw(gdt_address, gdt_limit(), GDT_KERNEL_CODE_SELECTOR, GDT_KERNEL_DATA_SELECTOR);
     x86_ltr_raw(GDT_TSS_SELECTOR);
     x86_lidt_table_raw(idt_address, idt_limit());
-
     unsafe { POST_CUTOVER_CPU_TABLES_ACTIVE = true; }
     return true;
 }
 
 @system
-pub fn post_cutover_cpu_tables_active() -> bool {
-    unsafe { return POST_CUTOVER_CPU_TABLES_ACTIVE; }
-}
+pub fn post_cutover_cpu_tables_active() -> bool { unsafe { return POST_CUTOVER_CPU_TABLES_ACTIVE; } }
 
 @system
 pub fn post_cutover_activate_pmm(context: *const PostCutoverContext) -> bool {
-    if !post_cutover_cpu_tables_active() { return false; }
-    if !post_cutover_context_valid(context) { return false; }
-
+    if !post_cutover_cpu_tables_active() || !post_cutover_context_valid(context) { return false; }
     let memory_map = post_cutover_memory_map_virtual(context);
     if memory_map == (null as *const u8) { return false; }
-    if !pmm_inventory_init(
-        memory_map,
-        context.memory_map_size as usize,
-        context.memory_descriptor_size as usize
-    ) { return false; }
-
-    if !pmm_allocator_activate_after_exit_boot_services() { return false; }
-    if !pmm_allocator_is_active() { return false; }
-
+    if !pmm_inventory_init(memory_map, context.memory_map_size as usize, context.memory_descriptor_size as usize) { return false; }
+    if !pmm_allocator_activate_after_exit_boot_services() || !pmm_allocator_is_active() { return false; }
     unsafe { POST_CUTOVER_PMM_ACTIVE = true; }
     return true;
 }
 
 @system
-pub fn post_cutover_pmm_active() -> bool {
-    unsafe { return POST_CUTOVER_PMM_ACTIVE; }
-}
+pub fn post_cutover_pmm_active() -> bool { unsafe { return POST_CUTOVER_PMM_ACTIVE; } }
 
 @system
 pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
-    if !post_cutover_pmm_active() { return false; }
-    if !post_cutover_context_valid(context) { return false; }
-    if !vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE) {
-        return false;
-    }
-    if !vmm_is_active() { return false; }
-
+    if !post_cutover_pmm_active() || !post_cutover_context_valid(context) { return false; }
+    if !vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE) || !vmm_is_active() { return false; }
     if !active_page_tables_resume(
         context.root_physical,
         context.page_table_arena_physical_base,
@@ -161,14 +138,42 @@ pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
         context.page_table_pages_used
     ) { return false; }
     if !active_page_tables_is_ready() { return false; }
-
     unsafe { POST_CUTOVER_VMM_ACTIVE = true; }
     return true;
 }
 
 @system
-pub fn post_cutover_vmm_active() -> bool {
-    unsafe { return POST_CUTOVER_VMM_ACTIVE; }
+pub fn post_cutover_vmm_active() -> bool { unsafe { return POST_CUTOVER_VMM_ACTIVE; } }
+
+@system
+pub fn post_cutover_activate_acpi(context: *const PostCutoverContext) -> bool {
+    if !post_cutover_vmm_active() || !post_cutover_context_valid(context) { return false; }
+    let rsdp = post_cutover_acpi_rsdp_virtual(context);
+    if rsdp == (null as *const u8) { return false; }
+    if !acpi_init_post_cutover(rsdp) || !acpi_is_ready() { return false; }
+    if !acpi_uses_post_cutover_direct_map() { return false; }
+    if !madt_init() || !madt_is_ready() { return false; }
+    unsafe { POST_CUTOVER_ACPI_READY = true; }
+    return true;
+}
+
+@system
+pub fn post_cutover_acpi_ready() -> bool { unsafe { return POST_CUTOVER_ACPI_READY; } }
+
+@system
+pub fn post_cutover_activate_interrupt_controllers() -> bool {
+    if !post_cutover_acpi_ready() { return false; }
+    let local_apic = madt_lapic_address();
+    if local_apic == 0 { return false; }
+    if !lapic_init_masked(local_apic) || !lapic_is_ready() { return false; }
+    if !ioapic_init_all_masked() || !ioapic_is_ready() { return false; }
+    unsafe { POST_CUTOVER_INTERRUPT_CONTROLLERS_READY = true; }
+    return true;
+}
+
+@system
+pub fn post_cutover_interrupt_controllers_ready() -> bool {
+    unsafe { return POST_CUTOVER_INTERRUPT_CONTROLLERS_READY; }
 }
 
 @system
@@ -178,8 +183,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_activate_cpu(context) { loop {} }
     if !post_cutover_activate_pmm(context) { loop {} }
     if !post_cutover_activate_vmm(context) { loop {} }
+    if !post_cutover_activate_acpi(context) { loop {} }
+    if !post_cutover_activate_interrupt_controllers() { loop {} }
 
-    // Próximo marco: APIC/IOAPIC. STI continua proibido até haver rotas e
-    // handlers de IRQ/timer realmente instalados.
+    // Próximo marco: IRQ stubs/handlers e timer. STI continua proibido.
     loop {}
 }
