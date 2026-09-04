@@ -103,7 +103,7 @@ fn xhci_hid_context_ceil_log2(value: u32) -> u8 {
 // interrupt endpoints, bInterval é dado em frames de 1 ms; convertemos para
 // microframes (x8) e arredondamos para cima. HS/SS já usa expoente USB.
 @system
-fn xhci_hid_context_interval(speed_id: u8, usb_interval: u8) -> u8 {
+fn xhci_hid_context_compute_interval(speed_id: u8, usb_interval: u8) -> u8 {
     if usb_interval == 0 { return 0; }
     if speed_id == 1 || speed_id == 2 {
         let microframes = (usb_interval as u32) * 8;
@@ -140,7 +140,7 @@ pub fn xhci_hid_context_prepare() -> bool {
     let snapshot = xhci_port_snapshot(port_id);
     if snapshot == (null as *const XhciPortSnapshot) { return false; }
     let speed_id = unsafe { (*snapshot).speed_id };
-    let interval = xhci_hid_context_interval(speed_id, usb_interval);
+    let interval = xhci_hid_context_compute_interval(speed_id, usb_interval);
     if interval > 15 { return false; }
 
     let context_size = xhci_context_size();
