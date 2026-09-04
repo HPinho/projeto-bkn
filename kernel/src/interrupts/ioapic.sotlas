@@ -1,0 +1,85 @@
+// Baken OS — IOAPIC pós-cutover.
+//
+// Descobre a capacidade de cada IOAPIC via register-select/window e mascara
+// todas as redirection entries antes de qualquer STI. Não programa vetores ainda.
+
+module kernel::interrupts::ioapic;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::acpi::madt::*;
+
+pub const IOAPIC_REGSEL_OFFSET: u64 = 0x00;
+pub const IOAPIC_WINDOW_OFFSET: u64 = 0x10;
+pub const IOAPIC_REG_ID: u32 = 0x00;
+pub const IOAPIC_REG_VERSION: u32 = 0x01;
+pub const IOAPIC_REDIR_BASE: u32 = 0x10;
+pub const IOAPIC_REDIR_MASKED: u32 = 1 << 16;
+
+static mut IOAPIC_READY: bool = false;
+static mut IOAPIC_COUNT: u32 = 0;
+
+@system
+fn ioapic_read(base: u64, register_index: u32) -> u32 {
+    x86_mmio_write32(base + IOAPIC_REGSEL_OFFSET, register_index);
+    return x86_mmio_read32(base + IOAPIC_WINDOW_OFFSET);
+}
+
+@system
+fn ioapic_write(base: u64, register_index: u32, value: u32) -> void {
+    x86_mmio_write32(base + IOAPIC_REGSEL_OFFSET, register_index);
+    x86_mmio_write32(base + IOAPIC_WINDOW_OFFSET, value);
+}
+
+@system
+fn ioapic_mask_all_at(base: u64) -> bool {
+    let version = ioapic_read(base, IOAPIC_REG_VERSION);
+    let max_redirection = (version >> 16) & 0xFF;
+    if max_redirection > 239 { return false; }
+
+    let mut index: u32 = 0;
+    while index <= max_redirection {
+        let low_reg = IOAPIC_REDIR_BASE + (index * 2);
+        let current_low = ioapic_read(base, low_reg);
+        ioapic_write(base, low_reg, current_low | IOAPIC_REDIR_MASKED);
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn ioapic_init_all_masked() -> bool {
+    unsafe {
+        IOAPIC_READY = false;
+        IOAPIC_COUNT = 0;
+    }
+    if !madt_is_ready() { return false; }
+
+    let count = madt_ioapic_count();
+    if count == 0 || count > MADT_MAX_IOAPICS as u32 { return false; }
+
+    let mut index: u32 = 0;
+    while index < count {
+        let descriptor = madt_ioapic(index);
+        if descriptor == (null as *const MadtIoApic) { return false; }
+        unsafe {
+            let base = descriptor.mmio_address as u64;
+            if base == 0 || (base & 0xFFF) != 0 { return false; }
+            if !active_page_tables_map_mmio_identity_4k(base) { return false; }
+            if !ioapic_mask_all_at(base) { return false; }
+        }
+        index += 1;
+    }
+
+    unsafe {
+        IOAPIC_COUNT = count;
+        IOAPIC_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn ioapic_is_ready() -> bool { unsafe { return IOAPIC_READY; } }
+
+@system
+pub fn ioapic_count() -> u32 { unsafe { return IOAPIC_COUNT; } }
