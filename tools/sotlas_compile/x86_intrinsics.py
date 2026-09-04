@@ -35,6 +35,16 @@ static inline void __invlpg(uint64_t address) {
     __asm__ __volatile__("invlpg (%0)" : : "r"((uintptr_t)address) : "memory");
 }
 
+static inline uint64_t __rdtsc(void) {
+    uint32_t low, high;
+    __asm__ __volatile__("rdtsc" : "=a"(low), "=d"(high));
+    return ((uint64_t)high << 32) | low;
+}
+
+static inline void __cpu_pause(void) {
+    __asm__ __volatile__("pause");
+}
+
 /*
  * Exception entry ABI (fase inicial, terminal):
  *
@@ -180,6 +190,14 @@ def install(bootstrap) -> None:
         ),
         "__invlpg": Function(
             "__invlpg", [("address", Type("u64"))], Type("void"), [],
+            public=True, attributes=["@system"],
+        ),
+        "__rdtsc": Function(
+            "__rdtsc", [], Type("u64"), [],
+            public=True, attributes=["@system"],
+        ),
+        "__cpu_pause": Function(
+            "__cpu_pause", [], Type("void"), [],
             public=True, attributes=["@system"],
         ),
         "__exception_stub_address": Function(
