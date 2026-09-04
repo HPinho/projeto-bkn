@@ -68,3 +68,4 @@ jobs:
           fi
           test "$status" -eq 124
           grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
+          grep -q "BAKEN:STEP=T" build/qemu-serial.log
