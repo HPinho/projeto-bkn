@@ -118,6 +118,8 @@ class SotlasResolverTests(unittest.TestCase):
                 "pointer_protocol", "block_io_protocol", "install_target_block_io_protocol",
                 "version", "struct_size", "flags", "memory_descriptor_size",
                 "memory_descriptor_version", "pixel_format", "acpi_rsdp",
+                "page_table_arena_physical_base", "page_table_arena_virtual_base",
+                "page_table_arena_page_count",
             ],
         )
 
