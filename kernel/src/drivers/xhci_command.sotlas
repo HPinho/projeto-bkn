@@ -21,7 +21,7 @@ import kernel::drivers::xhci_event::*;
 pub const XHCI_COMMAND_POLL_LIMIT: u64 = 10000000;
 pub const XHCI_COMMAND_FIRST_FREE_INDEX: u32 = 1;
 pub const XHCI_EVENT_FIRST_FREE_INDEX: u32 = 1;
-pub const XHCI_ERDP_EHB: u64 = 1 << 3;
+pub const XHCI_COMMAND_ERDP_EHB: u64 = 1 << 3;
 
 static mut XHCI_COMMAND_READY: bool = false;
 static mut XHCI_COMMAND_ENQUEUE_INDEX: u32 = XHCI_COMMAND_FIRST_FREE_INDEX;
@@ -141,7 +141,7 @@ fn xhci_command_update_erdp() -> bool {
         if runtime == 0 { return false; }
         let intr0 = runtime + XHCI_RUNTIME_INTERRUPTER0;
         if intr0 < runtime { return false; }
-        return xhci_command_write64(intr0 + XHCI_INTR_ERDP, next | XHCI_ERDP_EHB);
+        return xhci_command_write64(intr0 + XHCI_INTR_ERDP, next | XHCI_COMMAND_ERDP_EHB);
     }
 }
 
@@ -188,8 +188,8 @@ pub fn xhci_command_submit(command: XhciTrb) -> u64 {
         // Compiler barrier + serializing privileged read. Não depende do syntax
         // node `quench`, que o bootstrap legado não reconhece.
         if x86_read_cr3_raw() == 0 { return 0; }
-        if !xhci_command_advance_producer() { return 0; }
         if !xhci_command_ring_doorbell0() { return 0; }
+        if !xhci_command_advance_producer() { return 0; }
         return physical;
     }
 }
