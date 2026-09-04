@@ -1,0 +1,177 @@
+// Baken OS — construtor bootstrap de page tables x86-64.
+//
+// Recebe uma PageTableArena que já fornece pares PA/VA válidos e materializa
+// PML4 -> PDPT -> PD -> PT para o direct physical map. A janela é NX por padrão:
+// execução de código deve ocorrer pelo mapping próprio do kernel, não pelo direct-map.
+//
+// Este módulo NÃO aloca memória física, NÃO toca CR3 e NÃO invalida TLB.
+
+module kernel::memory::page_table_builder;
+
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_writer::*;
+import kernel::memory::direct_map::*;
+import kernel::arch::x86_64::paging::*;
+
+pub struct PageTableBuildResult {
+    pub root_physical: u64;
+    pub root_virtual: u64;
+    pub direct_map_base: u64;
+    pub table_pages_used: u64;
+    pub huge_pages_mapped: u64;
+    pub pages_4k_mapped: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn page_table_build_invalid() -> PageTableBuildResult {
+    return PageTableBuildResult {
+        root_physical: 0,
+        root_virtual: 0,
+        direct_map_base: 0,
+        table_pages_used: 0,
+        huge_pages_mapped: 0,
+        pages_4k_mapped: 0,
+        valid: false
+    };
+}
+
+@system
+fn page_table_link_flags() -> u64 {
+    return X86_PTE_PRESENT | X86_PTE_WRITABLE;
+}
+
+@system
+fn page_table_direct_map_flags() -> u64 {
+    return X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_GLOBAL | X86_PTE_NX;
+}
+
+@system
+fn page_table_direct_map_huge_flags() -> u64 {
+    return page_table_direct_map_flags() | X86_PTE_HUGE;
+}
+
+@system
+pub fn page_table_build_direct_map(arena: *mut PageTableArena,
+                                   plan: *const DirectMapPlan) -> PageTableBuildResult {
+    if arena == (null as *mut PageTableArena) { return page_table_build_invalid(); }
+    if plan == (null as *const DirectMapPlan) { return page_table_build_invalid(); }
+    if !direct_map_plan_valid(plan) { return page_table_build_invalid(); }
+
+    unsafe {
+        if !(*arena).valid { return page_table_build_invalid(); }
+        if page_table_arena_remaining(arena as *const PageTableArena) < (*plan).table_page_count {
+            return page_table_build_invalid();
+        }
+    }
+
+    let pml4 = page_table_arena_alloc(arena);
+    if !pml4.valid { return page_table_build_invalid(); }
+    if !page_table_zero(&pml4 as *const PageTablePage) { return page_table_build_invalid(); }
+
+    let mut physical_cursor: u64 = 0;
+    let mut huge_pages_mapped: u64 = 0;
+    let mut pages_4k_mapped: u64 = 0;
+    let physical_limit: u64;
+    unsafe { physical_limit = (*plan).physical_limit; }
+
+    while physical_cursor < physical_limit {
+        let virtual_cursor = BAKEN_DIRECT_MAP_BASE + physical_cursor;
+        let pml4_index = x86_pml4_index(virtual_cursor);
+
+        let pdpt = page_table_arena_alloc(arena);
+        if !pdpt.valid { return page_table_build_invalid(); }
+        if !page_table_zero(&pdpt as *const PageTablePage) { return page_table_build_invalid(); }
+        if !page_table_write_entry(
+            &pml4 as *const PageTablePage,
+            pml4_index,
+            x86_pte_make(pdpt.physical_address, page_table_link_flags())
+        ) { return page_table_build_invalid(); }
+
+        let pml4_region_end = physical_cursor + X86_PML4_ENTRY_SPAN;
+        let pml4_limit = if pml4_region_end < physical_limit { pml4_region_end } else { physical_limit };
+
+        while physical_cursor < pml4_limit {
+            let pd_virtual = BAKEN_DIRECT_MAP_BASE + physical_cursor;
+            let pdpt_index = x86_pdpt_index(pd_virtual);
+
+            let pd = page_table_arena_alloc(arena);
+            if !pd.valid { return page_table_build_invalid(); }
+            if !page_table_zero(&pd as *const PageTablePage) { return page_table_build_invalid(); }
+            if !page_table_write_entry(
+                &pdpt as *const PageTablePage,
+                pdpt_index,
+                x86_pte_make(pd.physical_address, page_table_link_flags())
+            ) { return page_table_build_invalid(); }
+
+            let pd_region_end = physical_cursor + X86_PAGE_SIZE_1G;
+            let pd_limit = if pd_region_end < pml4_limit { pd_region_end } else { pml4_limit };
+
+            while physical_cursor < pd_limit {
+                let page_virtual = BAKEN_DIRECT_MAP_BASE + physical_cursor;
+                let pd_index = x86_pd_index(page_virtual);
+                let remaining = pd_limit - physical_cursor;
+
+                if remaining >= X86_PAGE_SIZE_2M &&
+                   (physical_cursor % X86_PAGE_SIZE_2M) == 0 {
+                    let huge_entry = x86_pte_make(
+                        physical_cursor,
+                        page_table_direct_map_huge_flags()
+                    );
+                    if !page_table_write_entry(
+                        &pd as *const PageTablePage,
+                        pd_index,
+                        huge_entry
+                    ) { return page_table_build_invalid(); }
+                    physical_cursor += X86_PAGE_SIZE_2M;
+                    huge_pages_mapped += 1;
+                } else {
+                    let pt = page_table_arena_alloc(arena);
+                    if !pt.valid { return page_table_build_invalid(); }
+                    if !page_table_zero(&pt as *const PageTablePage) { return page_table_build_invalid(); }
+                    if !page_table_write_entry(
+                        &pd as *const PageTablePage,
+                        pd_index,
+                        x86_pte_make(pt.physical_address, page_table_link_flags())
+                    ) { return page_table_build_invalid(); }
+
+                    let tail_limit_candidate = physical_cursor + X86_PAGE_SIZE_2M;
+                    let tail_limit = if tail_limit_candidate < physical_limit {
+                        tail_limit_candidate
+                    } else {
+                        physical_limit
+                    };
+
+                    while physical_cursor < tail_limit {
+                        let tail_virtual = BAKEN_DIRECT_MAP_BASE + physical_cursor;
+                        let pt_index = x86_pt_index(tail_virtual);
+                        let pte = x86_pte_make(
+                            physical_cursor,
+                            page_table_direct_map_flags()
+                        );
+                        if !page_table_write_entry(
+                            &pt as *const PageTablePage,
+                            pt_index,
+                            pte
+                        ) { return page_table_build_invalid(); }
+                        physical_cursor += X86_PAGE_SIZE;
+                        pages_4k_mapped += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    let table_pages_used: u64;
+    unsafe { table_pages_used = (*arena).next_page_index; }
+
+    return PageTableBuildResult {
+        root_physical: pml4.physical_address,
+        root_virtual: pml4.virtual_address,
+        direct_map_base: BAKEN_DIRECT_MAP_BASE,
+        table_pages_used: table_pages_used,
+        huge_pages_mapped: huge_pages_mapped,
+        pages_4k_mapped: pages_4k_mapped,
+        valid: true
+    };
+}
