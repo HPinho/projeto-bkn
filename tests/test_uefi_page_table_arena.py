@@ -20,14 +20,15 @@ class UefiPageTableArenaTests(unittest.TestCase):
         for token in (
             "typedef EFI_STATUS (*EFI_ALLOCATE_PAGES)",
             "ALLOCATE_ANY_PAGES",
-            "EFI_LOADER_DATA",
+            "UEFI_LOADER_DATA",
             "BAKEN_PAGE_TABLE_ARENA_PAGES 1024ULL",
             "reserve_page_table_arena",
         ):
             self.assertIn(token, self.boot)
         helper = self.boot.split("static EFI_STATUS reserve_page_table_arena", 1)[1]
-        helper = helper.split("/* Captura um snapshot real", 1)[0]
+        helper = helper.split("static EFI_STATUS capture_loaded_image", 1)[0]
         self.assertIn("allocate_pages(", helper)
+        self.assertIn("UEFI_LOADER_DATA", helper)
         self.assertNotIn("AllocatePool", helper)
 
     def test_bootloader_records_physical_and_temporary_virtual_identity(self):
@@ -49,7 +50,7 @@ class UefiPageTableArenaTests(unittest.TestCase):
         self.assertIn("offsetof(BakenBootInfo, transition_stack_physical_base) == 168", self.header)
         self.assertIn("sizeof(BakenBootInfo) == 192", self.header)
 
-    def test_kernel_validates_but_does_not_consume_arena_in_hybrid_path(self):
+    def test_hybrid_entry_does_not_consume_arena_before_final_bootloader_cutover(self):
         self.assertIn("BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID", self.main)
         self.assertIn("boot_info.struct_size < 144", self.main)
         self.assertIn("page_table_arena_physical_base % X86_PAGE_SIZE", self.main)
