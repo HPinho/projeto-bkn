@@ -46,6 +46,8 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertEqual(builtins["__invlpg"].params[0][1].name, "u64")
         self.assertEqual(builtins["__exception_stub_address"].params[0][1].name, "u16")
         self.assertEqual(builtins["__exception_stub_address"].result.name, "u64")
+        self.assertEqual(builtins["__irq_stub_address"].params[0][1].name, "u16")
+        self.assertEqual(builtins["__irq_stub_address"].result.name, "u64")
 
     def test_preamble_contains_real_privileged_instructions(self):
         preamble = bootstrap.PREAMBLE
@@ -60,7 +62,10 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertIn('"mov %0, %%cr3"', preamble)
         self.assertIn('"movq %rcx, %rsp\\n\\t"', preamble)
         self.assertIn('"invlpg (%0)"', preamble)
+        self.assertIn('"iretq\\n\\t"', preamble)
         self.assertIn("static inline uint64_t __exception_stub_address", preamble)
+        self.assertIn("static inline uint64_t __irq_stub_address", preamble)
+        self.assertIn("sotlas_x86_irq_dispatch", preamble)
 
     def test_install_is_idempotent(self):
         x86_intrinsics.install(bootstrap)
@@ -85,7 +90,9 @@ pub fn exercise(gdt_base: u64, gdt_limit: u16, code: u16, data: u16,
     __write_cr3(old_cr3);
     __invlpg(page);
     let stub: u64 = __exception_stub_address(vector);
+    let irq_stub: u64 = __irq_stub_address(vector);
     if stack_top == 0 { __stack_switch_to_post_cutover(stack_top, argument); }
+    if irq_stub != 0 { return irq_stub; }
     if stub != 0 { return stub; }
     return __read_cr2();
 }
@@ -101,6 +108,7 @@ pub fn exercise(gdt_base: u64, gdt_limit: u16, code: u16, data: u16,
         self.assertIn("__stack_switch_to_post_cutover(stack_top, argument)", generated)
         self.assertIn("__invlpg(page)", generated)
         self.assertIn("__exception_stub_address(vector)", generated)
+        self.assertIn("__irq_stub_address(vector)", generated)
         self.assertIn("__read_cr2()", generated)
 
 
