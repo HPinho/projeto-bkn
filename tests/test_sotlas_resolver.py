@@ -30,12 +30,11 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertEqual(manifest["entry"], "kernel::main")
         self.assertEqual(manifest["audited_modules"], len(manifest["compile_order"]))
         self.assertIn("kernel::desktop_compositor", manifest["compile_order"])
-        # A entrada inicial deve ser pequena e verific├ível: framebuffer,
-        # rasteriza├º├úo, shell e compositor. Drivers incompletos n├úo pertencem
-        # ao grafo at├® que tenham testes de hardware/I-O.
         self.assertGreaterEqual(len(manifest["compile_order"]), 6)
         self.assertIn("kernel::graphics_engine", manifest["compile_order"])
         self.assertIn("kernel::window_manager", manifest["compile_order"])
+        self.assertIn("kernel::memory::pmm", manifest["compile_order"])
+        self.assertIn("kernel::drivers::pci_bus", manifest["compile_order"])
         self.assertEqual(manifest["unreachable_modules"], [])
         self.assertEqual(manifest["orphan_roots"], [])
 
@@ -54,15 +53,18 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertIn("kernel::main::baken_kernel_main", manifest["exports"])
 
     def test_build_modular_compiles_kernel_objects(self):
-        # O link PE/COFF final depende do linker UEFI; esta etapa é portátil e
-        # garante que todas as unidades reais chegam a objetos.
+        # O número de objetos segue o grafo canônico: um objeto por módulo
+        # Sotlas alcançável + o objeto do bootloader UEFI. Isso permite evoluir
+        # a arquitetura sem congelar a suíte em um contador mágico.
+        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
         result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas")
+        module_count = len(manifest["compile_order"])
         self.assertIn("compiled_objects", result)
-        self.assertEqual(len(result["compiled_objects"]), 27)
-        self.assertEqual(len(result["generated_sources"]), 26)
-        self.assertEqual(len(result["generated_headers"]), 26)
+        self.assertEqual(len(result["compiled_objects"]), module_count + 1)
+        self.assertEqual(len(result["generated_sources"]), module_count)
+        self.assertEqual(len(result["generated_headers"]), module_count)
         self.assertTrue(all(Path(path).is_file() for path in result["generated_headers"]))
-        self.assertEqual(len(result["generated_interfaces"]), 26)
+        self.assertEqual(len(result["generated_interfaces"]), module_count)
         main_interface = next(Path(path) for path in result["generated_interfaces"] if path.endswith("kernel__main.soti.json"))
         self.assertEqual(json.loads(main_interface.read_text(encoding="utf-8"))["module"], "kernel::main")
         graphics_c = next(Path(path) for path in result["generated_sources"] if path.endswith("kernel__graphics_engine.c"))
@@ -102,28 +104,29 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertEqual(ast.name, "kernel::main")
         self.assertIn("kernel::graphics_engine", ast.imports)
         self.assertIn("kernel::desktop_compositor", ast.imports)
-        
-        # Verifica struct BakenBootInfo
+        self.assertIn("kernel::memory::pmm", ast.imports)
+        self.assertIn("kernel::drivers::pci_bus", ast.imports)
+
         boot_info_struct = next((s for s in ast.structs if s.name == "BakenBootInfo"), None)
         self.assertIsNotNone(boot_info_struct)
         self.assertTrue(boot_info_struct.is_pub)
-        self.assertGreaterEqual(len(boot_info_struct.fields), 7)
         self.assertEqual(
             [field.name for field in boot_info_struct.fields],
-            ["framebuffer_base", "framebuffer_size", "screen_width", "screen_height",
-             "pixels_per_scanline", "memory_map_base", "memory_map_size", "system_table",
-             "pointer_protocol", "block_io_protocol", "install_target_block_io_protocol"],
+            [
+                "framebuffer_base", "framebuffer_size", "screen_width", "screen_height",
+                "pixels_per_scanline", "memory_map_base", "memory_map_size", "system_table",
+                "pointer_protocol", "block_io_protocol", "install_target_block_io_protocol",
+                "version", "struct_size", "flags", "memory_descriptor_size",
+                "memory_descriptor_version", "pixel_format", "acpi_rsdp",
+            ],
         )
-        
-        # Verifica fun├º├úo baken_kernel_main
+
         main_fn = next((f for f in ast.functions if f.name == "baken_kernel_main"), None)
         self.assertIsNotNone(main_fn)
         self.assertTrue(main_fn.is_pub)
         self.assertIn("@export", main_fn.attributes)
         self.assertIn("@system", main_fn.attributes)
         self.assertEqual(main_fn.return_type.name, "!")
-        
-        # Valida├º├úo de tipos
         self.assertTrue(sotlas_compile.typecheck_ast(ast))
 
     def test_typechecker_rejects_unknown_signature_type(self):
