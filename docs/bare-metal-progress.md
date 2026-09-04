@@ -30,11 +30,11 @@ Critério de status:
 | ACPI pós-CR3 | ✅ | 100% | 100% | `BAKEN:STEP=A` observado |
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
-| DMA real | ⚙️ | 80% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas, buffers de descriptors e Transfer Ring HID dedicada estão implementados; o primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 81% | 22% | QEMU validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Toda a enumeração estrutural até Configure Endpoint e SET_CONFIGURATION já está implementada; faltam produtor/consumer de reports HID, integração ativa pós-`STEP=N` e validação runtime |
+| DMA real | ⚙️ | 82% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas, buffers de descriptors, ring HID e buffer de reports estão implementados; DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
+| xHCI → USB HID | ⚙️ | 86% | 22% | QEMU validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Enumeração, Configure Endpoint, SET_CONFIGURATION, Interrupt IN report producer e parser Boot Keyboard/Mouse já existem; faltam integração ativa pós-`STEP=N`, ciclo contínuo de reports e validação runtime |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~79%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e a pilha USB está estruturalmente próxima do HID funcional. O gate runtime imediato continua no controller entre `STEP=8` e `STEP=9`, instrumentado com `h/j` |
+| **Fundação bare-metal geral** | ⚙️ | **~80%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e a pilha USB já chega estruturalmente ao parsing de reports HID. O gate runtime imediato continua no controller entre `STEP=8` e `STEP=9`, instrumentado com `h/j` |
 
 ## Estado xHCI atual
 
@@ -99,8 +99,10 @@ Supported Protocol
 → HID Endpoint Context + Transfer Ring dedicada
 → Configure Endpoint
 → SET_CONFIGURATION
-→ HID Interrupt IN report producer
-→ parser de keyboard/mouse reports
+→ HID Interrupt IN Normal TRB producer
+→ Doorbell Slot/DCI
+→ Transfer Event compartilhado
+→ parser Boot Keyboard/Mouse
 ```
 
 ## Regra de progresso
