@@ -1,7 +1,7 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
-// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs -> timer mascarado.
-// STI continua proibido até fontes de IRQ serem explicitamente desmascaradas.
+// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs -> timer live.
+// Só o LAPIC timer é desmascarado antes do STI; teclado/mouse continuam mascarados.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -24,6 +24,8 @@ import kernel::interrupts::ioapic::*;
 import kernel::interrupts::irq::*;
 import kernel::interrupts::lapic_timer::*;
 import kernel::interrupts::interrupt_enable::*;
+
+pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -52,6 +54,7 @@ static mut POST_CUTOVER_ACPI_READY: bool = false;
 static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
 static mut POST_CUTOVER_IRQS_READY: bool = false;
 static mut POST_CUTOVER_TIMER_READY: bool = false;
+static mut POST_CUTOVER_TIMER_LIVE: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -96,8 +99,6 @@ pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
 @system
 pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !post_cutover_context_valid(context) { return false; }
-    // Subetapas do primeiro cutover: 0=contexto, 1=CR3, 2=tabelas prontas,
-    // 3=segmentos/TSS/IDT carregados. COM1 já foi inicializada pela entrada.
     x86_serial_write_stage_marker('0' as u8);
     if !x86_mmu_activate_root(context.root_physical) { return false; }
     x86_serial_write_stage_marker('1' as u8);
@@ -205,7 +206,10 @@ pub fn post_cutover_irqs_ready() -> bool { unsafe { return POST_CUTOVER_IRQS_REA
 pub fn post_cutover_prepare_timer() -> bool {
     if !post_cutover_irqs_ready() { return false; }
     if !lapic_timer_calibrate_masked_from_pm() || !lapic_timer_is_ready() { return false; }
-    unsafe { POST_CUTOVER_TIMER_READY = true; }
+    unsafe {
+        POST_CUTOVER_TIMER_READY = true;
+        POST_CUTOVER_TIMER_LIVE = false;
+    }
     return true;
 }
 
@@ -213,17 +217,39 @@ pub fn post_cutover_prepare_timer() -> bool {
 pub fn post_cutover_timer_ready() -> bool { unsafe { return POST_CUTOVER_TIMER_READY; } }
 
 @system
+pub fn post_cutover_timer_live() -> bool { unsafe { return POST_CUTOVER_TIMER_LIVE; } }
+
+// Abre apenas a fonte local do LAPIC timer e exige prova de uma IRQ entregue
+// pelo dispatcher. Se o contador não avançar, fecha novamente STI/LVT e falha.
+@system
+pub fn post_cutover_enable_timer_interrupts() -> bool {
+    unsafe { POST_CUTOVER_TIMER_LIVE = false; }
+    if !post_cutover_timer_ready() { return false; }
+    if external_interrupts_enabled() { return false; }
+
+    let before = irq_timer_count();
+    if !interrupt_enable_timer_only() { return false; }
+
+    let mut spins: u64 = 0;
+    while spins < POST_CUTOVER_FIRST_TICK_SPIN_LIMIT {
+        if irq_timer_count() != before {
+            unsafe { POST_CUTOVER_TIMER_LIVE = true; }
+            return true;
+        }
+        spins += 1;
+    }
+
+    interrupt_disable_all();
+    return false;
+}
+
+@system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = argument as *const PostCutoverContext;
-    // COM1 é I/O de porta e não depende de Boot Services, de CR3 novo ou de
-    // tabelas de descritor. Este primeiro marcador separa falha no trampoline
-    // ou no contexto de falha da ativação de CPU propriamente dita.
     let serial_ready = x86_serial_init();
     if serial_ready { x86_serial_write_stage_marker('B' as u8); }
 
-    // Cada marcador é emitido antes da próxima etapa: o último visto no QEMU
-    // identifica o subsistema que falhou sem tocar em serviços UEFI.
     if !post_cutover_activate_cpu(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('C' as u8); }
 
@@ -243,13 +269,12 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('R' as u8); }
 
     if !post_cutover_prepare_timer() { loop {} }
+    if serial_ready { x86_serial_write_timer_ready_marker(); }
 
-    // Diagnóstico best-effort: não é pré-requisito de hardware do kernel.
-    if serial_ready {
-        x86_serial_write_timer_ready_marker();
-    }
+    // Primeiro marco com interrupções realmente live. O marcador T só aparece
+    // depois que o vetor 0x40 foi entregue, o contador avançou e o ISR enviou EOI.
+    if !post_cutover_enable_timer_interrupts() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('T' as u8); }
 
-    // interrupt_enable_timer_only() existe e compila, mas permanece deliberadamente
-    // desconectada até esta base passar suíte, cross-build e smoke QEMU.
     loop {}
 }
