@@ -78,12 +78,12 @@ pub fn hpet_init() -> bool {
     if length < HPET_TABLE_MIN_LENGTH || length > ACPI_MAX_SDT_LENGTH { return false; }
 
     let event_timer_block_id = hpet_read_u32(table, 36);
-    let address_space_id: u8;
-    let register_bit_width: u8;
-    let register_bit_offset: u8;
-    let access_size: u8;
-    let hpet_number: u8;
-    let page_protection: u8;
+    let mut address_space_id: u8 = 0;
+    let mut register_bit_width: u8 = 0;
+    let mut register_bit_offset: u8 = 0;
+    let mut access_size: u8 = 0;
+    let mut hpet_number: u8 = 0;
+    let mut page_protection: u8 = 0;
     unsafe {
         address_space_id = table[40];
         register_bit_width = table[41];
