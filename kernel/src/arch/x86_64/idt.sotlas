@@ -7,8 +7,10 @@
 module kernel::arch::x86_64::idt;
 
 import kernel::arch::x86_64::gdt::*;
+import kernel::arch::x86_64::cpu::*;
 
 pub const IDT_VECTOR_COUNT: usize = 256;
+pub const IDT_EXCEPTION_COUNT: u16 = 32;
 pub const IDT_GATE_INTERRUPT: u8 = 0x8E;
 pub const IDT_GATE_TRAP: u8 = 0x8F;
 
@@ -51,10 +53,12 @@ static mut IDT: [IdtGate; IDT_VECTOR_COUNT] = [
 ];
 
 static mut IDT_PREPARED: bool = false;
+static mut IDT_EXCEPTIONS_READY: bool = false;
 
 @system
 pub fn idt_set_gate(vector: u16, handler: u64, selector: u16, ist: u8, type_attr: u8) -> bool {
     if vector >= 256 { return false; }
+    if handler == 0 { return false; }
     let idx: usize = vector as usize;
     unsafe {
         IDT[idx].offset_low = (handler & 0xFFFF) as u16;
@@ -86,7 +90,7 @@ pub fn idt_exception_type_attr(vector: u16) -> u8 {
 
 @system
 pub fn idt_set_exception_gate(vector: u16, handler: u64) -> bool {
-    if vector >= 32 { return false; }
+    if vector >= IDT_EXCEPTION_COUNT { return false; }
     return idt_set_gate(
         vector,
         handler,
@@ -96,10 +100,29 @@ pub fn idt_set_exception_gate(vector: u16, handler: u64) -> bool {
     );
 }
 
+// Popula os vetores 0..31 com os stubs gerados pelo backend x86. Isso apenas
+// escreve a tabela em RAM: LIDT continua proibido durante a fase UEFI híbrida.
+@system
+pub fn idt_prepare_exceptions() -> bool {
+    idt_prepare_empty();
+    let vector: u16 = 0;
+    while vector < IDT_EXCEPTION_COUNT {
+        let handler: u64 = x86_exception_stub_address(vector);
+        if handler == 0 { return false; }
+        if !idt_set_exception_gate(vector, handler) { return false; }
+        vector = vector + 1;
+    }
+    unsafe { IDT_EXCEPTIONS_READY = true; }
+    return true;
+}
+
 @system
 pub fn idt_prepare_empty() -> void {
     // Zero-init estatico garante que vetores nao registrados permanecam non-present.
-    unsafe { IDT_PREPARED = true; }
+    unsafe {
+        IDT_PREPARED = true;
+        IDT_EXCEPTIONS_READY = false;
+    }
 }
 
 @system
@@ -115,4 +138,9 @@ pub fn idt_limit() -> u16 {
 @system
 pub fn idt_is_prepared() -> bool {
     unsafe { return IDT_PREPARED; }
+}
+
+@system
+pub fn idt_exceptions_ready() -> bool {
+    unsafe { return IDT_EXCEPTIONS_READY; }
 }
