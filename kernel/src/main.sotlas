@@ -1,5 +1,5 @@
 // Baken OS - entrada canônica do kernel modular em Sotlas (@system).
-// O frontend reduz o grafo para objetos independentes; nenhum módulo auxiliar
+// O frontend reduz o grafo Sotlas para objetos independentes; nenhum módulo auxiliar
 // deve declarar outra função baken_kernel_main.
 
 module kernel::main;
@@ -27,6 +27,7 @@ import kernel::memory::pe_wx_policy::*;
 import kernel::memory::transition_image_map::*;
 import kernel::memory::transition_image_wx::*;
 import kernel::memory::transition_page_tables::*;
+import kernel::memory::mmu_activate::*;
 import kernel::memory::cutover_plan::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
