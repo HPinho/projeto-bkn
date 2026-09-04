@@ -1,0 +1,190 @@
+// Baken OS — bring-up xHCI pós-cutover até estado resetado/quiescente.
+//
+// Esta etapa assume ownership somente do MMIO do controller: habilita Memory
+// Space no PCI, mapeia BAR0 como UC, valida capability registers, para o xHC se
+// necessário e executa HCRST. Bus Master, DCBAA, command/event rings, interrupções
+// MSI/MSI-X e enumeração USB continuam desligados até a fase DMA/rings.
+
+module kernel::drivers::xhci_controller;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::xhci_discovery::*;
+
+pub const XHCI_CAPLENGTH_HCIVERSION: u64 = 0x00;
+pub const XHCI_HCSPARAMS1: u64 = 0x04;
+pub const XHCI_HCCPARAMS1: u64 = 0x10;
+pub const XHCI_DBOFF: u64 = 0x14;
+pub const XHCI_RTSOFF: u64 = 0x18;
+
+pub const XHCI_OP_USBCMD: u64 = 0x00;
+pub const XHCI_OP_USBSTS: u64 = 0x04;
+pub const XHCI_OP_PAGESIZE: u64 = 0x08;
+
+pub const XHCI_USBCMD_RUN_STOP: u32 = 1;
+pub const XHCI_USBCMD_HCRST: u32 = 1 << 1;
+pub const XHCI_USBSTS_HCHALTED: u32 = 1;
+pub const XHCI_USBSTS_CNR: u32 = 1 << 11;
+
+pub const XHCI_RESET_POLL_LIMIT: u64 = 10000000;
+pub const XHCI_MIN_VERSION: u16 = 0x0096;
+pub const XHCI_MAX_VERSION: u16 = 0x0120;
+
+static mut XHCI_CONTROLLER_READY: bool = false;
+static mut XHCI_CONTROLLER_PCI_INDEX: u32 = 0;
+static mut XHCI_CONTROLLER_MMIO_BASE: u64 = 0;
+static mut XHCI_CONTROLLER_OPERATIONAL_BASE: u64 = 0;
+static mut XHCI_CONTROLLER_VERSION: u16 = 0;
+static mut XHCI_CONTROLLER_MAX_SLOTS: u8 = 0;
+static mut XHCI_CONTROLLER_MAX_PORTS: u8 = 0;
+static mut XHCI_CONTROLLER_PAGE_SIZE_MASK: u32 = 0;
+
+@system
+fn xhci_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_map_required_mmio(base: u64, operational: u64) -> bool {
+    if base == 0 || operational < base { return false; }
+    let capability_page = xhci_page_base(base);
+    let operational_page = xhci_page_base(operational);
+    if !active_page_tables_map_mmio_identity_4k(capability_page) { return false; }
+    if operational_page != capability_page {
+        if !active_page_tables_map_mmio_identity_4k(operational_page) { return false; }
+    }
+    return true;
+}
+
+@system
+fn xhci_wait_halted(operational: u64) -> bool {
+    let mut spins: u64 = 0;
+    while spins < XHCI_RESET_POLL_LIMIT {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HCHALTED) != 0 { return true; }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn xhci_wait_reset_complete(operational: u64) -> bool {
+    let mut spins: u64 = 0;
+    while spins < XHCI_RESET_POLL_LIMIT {
+        let command = x86_mmio_read32(operational + XHCI_OP_USBCMD);
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (command & XHCI_USBCMD_HCRST) == 0 && (status & XHCI_USBSTS_CNR) == 0 {
+            return true;
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn xhci_stop_and_reset(operational: u64) -> bool {
+    let command = x86_mmio_read32(operational + XHCI_OP_USBCMD);
+    if (command & XHCI_USBCMD_RUN_STOP) != 0 {
+        x86_mmio_write32(operational + XHCI_OP_USBCMD, command & ~XHCI_USBCMD_RUN_STOP);
+        if !xhci_wait_halted(operational) { return false; }
+    } else {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HCHALTED) == 0 {
+            if !xhci_wait_halted(operational) { return false; }
+        }
+    }
+
+    let halted_command = x86_mmio_read32(operational + XHCI_OP_USBCMD);
+    x86_mmio_write32(operational + XHCI_OP_USBCMD, halted_command | XHCI_USBCMD_HCRST);
+    return xhci_wait_reset_complete(operational);
+}
+
+@system
+pub fn xhci_controller_prepare_first() -> bool {
+    unsafe {
+        XHCI_CONTROLLER_READY = false;
+        XHCI_CONTROLLER_PCI_INDEX = 0;
+        XHCI_CONTROLLER_MMIO_BASE = 0;
+        XHCI_CONTROLLER_OPERATIONAL_BASE = 0;
+        XHCI_CONTROLLER_VERSION = 0;
+        XHCI_CONTROLLER_MAX_SLOTS = 0;
+        XHCI_CONTROLLER_MAX_PORTS = 0;
+        XHCI_CONTROLLER_PAGE_SIZE_MASK = 0;
+    }
+
+    if !active_page_tables_is_ready() { return false; }
+    if xhci_discovery_scan() == 0 { return false; }
+
+    let candidate = xhci_discovery_candidate(0);
+    if candidate == (null as *const XhciControllerCandidate) { return false; }
+    if !candidate.valid || !candidate.mmio_usable || candidate.mmio_base == 0 { return false; }
+
+    // Nesta fase o controller ainda não possui estruturas DMA. Habilitamos
+    // somente Memory Space; Bus Master permanece exatamente como estava.
+    pci_enable_command_bits(candidate.bus, candidate.slot, candidate.func, PCI_COMMAND_MEMORY_SPACE);
+    let command_after = pci_read_config16(candidate.bus, candidate.slot, candidate.func, 0x04);
+    if (command_after & PCI_COMMAND_MEMORY_SPACE) == 0 { return false; }
+
+    let mmio = candidate.mmio_base;
+    let cap0 = x86_mmio_read32(mmio);
+    // A primeira leitura só é segura após mapear a página do BAR.
+    // Como o mapper é idempotente para o mesmo endereço, fazemos o mapping
+    // antes de usar qualquer outro registrador e repetimos cap0 depois.
+    let capability_page = xhci_page_base(mmio);
+    if !active_page_tables_map_mmio_identity_4k(capability_page) { return false; }
+    let capability = x86_mmio_read32(mmio + XHCI_CAPLENGTH_HCIVERSION);
+    let caplength = (capability & 0xFF) as u8;
+    let version = ((capability >> 16) & 0xFFFF) as u16;
+    if caplength < 0x20 { return false; }
+    if version < XHCI_MIN_VERSION || version > XHCI_MAX_VERSION { return false; }
+
+    let operational = mmio + (caplength as u64);
+    if !xhci_map_required_mmio(mmio, operational) { return false; }
+
+    let hcsparams1 = x86_mmio_read32(mmio + XHCI_HCSPARAMS1);
+    let max_slots = (hcsparams1 & 0xFF) as u8;
+    let max_ports = ((hcsparams1 >> 24) & 0xFF) as u8;
+    if max_slots == 0 || max_ports == 0 { return false; }
+
+    let page_size_mask = x86_mmio_read32(operational + XHCI_OP_PAGESIZE);
+    if (page_size_mask & 1) == 0 { return false; }
+
+    if !xhci_stop_and_reset(operational) { return false; }
+    if (x86_mmio_read32(operational + XHCI_OP_USBSTS) & XHCI_USBSTS_HCHALTED) == 0 {
+        return false;
+    }
+
+    unsafe {
+        XHCI_CONTROLLER_PCI_INDEX = candidate.pci_index;
+        XHCI_CONTROLLER_MMIO_BASE = mmio;
+        XHCI_CONTROLLER_OPERATIONAL_BASE = operational;
+        XHCI_CONTROLLER_VERSION = version;
+        XHCI_CONTROLLER_MAX_SLOTS = max_slots;
+        XHCI_CONTROLLER_MAX_PORTS = max_ports;
+        XHCI_CONTROLLER_PAGE_SIZE_MASK = page_size_mask;
+        XHCI_CONTROLLER_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_controller_is_ready() -> bool { unsafe { return XHCI_CONTROLLER_READY; } }
+
+@system
+pub fn xhci_controller_mmio_base() -> u64 { unsafe { return XHCI_CONTROLLER_MMIO_BASE; } }
+
+@system
+pub fn xhci_controller_operational_base() -> u64 { unsafe { return XHCI_CONTROLLER_OPERATIONAL_BASE; } }
+
+@system
+pub fn xhci_controller_version() -> u16 { unsafe { return XHCI_CONTROLLER_VERSION; } }
+
+@system
+pub fn xhci_controller_max_slots() -> u8 { unsafe { return XHCI_CONTROLLER_MAX_SLOTS; } }
+
+@system
+pub fn xhci_controller_max_ports() -> u8 { unsafe { return XHCI_CONTROLLER_MAX_PORTS; } }
+
+@system
+pub fn xhci_controller_page_size_mask() -> u32 { unsafe { return XHCI_CONTROLLER_PAGE_SIZE_MASK; } }
