@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
 IOAPIC = ROOT / "kernel/src/interrupts/ioapic.sotlas"
+I8042 = ROOT / "kernel/src/drivers/i8042.sotlas"
 POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 X86 = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
 
@@ -41,12 +42,23 @@ class ExternalIrqFoundationTests(unittest.TestCase):
             body = text.split(f"if vector == {vector}", 1)[1].split("return;", 1)[0]
             self.assertIn("lapic_eoi()", body)
 
-    def test_keyboard_mouse_drain_i8042_before_eoi(self):
+    def test_keyboard_mouse_use_bounded_irq_drain_before_eoi(self):
         text = IRQ.read_text(encoding="utf-8")
         for vector in ("IRQ_VECTOR_KEYBOARD", "IRQ_VECTOR_MOUSE"):
             body = text.split(f"if vector == {vector}", 1)[1].split("return;", 1)[0]
-            self.assertIn("i8042_drain_output();", body)
-            self.assertLess(body.index("i8042_drain_output();"), body.index("lapic_eoi();"))
+            self.assertIn("i8042_drain_irq_output();", body)
+            self.assertNotIn("i8042_initialize_polling", body)
+            self.assertLess(body.index("i8042_drain_irq_output();"), body.index("lapic_eoi();"))
+
+    def test_i8042_irq_path_never_initializes_or_waits_for_ack(self):
+        text = I8042.read_text(encoding="utf-8")
+        body = text.split("pub fn i8042_drain_irq_output", 1)[1].split("pub fn i8042_pop_keyboard", 1)[0]
+        self.assertIn("I8042_INITIALIZED", body)
+        self.assertIn("I8042_NATIVE_IRQS_ENABLED", body)
+        self.assertIn("i8042_drain_ready_output();", body)
+        self.assertNotIn("i8042_initialize_polling", body)
+        self.assertNotIn("i8042_wait_output", body)
+        self.assertNotIn("i8042_aux_command", body)
 
     def test_ioapic_route_state_is_rebuilt_not_blindly_unmasked(self):
         text = IOAPIC.read_text(encoding="utf-8")
