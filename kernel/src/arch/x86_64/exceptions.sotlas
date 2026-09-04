@@ -1,0 +1,114 @@
+// Baken OS - x86_64 exception dispatcher foundation.
+//
+// Os stubs 0-31 sao emitidos pelo backend x86-64 e normalizam o topo da
+// pilha para ExceptionRawFrame. Nesta fase o dispatcher e terminal: registra
+// o estado e para a CPU. Retorno por IRETQ so sera implementado quando o frame
+// completo de registradores e as stacks IST estiverem estabilizados.
+
+module kernel::arch::x86_64::exceptions;
+
+import kernel::arch::x86_64::cpu::*;
+
+pub const EXCEPTION_VECTOR_COUNT: u16 = 32;
+pub const EXCEPTION_PAGE_FAULT: u64 = 14;
+
+@repr(C)
+@packed
+pub struct ExceptionRawFrame {
+    pub vector: u64;
+    pub error_code: u64;
+    pub rip: u64;
+    pub cs: u64;
+    pub rflags: u64;
+}
+
+pub struct ExceptionSnapshot {
+    pub vector: u64;
+    pub error_code: u64;
+    pub rip: u64;
+    pub cs: u64;
+    pub rflags: u64;
+    pub cr2: u64;
+    pub valid: bool;
+}
+
+static mut LAST_EXCEPTION: ExceptionSnapshot = ExceptionSnapshot {
+    vector: 0,
+    error_code: 0,
+    rip: 0,
+    cs: 0,
+    rflags: 0,
+    cr2: 0,
+    valid: false
+};
+
+@system
+pub fn exception_state_reset() -> void {
+    unsafe {
+        LAST_EXCEPTION.vector = 0;
+        LAST_EXCEPTION.error_code = 0;
+        LAST_EXCEPTION.rip = 0;
+        LAST_EXCEPTION.cs = 0;
+        LAST_EXCEPTION.rflags = 0;
+        LAST_EXCEPTION.cr2 = 0;
+        LAST_EXCEPTION.valid = false;
+    }
+}
+
+@system
+pub fn exception_has_snapshot() -> bool {
+    unsafe { return LAST_EXCEPTION.valid; }
+}
+
+@system
+pub fn exception_last_vector() -> u64 {
+    unsafe { return LAST_EXCEPTION.vector; }
+}
+
+@system
+pub fn exception_last_error_code() -> u64 {
+    unsafe { return LAST_EXCEPTION.error_code; }
+}
+
+@system
+pub fn exception_last_rip() -> u64 {
+    unsafe { return LAST_EXCEPTION.rip; }
+}
+
+@system
+pub fn exception_last_cr2() -> u64 {
+    unsafe { return LAST_EXCEPTION.cr2; }
+}
+
+// Simbolo ABI chamado diretamente pelo common exception stub do backend.
+// O argumento e o endereco do frame normalizado no stack de entrada.
+@system
+@export
+pub fn baken_exception_dispatch(frame_address: u64) -> void {
+    let frame = frame_address as *const ExceptionRawFrame;
+
+    if frame == (null as *const ExceptionRawFrame) {
+        __cli();
+        loop { __hlt(); }
+    }
+
+    unsafe {
+        LAST_EXCEPTION.vector = frame.vector;
+        LAST_EXCEPTION.error_code = frame.error_code;
+        LAST_EXCEPTION.rip = frame.rip;
+        LAST_EXCEPTION.cs = frame.cs;
+        LAST_EXCEPTION.rflags = frame.rflags;
+        LAST_EXCEPTION.cr2 = 0;
+
+        if frame.vector == EXCEPTION_PAGE_FAULT {
+            LAST_EXCEPTION.cr2 = x86_read_cr2();
+        }
+
+        LAST_EXCEPTION.valid = true;
+    }
+
+    // Primeira ABI de excecao e deliberadamente terminal. Nenhum IRETQ e
+    // permitido ate preservarmos todos os GPRs e validarmos RSP/SS/CPL/IST.
+    __cli();
+    loop { __hlt(); }
+}
