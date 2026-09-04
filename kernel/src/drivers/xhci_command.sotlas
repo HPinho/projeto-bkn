@@ -1,9 +1,9 @@
-// Baken OS — produtor único do Command Ring e consumidor polling de completions xHCI.
+// Baken OS — produtor único do Command Ring e polling de completions xHCI.
 //
 // Esta camada só é ativada após o No-op inicial ter sido realmente completado.
-// Portanto o primeiro slot disponível é o TRB 1 e o primeiro Event TRB disponível
-// também é o índice 1. O módulo mantém Producer/Consumer Cycle State e nunca
-// sobrescreve o Link TRB reservado no final do Command Ring.
+// O primeiro Command TRB livre é o índice 1. O Event Ring não possui mais cursor
+// privado aqui: Command Completion e futuros Transfer Events compartilham o
+// consumidor único kernel::drivers::xhci_event_consumer.
 
 module kernel::drivers::xhci_command;
 
@@ -17,17 +17,14 @@ import kernel::drivers::xhci_start::*;
 import kernel::drivers::xhci_ring::*;
 import kernel::drivers::xhci_trb::*;
 import kernel::drivers::xhci_event::*;
+import kernel::drivers::xhci_event_consumer::*;
 
 pub const XHCI_COMMAND_POLL_LIMIT: u64 = 10000000;
 pub const XHCI_COMMAND_FIRST_FREE_INDEX: u32 = 1;
-pub const XHCI_EVENT_FIRST_FREE_INDEX: u32 = 1;
-pub const XHCI_COMMAND_ERDP_EHB: u64 = 1 << 3;
 
 static mut XHCI_COMMAND_READY: bool = false;
 static mut XHCI_COMMAND_ENQUEUE_INDEX: u32 = XHCI_COMMAND_FIRST_FREE_INDEX;
 static mut XHCI_COMMAND_PRODUCER_CYCLE: bool = true;
-static mut XHCI_EVENT_DEQUEUE_INDEX: u32 = XHCI_EVENT_FIRST_FREE_INDEX;
-static mut XHCI_EVENT_CONSUMER_CYCLE: bool = true;
 static mut XHCI_COMMAND_LAST_SLOT_ID: u8 = 0;
 
 @system
@@ -39,16 +36,6 @@ fn xhci_command_page_base(address: u64) -> u64 {
 fn xhci_command_map_address(address: u64) -> bool {
     if address == 0 { return false; }
     return active_page_tables_map_mmio_identity_4k(xhci_command_page_base(address));
-}
-
-@system
-fn xhci_command_write64(address: u64, value: u64) -> bool {
-    if !xhci_command_map_address(address) || !xhci_command_map_address(address + 4) {
-        return false;
-    }
-    x86_mmio_write32(address, (value & 0xFFFFFFFF) as u32);
-    x86_mmio_write32(address + 4, ((value >> 32) & 0xFFFFFFFF) as u32);
-    return true;
 }
 
 @system
@@ -70,15 +57,6 @@ fn xhci_command_slot_physical(index: u32) -> u64 {
     let address = base + offset;
     if address < base { return 0; }
     return address;
-}
-
-@system
-fn xhci_event_slot_virtual(index: u32) -> *const XhciTrb {
-    if index >= XHCI_RUNTIME_EVENT_TRBS { return null as *const XhciTrb; }
-    let base = direct_map_virtual_address(xhci_runtime_event_ring_physical());
-    if base == 0 { return null as *const XhciTrb; }
-    let offset = (index as u64) * XHCI_TRB_SIZE;
-    return (base + offset) as *const XhciTrb;
 }
 
 @system
@@ -118,41 +96,11 @@ fn xhci_command_advance_producer() -> bool {
 }
 
 @system
-fn xhci_command_advance_event() -> bool {
-    unsafe {
-        XHCI_EVENT_DEQUEUE_INDEX += 1;
-        if XHCI_EVENT_DEQUEUE_INDEX >= XHCI_RUNTIME_EVENT_TRBS {
-            XHCI_EVENT_DEQUEUE_INDEX = 0;
-            XHCI_EVENT_CONSUMER_CYCLE = !XHCI_EVENT_CONSUMER_CYCLE;
-        }
-    }
-    return true;
-}
-
-@system
-fn xhci_command_update_erdp() -> bool {
-    let event_base = xhci_runtime_event_ring_physical();
-    if event_base == 0 { return false; }
-    unsafe {
-        let offset = (XHCI_EVENT_DEQUEUE_INDEX as u64) * XHCI_TRB_SIZE;
-        let next = event_base + offset;
-        if next < event_base { return false; }
-        let runtime = xhci_program_runtime_base();
-        if runtime == 0 { return false; }
-        let intr0 = runtime + XHCI_RUNTIME_INTERRUPTER0;
-        if intr0 < runtime { return false; }
-        return xhci_command_write64(intr0 + XHCI_INTR_ERDP, next | XHCI_COMMAND_ERDP_EHB);
-    }
-}
-
-@system
 pub fn xhci_command_prepare_after_noop() -> bool {
     unsafe {
         XHCI_COMMAND_READY = false;
         XHCI_COMMAND_ENQUEUE_INDEX = XHCI_COMMAND_FIRST_FREE_INDEX;
         XHCI_COMMAND_PRODUCER_CYCLE = true;
-        XHCI_EVENT_DEQUEUE_INDEX = XHCI_EVENT_FIRST_FREE_INDEX;
-        XHCI_EVENT_CONSUMER_CYCLE = true;
         XHCI_COMMAND_LAST_SLOT_ID = 0;
     }
     if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
@@ -160,6 +108,7 @@ pub fn xhci_command_prepare_after_noop() -> bool {
     if xhci_runtime_command_ring_physical() == 0 || xhci_runtime_event_ring_physical() == 0 {
         return false;
     }
+    if !xhci_event_consumer_prepare_after_noop() { return false; }
     unsafe { XHCI_COMMAND_READY = true; }
     return true;
 }
@@ -198,30 +147,25 @@ pub fn xhci_command_submit(command: XhciTrb) -> u64 {
 pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
     if !xhci_command_is_ready() || command_physical == 0 { return false; }
     let operational = xhci_controller_operational_base();
-    if operational == 0 { return false; }
+    if operational == 0 || !xhci_event_consumer_is_ready() { return false; }
 
     let mut spins: u64 = 0;
     while spins < XHCI_COMMAND_POLL_LIMIT {
         let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
         if (status & XHCI_USBSTS_HOST_CONTROLLER_ERROR) != 0 { return false; }
 
-        unsafe {
-            let event = xhci_event_slot_virtual(XHCI_EVENT_DEQUEUE_INDEX);
-            if event == (null as *const XhciTrb) { return false; }
-            if xhci_event_cycle(event) == XHCI_EVENT_CONSUMER_CYCLE {
-                if xhci_event_type(event) != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT {
-                    return false;
-                }
-                if !xhci_event_success(event) { return false; }
-                if xhci_command_completion_trb_pointer(event) != command_physical {
-                    return false;
-                }
-                XHCI_COMMAND_LAST_SLOT_ID = xhci_event_slot_id(event);
-                if !xhci_command_advance_event() || !xhci_command_update_erdp() {
-                    return false;
-                }
-                return true;
+        let event = xhci_event_consumer_peek();
+        if event != (null as *const XhciTrb) {
+            if xhci_event_type(event) != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT {
+                return false;
             }
+            if !xhci_event_success(event) { return false; }
+            if xhci_command_completion_trb_pointer(event) != command_physical {
+                return false;
+            }
+            unsafe { XHCI_COMMAND_LAST_SLOT_ID = xhci_event_slot_id(event); }
+            if !xhci_event_consumer_consume() { return false; }
+            return true;
         }
         spins += 1;
     }
@@ -238,10 +182,14 @@ pub fn xhci_command_enqueue_index() -> u32 { unsafe { return XHCI_COMMAND_ENQUEU
 pub fn xhci_command_producer_cycle() -> bool { unsafe { return XHCI_COMMAND_PRODUCER_CYCLE; } }
 
 @system
-pub fn xhci_command_event_dequeue_index() -> u32 { unsafe { return XHCI_EVENT_DEQUEUE_INDEX; } }
+pub fn xhci_command_event_dequeue_index() -> u32 {
+    return xhci_event_consumer_index();
+}
 
 @system
-pub fn xhci_command_event_consumer_cycle() -> bool { unsafe { return XHCI_EVENT_CONSUMER_CYCLE; } }
+pub fn xhci_command_event_consumer_cycle() -> bool {
+    return xhci_event_consumer_cycle();
+}
 
 @system
 pub fn xhci_command_last_slot_id() -> u8 { unsafe { return XHCI_COMMAND_LAST_SLOT_ID; } }
