@@ -1,0 +1,233 @@
+// Baken OS - controlador i8042 compartilhado para teclado e porta auxiliar.
+//
+// Somente este módulo é dono das portas 0x60/0x64. Isso impede que o driver
+// de mouse consuma bytes de teclado (ou vice-versa). Enquanto APIC/IOAPIC/IDT
+// ainda não estão ativos, IRQ1/IRQ12 ficam desabilitadas e o controlador opera
+// por polling roteado. A transição para IRQ apenas muda a fonte que chama
+// i8042_drain_output(); as filas e consumidores permanecem iguais.
+
+module kernel::drivers::i8042;
+
+pub const I8042_DATA_PORT: u16 = 0x60;
+pub const I8042_STATUS_PORT: u16 = 0x64;
+pub const I8042_COMMAND_PORT: u16 = 0x64;
+
+pub const I8042_STATUS_OUTPUT_FULL: u8 = 0x01;
+pub const I8042_STATUS_INPUT_FULL: u8 = 0x02;
+pub const I8042_STATUS_AUX_DATA: u8 = 0x20;
+
+pub const I8042_QUEUE_CAPACITY: u32 = 64;
+
+static mut I8042_INITIALIZED: bool = false;
+static mut I8042_FIRST_PORT_OK: bool = false;
+static mut I8042_SECOND_PORT_OK: bool = false;
+
+static mut KBD_QUEUE: [u8; 64] = [0; 64];
+static mut KBD_HEAD: u32 = 0;
+static mut KBD_TAIL: u32 = 0;
+static mut AUX_QUEUE: [u8; 64] = [0; 64];
+static mut AUX_HEAD: u32 = 0;
+static mut AUX_TAIL: u32 = 0;
+
+@system
+fn i8042_wait_write() -> bool {
+    for mut i in 0..100000 {
+        if (__inb(I8042_STATUS_PORT) & I8042_STATUS_INPUT_FULL) == 0 { return true; }
+        baken_io_wait();
+    }
+    return false;
+}
+
+@system
+fn i8042_wait_output() -> bool {
+    for mut i in 0..100000 {
+        if (__inb(I8042_STATUS_PORT) & I8042_STATUS_OUTPUT_FULL) != 0 { return true; }
+        baken_io_wait();
+    }
+    return false;
+}
+
+@system
+fn i8042_command(command: u8) -> bool {
+    if !i8042_wait_write() { return false; }
+    __outb(I8042_COMMAND_PORT, command);
+    baken_io_wait();
+    return true;
+}
+
+@system
+fn i8042_write_data(data: u8) -> bool {
+    if !i8042_wait_write() { return false; }
+    __outb(I8042_DATA_PORT, data);
+    baken_io_wait();
+    return true;
+}
+
+@system
+fn i8042_queue_kbd(data: u8) -> void {
+    unsafe {
+        let next = (KBD_HEAD + 1) % I8042_QUEUE_CAPACITY;
+        if next == KBD_TAIL {
+            // Em overflow descarta o byte mais antigo; nunca bloqueia a ISR/poll.
+            KBD_TAIL = (KBD_TAIL + 1) % I8042_QUEUE_CAPACITY;
+        }
+        KBD_QUEUE[KBD_HEAD as usize] = data;
+        KBD_HEAD = next;
+    }
+}
+
+@system
+fn i8042_queue_aux(data: u8) -> void {
+    unsafe {
+        let next = (AUX_HEAD + 1) % I8042_QUEUE_CAPACITY;
+        if next == AUX_TAIL {
+            AUX_TAIL = (AUX_TAIL + 1) % I8042_QUEUE_CAPACITY;
+        }
+        AUX_QUEUE[AUX_HEAD as usize] = data;
+        AUX_HEAD = next;
+    }
+}
+
+@system
+fn i8042_flush_hardware_output() -> void {
+    for mut i in 0..256 {
+        let status = __inb(I8042_STATUS_PORT);
+        if (status & I8042_STATUS_OUTPUT_FULL) == 0 { return; }
+        __inb(I8042_DATA_PORT);
+        baken_io_wait();
+    }
+}
+
+@system
+pub fn i8042_initialize_polling() -> bool {
+    unsafe {
+        if I8042_INITIALIZED { return true; }
+        KBD_HEAD = 0;
+        KBD_TAIL = 0;
+        AUX_HEAD = 0;
+        AUX_TAIL = 0;
+
+        // Desliga ambos os canais durante reconfiguração.
+        if !i8042_command(0xAD) { return false; }
+        if !i8042_command(0xA7) { return false; }
+        i8042_flush_hardware_output();
+
+        // Lê byte de configuração.
+        if !i8042_command(0x20) { return false; }
+        if !i8042_wait_output() { return false; }
+        let mut config = __inb(I8042_DATA_PORT);
+
+        // Polling durante a fase híbrida: IRQ1/IRQ12 desligadas. Também libera
+        // os clocks das duas portas (bits clock-disable 4/5 = 0).
+        config = config & 0xCC;
+        if !i8042_command(0x60) { return false; }
+        if !i8042_write_data(config) { return false; }
+
+        // Testes elétricos das portas. 0x00 = interface OK.
+        I8042_FIRST_PORT_OK = false;
+        if i8042_command(0xAB) && i8042_wait_output() {
+            I8042_FIRST_PORT_OK = __inb(I8042_DATA_PORT) == 0;
+        }
+        I8042_SECOND_PORT_OK = false;
+        if i8042_command(0xA9) && i8042_wait_output() {
+            I8042_SECOND_PORT_OK = __inb(I8042_DATA_PORT) == 0;
+        }
+
+        if I8042_FIRST_PORT_OK { i8042_command(0xAE); }
+        if I8042_SECOND_PORT_OK { i8042_command(0xA8); }
+        i8042_flush_hardware_output();
+
+        I8042_INITIALIZED = true;
+        return true;
+    }
+}
+
+// Deve ser chamado por polling agora e, futuramente, pelos handlers IRQ1/12.
+@system
+pub fn i8042_drain_output() -> void {
+    if !i8042_initialize_polling() { return; }
+    for mut i in 0..64 {
+        let status = __inb(I8042_STATUS_PORT);
+        if (status & I8042_STATUS_OUTPUT_FULL) == 0 { return; }
+        let data = __inb(I8042_DATA_PORT);
+        if (status & I8042_STATUS_AUX_DATA) != 0 {
+            i8042_queue_aux(data);
+        } else {
+            i8042_queue_kbd(data);
+        }
+    }
+}
+
+@system
+pub fn i8042_pop_keyboard(out_byte: *mut u8) -> bool {
+    if out_byte == (null as *mut u8) { return false; }
+    i8042_drain_output();
+    unsafe {
+        if KBD_HEAD == KBD_TAIL { return false; }
+        *out_byte = KBD_QUEUE[KBD_TAIL as usize];
+        KBD_TAIL = (KBD_TAIL + 1) % I8042_QUEUE_CAPACITY;
+        return true;
+    }
+}
+
+@system
+pub fn i8042_pop_aux(out_byte: *mut u8) -> bool {
+    if out_byte == (null as *mut u8) { return false; }
+    i8042_drain_output();
+    unsafe {
+        if AUX_HEAD == AUX_TAIL { return false; }
+        *out_byte = AUX_QUEUE[AUX_TAIL as usize];
+        AUX_TAIL = (AUX_TAIL + 1) % I8042_QUEUE_CAPACITY;
+        return true;
+    }
+}
+
+// Envia byte para o dispositivo auxiliar e espera ACK 0xFA, roteando qualquer
+// byte de teclado que apareça no intervalo para sua fila em vez de descartá-lo.
+@system
+pub fn i8042_aux_command(data: u8) -> bool {
+    if !i8042_initialize_polling() { return false; }
+    if !i8042_command(0xD4) { return false; }
+    if !i8042_write_data(data) { return false; }
+
+    for mut i in 0..100000 {
+        let status = __inb(I8042_STATUS_PORT);
+        if (status & I8042_STATUS_OUTPUT_FULL) == 0 {
+            baken_io_wait();
+            continue;
+        }
+        let value = __inb(I8042_DATA_PORT);
+        if (status & I8042_STATUS_AUX_DATA) != 0 {
+            if value == 0xFA { return true; }
+            // 0xFE = RESEND: o caller pode decidir repetir o comando.
+            if value == 0xFE { return false; }
+            i8042_queue_aux(value);
+        } else {
+            i8042_queue_kbd(value);
+        }
+    }
+    return false;
+}
+
+@system
+pub fn i8042_first_port_present() -> bool {
+    unsafe { return I8042_INITIALIZED && I8042_FIRST_PORT_OK; }
+}
+
+@system
+pub fn i8042_second_port_present() -> bool {
+    unsafe { return I8042_INITIALIZED && I8042_SECOND_PORT_OK; }
+}
+
+// Só deve ser chamado depois de IDT + APIC/IOAPIC estarem ativos.
+@system
+pub fn i8042_enable_native_irqs() -> bool {
+    if !i8042_initialize_polling() { return false; }
+    if !i8042_command(0x20) { return false; }
+    if !i8042_wait_output() { return false; }
+    let mut config = __inb(I8042_DATA_PORT);
+    if i8042_first_port_present() { config = config | 0x01; }
+    if i8042_second_port_present() { config = config | 0x02; }
+    if !i8042_command(0x60) { return false; }
+    return i8042_write_data(config);
+}
