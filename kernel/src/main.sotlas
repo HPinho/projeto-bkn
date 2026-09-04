@@ -23,6 +23,7 @@ import kernel::drivers::xhci_ring::*;
 import kernel::drivers::xhci_trb::*;
 import kernel::drivers::xhci_event::*;
 import kernel::drivers::xhci_erst::*;
+import kernel::drivers::xhci_event_ring::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
@@ -100,8 +101,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         );
     }
 
-    // Os contratos DMA/xHCI ring/TRB/event/ERST já fazem parte do grafo, mas
-    // permanecem fail-closed enquanto o PMM não possuir allocator físico.
+    // Os contratos DMA/xHCI ring/TRB/event/ERST/event-ring já fazem parte do
+    // grafo, mas permanecem fail-closed enquanto o PMM não possuir allocator físico.
     dma_allocator_available();
 
     // ACPI é validada por assinatura/checksum antes de qualquer consumidor
