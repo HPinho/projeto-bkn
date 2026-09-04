@@ -29,12 +29,17 @@ class CutoverPrepareTests(unittest.TestCase):
     def test_result_exposes_only_prepared_addresses_and_counts(self):
         for token in (
             "root_physical: tables.root_physical",
+            "context_virtual_base: stack.context_virtual_base",
             "stack_top: stack.stack_top",
             "table_pages_used: tables.table_pages_used",
             "direct_map_bytes: tables.direct_map_bytes",
             "framebuffer_pages: tables.framebuffer_pages",
         ):
             self.assertIn(token, self.text)
+
+    def test_context_page_is_required_before_result_is_valid(self):
+        self.assertIn("stack.context_virtual_base == 0", self.text)
+        self.assertIn("context_virtual_base: 0", self.text)
 
     def test_prepare_has_no_firmware_or_activation_side_effects(self):
         code = "\n".join(line.split("//", 1)[0] for line in self.text.splitlines())
