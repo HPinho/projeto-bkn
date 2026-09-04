@@ -1,14 +1,15 @@
 // Baken OS — preparação pura das estruturas para o futuro corte UEFI.
 //
 // O bootloader fornece somente memória já reservada e o Memory Map capturado.
-// Esta função monta arena, layout da imagem/stack e page tables W^X, devolvendo
-// os endereços que a fase pós-ExitBootServices usará. Não chama firmware, não
-// troca CR3/RSP e não ativa allocators.
+// Esta função monta arena, layout da imagem/framebuffer/stack e page tables,
+// devolvendo os endereços que a fase pós-ExitBootServices usará. Não chama
+// firmware, não troca CR3/RSP e não ativa allocators.
 
 module kernel::memory::cutover_prepare;
 
 import kernel::memory::page_table_arena::*;
 import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_framebuffer_map::*;
 import kernel::memory::transition_stack::*;
 import kernel::memory::transition_page_tables::*;
 
@@ -25,6 +26,9 @@ pub struct CutoverPrepareInput {
     pub image_virtual_base: u64;
     pub image_size: u64;
 
+    pub framebuffer_physical_base: u64;
+    pub framebuffer_size: u64;
+
     pub stack_physical_base: u64;
     pub stack_virtual_base: u64;
     pub stack_page_count: u64;
@@ -37,6 +41,7 @@ pub struct CutoverPrepareResult {
     pub table_pages_used: u64;
     pub direct_map_bytes: u64;
     pub image_pages: u64;
+    pub framebuffer_pages: u64;
     pub stack_pages: u64;
     pub valid: bool;
 }
@@ -50,6 +55,7 @@ pub fn cutover_prepare_invalid() -> CutoverPrepareResult {
         table_pages_used: 0,
         direct_map_bytes: 0,
         image_pages: 0,
+        framebuffer_pages: 0,
         stack_pages: 0,
         valid: false
     };
@@ -77,6 +83,12 @@ pub fn cutover_prepare(input: *const CutoverPrepareInput) -> CutoverPrepareResul
     );
     if !image.valid { return cutover_prepare_invalid(); }
 
+    let framebuffer = transition_framebuffer_layout(
+        input.framebuffer_physical_base,
+        input.framebuffer_size
+    );
+    if !framebuffer.valid { return cutover_prepare_invalid(); }
+
     let stack = transition_stack_layout(
         input.stack_physical_base,
         input.stack_virtual_base,
@@ -90,6 +102,7 @@ pub fn cutover_prepare(input: *const CutoverPrepareInput) -> CutoverPrepareResul
         input.memory_map_size,
         input.descriptor_size,
         image,
+        framebuffer,
         stack
     );
     if !tables.valid { return cutover_prepare_invalid(); }
@@ -104,6 +117,7 @@ pub fn cutover_prepare(input: *const CutoverPrepareInput) -> CutoverPrepareResul
         table_pages_used: tables.table_pages_used,
         direct_map_bytes: tables.direct_map_bytes,
         image_pages: tables.image_pages,
+        framebuffer_pages: tables.framebuffer_pages,
         stack_pages: tables.stack_pages,
         valid: true
     };
