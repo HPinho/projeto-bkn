@@ -41,12 +41,22 @@ class ExternalIrqFoundationTests(unittest.TestCase):
             body = text.split(f"if vector == {vector}", 1)[1].split("return;", 1)[0]
             self.assertIn("lapic_eoi()", body)
 
-    def test_ioapic_routes_are_programmed_masked(self):
+    def test_keyboard_mouse_drain_i8042_before_eoi(self):
+        text = IRQ.read_text(encoding="utf-8")
+        for vector in ("IRQ_VECTOR_KEYBOARD", "IRQ_VECTOR_MOUSE"):
+            body = text.split(f"if vector == {vector}", 1)[1].split("return;", 1)[0]
+            self.assertIn("i8042_drain_output();", body)
+            self.assertLess(body.index("i8042_drain_output();"), body.index("lapic_eoi();"))
+
+    def test_ioapic_route_state_is_rebuilt_not_blindly_unmasked(self):
         text = IOAPIC.read_text(encoding="utf-8")
+        self.assertIn("fn ioapic_program_route_state", text)
         self.assertIn("ioapic_program_route_masked", text)
-        self.assertIn("IOAPIC_REDIR_MASKED", text)
+        self.assertIn("ioapic_program_route_unmasked", text)
+        self.assertIn("if masked { low |= IOAPIC_REDIR_MASKED; }", text)
         self.assertIn("IOAPIC_REDIR_ACTIVE_LOW", text)
         self.assertIn("IOAPIC_REDIR_LEVEL", text)
+        self.assertIn("let high = (destination_apic_id as u32) << 24", text)
         self.assertIn("ioapic_write(base, high_reg, high)", text)
         self.assertIn("ioapic_write(base, low_reg, low)", text)
 
