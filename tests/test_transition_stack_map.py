@@ -14,13 +14,13 @@ class TransitionStackMapTests(unittest.TestCase):
         self.text = STACK_MAP.read_text(encoding="utf-8")
         self.main = MAIN.read_text(encoding="utf-8")
 
-    def test_only_usable_pages_are_mapped(self):
-        self.assertIn("layout.usable_virtual_base", self.text)
-        self.assertIn("layout.usable_physical_base", self.text)
-        self.assertIn("layout.usable_page_count * X86_PAGE_SIZE", self.text)
+    def test_context_and_stack_are_mapped_but_guard_is_not(self):
+        self.assertIn("layout.context_virtual_base", self.text)
+        self.assertIn("layout.context_physical_base", self.text)
+        self.assertIn("layout.usable_page_count + 1", self.text)
         self.assertNotIn("layout.guard_page_virtual_base", self.text)
 
-    def test_stack_mapping_is_rw_and_nx(self):
+    def test_mapping_is_rw_and_nx(self):
         self.assertIn("X86_PTE_WRITABLE", self.text)
         self.assertIn("X86_PTE_NX", self.text)
         self.assertIn("transition_map_range(", self.text)
