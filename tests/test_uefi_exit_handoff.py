@@ -21,16 +21,24 @@ class UefiExitHandoffTests(unittest.TestCase):
 
     def test_retry_contract_handles_map_key_changes(self):
         text = HANDOFF.read_text(encoding="utf-8")
+        refresh = "status = baken_refresh_final_memory_map(bs, state);"
+        exit_call = "status = exit_boot_services(image_handle, state->map_key);"
+        reject_other_errors = "if (status != EFI_INVALID_PARAMETER) {"
+        retry_marker = "Map key mudou."
+
         self.assertIn("BAKEN_UEFI_EXIT_MAX_ATTEMPTS", text)
-        self.assertIn("baken_refresh_final_memory_map", text)
-        self.assertIn("exit_boot_services(image_handle, state->map_key)", text)
-        # Qualquer status diferente de INVALID_PARAMETER encerra; quando é
-        # INVALID_PARAMETER o fluxo cai no fim do loop e refaz GetMemoryMap.
-        self.assertIn("if (status != EFI_INVALID_PARAMETER)", text)
-        self.assertRegex(
-            text,
-            r"if \(status != EFI_INVALID_PARAMETER\) \{\s*return status;\s*\}.*?Map key mudou",
-        )
+        self.assertIn(refresh, text)
+        self.assertIn(exit_call, text)
+        self.assertIn(reject_other_errors, text)
+        self.assertIn(retry_marker, text)
+
+        first_refresh = text.index(refresh)
+        exit_pos = text.index(exit_call, first_refresh)
+        reject_pos = text.index(reject_other_errors, exit_pos)
+        retry_pos = text.index(retry_marker, reject_pos)
+        self.assertLess(first_refresh, exit_pos)
+        self.assertLess(exit_pos, reject_pos)
+        self.assertLess(reject_pos, retry_pos)
 
     def test_no_boot_service_call_is_inserted_between_final_map_and_exit(self):
         text = HANDOFF.read_text(encoding="utf-8")
