@@ -185,7 +185,13 @@ kernel_entry
 
 UEFI já entrega a CPU x86-64 em long mode em uma inicialização UEFI normal; o trabalho do Baken é assumir o controle desse ambiente e estabelecer suas próprias tabelas, descritores e políticas.
 
-O compilador canônico ainda precisa de lowering explícito para `lgdt`, `lidt`, `ltr`, leitura de `CR2` e operações relacionadas antes que GDT/IDT/TSS possam ser declarados ativos. Esses recursos não serão simulados em UI/runtime.
+### Pré-requisito do backend Sotlas para GDT/IDT/TSS
+
+O compilador canônico ainda precisa de lowering explícito para instruções privilegiadas que não podem ser representadas como funções comuns: `lgdt`, `lidt`, `ltr`, leitura de `CR2`, `invlpg` e operações de controle de paginação relacionadas.
+
+Essas operações devem ser intrínsecos do backend x86-64, com assinatura Sotlas estável e emissão de instrução real. Elas **não** serão implementadas como lógica visual, strings de assembly escondidas em módulos de UI ou stubs que apenas retornam sucesso.
+
+Somente depois desses intrínsecos existirem e tiverem testes de codegen os módulos GDT/IDT/TSS serão conectados à entrada do kernel.
 
 ## PMM
 
@@ -288,7 +294,7 @@ Input, storage, compositor e USB não devem permanecer em um único polling loop
 1. BootInfo v2 + GetMemoryMap + ACPI handoff            [IMPLEMENTADO]
 2. PMM inventory                                       [IMPLEMENTADO]
 3. PCI discovery read-only                             [IMPLEMENTADO]
-4. corrigir intrínsecos x86-64 para GDT/IDT/TSS       [PRÓXIMO]
+4. intrínsecos x86-64 para GDT/IDT/TSS                 [PRÓXIMO]
 5. GDT/IDT/TSS/exceptions
 6. PMM allocator pós-cutover + VMM/heap/PAT
 7. ACPI/APIC/IOAPIC/timers
