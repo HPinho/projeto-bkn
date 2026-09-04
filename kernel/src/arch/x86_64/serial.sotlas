@@ -49,6 +49,38 @@ pub fn x86_serial_write_byte(value: u8) -> bool {
     return false;
 }
 
+@system
+fn x86_serial_hex_digit(value: u8) -> u8 {
+    if value < 10 { return ('0' as u8) + value; }
+    return ('A' as u8) + (value - 10);
+}
+
+// Diagnóstico numérico sem alocação/formatação: BAKEN:HEX=<tag>:XXXXXXXX.
+@system
+pub fn x86_serial_write_hex32_marker(tag: u8, value: u32) -> bool {
+    if !x86_serial_write_byte('B' as u8) { return false; }
+    if !x86_serial_write_byte('A' as u8) { return false; }
+    if !x86_serial_write_byte('K' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('N' as u8) { return false; }
+    if !x86_serial_write_byte(':' as u8) { return false; }
+    if !x86_serial_write_byte('H' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('X' as u8) { return false; }
+    if !x86_serial_write_byte('=' as u8) { return false; }
+    if !x86_serial_write_byte(tag) { return false; }
+    if !x86_serial_write_byte(':' as u8) { return false; }
+
+    let mut shift: i32 = 28;
+    while shift >= 0 {
+        let nibble = ((value >> (shift as u32)) & 0x0F) as u8;
+        if !x86_serial_write_byte(x86_serial_hex_digit(nibble)) { return false; }
+        shift -= 4;
+    }
+    if !x86_serial_write_byte('\n' as u8) { return false; }
+    return true;
+}
+
 // Checkpoint curto e delimitado para o bring-up pós-cutover.  Um único
 // caractere de etapa evita depender de alocação, formatação ou framebuffer
 // enquanto a MMU, o PMM e os controladores de interrupção são validados.
