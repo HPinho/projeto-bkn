@@ -1,0 +1,59 @@
+// Baken OS — planejamento de rota IRQ -> GSI -> vetor IDT.
+//
+// Usa somente o inventário MADT já validado. Não toca LAPIC/IOAPIC, não lê
+// MMIO e não habilita interrupções; apenas resolve a semântica ACPI do IRQ.
+
+module kernel::interrupts::route;
+
+import kernel::acpi::madt::*;
+
+pub const IRQ_ROUTE_MIN_VECTOR: u16 = 32;
+pub const IRQ_ROUTE_MAX_VECTOR: u16 = 255;
+
+pub struct InterruptRoute {
+    pub source_irq: u8;
+    pub gsi: u32;
+    pub vector: u16;
+    pub active_low: bool;
+    pub level_triggered: bool;
+    pub valid: bool;
+}
+
+@system
+pub fn interrupt_route_legacy_irq(irq: u8, vector: u16) -> InterruptRoute {
+    let mut route = InterruptRoute {
+        source_irq: irq,
+        gsi: irq as u32,
+        vector: vector,
+        active_low: false,
+        level_triggered: false,
+        valid: false
+    };
+
+    if !madt_is_ready() { return route; }
+    if vector < IRQ_ROUTE_MIN_VECTOR || vector > IRQ_ROUTE_MAX_VECTOR { return route; }
+
+    let flags = madt_irq_flags(irq);
+    let polarity = flags & 3;
+    let trigger = (flags >> 2) & 3;
+
+    // ACPI MADT: 00 = conforms, 01 = high/edge, 11 = low/level.
+    // O encoding 10 é reservado e não deve ser programado no IOAPIC.
+    if polarity == 2 || trigger == 2 { return route; }
+
+    route.gsi = madt_irq_to_gsi(irq);
+    route.active_low = polarity == 3;
+    route.level_triggered = trigger == 3;
+    route.valid = true;
+    return route;
+}
+
+@system
+pub fn interrupt_route_keyboard(vector: u16) -> InterruptRoute {
+    return interrupt_route_legacy_irq(1, vector);
+}
+
+@system
+pub fn interrupt_route_ps2_mouse(vector: u16) -> InterruptRoute {
+    return interrupt_route_legacy_irq(12, vector);
+}
