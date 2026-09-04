@@ -123,11 +123,12 @@ pub fn page_fault_was_shadow_stack(error_code: u64) -> bool {
     return (error_code & PAGE_FAULT_SHADOW_STACK) != 0;
 }
 
-// Simbolo ABI chamado diretamente pelo common exception stub do backend.
-// O argumento e o endereco do frame normalizado no stack de entrada.
+// Callback ABI generico esperado pelo backend x86-64 da linguagem Sotlas.
+// A implementacao pertence ao kernel Baken, mas o backend nao conhece o nome
+// do sistema operacional. O argumento aponta para ExceptionRawFrame.
 @system
 @export
-pub fn baken_exception_dispatch(frame_address: u64) -> void {
+pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> void {
     let frame = frame_address as *const ExceptionRawFrame;
 
     if frame == (null as *const ExceptionRawFrame) {
