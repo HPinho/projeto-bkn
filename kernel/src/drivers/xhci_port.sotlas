@@ -1,0 +1,146 @@
+// Baken OS — inventário read-only de portas xHCI após o primeiro DMA provado.
+//
+// Lê PORTSC somente depois que o controller está rodando e o No-op Command já
+// foi concluído. Não limpa change bits, não faz Port Reset/Warm Reset e não
+// escreve PORTSC. A próxima fase usa este inventário para escolher uma porta.
+
+module kernel::drivers::xhci_port;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_start::*;
+
+pub const XHCI_PORT_REGISTER_BASE: u64 = 0x400;
+pub const XHCI_PORT_REGISTER_STRIDE: u64 = 0x10;
+pub const XHCI_PORTSC_OFFSET: u64 = 0x00;
+pub const XHCI_PORTSC_CCS: u32 = 1;
+pub const XHCI_PORTSC_PED: u32 = 1 << 1;
+pub const XHCI_PORTSC_PP: u32 = 1 << 9;
+pub const XHCI_PORTSC_SPEED_SHIFT: u32 = 10;
+pub const XHCI_PORTSC_SPEED_MASK: u32 = 0xF << XHCI_PORTSC_SPEED_SHIFT;
+pub const XHCI_MAX_TRACKED_PORTS: usize = 256;
+
+pub struct XhciPortSnapshot {
+    pub port_id: u8;
+    pub portsc: u32;
+    pub connected: bool;
+    pub enabled: bool;
+    pub powered: bool;
+    pub speed_id: u8;
+    pub valid: bool;
+}
+
+static mut XHCI_PORTS: [XhciPortSnapshot; XHCI_MAX_TRACKED_PORTS] = [
+    XhciPortSnapshot {
+        port_id: 0,
+        portsc: 0,
+        connected: false,
+        enabled: false,
+        powered: false,
+        speed_id: 0,
+        valid: false
+    };
+    XHCI_MAX_TRACKED_PORTS
+];
+static mut XHCI_PORT_COUNT: u16 = 0;
+static mut XHCI_CONNECTED_PORT_COUNT: u16 = 0;
+static mut XHCI_FIRST_CONNECTED_PORT: u8 = 0;
+
+@system
+fn xhci_port_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_port_map(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_port_page_base(address));
+}
+
+@system
+fn xhci_port_address(port_id: u8) -> u64 {
+    if port_id == 0 { return 0; }
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return 0; }
+    let index = (port_id as u64) - 1;
+    let offset = XHCI_PORT_REGISTER_BASE + (index * XHCI_PORT_REGISTER_STRIDE);
+    let address = operational + offset + XHCI_PORTSC_OFFSET;
+    if address < operational { return 0; }
+    return address;
+}
+
+@system
+pub fn xhci_port_scan() -> u16 {
+    unsafe {
+        XHCI_PORT_COUNT = 0;
+        XHCI_CONNECTED_PORT_COUNT = 0;
+        XHCI_FIRST_CONNECTED_PORT = 0;
+        let mut clear: usize = 0;
+        while clear < XHCI_MAX_TRACKED_PORTS {
+            XHCI_PORTS[clear].valid = false;
+            XHCI_PORTS[clear].portsc = 0;
+            XHCI_PORTS[clear].connected = false;
+            XHCI_PORTS[clear].enabled = false;
+            XHCI_PORTS[clear].powered = false;
+            XHCI_PORTS[clear].speed_id = 0;
+            clear += 1;
+        }
+    }
+
+    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return 0; }
+    let max_ports = xhci_controller_max_ports() as u16;
+    if max_ports == 0 || (max_ports as usize) > XHCI_MAX_TRACKED_PORTS { return 0; }
+
+    let mut port: u16 = 1;
+    while port <= max_ports {
+        let port_id = port as u8;
+        let address = xhci_port_address(port_id);
+        if address == 0 || !xhci_port_map(address) { return 0; }
+        let portsc = x86_mmio_read32(address);
+        let connected = (portsc & XHCI_PORTSC_CCS) != 0;
+        let enabled = (portsc & XHCI_PORTSC_PED) != 0;
+        let powered = (portsc & XHCI_PORTSC_PP) != 0;
+        let speed_id = ((portsc & XHCI_PORTSC_SPEED_MASK) >> XHCI_PORTSC_SPEED_SHIFT) as u8;
+        let index = (port - 1) as usize;
+
+        unsafe {
+            XHCI_PORTS[index].port_id = port_id;
+            XHCI_PORTS[index].portsc = portsc;
+            XHCI_PORTS[index].connected = connected;
+            XHCI_PORTS[index].enabled = enabled;
+            XHCI_PORTS[index].powered = powered;
+            XHCI_PORTS[index].speed_id = speed_id;
+            XHCI_PORTS[index].valid = true;
+            XHCI_PORT_COUNT += 1;
+            if connected {
+                XHCI_CONNECTED_PORT_COUNT += 1;
+                if XHCI_FIRST_CONNECTED_PORT == 0 {
+                    XHCI_FIRST_CONNECTED_PORT = port_id;
+                }
+            }
+        }
+        port += 1;
+    }
+    unsafe { return XHCI_PORT_COUNT; }
+}
+
+@system
+pub fn xhci_port_count() -> u16 { unsafe { return XHCI_PORT_COUNT; } }
+
+@system
+pub fn xhci_connected_port_count() -> u16 { unsafe { return XHCI_CONNECTED_PORT_COUNT; } }
+
+@system
+pub fn xhci_first_connected_port() -> u8 { unsafe { return XHCI_FIRST_CONNECTED_PORT; } }
+
+@system
+pub fn xhci_port_snapshot(port_id: u8) -> *const XhciPortSnapshot {
+    if port_id == 0 { return null as *const XhciPortSnapshot; }
+    let index = (port_id as usize) - 1;
+    if index >= XHCI_MAX_TRACKED_PORTS { return null as *const XhciPortSnapshot; }
+    unsafe {
+        if !XHCI_PORTS[index].valid { return null as *const XhciPortSnapshot; }
+        return &XHCI_PORTS[index];
+    }
+}
