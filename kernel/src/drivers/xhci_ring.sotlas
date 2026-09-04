@@ -1,0 +1,76 @@
+// Baken OS — contrato de rings xHCI sobre buffers DMA reais.
+//
+// Define a unidade TRB de 16 bytes e valida um buffer já fornecido pelo
+// allocator DMA. Não aloca memória, não escreve doorbells e não toca MMIO.
+
+module kernel::drivers::xhci_ring;
+
+import kernel::memory::dma::*;
+
+pub const XHCI_TRB_SIZE: u64 = 16;
+pub const XHCI_RING_ALIGNMENT: u64 = 64;
+pub const XHCI_RING_MIN_TRBS: u32 = 16;
+pub const XHCI_RING_MAX_TRBS: u32 = 4096;
+
+pub struct XhciTrb {
+    pub parameter: u64;
+    pub status: u32;
+    pub control: u32;
+}
+
+pub struct XhciRing {
+    pub virtual_base: *mut XhciTrb;
+    pub physical_base: u64;
+    pub trb_count: u32;
+    pub enqueue_index: u32;
+    pub cycle_state: bool;
+    pub valid: bool;
+}
+
+@system
+pub fn xhci_ring_invalid() -> XhciRing {
+    return XhciRing {
+        virtual_base: null as *mut XhciTrb,
+        physical_base: 0,
+        trb_count: 0,
+        enqueue_index: 0,
+        cycle_state: true,
+        valid: false
+    };
+}
+
+@system
+pub fn xhci_ring_bind(buffer: DmaBuffer, trb_count: u32) -> XhciRing {
+    if !buffer.valid { return xhci_ring_invalid(); }
+    if buffer.virtual_address == (null as *mut u8) { return xhci_ring_invalid(); }
+    if buffer.physical_address == 0 { return xhci_ring_invalid(); }
+    if trb_count < XHCI_RING_MIN_TRBS || trb_count > XHCI_RING_MAX_TRBS {
+        return xhci_ring_invalid();
+    }
+
+    let required = (trb_count as u64) * XHCI_TRB_SIZE;
+    if buffer.size < required { return xhci_ring_invalid(); }
+    if (buffer.physical_address & (XHCI_RING_ALIGNMENT - 1)) != 0 {
+        return xhci_ring_invalid();
+    }
+
+    return XhciRing {
+        virtual_base: buffer.virtual_address as *mut XhciTrb,
+        physical_base: buffer.physical_address,
+        trb_count: trb_count,
+        enqueue_index: 0,
+        cycle_state: true,
+        valid: true
+    };
+}
+
+@system
+pub fn xhci_ring_is_ready(ring: *const XhciRing) -> bool {
+    if ring == (null as *const XhciRing) { return false; }
+    unsafe {
+        return (*ring).valid &&
+            (*ring).virtual_base != (null as *mut XhciTrb) &&
+            (*ring).physical_base != 0 &&
+            (*ring).trb_count >= XHCI_RING_MIN_TRBS;
+    }
+}
