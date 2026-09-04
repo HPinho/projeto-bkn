@@ -1,0 +1,108 @@
+// Baken OS — fundação de IRQs externos x86-64.
+//
+// Instala apenas vetores conhecidos, mantém IOAPIC mascarado e nunca executa STI.
+// O backend salva/restaura GPRs e retorna com IRETQ; este módulo contém a política.
+
+module kernel::interrupts::irq;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::idt::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::ioapic::*;
+import kernel::interrupts::route::*;
+
+pub const IRQ_VECTOR_TIMER: u16 = 0x40;
+pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
+pub const IRQ_VECTOR_MOUSE: u16 = 0x42;
+pub const IRQ_VECTOR_SPURIOUS: u16 = 0xFF;
+
+static mut IRQ_IDT_READY: bool = false;
+static mut IRQ_ROUTES_READY: bool = false;
+static mut IRQ_TIMER_COUNT: u64 = 0;
+static mut IRQ_KEYBOARD_COUNT: u64 = 0;
+static mut IRQ_MOUSE_COUNT: u64 = 0;
+static mut IRQ_SPURIOUS_COUNT: u64 = 0;
+
+@system
+fn irq_install_gate(vector: u16) -> bool {
+    let handler = x86_irq_stub_address(vector);
+    if handler == 0 { return false; }
+    return idt_set_irq_gate(vector, handler);
+}
+
+@system
+pub fn irq_prepare_idt() -> bool {
+    unsafe { IRQ_IDT_READY = false; }
+    if !idt_exceptions_ready() { return false; }
+    if !irq_install_gate(IRQ_VECTOR_TIMER) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_KEYBOARD) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_MOUSE) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
+    unsafe { IRQ_IDT_READY = true; }
+    return true;
+}
+
+@system
+pub fn irq_prepare_masked_ioapic_routes() -> bool {
+    unsafe { IRQ_ROUTES_READY = false; }
+    if !IRQ_IDT_READY || !lapic_is_ready() || !ioapic_is_ready() { return false; }
+
+    let keyboard = interrupt_route_keyboard(IRQ_VECTOR_KEYBOARD);
+    if !keyboard.valid { return false; }
+    let mouse = interrupt_route_ps2_mouse(IRQ_VECTOR_MOUSE);
+    if !mouse.valid { return false; }
+
+    let destination = lapic_id();
+    if !ioapic_program_route_masked(&keyboard, destination) { return false; }
+    if !ioapic_program_route_masked(&mouse, destination) { return false; }
+
+    unsafe { IRQ_ROUTES_READY = true; }
+    return true;
+}
+
+@system
+pub fn irq_idt_ready() -> bool { unsafe { return IRQ_IDT_READY; } }
+
+@system
+pub fn irq_routes_ready() -> bool { unsafe { return IRQ_ROUTES_READY; } }
+
+@system
+pub fn irq_timer_count() -> u64 { unsafe { return IRQ_TIMER_COUNT; } }
+
+@system
+pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
+
+@system
+pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
+
+@system
+pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
+
+@system
+@export
+pub fn sotlas_x86_irq_dispatch(vector: u64) -> void {
+    if vector == IRQ_VECTOR_SPURIOUS as u64 {
+        unsafe { IRQ_SPURIOUS_COUNT += 1; }
+        // Vetor espúrio do LAPIC não recebe EOI.
+        return;
+    }
+
+    if vector == IRQ_VECTOR_TIMER as u64 {
+        unsafe { IRQ_TIMER_COUNT += 1; }
+        lapic_eoi();
+        return;
+    }
+    if vector == IRQ_VECTOR_KEYBOARD as u64 {
+        unsafe { IRQ_KEYBOARD_COUNT += 1; }
+        lapic_eoi();
+        return;
+    }
+    if vector == IRQ_VECTOR_MOUSE as u64 {
+        unsafe { IRQ_MOUSE_COUNT += 1; }
+        lapic_eoi();
+        return;
+    }
+
+    // Nenhum gate desconhecido deve apontar para este dispatcher.
+    // Falha fechada: não envia EOI para uma fonte que não reconhecemos.
+}
