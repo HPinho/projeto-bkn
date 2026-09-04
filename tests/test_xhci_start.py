@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do primeiro start xHCI + No-op Command, ainda não ativado no boot."""
+"""Guardrails do primeiro start xHCI + No-op Command DMA real."""
 
 from pathlib import Path
 import re
@@ -64,9 +64,17 @@ class XhciStartTests(unittest.TestCase):
         for forbidden in ("msi", "msix", "xhci_iman_ie", "interrupt_enable"):
             self.assertNotIn(forbidden, code)
 
-    def test_active_start_is_deliberately_not_called_from_post_cutover_yet(self):
+    def test_post_cutover_connects_noop_only_after_dma_tables(self):
         text = POST.read_text(encoding="utf-8")
-        self.assertNotIn("xhci_start_and_prove_noop()", text)
+        body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        self.assertIn("xhci_start_and_prove_noop()", text)
+        self.assertIn("post_cutover_start_xhci_and_prove_noop()", text)
+        self.assertLess(
+            body.index("x86_serial_write_stage_marker('D' as u8)"),
+            body.index("x86_serial_write_stage_marker('N' as u8)"),
+        )
+        self.assertIn("xhci_start_noop_completed()", text)
+        self.assertIn("POST_CUTOVER_XHCI_NOOP_LIVE = true", text)
 
 
 if __name__ == "__main__":
