@@ -10,6 +10,7 @@ import kernel::baken_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
+import kernel::drivers::pci_bus::*;
 
 // Envelope de transição BakenBootInfo v2.
 // Os primeiros campos preservam o ABI legado enquanto input/storage/timing
@@ -69,6 +70,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
             boot_info.memory_descriptor_size as usize
         );
     }
+
+    // Descoberta PCI é somente leitura. Ela registra hardware real, mas não
+    // habilita Bus Master, I/O/Memory Space nem promove GPU para aceleração.
+    pci_scan_all();
 
     // O framebuffer GOP é transportado como endereço físico/passivo no handoff.
     display_init(
