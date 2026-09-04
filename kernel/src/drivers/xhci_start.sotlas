@@ -133,9 +133,13 @@ fn xhci_start_publish_noop(command_physical: u64) -> bool {
     if command_virtual == 0 { return false; }
     let slot = command_virtual as *mut XhciTrb;
     let noop = xhci_trb_noop_command(true);
-    quench {
-        unsafe { *slot = noop; }
-    }
+    unsafe { *slot = noop; }
+
+    // x86 mantém store→store ordering; o read de CR3 usa um asm com clobber
+    // "memory", funcionando como barreira do compilador antes de Bus Master,
+    // Run/Stop e do MMIO Doorbell. Também confirma que seguimos sob CR3 próprio.
+    let active_root = x86_read_cr3_raw();
+    if active_root == 0 { return false; }
     return true;
 }
 
