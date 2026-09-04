@@ -23,6 +23,7 @@ import kernel::memory::transition_map::*;
 import kernel::memory::transition_stack::*;
 import kernel::memory::transition_stack_map::*;
 import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_page_tables::*;
 import kernel::memory::cutover_plan::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
