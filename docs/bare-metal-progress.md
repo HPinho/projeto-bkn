@@ -30,11 +30,11 @@ Critério de status:
 | ACPI pós-CR3 | ✅ | 100% | 100% | `BAKEN:STEP=A` observado |
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
-| DMA real | ⚙️ | 76% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas e buffer DMA do primeiro descriptor implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 68% | 22% | QEMU já validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Legacy handoff possui fallback forçado; rings, port reset, Enable Slot, contexts, Address Device, Transfer TRBs, produtor EP0, consumidor compartilhado, waiter de Transfer Event e GET_DESCRIPTOR(Device) estão implementados. Configuration/HID descriptors, Configure Endpoint e HID ainda pendentes |
+| DMA real | ⚙️ | 77% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas e buffers DMA dos descriptors implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
+| xHCI → USB HID | ⚙️ | 73% | 22% | QEMU validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Rings, port reset, Enable Slot, contexts, Address Device, EP0, Event consumer, GET_DESCRIPTOR(Device) e leitura/parsing de Configuration + HID Boot + Interrupt IN estão implementados. Configure Endpoint, SET_CONFIGURATION e reports HID ainda pendentes |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~76%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e o xHCI já chega a capability validation. O gate imediato é provar `STEP=9/q/w/X`, depois `STEP=D/N`, ativar enumeração USB, storage e PAT/WC final |
+| **Fundação bare-metal geral** | ⚙️ | **~77%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS; a enumeração USB está estruturalmente avançada. O gate runtime imediato continua no controller entre `STEP=8` e `STEP=9`, agora com subcheckpoints adicionais para localizar a falha |
 
 ## Estado xHCI atual
 
@@ -70,7 +70,9 @@ STEP=5  xHCI PCI candidate encontrado              ✅
 STEP=6  BAR/MMIO válido                            ✅
 STEP=7  PCI Memory Space habilitado                ✅
 STEP=8  capability/version válidos                 ✅
-STEP=9  legacy ownership concluído                 ⚙️ correção em validação
+STEP=h  HCSPARAMS1 / MaxSlots / MaxPorts válidos  ⬜ novo diagnóstico
+STEP=j  entrada no Legacy handoff                  ⬜ novo diagnóstico
+STEP=9  legacy ownership concluído                 ⚙️ em investigação
 STEP=q  page size 4 KiB suportado                  ⬜ aguardando gate anterior
 STEP=w  halt/HCRST/CNR concluídos                  ⬜ aguardando gate anterior
 STEP=X  controller pronto                          ⬜ aguardando gate anterior
@@ -78,7 +80,7 @@ STEP=D  DCBAA/CRCR/ERST/ERDP programados           ⬜ aguardando gate anterior
 STEP=N  No-op Command Completion real              ⬜ aguardando gate anterior
 ```
 
-A falha do smoke anterior foi localizada exatamente entre `STEP=8` e `STEP=9`. O handoff agora solicita OS Owned, espera BIOS Owned limpar e, se firmware/emulação não liberar o semáforo, desabilita USB Legacy SMIs e assume ownership após timeout em vez de abortar todo o bring-up.
+O run que validou o fallback anterior ainda parou em `STEP=8`. Como `STEP=8` ocorre antes da validação de `HCSPARAMS1`, foram adicionados os subcheckpoints `h` e `j` para distinguir uma falha em parâmetros estruturais do controller de uma falha real no Legacy Support capability.
 
 Depois de `STEP=N`, a sequência já preparada é:
 
@@ -93,10 +95,12 @@ Supported Protocol
 → consumidor único compartilhado do Event Ring
 → waiter de Transfer Event
 → GET_DESCRIPTOR(Device) de 18 bytes
-→ Configuration Descriptor
-→ HID Descriptor / Endpoint Descriptor
+→ GET_DESCRIPTOR(Configuration) em duas fases
+→ parser Interface/HID/Endpoint
+→ seleção HID Boot keyboard/mouse + Interrupt IN
 → Configure Endpoint
-→ HID keyboard/mouse
+→ SET_CONFIGURATION
+→ HID reports / keyboard / mouse
 ```
 
 ## Regra de progresso
