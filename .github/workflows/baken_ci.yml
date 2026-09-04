@@ -89,3 +89,6 @@ jobs:
           # STEP=D exige arena DMA real, DCBAAP/CRCR/ERST/ERDP programados,
           # readback válido e HCHalted ainda ativo. Bus Master continua off.
           grep -q "BAKEN:STEP=D" build/qemu-serial.log
+          # STEP=N exige Bus Master, Run/Stop, Doorbell 0 e um Command Completion
+          # Event real para o No-op Command no Event Ring xHCI.
+          grep -q "BAKEN:STEP=N" build/qemu-serial.log
