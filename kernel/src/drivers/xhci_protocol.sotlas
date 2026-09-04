@@ -1,0 +1,155 @@
+// Baken OS — Supported Protocol Extended Capabilities do xHCI.
+//
+// Esta fase é estritamente read-only: percorre a lista de Extended Capabilities
+// a partir de HCCPARAMS1.xECP e registra ranges de portas USB 2.x / 3.x.
+
+module kernel::drivers::xhci_protocol;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_start::*;
+
+pub const XHCI_EXT_CAP_SUPPORTED_PROTOCOL: u32 = 2;
+pub const XHCI_PROTOCOL_MAX_RANGES: usize = 16;
+pub const XHCI_PROTOCOL_USB2_MAJOR: u8 = 2;
+pub const XHCI_PROTOCOL_USB3_MAJOR: u8 = 3;
+
+pub struct XhciProtocolRange {
+    pub major: u8;
+    pub minor: u8;
+    pub port_offset: u8;
+    pub port_count: u8;
+    pub slot_type: u8;
+    pub valid: bool;
+}
+
+static mut XHCI_PROTOCOL_RANGES: [XhciProtocolRange; XHCI_PROTOCOL_MAX_RANGES] = [
+    XhciProtocolRange {
+        major: 0,
+        minor: 0,
+        port_offset: 0,
+        port_count: 0,
+        slot_type: 0,
+        valid: false
+    };
+    XHCI_PROTOCOL_MAX_RANGES
+];
+static mut XHCI_PROTOCOL_RANGE_COUNT: u8 = 0;
+
+@system
+fn xhci_protocol_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_protocol_map(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_protocol_page_base(address));
+}
+
+@system
+pub fn xhci_protocol_scan() -> u8 {
+    unsafe {
+        XHCI_PROTOCOL_RANGE_COUNT = 0;
+        let mut clear: usize = 0;
+        while clear < XHCI_PROTOCOL_MAX_RANGES {
+            XHCI_PROTOCOL_RANGES[clear].valid = false;
+            clear += 1;
+        }
+    }
+
+    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return 0; }
+    let mmio = xhci_controller_mmio_base();
+    if mmio == 0 || !xhci_protocol_map(mmio + XHCI_HCCPARAMS1) { return 0; }
+    let hccparams1 = x86_mmio_read32(mmio + XHCI_HCCPARAMS1);
+    let mut offset_dwords = (hccparams1 >> 16) & 0xFFFF;
+    if offset_dwords == 0 { return 0; }
+
+    let mut visited: u32 = 0;
+    while offset_dwords != 0 && visited < XHCI_MAX_EXT_CAPS {
+        let address = mmio + ((offset_dwords as u64) * 4);
+        if address < mmio || !xhci_protocol_map(address) || !xhci_protocol_map(address + 12) {
+            return 0;
+        }
+        let header = x86_mmio_read32(address);
+        let cap_id = header & 0xFF;
+        let next = (header >> 8) & 0xFF;
+
+        if cap_id == XHCI_EXT_CAP_SUPPORTED_PROTOCOL {
+            let major = ((header >> 24) & 0xFF) as u8;
+            let minor = ((header >> 16) & 0xFF) as u8;
+            let ports = x86_mmio_read32(address + 8);
+            let slot = x86_mmio_read32(address + 12);
+            let port_offset = (ports & 0xFF) as u8;
+            let port_count = ((ports >> 8) & 0xFF) as u8;
+            let slot_type = (slot & 0x1F) as u8;
+            if port_offset == 0 || port_count == 0 { return 0; }
+            let last = (port_offset as u16) + (port_count as u16) - 1;
+            if last > (xhci_controller_max_ports() as u16) { return 0; }
+
+            unsafe {
+                let index = XHCI_PROTOCOL_RANGE_COUNT as usize;
+                if index >= XHCI_PROTOCOL_MAX_RANGES { return 0; }
+                XHCI_PROTOCOL_RANGES[index].major = major;
+                XHCI_PROTOCOL_RANGES[index].minor = minor;
+                XHCI_PROTOCOL_RANGES[index].port_offset = port_offset;
+                XHCI_PROTOCOL_RANGES[index].port_count = port_count;
+                XHCI_PROTOCOL_RANGES[index].slot_type = slot_type;
+                XHCI_PROTOCOL_RANGES[index].valid = true;
+                XHCI_PROTOCOL_RANGE_COUNT += 1;
+            }
+        }
+
+        if next == 0 { break; }
+        offset_dwords += next;
+        visited += 1;
+    }
+    unsafe { return XHCI_PROTOCOL_RANGE_COUNT; }
+}
+
+@system
+pub fn xhci_protocol_range_count() -> u8 { unsafe { return XHCI_PROTOCOL_RANGE_COUNT; } }
+
+@system
+pub fn xhci_protocol_range(index: u8) -> *const XhciProtocolRange {
+    if (index as usize) >= XHCI_PROTOCOL_MAX_RANGES { return null as *const XhciProtocolRange; }
+    unsafe {
+        if !XHCI_PROTOCOL_RANGES[index as usize].valid { return null as *const XhciProtocolRange; }
+        return &XHCI_PROTOCOL_RANGES[index as usize];
+    }
+}
+
+@system
+pub fn xhci_protocol_major_for_port(port_id: u8) -> u8 {
+    if port_id == 0 { return 0; }
+    unsafe {
+        let mut index: u8 = 0;
+        while index < XHCI_PROTOCOL_RANGE_COUNT {
+            let range = &XHCI_PROTOCOL_RANGES[index as usize];
+            let first = range.port_offset as u16;
+            let last = first + (range.port_count as u16) - 1;
+            let port = port_id as u16;
+            if range.valid && port >= first && port <= last { return range.major; }
+            index += 1;
+        }
+    }
+    return 0;
+}
+
+@system
+pub fn xhci_protocol_slot_type_for_port(port_id: u8) -> u8 {
+    if port_id == 0 { return 0; }
+    unsafe {
+        let mut index: u8 = 0;
+        while index < XHCI_PROTOCOL_RANGE_COUNT {
+            let range = &XHCI_PROTOCOL_RANGES[index as usize];
+            let first = range.port_offset as u16;
+            let last = first + (range.port_count as u16) - 1;
+            let port = port_id as u16;
+            if range.valid && port >= first && port <= last { return range.slot_type; }
+            index += 1;
+        }
+    }
+    return 0;
+}
