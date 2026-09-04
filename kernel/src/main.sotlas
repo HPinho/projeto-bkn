@@ -7,6 +7,7 @@ module kernel::main;
 import kernel::graphics_engine::*;
 import kernel::desktop_compositor::*;
 import kernel::baken_runtime::*;
+import kernel::baken_native_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
@@ -191,7 +192,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
 
     // Compatibilidade temporária: baken_runtime ainda interpreta somente o
-    // prefixo legado congelado do BootInfo.
+    // prefixo legado congelado do BootInfo. A rota baken_native_runtime permanece
+    // compilada, mas não é chamada antes do cutover real.
     baken_runtime_run(boot_info as *const void, boot_info.screen_width, boot_info.screen_height);
     loop {}
 }
