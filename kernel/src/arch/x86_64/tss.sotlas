@@ -1,0 +1,78 @@
+// Baken OS - x86_64 Task State Segment foundation.
+//
+// A TSS em long mode fornece RSP0 e ISTs para transicoes de privilegio e
+// excecoes criticas. Este modulo prepara a estrutura; LTR sera conectado ao
+// backend privilegiado Sotlas em etapa separada.
+
+module kernel::arch::x86_64::tss;
+
+pub struct Tss64 {
+    pub reserved0: u32;
+    pub rsp0: u64;
+    pub rsp1: u64;
+    pub rsp2: u64;
+    pub reserved1: u64;
+    pub ist1: u64;
+    pub ist2: u64;
+    pub ist3: u64;
+    pub ist4: u64;
+    pub ist5: u64;
+    pub ist6: u64;
+    pub ist7: u64;
+    pub reserved2: u64;
+    pub reserved3: u16;
+    pub io_map_base: u16;
+}
+
+static mut TSS: Tss64 = Tss64 {
+    reserved0: 0,
+    rsp0: 0,
+    rsp1: 0,
+    rsp2: 0,
+    reserved1: 0,
+    ist1: 0,
+    ist2: 0,
+    ist3: 0,
+    ist4: 0,
+    ist5: 0,
+    ist6: 0,
+    ist7: 0,
+    reserved2: 0,
+    reserved3: 0,
+    io_map_base: 0,
+};
+
+static mut TSS_PREPARED: bool = false;
+
+@system
+pub fn tss_prepare(kernel_rsp0: u64, ist_double_fault: u64, ist_nmi: u64, ist_machine_check: u64) -> void {
+    unsafe {
+        TSS.rsp0 = kernel_rsp0;
+        TSS.rsp1 = 0;
+        TSS.rsp2 = 0;
+        TSS.ist1 = ist_double_fault;
+        TSS.ist2 = ist_nmi;
+        TSS.ist3 = ist_machine_check;
+        TSS.ist4 = 0;
+        TSS.ist5 = 0;
+        TSS.ist6 = 0;
+        TSS.ist7 = 0;
+        TSS.io_map_base = 104;
+        TSS_PREPARED = true;
+    }
+}
+
+@system
+pub fn tss_base() -> u64 {
+    unsafe { return (&TSS as *const Tss64) as u64; }
+}
+
+@system
+pub fn tss_limit() -> u32 {
+    return 103;
+}
+
+@system
+pub fn tss_is_prepared() -> bool {
+    unsafe { return TSS_PREPARED; }
+}
