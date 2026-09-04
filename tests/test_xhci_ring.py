@@ -30,6 +30,7 @@ class XhciRingTests(unittest.TestCase):
         for token in (
             "mmio_read", "mmio_write", "doorbell", "pci_write",
             "pci_enable", "bus_master", "__out", "dma_alloc(",
+            "virtual_base[", "*(*ring).virtual_base",
         ):
             self.assertNotIn(token, text, token)
 
@@ -37,6 +38,20 @@ class XhciRingTests(unittest.TestCase):
         text = RING.read_text(encoding="utf-8")
         self.assertIn("cycle_state: true", text)
         self.assertIn("enqueue_index: 0", text)
+
+    def test_last_trb_is_reserved_for_link(self):
+        text = RING.read_text(encoding="utf-8")
+        self.assertIn("XHCI_RING_RESERVED_LINK_TRBS: u32 = 1", text)
+        self.assertIn("return (*ring).trb_count - XHCI_RING_RESERVED_LINK_TRBS", text)
+        self.assertIn("let usable = (*ring).trb_count - XHCI_RING_RESERVED_LINK_TRBS", text)
+
+    def test_cursor_wrap_toggles_producer_cycle_state(self):
+        text = RING.read_text(encoding="utf-8")
+        self.assertIn("pub fn xhci_ring_advance_cursor", text)
+        self.assertIn("(*ring).enqueue_index += 1", text)
+        self.assertIn("if (*ring).enqueue_index >= usable", text)
+        self.assertIn("(*ring).enqueue_index = 0", text)
+        self.assertIn("(*ring).cycle_state = !(*ring).cycle_state", text)
 
 
 if __name__ == "__main__":
