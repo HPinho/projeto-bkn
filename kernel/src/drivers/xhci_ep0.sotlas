@@ -1,0 +1,170 @@
+// Baken OS — produtor stateful do EP0 Transfer Ring.
+//
+// Só é preparado após Address Device. Publica um Control Transfer TD completo
+// (Setup + Data opcional + Status) antes de tocar o doorbell do endpoint 0.
+// Mantém enqueue_index/Producer Cycle State e republica o Link TRB ao cruzar
+// o fim do ring. Não consome Event Ring: existe um único consumidor global de
+// eventos, que será compartilhado/refatorado antes de ativar GET_DESCRIPTOR.
+
+module kernel::drivers::xhci_ep0;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_address::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
+
+pub const XHCI_EP0_ENDPOINT_ID: u32 = 1;
+pub const XHCI_EP0_DOORBELL_TARGET_MASK: u32 = 0xFF;
+
+static mut XHCI_EP0_READY: bool = false;
+static mut XHCI_EP0_ENQUEUE_INDEX: u32 = 0;
+static mut XHCI_EP0_PRODUCER_CYCLE: bool = true;
+static mut XHCI_EP0_LAST_STATUS_TRB_PHYSICAL: u64 = 0;
+
+@system
+fn xhci_ep0_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_ep0_map_address(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_ep0_page_base(address));
+}
+
+@system
+fn xhci_ep0_slot_virtual(index: u32) -> *mut XhciTrb {
+    if index >= XHCI_EP0_RING_TRBS { return null as *mut XhciTrb; }
+    let base = direct_map_virtual_address(xhci_context_ep0_ring_physical());
+    if base == 0 { return null as *mut XhciTrb; }
+    let offset = (index as u64) * XHCI_TRB_SIZE;
+    return (base + offset) as *mut XhciTrb;
+}
+
+@system
+fn xhci_ep0_slot_physical(index: u32) -> u64 {
+    if index >= XHCI_EP0_RING_TRBS { return 0; }
+    let base = xhci_context_ep0_ring_physical();
+    if base == 0 { return 0; }
+    let offset = (index as u64) * XHCI_TRB_SIZE;
+    let address = base + offset;
+    if address < base { return 0; }
+    return address;
+}
+
+@system
+fn xhci_ep0_publish_link(cycle: bool) -> bool {
+    let link_index = XHCI_EP0_RING_TRBS - 1;
+    let slot = xhci_ep0_slot_virtual(link_index);
+    if slot == (null as *mut XhciTrb) { return false; }
+    let link = xhci_trb_link(xhci_context_ep0_ring_physical(), true, cycle);
+    unsafe { *slot = link; }
+    return x86_read_cr3_raw() != 0;
+}
+
+@system
+fn xhci_ep0_write_one(trb: XhciTrb) -> u64 {
+    unsafe {
+        let usable = XHCI_EP0_RING_TRBS - XHCI_RING_RESERVED_LINK_TRBS;
+        if usable == 0 || XHCI_EP0_ENQUEUE_INDEX >= usable { return 0; }
+        let index = XHCI_EP0_ENQUEUE_INDEX;
+        let cycle = XHCI_EP0_PRODUCER_CYCLE;
+
+        // Se este é o último TRB utilizável, o controller seguirá o Link TRB.
+        if index == (usable - 1) && !xhci_ep0_publish_link(cycle) { return 0; }
+
+        let slot = xhci_ep0_slot_virtual(index);
+        let physical = xhci_ep0_slot_physical(index);
+        if slot == (null as *mut XhciTrb) || physical == 0 { return 0; }
+
+        let mut published = trb;
+        published.control = (published.control & ~XHCI_TRB_CYCLE_BIT) |
+            xhci_trb_cycle_bits(cycle);
+        *slot = published;
+
+        XHCI_EP0_ENQUEUE_INDEX += 1;
+        if XHCI_EP0_ENQUEUE_INDEX >= usable {
+            XHCI_EP0_ENQUEUE_INDEX = 0;
+            XHCI_EP0_PRODUCER_CYCLE = !XHCI_EP0_PRODUCER_CYCLE;
+        }
+        return physical;
+    }
+}
+
+@system
+fn xhci_ep0_ring_doorbell() -> bool {
+    let mmio = xhci_controller_mmio_base();
+    let slot_id = xhci_context_slot_id();
+    if mmio == 0 || slot_id == 0 { return false; }
+
+    let dboff = (x86_mmio_read32(mmio + XHCI_DBOFF) as u64) & 0xFFFFFFFC;
+    let doorbell_base = mmio + dboff;
+    if doorbell_base < mmio { return false; }
+    let doorbell = doorbell_base + ((slot_id as u64) * 4);
+    if doorbell < doorbell_base || !xhci_ep0_map_address(doorbell) { return false; }
+
+    x86_mmio_write32(doorbell, XHCI_EP0_ENDPOINT_ID & XHCI_EP0_DOORBELL_TARGET_MASK);
+    return true;
+}
+
+@system
+pub fn xhci_ep0_prepare_after_address() -> bool {
+    unsafe {
+        XHCI_EP0_READY = false;
+        XHCI_EP0_ENQUEUE_INDEX = 0;
+        XHCI_EP0_PRODUCER_CYCLE = true;
+        XHCI_EP0_LAST_STATUS_TRB_PHYSICAL = 0;
+    }
+    if !xhci_address_is_ready() || !xhci_context_is_ready() { return false; }
+    if xhci_address_slot_id() != xhci_context_slot_id() { return false; }
+    if xhci_context_ep0_ring_physical() == 0 { return false; }
+    unsafe { XHCI_EP0_READY = true; }
+    return true;
+}
+
+// Publica todo o TD antes do doorbell. `has_data=false` usa Setup+Status;
+// `has_data=true` usa Setup+Data+Status. O retorno é o endereço físico do
+// Status Stage TRB, usado posteriormente para correlacionar o Transfer Event.
+@system
+pub fn xhci_ep0_submit_control_td(setup: XhciTrb,
+                                  data: XhciTrb,
+                                  status: XhciTrb,
+                                  has_data: bool) -> u64 {
+    if !xhci_ep0_is_ready() { return 0; }
+
+    let setup_physical = xhci_ep0_write_one(setup);
+    if setup_physical == 0 { return 0; }
+
+    if has_data {
+        let data_physical = xhci_ep0_write_one(data);
+        if data_physical == 0 { return 0; }
+    }
+
+    let status_physical = xhci_ep0_write_one(status);
+    if status_physical == 0 { return 0; }
+
+    // Publication barrier depois de TODOS os TRBs e antes do doorbell.
+    if x86_read_cr3_raw() == 0 { return 0; }
+    if !xhci_ep0_ring_doorbell() { return 0; }
+
+    unsafe { XHCI_EP0_LAST_STATUS_TRB_PHYSICAL = status_physical; }
+    return status_physical;
+}
+
+@system
+pub fn xhci_ep0_is_ready() -> bool { unsafe { return XHCI_EP0_READY; } }
+
+@system
+pub fn xhci_ep0_enqueue_index() -> u32 { unsafe { return XHCI_EP0_ENQUEUE_INDEX; } }
+
+@system
+pub fn xhci_ep0_producer_cycle() -> bool { unsafe { return XHCI_EP0_PRODUCER_CYCLE; } }
+
+@system
+pub fn xhci_ep0_last_status_trb_physical() -> u64 {
+    unsafe { return XHCI_EP0_LAST_STATUS_TRB_PHYSICAL; }
+}
