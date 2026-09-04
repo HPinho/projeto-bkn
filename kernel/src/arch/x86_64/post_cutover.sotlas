@@ -22,6 +22,7 @@ import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::irq::*;
 import kernel::interrupts::lapic_timer::*;
+import kernel::interrupts::interrupt_enable::*;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -215,7 +216,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_prepare_irqs() { loop {} }
     if !post_cutover_prepare_timer() { loop {} }
 
-    // Timer e rotas existem, mas continuam mascarados. Próxima fase decide
-    // quais fontes podem ser abertas e só então executa STI.
+    // interrupt_enable_timer_only() existe e compila, mas permanece deliberadamente
+    // desconectada até esta base passar suíte, cross-build e smoke QEMU.
     loop {}
 }
