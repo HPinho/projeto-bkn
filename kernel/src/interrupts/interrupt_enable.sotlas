@@ -1,0 +1,47 @@
+// Baken OS — porta fail-closed para habilitação de interrupções externas.
+//
+// Esta função existe para centralizar a transição de IRQs mascarados para live.
+// Enquanto não for chamada pelo post-cutover, STI permanece totalmente inativo.
+
+module kernel::interrupts::interrupt_enable;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::interrupts::irq::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::ioapic::*;
+import kernel::interrupts::lapic_timer::*;
+
+static mut EXTERNAL_INTERRUPTS_ENABLED: bool = false;
+
+@system
+pub fn interrupt_enable_timer_only() -> bool {
+    unsafe {
+        if EXTERNAL_INTERRUPTS_ENABLED { return false; }
+    }
+    if !lapic_is_ready() || !ioapic_is_ready() { return false; }
+    if !irq_idt_ready() || !irq_routes_ready() { return false; }
+    if !lapic_timer_is_ready() { return false; }
+
+    // Mantemos teclado/mouse mascarados no IOAPIC. Só a fonte local do timer
+    // é aberta antes do STI, garantindo que a primeira IRQ live seja conhecida.
+    x86_cli_raw();
+    if !lapic_timer_unmask_periodic() {
+        lapic_timer_mask();
+        return false;
+    }
+    unsafe { EXTERNAL_INTERRUPTS_ENABLED = true; }
+    x86_sti_raw();
+    return true;
+}
+
+@system
+pub fn interrupt_disable_all() -> void {
+    x86_cli_raw();
+    lapic_timer_mask();
+    unsafe { EXTERNAL_INTERRUPTS_ENABLED = false; }
+}
+
+@system
+pub fn external_interrupts_enabled() -> bool {
+    unsafe { return EXTERNAL_INTERRUPTS_ENABLED; }
+}
