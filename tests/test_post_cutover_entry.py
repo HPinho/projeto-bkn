@@ -23,6 +23,7 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertNotIn("sotlas_x86_post_cutover_entry(", main_body)
         self.assertNotIn("post_cutover_activate_cpu(", main_body)
         self.assertNotIn("post_cutover_activate_pmm(", main_body)
+        self.assertNotIn("post_cutover_activate_vmm(", main_body)
 
     def test_handoff_pointers_are_translated_through_direct_map(self):
         text = POST.read_text(encoding="utf-8")
@@ -62,10 +63,20 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertIn("pmm_allocator_activate_after_exit_boot_services()", body)
         self.assertIn("pmm_allocator_is_active()", body)
 
+    def test_vmm_activates_only_after_pmm_and_on_current_root(self):
+        text = POST.read_text(encoding="utf-8")
+        self.assertIn("import kernel::memory::vmm::*;", text)
+        body = text.split("pub fn post_cutover_activate_vmm", 1)[1].split("pub fn post_cutover_vmm_active", 1)[0]
+        self.assertIn("if !post_cutover_pmm_active()", body)
+        self.assertIn("vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE)", body)
+        self.assertIn("vmm_is_active()", body)
+
         entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
         cpu_pos = entry.index("post_cutover_activate_cpu(context)")
         pmm_pos = entry.index("post_cutover_activate_pmm(context)")
+        vmm_pos = entry.index("post_cutover_activate_vmm(context)")
         self.assertLess(cpu_pos, pmm_pos)
+        self.assertLess(pmm_pos, vmm_pos)
 
     def test_interrupts_remain_disabled_in_this_phase(self):
         code = code_without_comments(POST.read_text(encoding="utf-8"))
