@@ -1,0 +1,222 @@
+// Baken OS — preparação do Endpoint Context HID Interrupt IN.
+//
+// Após o parser de Configuration Descriptor selecionar uma interface HID Boot,
+// este módulo aloca uma Transfer Ring dedicada e escreve o novo Endpoint Context
+// no Input Context já associado ao slot. Não envia Configure Endpoint e não toca
+// doorbell; apenas prepara memória DMA coerente para o próximo comando xHCI.
+
+module kernel::drivers::xhci_hid_context;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::dma::*;
+import kernel::memory::direct_map::*;
+import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_port::*;
+import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
+
+pub const XHCI_HID_RING_SIZE: u64 = 4096;
+pub const XHCI_HID_RING_TRBS: u32 = 256;
+pub const XHCI_ENDPOINT_CONTEXT_INTERVAL_SHIFT: u32 = 16;
+pub const XHCI_ENDPOINT_CONTEXT_CERR_SHIFT: u32 = 1;
+pub const XHCI_ENDPOINT_CONTEXT_CERR_3: u32 = 3;
+pub const XHCI_ENDPOINT_CONTEXT_TYPE_SHIFT: u32 = 3;
+pub const XHCI_ENDPOINT_TYPE_INTERRUPT_IN: u32 = 7;
+pub const XHCI_ENDPOINT_CONTEXT_MAX_PACKET_SHIFT: u32 = 16;
+pub const XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH: u32 = 8;
+pub const XHCI_HID_MAX_CONTEXT_INDEX: u8 = 31;
+
+static mut XHCI_HID_CONTEXT_READY: bool = false;
+static mut XHCI_HID_CONTEXT_DCI: u8 = 0;
+static mut XHCI_HID_CONTEXT_RING: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+static mut XHCI_HID_CONTEXT_RING_PHYSICAL: u64 = 0;
+static mut XHCI_HID_CONTEXT_INTERVAL: u8 = 0;
+
+@system
+fn xhci_hid_context_write32(base: *mut u8, offset: u64, value: u32) -> bool {
+    if base == (null as *mut u8) { return false; }
+    unsafe {
+        *(((base as usize) + (offset as usize)) as *mut u32) = value;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_context_write64(base: *mut u8, offset: u64, value: u64) -> bool {
+    if base == (null as *mut u8) { return false; }
+    unsafe {
+        *(((base as usize) + (offset as usize)) as *mut u64) = value;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_context_zero(base: *mut u8, size: u64) -> bool {
+    if base == (null as *mut u8) || size == 0 { return false; }
+    unsafe {
+        let mut i: u64 = 0;
+        while i < size {
+            *(((base as usize) + (i as usize)) as *mut u8) = 0;
+            i += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_context_endpoint_number(address: u8) -> u8 {
+    return address & 0x0F;
+}
+
+@system
+fn xhci_hid_context_dci(address: u8) -> u8 {
+    let endpoint = xhci_hid_context_endpoint_number(address);
+    if endpoint == 0 || (address & USB_ENDPOINT_DIRECTION_IN) == 0 { return 0; }
+    let dci = ((endpoint as u16) * 2) + 1;
+    if dci > (XHCI_HID_MAX_CONTEXT_INDEX as u16) { return 0; }
+    return dci as u8;
+}
+
+@system
+fn xhci_hid_context_ceil_log2(value: u32) -> u8 {
+    if value <= 1 { return 0; }
+    let mut power: u32 = 1;
+    let mut exponent: u8 = 0;
+    while power < value && exponent < 15 {
+        power <<= 1;
+        exponent += 1;
+    }
+    return exponent;
+}
+
+// xHCI expressa Interval em unidades exponenciais de 125 us. Para LS/FS
+// interrupt endpoints, bInterval é dado em frames de 1 ms; convertemos para
+// microframes (x8) e arredondamos para cima. HS/SS já usa expoente USB.
+@system
+fn xhci_hid_context_interval(speed_id: u8, usb_interval: u8) -> u8 {
+    if usb_interval == 0 { return 0; }
+    if speed_id == 1 || speed_id == 2 {
+        let microframes = (usb_interval as u32) * 8;
+        return xhci_hid_context_ceil_log2(microframes);
+    }
+    if speed_id >= 3 {
+        let encoded = usb_interval - 1;
+        if encoded > 15 { return 15; }
+        return encoded;
+    }
+    return 0;
+}
+
+@system
+pub fn xhci_hid_context_prepare() -> bool {
+    unsafe {
+        XHCI_HID_CONTEXT_READY = false;
+        XHCI_HID_CONTEXT_DCI = 0;
+        XHCI_HID_CONTEXT_RING = dma_invalid_buffer();
+        XHCI_HID_CONTEXT_RING_PHYSICAL = 0;
+        XHCI_HID_CONTEXT_INTERVAL = 0;
+    }
+    if !xhci_context_is_ready() || !xhci_configuration_is_ready() || !xhci_slot_is_ready() {
+        return false;
+    }
+
+    let endpoint_address = xhci_hid_endpoint_address();
+    let max_packet = xhci_hid_endpoint_max_packet();
+    let usb_interval = xhci_hid_endpoint_interval();
+    let dci = xhci_hid_context_dci(endpoint_address);
+    if dci <= 1 || max_packet == 0 || usb_interval == 0 { return false; }
+
+    let port_id = xhci_slot_port_id();
+    let snapshot = xhci_port_snapshot(port_id);
+    if snapshot == (null as *const XhciPortSnapshot) { return false; }
+    let speed_id = unsafe { (*snapshot).speed_id };
+    let interval = xhci_hid_context_interval(speed_id, usb_interval);
+    if interval > 15 { return false; }
+
+    let context_size = xhci_context_size();
+    if context_size != 32 && context_size != 64 { return false; }
+    let input_physical = xhci_context_input_physical();
+    let input_virtual = direct_map_virtual_address(input_physical);
+    if input_physical == 0 || input_virtual == 0 { return false; }
+    let input = input_virtual as *mut u8;
+
+    let mut ring_buffer = dma_alloc(XHCI_HID_RING_SIZE, XHCI_HID_RING_SIZE);
+    if !dma_buffer_cpu_owned(&ring_buffer) { return false; }
+    if !xhci_hid_context_zero(ring_buffer.virtual_address, ring_buffer.size) { return false; }
+    let ring = xhci_ring_bind(ring_buffer, XHCI_HID_RING_TRBS);
+    if !xhci_ring_is_ready(&ring) { return false; }
+
+    let link_index = XHCI_HID_RING_TRBS - 1;
+    unsafe {
+        let link = ((ring.virtual_base as usize) + ((link_index as usize) * 16)) as *mut XhciTrb;
+        *link = xhci_trb_link(ring.physical_base, true, true);
+    }
+
+    // Add Context flag bit n seleciona o Device Context Index n.
+    let add_flags_offset: u64 = 4;
+    let add_flag = 1u32 << (dci as u32);
+    unsafe {
+        let current = *(((input as usize) + (add_flags_offset as usize)) as *const u32);
+        if !xhci_hid_context_write32(input, add_flags_offset, current | add_flag) { return false; }
+    }
+
+    // Slot Context precisa anunciar o maior Context Entry válido.
+    let slot_offset = context_size as u64;
+    unsafe {
+        let slot_dw0_ptr = ((input as usize) + (slot_offset as usize)) as *const u32;
+        let slot_dw0 = *slot_dw0_ptr;
+        let cleared = slot_dw0 & ~(0x1Fu32 << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
+        if !xhci_hid_context_write32(
+            input,
+            slot_offset,
+            cleared | ((dci as u32) << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT)
+        ) { return false; }
+    }
+
+    // Input Context layout: Input Control é entrada 0; contexto DCI n começa em
+    // (n + 1) * ContextSize. DCI=1 é EP0, já preparado na fase Address Device.
+    let endpoint_offset = ((dci as u64) + 1) * (context_size as u64);
+    let ep_dw0 = (interval as u32) << XHCI_ENDPOINT_CONTEXT_INTERVAL_SHIFT;
+    let ep_dw1 = (XHCI_ENDPOINT_CONTEXT_CERR_3 << XHCI_ENDPOINT_CONTEXT_CERR_SHIFT) |
+        (XHCI_ENDPOINT_TYPE_INTERRUPT_IN << XHCI_ENDPOINT_CONTEXT_TYPE_SHIFT) |
+        ((max_packet as u32) << XHCI_ENDPOINT_CONTEXT_MAX_PACKET_SHIFT);
+    if !xhci_hid_context_write32(input, endpoint_offset, ep_dw0) ||
+       !xhci_hid_context_write32(input, endpoint_offset + 4, ep_dw1) ||
+       !xhci_hid_context_write64(input, endpoint_offset + 8,
+           ring.physical_base | XHCI_TR_DEQUEUE_DCS) ||
+       !xhci_hid_context_write32(input, endpoint_offset + 16,
+           XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH) { return false; }
+
+    if x86_read_cr3_raw() == 0 { return false; }
+    if !dma_share_with_device(&mut ring_buffer) { return false; }
+
+    unsafe {
+        XHCI_HID_CONTEXT_DCI = dci;
+        XHCI_HID_CONTEXT_RING = ring_buffer;
+        XHCI_HID_CONTEXT_RING_PHYSICAL = ring.physical_base;
+        XHCI_HID_CONTEXT_INTERVAL = interval;
+        XHCI_HID_CONTEXT_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_hid_context_is_ready() -> bool { unsafe { return XHCI_HID_CONTEXT_READY; } }
+@system
+pub fn xhci_hid_context_dci() -> u8 { unsafe { return XHCI_HID_CONTEXT_DCI; } }
+@system
+pub fn xhci_hid_context_ring_physical() -> u64 {
+    unsafe { return XHCI_HID_CONTEXT_RING_PHYSICAL; }
+}
+@system
+pub fn xhci_hid_context_interval() -> u8 { unsafe { return XHCI_HID_CONTEXT_INTERVAL; } }
