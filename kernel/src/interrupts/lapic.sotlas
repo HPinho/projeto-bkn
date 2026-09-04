@@ -1,0 +1,110 @@
+// Baken OS — Local APIC xAPIC pós-cutover.
+//
+// Só opera depois que a página MMIO indicada pela MADT foi mapeada UC. O modo
+// x2APIC é recusado nesta fase; nenhum IRQ é habilitado aqui.
+
+module kernel::interrupts::lapic;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+
+pub const IA32_APIC_BASE_MSR: u32 = 0x1B;
+pub const IA32_APIC_BASE_ENABLE: u64 = 1 << 11;
+pub const IA32_APIC_BASE_X2APIC: u64 = 1 << 10;
+pub const IA32_APIC_BASE_ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
+
+pub const LAPIC_REG_VERSION: u64 = 0x030;
+pub const LAPIC_REG_EOI: u64 = 0x0B0;
+pub const LAPIC_REG_SVR: u64 = 0x0F0;
+pub const LAPIC_REG_LVT_TIMER: u64 = 0x320;
+pub const LAPIC_REG_LVT_THERMAL: u64 = 0x330;
+pub const LAPIC_REG_LVT_PERF: u64 = 0x340;
+pub const LAPIC_REG_LVT_LINT0: u64 = 0x350;
+pub const LAPIC_REG_LVT_LINT1: u64 = 0x360;
+pub const LAPIC_REG_LVT_ERROR: u64 = 0x370;
+
+pub const LAPIC_LVT_MASKED: u32 = 1 << 16;
+pub const LAPIC_SVR_ENABLE: u32 = 1 << 8;
+pub const LAPIC_SPURIOUS_VECTOR: u32 = 0xFF;
+
+static mut LAPIC_READY: bool = false;
+static mut LAPIC_BASE: u64 = 0;
+static mut LAPIC_VERSION: u32 = 0;
+
+@system
+fn lapic_read(offset: u64) -> u32 {
+    unsafe {
+        if !LAPIC_READY && offset != LAPIC_REG_VERSION { return 0; }
+        if LAPIC_BASE == 0 { return 0; }
+        return x86_mmio_read32(LAPIC_BASE + offset);
+    }
+}
+
+@system
+fn lapic_write(offset: u64, value: u32) -> void {
+    unsafe {
+        if LAPIC_BASE == 0 { return; }
+        x86_mmio_write32(LAPIC_BASE + offset, value);
+    }
+}
+
+@system
+pub fn lapic_init_masked(madt_base: u64) -> bool {
+    unsafe {
+        LAPIC_READY = false;
+        LAPIC_BASE = 0;
+        LAPIC_VERSION = 0;
+    }
+    if madt_base == 0 || (madt_base & 0xFFF) != 0 { return false; }
+
+    let mut apic_base = x86_read_msr(IA32_APIC_BASE_MSR);
+    if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }
+
+    let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
+    if msr_base != 0 && msr_base != madt_base { return false; }
+    if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
+        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) |
+            madt_base | IA32_APIC_BASE_ENABLE;
+        x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
+    }
+
+    if !active_page_tables_map_mmio_identity_4k(madt_base) { return false; }
+    unsafe { LAPIC_BASE = madt_base; }
+
+    let version = x86_mmio_read32(madt_base + LAPIC_REG_VERSION);
+    if (version & 0xFF) == 0 { return false; }
+
+    // Mantém todas as fontes locais mascaradas até handlers/rotas existirem.
+    lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
+
+    // Software-enable do LAPIC com vetor espúrio reservado, ainda sem STI.
+    lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
+
+    unsafe {
+        LAPIC_VERSION = version;
+        LAPIC_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn lapic_is_ready() -> bool { unsafe { return LAPIC_READY; } }
+
+@system
+pub fn lapic_base() -> u64 { unsafe { return LAPIC_BASE; } }
+
+@system
+pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
+
+@system
+pub fn lapic_eoi() -> void {
+    unsafe {
+        if !LAPIC_READY { return; }
+    }
+    lapic_write(LAPIC_REG_EOI, 0);
+}
