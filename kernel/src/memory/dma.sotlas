@@ -16,6 +16,7 @@ pub const DMA_MAX_ALIGNMENT: u64 = 2097152;
 pub const DMA_OWNER_CPU: u32 = 0;
 pub const DMA_OWNER_DEVICE: u32 = 1;
 pub const DMA_OWNER_COMPLETED: u32 = 2;
+pub const DMA_OWNER_SHARED: u32 = 3;
 
 pub struct DmaBuffer {
     pub virtual_address: *mut u8;
@@ -56,8 +57,11 @@ pub fn dma_buffer_valid(buffer: *const DmaBuffer) -> bool {
         }
         if !dma_alignment_valid((*buffer).alignment) { return false; }
         if (*buffer).owner != DMA_OWNER_CPU && (*buffer).owner != DMA_OWNER_DEVICE &&
-            (*buffer).owner != DMA_OWNER_COMPLETED { return false; }
+            (*buffer).owner != DMA_OWNER_COMPLETED && (*buffer).owner != DMA_OWNER_SHARED {
+            return false;
+        }
         if (*buffer).owner == DMA_OWNER_DEVICE && (*buffer).fence == 0 { return false; }
+        if (*buffer).owner == DMA_OWNER_SHARED && (*buffer).fence != 0 { return false; }
         if ((*buffer).physical_address & ((*buffer).alignment - 1)) != 0 { return false; }
         if ((*buffer).size % BAKEN_PAGE_SIZE) != 0 { return false; }
         return direct_map_virtual_address((*buffer).physical_address) ==
@@ -77,10 +81,27 @@ pub fn dma_buffer_device_owned(buffer: *const DmaBuffer) -> bool {
     unsafe { return (*buffer).owner == DMA_OWNER_DEVICE && (*buffer).fence != 0; }
 }
 
+// Rings, descriptor tables and submission/completion queues permanecem
+// acessíveis à CPU enquanto o dispositivo também faz DMA. Esse estado é
+// diferente de uma transferência exclusiva protegida por fence.
+@system
+pub fn dma_buffer_shared(buffer: *const DmaBuffer) -> bool {
+    if !dma_buffer_valid(buffer) { return false; }
+    unsafe { return (*buffer).owner == DMA_OWNER_SHARED && (*buffer).fence == 0; }
+}
+
+@system
+pub fn dma_buffer_cpu_accessible(buffer: *const DmaBuffer) -> bool {
+    return dma_buffer_cpu_owned(buffer) || dma_buffer_shared(buffer);
+}
+
+@system
+pub fn dma_buffer_device_accessible(buffer: *const DmaBuffer) -> bool {
+    return dma_buffer_device_owned(buffer) || dma_buffer_shared(buffer);
+}
+
 @system
 pub fn dma_allocator_available() -> bool {
-    // DMA só existe depois do cutover: ownership físico no PMM e direct-map
-    // ativo no VMM. Nenhuma ponte UEFI participa deste caminho.
     return pmm_allocator_is_active() && vmm_is_active() &&
         vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE;
 }
@@ -125,8 +146,6 @@ pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
     }
 }
 
-// A conclusão deve trazer o mesmo fence submetido. Antes dela a memória não
-// pode ser reutilizada nem alterada pela CPU como buffer de transporte.
 @system
 pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
     if buffer == (null as *mut DmaBuffer) || fence == 0 { return false; }
@@ -138,8 +157,28 @@ pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
     }
 }
 
-// O PMM bootstrap só aceita LIFO. A API invalida o descritor quando a liberação
-// é bem-sucedida, e recusa todo buffer ainda pertencente ao dispositivo.
+@system
+pub fn dma_share_with_device(buffer: *mut DmaBuffer) -> bool {
+    if buffer == (null as *mut DmaBuffer) { return false; }
+    if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
+    unsafe {
+        (*buffer).owner = DMA_OWNER_SHARED;
+        (*buffer).fence = 0;
+    }
+    return dma_buffer_shared(buffer as *const DmaBuffer);
+}
+
+@system
+pub fn dma_unshare_from_device(buffer: *mut DmaBuffer) -> bool {
+    if buffer == (null as *mut DmaBuffer) { return false; }
+    if !dma_buffer_shared(buffer as *const DmaBuffer) { return false; }
+    unsafe {
+        (*buffer).owner = DMA_OWNER_CPU;
+        (*buffer).fence = 0;
+    }
+    return dma_buffer_cpu_owned(buffer as *const DmaBuffer);
+}
+
 @system
 pub fn dma_release(buffer: *mut DmaBuffer) -> bool {
     if buffer == (null as *mut DmaBuffer) { return false; }
