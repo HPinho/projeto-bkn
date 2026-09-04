@@ -25,16 +25,24 @@ class CutoverPlanTests(unittest.TestCase):
         ):
             self.assertIn(f"{field}: false", body)
 
-    def test_ready_requires_every_precondition(self):
+    def test_core_cutover_requires_all_runtime_preconditions_except_storage(self):
         text = PLAN.read_text(encoding="utf-8")
-        body = text.split("pub fn cutover_plan_ready", 1)[1]
+        body = text.split("pub fn cutover_plan_ready", 1)[1].split("pub fn cutover_native_foundation_ready", 1)[0]
         self.assertIn("if plan.uefi_bridge_active { return false; }", body)
         for field in (
             "handoff_valid", "final_memory_map_ready", "page_tables_ready",
             "transition_image_ready", "transition_stack_ready", "native_timer_ready",
-            "native_input_ready", "native_storage_ready",
+            "native_input_ready",
         ):
             self.assertIn(f"if !plan.{field} {{ return false; }}", body)
+        self.assertNotIn("if !plan.native_storage_ready", body)
+        self.assertIn("return true;", body)
+
+    def test_full_native_foundation_adds_storage_requirement(self):
+        text = PLAN.read_text(encoding="utf-8")
+        body = text.split("pub fn cutover_native_foundation_ready", 1)[1]
+        self.assertIn("if !cutover_plan_ready(plan) { return false; }", body)
+        self.assertIn("if !plan.native_storage_ready { return false; }", body)
         self.assertIn("return true;", body)
 
     def test_plan_has_no_privileged_or_firmware_side_effects(self):
