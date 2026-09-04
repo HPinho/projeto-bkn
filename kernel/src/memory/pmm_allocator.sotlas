@@ -1,0 +1,126 @@
+// Baken OS — bootstrap allocator físico pós-ExitBootServices.
+//
+// Este módulo NÃO deve ser ativado durante a fase híbrida UEFI. Ele usa apenas
+// a maior região EfiConventionalMemory já inventariada pelo PMM e fornece um
+// allocator monotônico de páginas para o primeiro estágio pós-cutover.
+//
+// É propositalmente simples: não há free-list/bitmap ainda. O objetivo é dar ao
+// VMM/DMA uma fonte física inicial segura depois que o firmware deixou de possuir
+// Boot Services. O allocator definitivo poderá substituir este bootstrap sem
+// mudar o contrato externo.
+
+module kernel::memory::pmm_allocator;
+
+import kernel::memory::pmm::*;
+
+pub const PMM_ALLOCATOR_STATE_LOCKED: u32 = 0;
+pub const PMM_ALLOCATOR_STATE_ACTIVE: u32 = 1;
+pub const PMM_ALLOCATOR_STATE_EXHAUSTED: u32 = 2;
+
+pub struct PmmAllocatorState {
+    pub state: u32;
+    pub region_base: u64;
+    pub region_end: u64;
+    pub next_page: u64;
+    pub allocated_pages: u64;
+}
+
+static mut PMM_ALLOCATOR: PmmAllocatorState = PmmAllocatorState {
+    state: PMM_ALLOCATOR_STATE_LOCKED,
+    region_base: 0,
+    region_end: 0,
+    next_page: 0,
+    allocated_pages: 0
+};
+
+@system
+pub fn pmm_allocator_is_active() -> bool {
+    unsafe {
+        return PMM_ALLOCATOR.state == PMM_ALLOCATOR_STATE_ACTIVE;
+    }
+}
+
+@system
+pub fn pmm_allocator_state() -> u32 {
+    unsafe { return PMM_ALLOCATOR.state; }
+}
+
+@system
+pub fn pmm_allocator_reset_locked() {
+    unsafe {
+        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_LOCKED;
+        PMM_ALLOCATOR.region_base = 0;
+        PMM_ALLOCATOR.region_end = 0;
+        PMM_ALLOCATOR.next_page = 0;
+        PMM_ALLOCATOR.allocated_pages = 0;
+    }
+}
+
+// Esta função só poderá ser chamada pelo caminho canônico imediatamente APÓS
+// ExitBootServices() bem-sucedido. Enquanto main.sotlas ainda usa UEFI, nenhum
+// chamador deve existir na rota ativa.
+@system
+pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
+    if !pmm_inventory_is_valid() { return false; }
+
+    let base = pmm_get_largest_conventional_base();
+    let pages = pmm_get_largest_conventional_pages();
+    if base == 0 || pages == 0 { return false; }
+
+    let byte_count = pages * BAKEN_PAGE_SIZE;
+    let end = base + byte_count;
+    if end <= base { return false; }
+
+    unsafe {
+        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_ACTIVE;
+        PMM_ALLOCATOR.region_base = base;
+        PMM_ALLOCATOR.region_end = end;
+        PMM_ALLOCATOR.next_page = base;
+        PMM_ALLOCATOR.allocated_pages = 0;
+    }
+    return true;
+}
+
+@system
+pub fn pmm_alloc_page() -> u64 {
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+        if PMM_ALLOCATOR.next_page == 0 { return 0; }
+        if PMM_ALLOCATOR.next_page + BAKEN_PAGE_SIZE > PMM_ALLOCATOR.region_end {
+            PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
+            return 0;
+        }
+
+        let page = PMM_ALLOCATOR.next_page;
+        PMM_ALLOCATOR.next_page += BAKEN_PAGE_SIZE;
+        PMM_ALLOCATOR.allocated_pages += 1;
+        return page;
+    }
+}
+
+@system
+pub fn pmm_alloc_pages(count: u64) -> u64 {
+    if count == 0 { return 0; }
+
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+
+        let bytes = count * BAKEN_PAGE_SIZE;
+        if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
+        let end = PMM_ALLOCATOR.next_page + bytes;
+        if end < PMM_ALLOCATOR.next_page || end > PMM_ALLOCATOR.region_end {
+            PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
+            return 0;
+        }
+
+        let base = PMM_ALLOCATOR.next_page;
+        PMM_ALLOCATOR.next_page = end;
+        PMM_ALLOCATOR.allocated_pages += count;
+        return base;
+    }
+}
+
+@system
+pub fn pmm_allocator_allocated_pages() -> u64 {
+    unsafe { return PMM_ALLOCATOR.allocated_pages; }
+}
