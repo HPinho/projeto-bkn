@@ -1,14 +1,16 @@
 /*
  * Baken OS — UEFI bootstrap / handoff loader (x86_64)
  *
- * O bootloader prepara somente dados de plataforma. A ponte Pointer/Block I/O
- * permanece temporariamente enquanto input/storage nativos são concluídos.
- * Nenhuma UI pertence aqui.
+ * UEFI prepara somente o terreno. O corte final usa o Memory Map definitivo,
+ * monta as page tables Baken, encerra Boot Services e salta para a entrada
+ * pós-cutover Sotlas numa stack própria. Nenhuma UI pertence aqui.
  */
 
 #include <stdint.h>
 #include <stddef.h>
 #include "baken_boot_info.h"
+#include "kernel__memory__cutover_prepare.h"
+#include "kernel__arch__x86_64__post_cutover.h"
 
 typedef uint16_t CHAR16;
 typedef uint64_t UINTN;
@@ -23,7 +25,7 @@ typedef UINTN EFI_STATUS;
 #define EFI_BUFFER_TOO_SMALL EFI_ERROR(5)
 #define EFI_OUT_OF_RESOURCES EFI_ERROR(9)
 #define EFI_ABORTED EFI_ERROR(21)
-#define EFI_LOADER_DATA 2U
+#define UEFI_LOADER_DATA 2U
 #define ALLOCATE_ANY_PAGES 0U
 #define BY_PROTOCOL 2U
 #define PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR 1U
@@ -192,6 +194,14 @@ typedef EFI_STATUS (*EFI_GET_MEMORY_MAP)(UINTN*, void*, UINTN*, UINTN*, uint32_t
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(uint32_t, UINTN, void**);
 typedef EFI_STATUS (*EFI_FREE_POOL)(void*);
 
+#include "uefi_exit_boot_services.h"
+
+typedef struct {
+    BakenBootInfo *boot_info;
+    uint64_t stack_top;
+    uint64_t post_context_address;
+} BAKEN_CUTOVER_BRIDGE_CONTEXT;
+
 static int guid_equal(const EFI_GUID *a, const EFI_GUID *b) {
     if (!a || !b || a->Data1 != b->Data1 || a->Data2 != b->Data2 || a->Data3 != b->Data3) return 0;
     for (UINTN i = 0; i < 8; ++i) if (a->Data4[i] != b->Data4[i]) return 0;
@@ -217,7 +227,7 @@ static EFI_STATUS reserve_page_table_arena(EFI_BOOT_SERVICES *bs,
     EFI_PHYSICAL_ADDRESS physical_base = 0;
     EFI_STATUS status = allocate_pages(
         ALLOCATE_ANY_PAGES,
-        EFI_LOADER_DATA,
+        UEFI_LOADER_DATA,
         BAKEN_PAGE_TABLE_ARENA_PAGES,
         &physical_base
     );
@@ -226,9 +236,6 @@ static EFI_STATUS reserve_page_table_arena(EFI_BOOT_SERVICES *bs,
     }
 
     boot_info->page_table_arena_physical_base = physical_base;
-    /* Durante Boot Services, a área retornada por AllocatePages é acessível
-     * pelo address space UEFI atual. Guardamos esse alias explicitamente; o
-     * kernel nunca deve reconstruí-lo a partir do PA depois de trocar CR3. */
     boot_info->page_table_arena_virtual_base = (void*)(uintptr_t)physical_base;
     boot_info->page_table_arena_page_count = BAKEN_PAGE_TABLE_ARENA_PAGES;
     boot_info->flags |= BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID;
@@ -251,10 +258,8 @@ static EFI_STATUS capture_loaded_image(EFI_BOOT_SERVICES *bs,
         return status == EFI_SUCCESS ? EFI_UNSUPPORTED : status;
     }
 
-    /* No bootstrap x86_64 atual, ImageBase é o endereço pelo qual a imagem PE
-     * está realmente executando. Registramos esse endereço em ambos os campos
-     * de transição, mas o futuro write_cr3 só poderá ocorrer depois de o mapper
-     * verificar/materializar a tradução que mantém esse range acessível. */
+    /* O endereço físico real será revalidado contra o Memory Map final antes
+     * de construir as page tables; estes campos preservam o alias de execução. */
     boot_info->loaded_image_physical_base = (uint64_t)(uintptr_t)loaded->ImageBase;
     boot_info->loaded_image_virtual_base = loaded->ImageBase;
     boot_info->loaded_image_size = loaded->ImageSize;
@@ -270,7 +275,7 @@ static EFI_STATUS reserve_transition_stack(EFI_BOOT_SERVICES *bs,
     EFI_PHYSICAL_ADDRESS physical_base = 0;
     EFI_STATUS status = allocate_pages(
         ALLOCATE_ANY_PAGES,
-        EFI_LOADER_DATA,
+        UEFI_LOADER_DATA,
         BAKEN_TRANSITION_STACK_PAGES,
         &physical_base
     );
@@ -285,9 +290,8 @@ static EFI_STATUS reserve_transition_stack(EFI_BOOT_SERVICES *bs,
     return EFI_SUCCESS;
 }
 
-/* Captura um snapshot real do memory map com folga para alterações causadas
- * pela própria alocação. Esse snapshot ainda NÃO é o map key final do cutover,
- * pois o runtime legado continua usando Boot Services depois do handoff. */
+/* Snapshot inicial para inventário/diagnóstico do handoff v2. O corte real usa
+ * BAKEN_FINAL_MEMORY_MAP, obtido novamente imediatamente antes de ExitBootServices. */
 static EFI_STATUS capture_memory_map(EFI_BOOT_SERVICES *bs,
                                      void **out_map,
                                      UINTN *out_size,
@@ -309,7 +313,7 @@ static EFI_STATUS capture_memory_map(EFI_BOOT_SERVICES *bs,
 
     UINTN capacity = size + (descriptor_size * 16U) + 4096U;
     void *map = NULL;
-    status = allocate_pool(EFI_LOADER_DATA, capacity, &map);
+    status = allocate_pool(UEFI_LOADER_DATA, capacity, &map);
     if (status != EFI_SUCCESS || !map) return status == EFI_SUCCESS ? EFI_OUT_OF_RESOURCES : status;
 
     size = capacity;
@@ -372,8 +376,6 @@ static int is_baken_boot_media(EFI_BLOCK_IO_PROTOCOL *io) {
         0xBF, 0x20, 0x42, 0x41, 0x4B, 0x45, 0x4E, 0x31
     };
 
-    /* Compatibilidade atual: a leitura do layout instalado ainda assume o
-     * formato GPT de referência de 512 B. A camada GPT nativa removerá isso. */
     for (uint64_t lba = 2; lba <= 33 && lba <= io->Media->LastBlock; ++lba) {
         if (io->ReadBlocks(io, io->Media->MediaId, lba, 512, sector) != EFI_SUCCESS) break;
         for (UINTN off = 0; off + 16 <= 512; off += 128) {
@@ -473,7 +475,73 @@ static void *find_pointer_protocol(EFI_BOOT_SERVICES *bs) {
     return ptr;
 }
 
-extern void baken_kernel_main(const BakenBootInfo *boot_info);
+/* Callback estritamente pré-exit: não recebe EFI_BOOT_SERVICES e não chama
+ * firmware. Ela reconstrói as page tables a partir do Memory Map que gerou o
+ * MapKey da tentativa corrente e materializa o PostCutoverContext. */
+static EFI_STATUS baken_prepare_cutover_from_final_map(
+    const BAKEN_FINAL_MEMORY_MAP *state,
+    void *opaque_context
+) {
+    BAKEN_CUTOVER_BRIDGE_CONTEXT *bridge =
+        (BAKEN_CUTOVER_BRIDGE_CONTEXT*)opaque_context;
+    if (!state || !bridge || !bridge->boot_info) return EFI_INVALID_PARAMETER;
+
+    BakenBootInfo *boot_info = bridge->boot_info;
+    uint64_t map_physical = baken_final_map_physical_address(
+        state, (uint64_t)(uintptr_t)state->memory_map);
+    uint64_t image_physical = baken_final_map_physical_address(
+        state, (uint64_t)(uintptr_t)boot_info->loaded_image_virtual_base);
+    if (map_physical == 0 || image_physical == 0) return EFI_ABORTED;
+
+    uint64_t acpi_physical = 0;
+    if (boot_info->acpi_rsdp) {
+        acpi_physical = baken_final_map_physical_address(
+            state, (uint64_t)(uintptr_t)boot_info->acpi_rsdp);
+        if (acpi_physical == 0) return EFI_ABORTED;
+    }
+
+    CutoverPrepareInput input = {0};
+    input.memory_map_base = (const uint8_t*)state->memory_map;
+    input.memory_map_size = state->memory_map_size;
+    input.descriptor_size = state->descriptor_size;
+    input.arena_physical_base = boot_info->page_table_arena_physical_base;
+    input.arena_virtual_base = (uint64_t)(uintptr_t)boot_info->page_table_arena_virtual_base;
+    input.arena_page_count = boot_info->page_table_arena_page_count;
+    input.image_physical_base = image_physical;
+    input.image_virtual_base = (uint64_t)(uintptr_t)boot_info->loaded_image_virtual_base;
+    input.image_size = boot_info->loaded_image_size;
+    input.framebuffer_physical_base = (uint64_t)(uintptr_t)boot_info->framebuffer_base;
+    input.framebuffer_size = boot_info->framebuffer_size;
+    input.stack_physical_base = boot_info->transition_stack_physical_base;
+    input.stack_virtual_base = (uint64_t)(uintptr_t)boot_info->transition_stack_virtual_base;
+    input.stack_page_count = boot_info->transition_stack_page_count;
+
+    CutoverPrepareResult prepared = cutover_prepare(&input);
+    if (!prepared.valid || prepared.root_physical == 0 ||
+        prepared.context_virtual_base == 0 || prepared.stack_top == 0) {
+        return EFI_ABORTED;
+    }
+
+    PostCutoverContext *post =
+        (PostCutoverContext*)(uintptr_t)prepared.context_virtual_base;
+    *post = (PostCutoverContext){0};
+    post->root_physical = prepared.root_physical;
+    post->stack_top = prepared.stack_top;
+    post->framebuffer_base = (uint64_t)(uintptr_t)boot_info->framebuffer_base;
+    post->framebuffer_size = boot_info->framebuffer_size;
+    post->screen_width = boot_info->screen_width;
+    post->screen_height = boot_info->screen_height;
+    post->pixels_per_scanline = boot_info->pixels_per_scanline;
+    post->memory_map_base = map_physical;
+    post->memory_map_size = state->memory_map_size;
+    post->memory_descriptor_size = state->descriptor_size;
+    post->acpi_rsdp = acpi_physical;
+    post->valid = true;
+
+    bridge->stack_top = prepared.stack_top;
+    bridge->post_context_address = prepared.context_virtual_base;
+    return EFI_SUCCESS;
+}
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     if (!SystemTable || !SystemTable->BootServices) return EFI_INVALID_PARAMETER;
@@ -508,7 +576,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_info.screen_height = gop->Mode->Info->VerticalResolution;
     boot_info.pixels_per_scanline = gop->Mode->Info->PixelsPerScanLine;
 
-    /* Extensão v2. */
     boot_info.version = BAKEN_BOOT_INFO_VERSION;
     boot_info.struct_size = (uint32_t)sizeof(BakenBootInfo);
     boot_info.flags = BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE;
@@ -516,9 +583,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_info.acpi_rsdp = find_acpi_rsdp(SystemTable);
     if (boot_info.acpi_rsdp) boot_info.flags |= BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID;
 
-    /* Todos os recursos que o cutover precisará devem existir ANTES do
-     * snapshot entregue ao kernel. Assim arena e stack aparecem como
-     * EfiLoaderData e não podem ser confundidas com ConventionalMemory. */
+    /* Toda memória que o cutover usa é reservada antes do mapa final. */
     if (reserve_page_table_arena(bs, &boot_info) != EFI_SUCCESS) {
         return EFI_OUT_OF_RESOURCES;
     }
@@ -529,6 +594,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         return EFI_OUT_OF_RESOURCES;
     }
 
+    /* Snapshot v2 inicial: preservado para auditoria/compatibilidade do contrato.
+     * O callback de ExitBootServices usa outro mapa, final e com MapKey atual. */
     UINTN map_size = 0;
     UINTN descriptor_size = 0;
     uint32_t descriptor_version = 0;
@@ -541,15 +608,35 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         boot_info.flags |= BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID;
     }
 
-    /* Ponte de compatibilidade: será removida quando o kernel não precisar mais
-     * de Boot Services para input, temporização e persistência. */
+    /* Estes ponteiros existem somente enquanto Boot Services ainda está vivo.
+     * Nenhum deles é transportado para PostCutoverContext. */
     boot_info.system_table = SystemTable;
     boot_info.pointer_protocol = pointer;
     boot_info.block_io_protocol = block_io;
     boot_info.install_target_block_io_protocol = install_target;
 
-    /* Ainda não chamamos ExitBootServices aqui: o runtime atual dereferencia
-     * esses protocolos. O cutover só é correto depois dos drivers nativos. */
-    baken_kernel_main(&boot_info);
-    return EFI_ABORTED;
+    BAKEN_FINAL_MEMORY_MAP final_map = {0};
+    BAKEN_CUTOVER_BRIDGE_CONTEXT bridge = {0};
+    bridge.boot_info = &boot_info;
+
+    EFI_STATUS status = baken_exit_boot_services_final(
+        ImageHandle,
+        bs,
+        &final_map,
+        baken_prepare_cutover_from_final_map,
+        &bridge
+    );
+    if (status != EFI_SUCCESS) return status;
+
+    /* Boot Services terminou. Daqui em diante é proibido tocar em `bs`,
+     * SystemTable, protocolos UEFI ou no snapshot legado. Troca a stack e a
+     * continuação Sotlas assume CR3/GDT/TSS/IDT. Esta chamada não retorna. */
+    x86_stack_switch_to_post_cutover_raw(
+        bridge.stack_top,
+        bridge.post_context_address
+    );
+
+    for (;;) {
+        __asm__ __volatile__("cli; hlt");
+    }
 }
