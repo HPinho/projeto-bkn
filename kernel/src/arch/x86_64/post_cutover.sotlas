@@ -2,8 +2,8 @@
 //
 // O trampoline do backend troca para a stack de transição e chama o símbolo
 // exportado abaixo. A ordem é deliberada: primeiro CR3/tabelas da CPU, depois
-// o PMM consome o Memory Map final. Interrupções continuam desabilitadas;
-// APIC/IOAPIC/timer entram em fase posterior.
+// PMM e VMM assumem formalmente o estado de memória. Interrupções continuam
+// desabilitadas; APIC/IOAPIC/timer entram em fase posterior.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -15,6 +15,7 @@ import kernel::memory::mmu_activate::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
+import kernel::memory::vmm::*;
 import kernel::arch::x86_64::paging::*;
 
 @repr(C)
@@ -39,6 +40,7 @@ pub struct PostCutoverContext {
 
 static mut POST_CUTOVER_CPU_TABLES_ACTIVE: bool = false;
 static mut POST_CUTOVER_PMM_ACTIVE: bool = false;
+static mut POST_CUTOVER_VMM_ACTIVE: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -80,7 +82,6 @@ pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
 pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !post_cutover_context_valid(context) { return false; }
 
-    // A nova PML4 precisa mapear a imagem, esta stack e todos os objetos abaixo.
     if !x86_mmu_activate_root(context.root_physical) { return false; }
 
     tss_prepare_default_stacks();
@@ -96,19 +97,13 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     let idt_address = idt_base() as u64;
     if gdt_address == 0 || idt_address == 0 { return false; }
 
-    // LGDT sozinho não altera CS. O backend recarrega DS/ES/SS e usa LRETQ
-    // para instalar GDT_KERNEL_CODE_SELECTOR em CS.
     x86_gdt_activate_segments_raw(
         gdt_address,
         gdt_limit(),
         GDT_KERNEL_CODE_SELECTOR,
         GDT_KERNEL_DATA_SELECTOR
     );
-
-    // A TSS já possui RSP0 e IST1/IST2/IST3 válidos antes de LTR.
     x86_ltr_raw(GDT_TSS_SELECTOR);
-
-    // Todos os vetores 0..31 já apontam para stubs reais antes de LIDT.
     x86_lidt_table_raw(idt_address, idt_limit());
 
     unsafe { POST_CUTOVER_CPU_TABLES_ACTIVE = true; }
@@ -120,8 +115,6 @@ pub fn post_cutover_cpu_tables_active() -> bool {
     unsafe { return POST_CUTOVER_CPU_TABLES_ACTIVE; }
 }
 
-// Só pode ser chamado depois que CR3 já aponta para a PML4 Baken. O Memory Map
-// final é dereferenciado através do direct-map alto, nunca pelo alias UEFI antigo.
 @system
 pub fn post_cutover_activate_pmm(context: *const PostCutoverContext) -> bool {
     if !post_cutover_cpu_tables_active() { return false; }
@@ -147,6 +140,26 @@ pub fn post_cutover_pmm_active() -> bool {
     unsafe { return POST_CUTOVER_PMM_ACTIVE; }
 }
 
+// O VMM só se declara ativo depois do PMM e depois de provar que o CR3 atual
+// é exatamente a raiz entregue pelo cutover. Nenhuma segunda troca de CR3 ocorre.
+@system
+pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
+    if !post_cutover_pmm_active() { return false; }
+    if !post_cutover_context_valid(context) { return false; }
+    if !vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE) {
+        return false;
+    }
+    if !vmm_is_active() { return false; }
+
+    unsafe { POST_CUTOVER_VMM_ACTIVE = true; }
+    return true;
+}
+
+@system
+pub fn post_cutover_vmm_active() -> bool {
+    unsafe { return POST_CUTOVER_VMM_ACTIVE; }
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -157,8 +170,11 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_activate_pmm(context) {
         loop {}
     }
+    if !post_cutover_activate_vmm(context) {
+        loop {}
+    }
 
-    // Próximo marco: ativar formalmente o VMM e controladores de interrupção.
-    // Enquanto isso não existir, nunca habilitamos STI e nunca retornamos.
+    // Próximo marco: APIC/IOAPIC. STI continua proibido até haver rotas e
+    // handlers de IRQ/timer realmente instalados.
     loop {}
 }
