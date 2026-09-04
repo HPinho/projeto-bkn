@@ -1,0 +1,88 @@
+// Baken OS — contratos puros de paging x86-64 (4-level, 4 KiB).
+//
+// Este módulo somente calcula índices e codifica/decodifica entries. Ele não
+// escreve CR3, não invalida TLB e não ativa page tables próprias. A ativação
+// ficará para o VMM pós-ExitBootServices, depois do PMM bootstrap estar ativo.
+
+module kernel::arch::x86_64::paging;
+
+pub const X86_PAGE_SHIFT: u64 = 12;
+pub const X86_PAGE_SIZE: u64 = 4096;
+pub const X86_PAGE_INDEX_MASK: u64 = 0x1FF;
+pub const X86_PAGE_ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
+
+pub const X86_PTE_PRESENT: u64 = 1 << 0;
+pub const X86_PTE_WRITABLE: u64 = 1 << 1;
+pub const X86_PTE_USER: u64 = 1 << 2;
+pub const X86_PTE_WRITE_THROUGH: u64 = 1 << 3;
+pub const X86_PTE_CACHE_DISABLE: u64 = 1 << 4;
+pub const X86_PTE_ACCESSED: u64 = 1 << 5;
+pub const X86_PTE_DIRTY: u64 = 1 << 6;
+pub const X86_PTE_HUGE: u64 = 1 << 7;
+pub const X86_PTE_GLOBAL: u64 = 1 << 8;
+pub const X86_PTE_NX: u64 = 1 << 63;
+
+@system
+pub fn x86_page_aligned(address: u64) -> bool {
+    return (address & (X86_PAGE_SIZE - 1)) == 0;
+}
+
+@system
+pub fn x86_page_align_down(address: u64) -> u64 {
+    return address & X86_PAGE_ADDRESS_MASK;
+}
+
+@system
+pub fn x86_page_align_up(address: u64) -> u64 {
+    if x86_page_aligned(address) { return address; }
+    let rounded = address + (X86_PAGE_SIZE - 1);
+    if rounded < address { return 0; }
+    return rounded & X86_PAGE_ADDRESS_MASK;
+}
+
+@system
+pub fn x86_pml4_index(virtual_address: u64) -> u16 {
+    return ((virtual_address >> 39) & X86_PAGE_INDEX_MASK) as u16;
+}
+
+@system
+pub fn x86_pdpt_index(virtual_address: u64) -> u16 {
+    return ((virtual_address >> 30) & X86_PAGE_INDEX_MASK) as u16;
+}
+
+@system
+pub fn x86_pd_index(virtual_address: u64) -> u16 {
+    return ((virtual_address >> 21) & X86_PAGE_INDEX_MASK) as u16;
+}
+
+@system
+pub fn x86_pt_index(virtual_address: u64) -> u16 {
+    return ((virtual_address >> 12) & X86_PAGE_INDEX_MASK) as u16;
+}
+
+@system
+pub fn x86_page_offset(virtual_address: u64) -> u16 {
+    return (virtual_address & (X86_PAGE_SIZE - 1)) as u16;
+}
+
+@system
+pub fn x86_pte_make(physical_address: u64, flags: u64) -> u64 {
+    if !x86_page_aligned(physical_address) { return 0; }
+    return (physical_address & X86_PAGE_ADDRESS_MASK) |
+        (flags & ~X86_PAGE_ADDRESS_MASK);
+}
+
+@system
+pub fn x86_pte_address(entry: u64) -> u64 {
+    return entry & X86_PAGE_ADDRESS_MASK;
+}
+
+@system
+pub fn x86_pte_present(entry: u64) -> bool {
+    return (entry & X86_PTE_PRESENT) != 0;
+}
+
+@system
+pub fn x86_pte_has_flag(entry: u64, flag: u64) -> bool {
+    return (entry & flag) != 0;
+}
