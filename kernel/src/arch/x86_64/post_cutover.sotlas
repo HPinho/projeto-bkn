@@ -51,7 +51,7 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !post_cutover_context_valid(context) { return false; }
 
     // A nova PML4 precisa mapear a imagem, esta stack e todos os objetos abaixo.
-    if !x86_mmu_activate(context.root_physical) { return false; }
+    if !x86_mmu_activate_root(context.root_physical) { return false; }
 
     tss_prepare_default_stacks();
     if !tss_is_prepared() { return false; }
