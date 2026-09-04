@@ -45,7 +45,9 @@ class UefiPageTableArenaTests(unittest.TestCase):
         self.assertIn("offsetof(BakenBootInfo, version) == 80", self.header)
         self.assertIn("offsetof(BakenBootInfo, acpi_rsdp) == 112", self.header)
         self.assertIn("offsetof(BakenBootInfo, page_table_arena_physical_base) == 120", self.header)
-        self.assertIn("sizeof(BakenBootInfo) == 144", self.header)
+        self.assertIn("offsetof(BakenBootInfo, loaded_image_physical_base) == 144", self.header)
+        self.assertIn("offsetof(BakenBootInfo, transition_stack_physical_base) == 168", self.header)
+        self.assertIn("sizeof(BakenBootInfo) == 192", self.header)
 
     def test_kernel_validates_but_does_not_consume_arena_in_hybrid_path(self):
         self.assertIn("BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID", self.main)
