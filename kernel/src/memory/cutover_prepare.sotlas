@@ -1,0 +1,110 @@
+// Baken OS — preparação pura das estruturas para o futuro corte UEFI.
+//
+// O bootloader fornece somente memória já reservada e o Memory Map capturado.
+// Esta função monta arena, layout da imagem/stack e page tables W^X, devolvendo
+// os endereços que a fase pós-ExitBootServices usará. Não chama firmware, não
+// troca CR3/RSP e não ativa allocators.
+
+module kernel::memory::cutover_prepare;
+
+import kernel::memory::page_table_arena::*;
+import kernel::memory::transition_image_map::*;
+import kernel::memory::transition_stack::*;
+import kernel::memory::transition_page_tables::*;
+
+pub struct CutoverPrepareInput {
+    pub memory_map_base: *const u8;
+    pub memory_map_size: usize;
+    pub descriptor_size: usize;
+
+    pub arena_physical_base: u64;
+    pub arena_virtual_base: u64;
+    pub arena_page_count: u64;
+
+    pub image_physical_base: u64;
+    pub image_virtual_base: u64;
+    pub image_size: u64;
+
+    pub stack_physical_base: u64;
+    pub stack_virtual_base: u64;
+    pub stack_page_count: u64;
+}
+
+pub struct CutoverPrepareResult {
+    pub root_physical: u64;
+    pub root_virtual: u64;
+    pub stack_top: u64;
+    pub table_pages_used: u64;
+    pub direct_map_bytes: u64;
+    pub image_pages: u64;
+    pub stack_pages: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn cutover_prepare_invalid() -> CutoverPrepareResult {
+    return CutoverPrepareResult {
+        root_physical: 0,
+        root_virtual: 0,
+        stack_top: 0,
+        table_pages_used: 0,
+        direct_map_bytes: 0,
+        image_pages: 0,
+        stack_pages: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn cutover_prepare(input: *const CutoverPrepareInput) -> CutoverPrepareResult {
+    if input == (null as *const CutoverPrepareInput) { return cutover_prepare_invalid(); }
+    if input.memory_map_base == (null as *const u8) { return cutover_prepare_invalid(); }
+    if input.memory_map_size == 0 || input.descriptor_size < 40 {
+        return cutover_prepare_invalid();
+    }
+
+    let mut arena = page_table_arena_make(
+        input.arena_physical_base,
+        input.arena_virtual_base,
+        input.arena_page_count
+    );
+    if !arena.valid { return cutover_prepare_invalid(); }
+
+    let image = transition_image_layout(
+        input.image_physical_base,
+        input.image_virtual_base,
+        input.image_size
+    );
+    if !image.valid { return cutover_prepare_invalid(); }
+
+    let stack = transition_stack_layout(
+        input.stack_physical_base,
+        input.stack_virtual_base,
+        input.stack_page_count
+    );
+    if !stack.valid { return cutover_prepare_invalid(); }
+
+    let tables = transition_page_tables_build(
+        &mut arena,
+        input.memory_map_base,
+        input.memory_map_size,
+        input.descriptor_size,
+        image,
+        stack
+    );
+    if !tables.valid { return cutover_prepare_invalid(); }
+    if tables.root_physical == 0 || stack.stack_top == 0 {
+        return cutover_prepare_invalid();
+    }
+
+    return CutoverPrepareResult {
+        root_physical: tables.root_physical,
+        root_virtual: tables.root_virtual,
+        stack_top: stack.stack_top,
+        table_pages_used: tables.table_pages_used,
+        direct_map_bytes: tables.direct_map_bytes,
+        image_pages: tables.image_pages,
+        stack_pages: tables.stack_pages,
+        valid: true
+    };
+}
