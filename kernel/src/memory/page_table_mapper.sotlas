@@ -1,0 +1,110 @@
+// Baken OS — mapper bootstrap reutilizável de page tables x86-64.
+//
+// Cria/reabre níveis PML4 -> PDPT -> PD -> PT somente dentro de uma
+// PageTableArena explícita. O mapper não conhece UEFI, PMM, CR3 ou política de
+// quais regiões devem existir; ele apenas materializa mappings solicitados.
+//
+// Isso permite ao VMM futuro mapear RAM, imagem, stack e MMIO separadamente,
+// cada um com suas permissões/cache policy, sem assumir memória física contínua.
+
+module kernel::memory::page_table_mapper;
+
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_writer::*;
+import kernel::memory::direct_map::*;
+import kernel::arch::x86_64::paging::*;
+
+@system
+fn page_table_mapper_link_flags() -> u64 {
+    return X86_PTE_PRESENT | X86_PTE_WRITABLE;
+}
+
+@system
+fn page_table_mapper_child(arena: *mut PageTableArena,
+                           parent: PageTablePage,
+                           index: u16) -> PageTablePage {
+    if arena == (null as *mut PageTableArena) { return page_table_page_invalid(); }
+    if !page_table_page_writable(parent) { return page_table_page_invalid(); }
+
+    let current = page_table_read_entry(parent, index);
+    if x86_pte_present(current) {
+        if x86_pte_has_flag(current, X86_PTE_HUGE) {
+            return page_table_page_invalid();
+        }
+        let child_physical = x86_pte_address(current);
+        return page_table_arena_page_from_physical(
+            arena as *const PageTableArena,
+            child_physical
+        );
+    }
+
+    let child = page_table_arena_alloc(arena);
+    if !child.valid { return page_table_page_invalid(); }
+    if !page_table_zero(child) { return page_table_page_invalid(); }
+
+    let entry = x86_pte_make(child.physical_address, page_table_mapper_link_flags());
+    if entry == 0 { return page_table_page_invalid(); }
+    if !page_table_write_entry(parent, index, entry) {
+        return page_table_page_invalid();
+    }
+    return child;
+}
+
+@system
+fn page_table_mapper_commit(page: PageTablePage,
+                            index: u16,
+                            desired: u64) -> bool {
+    if desired == 0 || !page_table_page_writable(page) { return false; }
+    let current = page_table_read_entry(page, index);
+    if x86_pte_present(current) {
+        return current == desired;
+    }
+    return page_table_write_entry(page, index, desired);
+}
+
+@system
+pub fn page_table_map_4k(arena: *mut PageTableArena,
+                         root: PageTablePage,
+                         virtual_address: u64,
+                         physical_address: u64,
+                         flags: u64) -> bool {
+    if arena == (null as *mut PageTableArena) { return false; }
+    if !page_table_page_writable(root) { return false; }
+    if !x86_page_aligned(virtual_address) || !x86_page_aligned(physical_address) {
+        return false;
+    }
+
+    let pdpt = page_table_mapper_child(arena, root, x86_pml4_index(virtual_address));
+    if !pdpt.valid { return false; }
+    let pd = page_table_mapper_child(arena, pdpt, x86_pdpt_index(virtual_address));
+    if !pd.valid { return false; }
+    let pt = page_table_mapper_child(arena, pd, x86_pd_index(virtual_address));
+    if !pt.valid { return false; }
+
+    let clean_flags = (flags | X86_PTE_PRESENT) & ~X86_PTE_HUGE;
+    let desired = x86_pte_make(physical_address, clean_flags);
+    return page_table_mapper_commit(pt, x86_pt_index(virtual_address), desired);
+}
+
+@system
+pub fn page_table_map_2m(arena: *mut PageTableArena,
+                         root: PageTablePage,
+                         virtual_address: u64,
+                         physical_address: u64,
+                         flags: u64) -> bool {
+    if arena == (null as *mut PageTableArena) { return false; }
+    if !page_table_page_writable(root) { return false; }
+    if (virtual_address % X86_PAGE_SIZE_2M) != 0 ||
+       (physical_address % X86_PAGE_SIZE_2M) != 0 {
+        return false;
+    }
+
+    let pdpt = page_table_mapper_child(arena, root, x86_pml4_index(virtual_address));
+    if !pdpt.valid { return false; }
+    let pd = page_table_mapper_child(arena, pdpt, x86_pdpt_index(virtual_address));
+    if !pd.valid { return false; }
+
+    let clean_flags = flags | X86_PTE_PRESENT | X86_PTE_HUGE;
+    let desired = x86_pte_make(physical_address, clean_flags);
+    return page_table_mapper_commit(pd, x86_pd_index(virtual_address), desired);
+}
