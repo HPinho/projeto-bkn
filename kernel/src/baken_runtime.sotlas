@@ -13,6 +13,7 @@ import kernel::baken_oobe_screen::*;
 import kernel::window_manager::*;
 import kernel::baken_cursor::*;
 import kernel::drivers::ps2_mouse::*;
+import kernel::drivers::ps2_keyboard::*;
 import kernel::arch::x86_64::timer::*;
 
 // =============================================================================
@@ -176,7 +177,6 @@ static mut G_ABS_COUNT: u32 = 0;
 static mut G_LAST_ABS_X: i32 = -1;
 static mut G_LAST_ABS_Y: i32 = -1;
 
-// Telemetria de Hardware, Pacing Adaptativo e Monitoramento de 60/120 Hz
 static mut G_LAST_FRAME_TSC: u64 = 0;
 static mut G_TARGET_FRAME_US: u64 = 16667;
 static mut G_TELEMETRY_FRAME_COUNT: u64 = 0;
@@ -200,10 +200,6 @@ static mut G_ABSOLUTE_GUID: EfiGuid = EfiGuid {
     Data3: 0x4AE9,
     Data4: [0x9B, 0x15, 0xF2, 0x59, 0x04, 0x99, 0x2A, 0x43]
 };
-
-// =============================================================================
-// LIGAÇÃO DE ATIVOS (FONTES, CJK E LOGO) 100% EM SOTLAS
-// =============================================================================
 
 @system
 pub fn baken_runtime_init_assets() -> void {
@@ -241,10 +237,6 @@ pub fn baken_runtime_init_assets() -> void {
     }
 }
 
-// =============================================================================
-// INICIALIZAÇÃO DE HARDWARE UEFI TRANSITÓRIA
-// =============================================================================
-
 @system
 pub fn baken_efi_init(boot_info: *const void) -> void {
     if (boot_info == (null as *const void)) { return; }
@@ -256,7 +248,6 @@ pub fn baken_efi_init(boot_info: *const void) -> void {
     G_BOOT_SERVICES = bs;
     G_KEYBOARD = st.ConIn;
 
-    // Busca e conecta dispositivos Absolute Pointer (USB Tablet) e Simple Pointer (USB Mouse) separadamente.
     if (bs != (null as *mut EfiBootServicesPrefix)) {
         let mut abs_ptr: *mut void = null as *mut void;
         if (bs.LocateProtocol(&G_ABSOLUTE_GUID, null as *mut void, &mut abs_ptr) == 0 && abs_ptr != (null as *mut void)) {
@@ -280,8 +271,6 @@ pub fn baken_efi_init(boot_info: *const void) -> void {
         G_SIMPLE_COUNT = 1;
     }
 
-    // Dívida transitória isolada: usa Stall somente uma vez como referência de
-    // 10 ms para calibrar o TSC. Depois disso, frame pacing é CPU-only.
     if (bs != (null as *mut EfiBootServicesPrefix)) {
         let start = x86_timer_read_tsc();
         bs.Stall(10000);
@@ -295,15 +284,9 @@ pub fn baken_efi_init(boot_info: *const void) -> void {
             x86_timer_set_cycles_per_us(3000);
         }
     } else {
-        // Fallback temporário para a fase híbrida. Antes do cutover definitivo,
-        // CPUID/HPET/APIC timer substituirá esta aproximação.
         x86_timer_set_cycles_per_us(3000);
     }
 }
-
-// =============================================================================
-// POLLING DE ENTRADA UEFI TRANSITÓRIO
-// =============================================================================
 
 @system
 pub fn baken_efi_poll_key(out_scan: *mut u16, out_uni: *mut u16) -> u8 {
@@ -316,6 +299,16 @@ pub fn baken_efi_poll_key(out_scan: *mut u16, out_uni: *mut u16) -> u8 {
         return 1;
     }
     return 0;
+}
+
+// Preferência de input: i8042 nativo quando existe; UEFI fica apenas como
+// fallback temporário para teclados USB enquanto xHCI/HID não está pronto.
+@system
+pub fn baken_runtime_poll_key(out_scan: *mut u16, out_uni: *mut u16) -> u8 {
+    if ps2_keyboard_is_present() {
+        return ps2_keyboard_poll(out_scan, out_uni);
+    }
+    return baken_efi_poll_key(out_scan, out_uni);
 }
 
 @system
@@ -345,7 +338,6 @@ pub fn baken_efi_poll_mouse_rel(out_dx: *mut i32, out_dy: *mut i32, out_btn: *mu
                 let mut dy = (ry * scale) / 6;
                 if (dx == 0 && rx != 0) { dx = if (rx > 0) { 1 } else { -1 }; }
                 if (dy == 0 && ry != 0) { dy = if (ry > 0) { 1 } else { -1 }; }
-
                 total_dx += dx;
                 total_dy += dy;
                 if (state.LeftButton != 0) { btn_state = 1; }
@@ -370,12 +362,7 @@ pub fn baken_efi_poll_mouse_abs(screen_w: u32, screen_h: u32, out_x: *mut i32, o
         if (abs == (null as *mut EfiAbsolutePointer)) { continue; }
         let mode = abs.Mode;
         if (mode == (null as *mut EfiAbsolutePointerMode)) { continue; }
-        let mut state = EfiAbsolutePointerState {
-            CurrentX: 0,
-            CurrentY: 0,
-            CurrentZ: 0,
-            ActiveButtons: 0
-        };
+        let mut state = EfiAbsolutePointerState { CurrentX: 0, CurrentY: 0, CurrentZ: 0, ActiveButtons: 0 };
         if (abs.GetState(abs, &mut state) == 0) {
             let range_x = mode.AbsoluteMaxX - mode.AbsoluteMinX;
             let range_y = mode.AbsoluteMaxY - mode.AbsoluteMinY;
@@ -401,21 +388,13 @@ pub fn baken_efi_poll_mouse_abs(screen_w: u32, screen_h: u32, out_x: *mut i32, o
     return 0;
 }
 
-// =============================================================================
-// TEMPORIZAÇÃO NATIVA x86-64 E PACING DE QUADROS
-// =============================================================================
-
 @system
-pub fn baken_efi_read_tsc() -> u64 {
-    // Nome mantido por compatibilidade temporária; a implementação já é CPU-only.
-    return x86_timer_read_tsc();
-}
+pub fn baken_efi_read_tsc() -> u64 { return x86_timer_read_tsc(); }
 
 @system
 pub fn baken_efi_frame_wait(frame_start: u64) -> void {
     let frame_end = x86_timer_read_tsc();
     let cycles_per_us = x86_timer_cycles_per_us();
-
     let reported_refresh = display_get_refresh_hz();
     let refresh_hz: u32 = if reported_refresh < 30 { 60 } else if reported_refresh > 240 { 240 } else { reported_refresh };
     let target_us: u64 = 1000000 / refresh_hz as u64;
@@ -426,7 +405,6 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
         if (work_us < target_us) {
             let remain = target_us - work_us;
             unsafe { G_TELEMETRY_BUDGET_REMAIN_US = remain; }
-            // Não chama UEFI Stall: pacing continua funcional após ExitBootServices.
             x86_timer_spin_wait_us(remain);
         } else {
             unsafe {
@@ -446,7 +424,6 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
             dt = (total_us as f32) / 1000000.0;
             if (dt < 0.001) { dt = 0.001; }
             if (dt > 0.066) { dt = 0.066; }
-
             let ft_ms = (total_us as f32) / 1000.0;
             G_TELEMETRY_FRAMETIME_MS = (G_TELEMETRY_FRAMETIME_MS * 0.85) + (ft_ms * 0.15);
             if (ft_ms > G_TELEMETRY_P95_MS) {
@@ -454,7 +431,6 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
             } else {
                 G_TELEMETRY_P95_MS = (G_TELEMETRY_P95_MS * 0.99) + (ft_ms * 0.01);
             }
-
             G_TELEMETRY_ACCUM_US += total_us;
             G_TELEMETRY_FRAME_COUNT += 1;
             if (G_TELEMETRY_ACCUM_US >= 1000000) {
@@ -465,46 +441,28 @@ pub fn baken_efi_frame_wait(frame_start: u64) -> void {
         }
         G_LAST_FRAME_TSC = now_tsc;
     }
-
     desktop_compositor_set_frame_delta(dt);
 }
 
 @system
 pub fn baken_telemetry_get_fps() -> f32 { unsafe { return G_TELEMETRY_FPS; } }
-
 @system
 pub fn baken_telemetry_get_frametime_ms() -> f32 { unsafe { return G_TELEMETRY_FRAMETIME_MS; } }
-
 @system
 pub fn baken_telemetry_get_p95_ms() -> f32 { unsafe { return G_TELEMETRY_P95_MS; } }
-
 @system
 pub fn baken_telemetry_get_dropped_frames() -> u64 { unsafe { return G_TELEMETRY_DROPPED_FRAMES; } }
-
 @system
 pub fn baken_telemetry_get_budget_remain_us() -> u64 { unsafe { return G_TELEMETRY_BUDGET_REMAIN_US; } }
-
 @system
-pub fn baken_runtime_timing_contract(frame_start: u64) -> void {
-    baken_efi_frame_wait(frame_start);
-}
-
-// =============================================================================
-// DESPACHO DE EVENTOS VISUAIS E DE ENTRADA
-// =============================================================================
+pub fn baken_runtime_timing_contract(frame_start: u64) -> void { baken_efi_frame_wait(frame_start); }
 
 @system
 pub fn baken_runtime_dispatch_click(mx: i32, my: i32, w: u32, h: u32) -> void {
     let session = desktop_compositor_get_session();
-    if (session == 0) {
-        baken_installer_handle_click(mx, my, w, h);
-    } else if (session == 1) {
-        baken_oobe_handle_click(mx, my, w, h);
-    } else {
-        if (!wm_handle_mouse_down(mx, my)) {
-            desktop_shell_handle_click(mx, my);
-        }
-    }
+    if (session == 0) { baken_installer_handle_click(mx, my, w, h); }
+    else if (session == 1) { baken_oobe_handle_click(mx, my, w, h); }
+    else { if (!wm_handle_mouse_down(mx, my)) { desktop_shell_handle_click(mx, my); } }
 }
 
 @system
@@ -512,44 +470,33 @@ pub fn baken_runtime_dispatch_move(mx: i32, my: i32) -> void {
     baken_cursor_set_pos(mx, my);
     desktop_shell_set_cursor(mx, my);
     raster_set_cursor_parallax(mx, my);
-    let session = desktop_compositor_get_session();
-    if (session == 2) {
-        wm_handle_mouse_move(mx, my);
-    }
+    if (desktop_compositor_get_session() == 2) { wm_handle_mouse_move(mx, my); }
 }
 
 @system
 pub fn baken_runtime_dispatch_up() -> void {
-    let session = desktop_compositor_get_session();
-    if (session == 2) {
-        wm_handle_mouse_up();
-    }
+    if (desktop_compositor_get_session() == 2) { wm_handle_mouse_up(); }
 }
-
-// =============================================================================
-// LOOP PRINCIPAL DO SISTEMA 100% EM SOTLAS
-// =============================================================================
 
 @system
 @export
 pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> void {
     baken_efi_init(boot_info);
+    ps2_keyboard_init();
     ps2_mouse_init();
 
     let mut mouse_x: i32 = (width / 2) as i32;
     let mut mouse_y: i32 = (height / 2) as i32;
     let mut left_down: u8 = 0;
-
     desktop_shell_set_cursor(mouse_x, mouse_y);
     raster_set_cursor_parallax(mouse_x, mouse_y);
 
     loop {
         let frame_start: u64 = x86_timer_read_tsc();
 
-        // 1. Polling de Teclado UEFI — dívida transitória até PS/2 + USB HID.
         let mut scancode: u16 = 0;
         let mut unicode: u16 = 0;
-        while (baken_efi_poll_key(&mut scancode, &mut unicode) == 1) {
+        while (baken_runtime_poll_key(&mut scancode, &mut unicode) == 1) {
             let session = desktop_compositor_get_session();
             if (session == 0) {
                 let key = if (unicode != 0) { unicode as u32 } else { scancode as u32 };
@@ -567,10 +514,8 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             }
         }
 
-        // 2. Polling de Mouse (i8042 direto -> UEFI Absolute -> UEFI Simple Pointer).
         let mut mouse_updated: u8 = 0;
         let mut curr_btn: u8 = left_down;
-
         let mut ps2_dx: i32 = 0;
         let mut ps2_dy: i32 = 0;
         let mut ps2_btn: u8 = 0;
@@ -590,10 +535,7 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             let mut abs_y: i32 = 0;
             let mut abs_btn: u8 = 0;
             if (baken_efi_poll_mouse_abs(width, height, &mut abs_x, &mut abs_y, &mut abs_btn) == 1) {
-                mouse_x = abs_x;
-                mouse_y = abs_y;
-                curr_btn = abs_btn;
-                mouse_updated = 1;
+                mouse_x = abs_x; mouse_y = abs_y; curr_btn = abs_btn; mouse_updated = 1;
             }
         }
 
@@ -602,14 +544,12 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             let mut rel_dy: i32 = 0;
             let mut rel_btn: u8 = 0;
             if (baken_efi_poll_mouse_rel(&mut rel_dx, &mut rel_dy, &mut rel_btn) == 1) {
-                mouse_x += rel_dx;
-                mouse_y += rel_dy;
+                mouse_x += rel_dx; mouse_y += rel_dy;
                 if (mouse_x < 0) { mouse_x = 0; }
                 if (mouse_y < 0) { mouse_y = 0; }
                 if (mouse_x >= (width as i32)) { mouse_x = (width as i32) - 1; }
                 if (mouse_y >= (height as i32)) { mouse_y = (height as i32) - 1; }
-                curr_btn = rel_btn;
-                mouse_updated = 1;
+                curr_btn = rel_btn; mouse_updated = 1;
             }
         }
 
@@ -619,21 +559,15 @@ pub fn baken_runtime_run(boot_info: *const void, width: u32, height: u32) -> voi
             raster_set_cursor_parallax(mouse_x, mouse_y);
         }
 
-        // 3. Despacho de Eventos de Clique e Arraste
         if (curr_btn == 1 && left_down == 0) {
             baken_runtime_dispatch_click(mouse_x, mouse_y, width, height);
         } else if (curr_btn == 1) {
-            if (desktop_compositor_get_session() == 2) {
-                wm_handle_mouse_move(mouse_x, mouse_y);
-            }
+            if (desktop_compositor_get_session() == 2) { wm_handle_mouse_move(mouse_x, mouse_y); }
         } else if (left_down == 1) {
-            if (desktop_compositor_get_session() == 2) {
-                wm_handle_mouse_up();
-            }
+            if (desktop_compositor_get_session() == 2) { wm_handle_mouse_up(); }
         }
         left_down = curr_btn;
 
-        // 4. Renderização e pacing sem BootServices.Stall por frame.
         desktop_compositor_render_frame();
         baken_efi_frame_wait(frame_start);
     }
