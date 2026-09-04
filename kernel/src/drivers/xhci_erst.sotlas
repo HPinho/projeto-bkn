@@ -1,0 +1,67 @@
+// Baken OS — contrato puro de Event Ring Segment Table (ERST) xHCI.
+//
+// Constrói uma entrada de 16 bytes a partir de um segmento DMA real já
+// existente. Não programa ERSTBA/ERSTSZ/ERDP e não acessa Runtime MMIO.
+
+module kernel::drivers::xhci_erst;
+
+import kernel::memory::dma::*;
+
+pub const XHCI_ERST_ENTRY_SIZE: u64 = 16;
+pub const XHCI_EVENT_SEGMENT_ALIGNMENT: u64 = 64;
+pub const XHCI_EVENT_SEGMENT_MIN_TRBS: u32 = 16;
+pub const XHCI_EVENT_SEGMENT_MAX_TRBS: u32 = 4096;
+pub const XHCI_EVENT_TRB_SIZE: u64 = 16;
+
+pub struct XhciErstEntry {
+    pub ring_segment_base_address: u64;
+    pub ring_segment_size: u32;
+    pub reserved: u32;
+}
+
+@system
+pub fn xhci_erst_invalid_entry() -> XhciErstEntry {
+    return XhciErstEntry {
+        ring_segment_base_address: 0,
+        ring_segment_size: 0,
+        reserved: 0
+    };
+}
+
+@system
+pub fn xhci_erst_entry_valid(entry: *const XhciErstEntry) -> bool {
+    if entry == (null as *const XhciErstEntry) { return false; }
+    unsafe {
+        if (*entry).ring_segment_base_address == 0 { return false; }
+        if ((*entry).ring_segment_base_address & (XHCI_EVENT_SEGMENT_ALIGNMENT - 1)) != 0 {
+            return false;
+        }
+        if (*entry).ring_segment_size < XHCI_EVENT_SEGMENT_MIN_TRBS ||
+            (*entry).ring_segment_size > XHCI_EVENT_SEGMENT_MAX_TRBS {
+            return false;
+        }
+        return (*entry).reserved == 0;
+    }
+}
+
+@system
+pub fn xhci_erst_entry_from_dma(segment: DmaBuffer, trb_count: u32) -> XhciErstEntry {
+    if !segment.valid { return xhci_erst_invalid_entry(); }
+    if segment.virtual_address == (null as *mut u8) { return xhci_erst_invalid_entry(); }
+    if segment.physical_address == 0 { return xhci_erst_invalid_entry(); }
+    if (segment.physical_address & (XHCI_EVENT_SEGMENT_ALIGNMENT - 1)) != 0 {
+        return xhci_erst_invalid_entry();
+    }
+    if trb_count < XHCI_EVENT_SEGMENT_MIN_TRBS || trb_count > XHCI_EVENT_SEGMENT_MAX_TRBS {
+        return xhci_erst_invalid_entry();
+    }
+
+    let required_bytes = (trb_count as u64) * XHCI_EVENT_TRB_SIZE;
+    if segment.size < required_bytes { return xhci_erst_invalid_entry(); }
+
+    return XhciErstEntry {
+        ring_segment_base_address: segment.physical_address,
+        ring_segment_size: trb_count,
+        reserved: 0
+    };
+}
