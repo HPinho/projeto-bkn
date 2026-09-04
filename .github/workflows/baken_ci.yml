@@ -47,6 +47,7 @@ jobs:
           test -s build/baken_os.iso
 
       - name: Run Headless QEMU Boot Smoke Test
+        shell: bash
         run: |
           OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
           test -n "$OVMF_CODE"
@@ -54,18 +55,35 @@ jobs:
           test -f "$OVMF_VARS"
           cp "$OVMF_VARS" build/OVMF_VARS.fd
           rm -f build/qemu-serial.log
+
+          # Injeta repetidamente uma tecla via monitor HMP. As primeiras podem
+          # ocorrer ainda durante OVMF; pelo menos uma deve chegar depois que
+          # Baken habilitar IRQ1 no IOAPIC.
           set +e
-          timeout 15s qemu-system-x86_64 \
+          {
+            sleep 4
+            for i in $(seq 1 8); do
+              echo "sendkey a"
+              sleep 1
+            done
+            sleep 20
+          } | timeout 15s qemu-system-x86_64 \
             -machine q35 -m 512M -no-reboot \
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
             -cdrom build/baken_os.iso \
-            -display none -serial file:build/qemu-serial.log
-          status=$?
+            -display none \
+            -monitor stdio \
+            -serial file:build/qemu-serial.log
+          status=${PIPESTATUS[1]}
           set -e
+
           if test -f build/qemu-serial.log; then
             cat build/qemu-serial.log
           fi
           test "$status" -eq 124
           grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
           grep -q "BAKEN:STEP=T" build/qemu-serial.log
+          # STEP=K só aparece depois que IRQ1/0x41 foi realmente entregue,
+          # o i8042 drenou o byte e o dispatcher incrementou o contador + EOI.
+          grep -q "BAKEN:STEP=K" build/qemu-serial.log
