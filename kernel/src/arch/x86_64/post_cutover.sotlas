@@ -9,6 +9,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
+import kernel::arch::x86_64::serial::*;
 import kernel::memory::mmu_activate::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::pmm::*;
@@ -215,6 +216,11 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_activate_interrupt_controllers() { loop {} }
     if !post_cutover_prepare_irqs() { loop {} }
     if !post_cutover_prepare_timer() { loop {} }
+
+    // Diagnóstico best-effort: não é pré-requisito de hardware do kernel.
+    if x86_serial_init() {
+        x86_serial_write_timer_ready_marker();
+    }
 
     // interrupt_enable_timer_only() existe e compila, mas permanece deliberadamente
     // desconectada até esta base passar suíte, cross-build e smoke QEMU.
