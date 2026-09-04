@@ -15,6 +15,7 @@ import kernel::memory::vmm::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::page_table_arena::*;
 import kernel::memory::page_table_writer::*;
+import kernel::memory::page_table_builder::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
@@ -113,8 +114,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // função seria reutilizar memória física antes do firmware liberar ownership.
     pmm_allocator_is_active();
 
-    // Paging/VMM/PAT/direct-map/arena/writer já são contratos fail-closed.
-    // Nenhum mapping é materializado, IA32_PAT não muda e CR3 fica inalterado.
+    // Paging/VMM/PAT/direct-map/arena/writer/builder são contratos fail-closed.
+    // O builder existe, mas não roda aqui: sem arena bootstrap válida não há
+    // escrita de page table. IA32_PAT e CR3 permanecem inalterados.
     x86_page_aligned(X86_PAGE_SIZE);
     x86_pat_index_valid(0);
     vmm_is_active();
