@@ -1,0 +1,69 @@
+// Baken OS — Block Device API nativa.
+//
+// Esta camada não implementa AHCI/NVMe por si só. Ela mantém somente o
+// contrato de ownership/capacidade de um dispositivo de bloco que já tenha
+// sido inicializado por um driver nativo real.
+
+module kernel::storage::block_device;
+
+pub const BLOCK_DEVICE_NONE: u32 = 0;
+pub const BLOCK_DEVICE_AHCI: u32 = 1;
+pub const BLOCK_DEVICE_NVME: u32 = 2;
+
+static mut BLOCK_KIND: u32 = BLOCK_DEVICE_NONE;
+static mut BLOCK_INDEX: u32 = 0;
+static mut BLOCK_SIZE: u32 = 0;
+static mut BLOCK_LAST_LBA: u64 = 0;
+static mut BLOCK_WRITABLE: bool = false;
+static mut BLOCK_NATIVE_IO_READY: bool = false;
+
+@system
+pub fn block_device_reset_registry() -> void {
+    unsafe {
+        BLOCK_KIND = BLOCK_DEVICE_NONE;
+        BLOCK_INDEX = 0;
+        BLOCK_SIZE = 0;
+        BLOCK_LAST_LBA = 0;
+        BLOCK_WRITABLE = false;
+        BLOCK_NATIVE_IO_READY = false;
+    }
+}
+
+// Somente um driver AHCI/NVMe nativo deve chamar este registro depois de
+// concluir inicialização do controlador, fila/comandos e caminho real de I/O.
+@system
+pub fn block_device_register_native(kind: u32, index: u32, block_size: u32, last_lba: u64, writable: bool, io_ready: bool) -> bool {
+    unsafe {
+        if (kind != BLOCK_DEVICE_AHCI && kind != BLOCK_DEVICE_NVME) { return false; }
+        if (block_size == 0 || last_lba == 0 || !io_ready) { return false; }
+        BLOCK_KIND = kind;
+        BLOCK_INDEX = index;
+        BLOCK_SIZE = block_size;
+        BLOCK_LAST_LBA = last_lba;
+        BLOCK_WRITABLE = writable;
+        BLOCK_NATIVE_IO_READY = true;
+        return true;
+    }
+}
+
+@system
+pub fn block_device_has_native_target() -> bool {
+    unsafe { return BLOCK_NATIVE_IO_READY && BLOCK_KIND != BLOCK_DEVICE_NONE; }
+}
+
+@system
+pub fn block_device_has_writable_native_target() -> bool {
+    unsafe { return BLOCK_NATIVE_IO_READY && BLOCK_WRITABLE && BLOCK_KIND != BLOCK_DEVICE_NONE; }
+}
+
+@system
+pub fn block_device_kind() -> u32 { unsafe { return BLOCK_KIND; } }
+
+@system
+pub fn block_device_index() -> u32 { unsafe { return BLOCK_INDEX; } }
+
+@system
+pub fn block_device_block_size() -> u32 { unsafe { return BLOCK_SIZE; } }
+
+@system
+pub fn block_device_last_lba() -> u64 { unsafe { return BLOCK_LAST_LBA; } }
