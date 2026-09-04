@@ -39,6 +39,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/drivers/xhci_address.sotlas", "kernel/src/drivers/xhci_ep0.sotlas",
         "kernel/src/drivers/xhci_descriptor.sotlas", "kernel/src/drivers/xhci_configuration.sotlas",
         "kernel/src/drivers/xhci_hid_context.sotlas", "kernel/src/drivers/xhci_configure_endpoint.sotlas",
+        "kernel/src/drivers/xhci_set_configuration.sotlas",
         "kernel/src/drivers/xhci_ring.sotlas", "kernel/src/drivers/xhci_trb.sotlas",
         "kernel/src/drivers/xhci_event.sotlas", "kernel/src/drivers/xhci_erst.sotlas",
         "kernel/src/drivers/xhci_event_ring.sotlas",
