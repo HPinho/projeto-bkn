@@ -1,16 +1,11 @@
-// Baken OS — Driver de Hardware Nativo i8042 PS/2 Touchpad & Mouse (@system)
-// Controle elétrico direto via portas I/O 0x60 (Dados) e 0x64 (Comando/Status).
-// Desacoplado 100% de UEFI: lê sinais elétricos do touchpad integrado do notebook e mouses PS/2.
+// Baken OS — Driver PS/2 de mouse/touchpad sobre o controlador i8042 comum.
+//
+// Este módulo não acessa mais 0x60/0x64 diretamente. O i8042 roteia bytes de
+// teclado e AUX para filas diferentes, impedindo perda cruzada de eventos.
 
 module kernel::drivers::ps2_mouse;
 
-pub const PS2_DATA_PORT: u16    = 0x60;
-pub const PS2_STATUS_PORT: u16  = 0x64;
-pub const PS2_COMMAND_PORT: u16 = 0x64;
-
-pub const PS2_STATUS_OUTPUT_BUFFER_FULL: u8 = 0x01; // Bit 0: Dado pronto para leitura na porta 0x60
-pub const PS2_STATUS_INPUT_BUFFER_FULL: u8  = 0x02; // Bit 1: Aguardar antes de gravar na porta 0x60/0x64
-pub const PS2_STATUS_AUX_DATA: u8           = 0x20; // Bit 5: Dado originado da porta auxiliar (Touchpad/Mouse)
+import kernel::drivers::i8042::*;
 
 static mut PS2_INITIALIZED: bool = false;
 static mut PS2_MOUSE_PRESENT: bool = false;
@@ -18,220 +13,98 @@ static mut PS2_PACKET_BUFFER: [u8; 4] = [0, 0, 0, 0];
 static mut PS2_PACKET_INDEX: u32 = 0;
 static mut PS2_LAST_BUTTON_STATE: u8 = 0;
 
-// -----------------------------------------------------------------------------
-// AUXILIARES DE CONTROLE DE TEMPO E FLUXO DO BARRAMENTO I/O
-// -----------------------------------------------------------------------------
-
-@system
-fn ps2_wait_write() -> bool {
-    for mut i in 0..100000 {
-        let status: u8 = __inb(PS2_STATUS_PORT);
-        if (status & PS2_STATUS_INPUT_BUFFER_FULL) == 0 {
-            return true;
-        }
-        baken_io_wait();
-    }
-    return false;
-}
-
-@system
-fn ps2_wait_read() -> bool {
-    for mut i in 0..100000 {
-        let status: u8 = __inb(PS2_STATUS_PORT);
-        if (status & PS2_STATUS_OUTPUT_BUFFER_FULL) != 0 {
-            return true;
-        }
-        baken_io_wait();
-    }
-    return false;
-}
-
-@system
-fn ps2_flush_output() -> void {
-    for mut i in 0..100 {
-        let status: u8 = __inb(PS2_STATUS_PORT);
-        if (status & PS2_STATUS_OUTPUT_BUFFER_FULL) != 0 {
-            __inb(PS2_DATA_PORT);
-        } else {
-            break;
-        }
-        baken_io_wait();
-    }
-}
-
-@system
-fn ps2_send_command(cmd: u8) -> bool {
-    if !ps2_wait_write() { return false; }
-    __outb(PS2_COMMAND_PORT, cmd);
-    baken_io_wait();
-    return true;
-}
-
-@system
-fn ps2_write_aux(data: u8) -> bool {
-    // 0xD4 informa ao controlador i8042 que o proximo byte vai para a porta auxiliar (Mouse/Touchpad)
-    if !ps2_send_command(0xD4) { return false; }
-    if !ps2_wait_write() { return false; }
-    __outb(PS2_DATA_PORT, data);
-    baken_io_wait();
-    return true;
-}
-
-@system
-fn ps2_read_ack() -> bool {
-    if !ps2_wait_read() { return false; }
-    let resp: u8 = __inb(PS2_DATA_PORT);
-    return resp == 0xFA; // 0xFA = ACK oficial PS/2
-}
-
-// -----------------------------------------------------------------------------
-// INICIALIZACAO ELETRICA DA CONTROLADORA E TOUCHPAD
-// -----------------------------------------------------------------------------
-
 @system
 pub fn ps2_mouse_init() -> void {
     unsafe {
         PS2_PACKET_INDEX = 0;
         PS2_LAST_BUTTON_STATE = 0;
+        PS2_MOUSE_PRESENT = false;
 
-        // 1. Desativa portas 1 (Teclado) e 2 (Touchpad/Mouse) para configuracao segura
-        ps2_send_command(0xAD); // Disable KBD
-        ps2_send_command(0xA7); // Disable AUX
+        if !i8042_initialize_polling() {
+            PS2_INITIALIZED = true;
+            return;
+        }
+        if !i8042_second_port_present() {
+            PS2_INITIALIZED = true;
+            return;
+        }
 
-        // 2. Limpa qualquer residuo no buffer de saida
-        ps2_flush_output();
+        // Defaults -> sample rate 200 Hz -> resolução 8 counts/mm -> streaming.
+        if !i8042_aux_command(0xF6) {
+            PS2_INITIALIZED = true;
+            return;
+        }
+        if !i8042_aux_command(0xF3) {
+            PS2_INITIALIZED = true;
+            return;
+        }
+        if !i8042_aux_command(200) {
+            PS2_INITIALIZED = true;
+            return;
+        }
+        if !i8042_aux_command(0xE8) {
+            PS2_INITIALIZED = true;
+            return;
+        }
+        if !i8042_aux_command(0x03) {
+            PS2_INITIALIZED = true;
+            return;
+        }
+        if !i8042_aux_command(0xF4) {
+            PS2_INITIALIZED = true;
+            return;
+        }
 
-        // 3. Le o byte de configuracao do controlador i8042
-        if !ps2_send_command(0x20) { return; }
-        if !ps2_wait_read() { return; }
-        let mut config: u8 = __inb(PS2_DATA_PORT);
-
-        // Habilita interrupcao e clock da porta auxiliar (Bit 1 = IRQ12, Bit 5 = Mouse Clock Enable)
-        config = (config | 0x02) & 0xDF;
-        // Habilita interrupcao da porta de teclado (Bit 0 = IRQ1)
-        config = config | 0x01;
-
-        // 4. Grava de volta o byte de configuracao
-        if !ps2_send_command(0x60) { return; }
-        if !ps2_wait_write() { return; }
-        __outb(PS2_DATA_PORT, config);
-        baken_io_wait();
-
-        // 5. Ativa as portas no controlador i8042
-        ps2_send_command(0xA8); // Enable AUX
-        ps2_send_command(0xAE); // Enable KBD
-        ps2_flush_output();
-
-        // 6. Configura o Mouse/Touchpad para padroes eletricos estaveis
-        ps2_write_aux(0xF6); // Set Defaults
-        ps2_read_ack();
-
-        // 7. Configura Sample Rate para 200 Hz (alta precisao e fluidez)
-        ps2_write_aux(0xF3);
-        ps2_read_ack();
-        ps2_write_aux(200);
-        ps2_read_ack();
-
-        // 8. Configura Resolucao para maxima densidade (8 counts/mm = 0x03)
-        ps2_write_aux(0xE8);
-        ps2_read_ack();
-        ps2_write_aux(0x03);
-        ps2_read_ack();
-
-        // 9. Ativa o Modo Streaming / Data Reporting continuo (0xF4)
-        ps2_write_aux(0xF4);
-        let ack: bool = ps2_read_ack();
-
-        ps2_flush_output();
-
-        PS2_MOUSE_PRESENT = ack;
+        PS2_MOUSE_PRESENT = true;
         PS2_INITIALIZED = true;
     }
 }
 
 @system
 pub fn ps2_mouse_is_present() -> bool {
-    unsafe {
-        return PS2_INITIALIZED && PS2_MOUSE_PRESENT;
-    }
+    unsafe { return PS2_INITIALIZED && PS2_MOUSE_PRESENT; }
 }
-
-// -----------------------------------------------------------------------------
-// POLLING DIRETO DE PACOTES DE SINAL ELETRICO BRUTO (3/4 BYTES)
-// -----------------------------------------------------------------------------
 
 @system
 pub fn ps2_mouse_poll(out_dx: *mut i32, out_dy: *mut i32, out_btn: *mut u8) -> u8 {
     unsafe {
-        if !PS2_INITIALIZED {
-            ps2_mouse_init();
-        }
+        if !PS2_INITIALIZED { ps2_mouse_init(); }
+        if !PS2_MOUSE_PRESENT { return 0; }
 
-        // Loop para ler todos os bytes disponiveis no buffer da controladora
+        // Consome exclusivamente a fila AUX; bytes de teclado permanecem na
+        // fila KBD do controlador compartilhado.
         for mut attempt in 0..16 {
-            let status: u8 = __inb(PS2_STATUS_PORT);
-            if (status & PS2_STATUS_OUTPUT_BUFFER_FULL) == 0 {
-                break;
-            }
-
-            // Garante que o dado vem do dispositivo auxiliar (Mouse/Touchpad)
-            let is_aux = (status & PS2_STATUS_AUX_DATA) != 0;
-            let data: u8 = __inb(PS2_DATA_PORT);
-
-            if !is_aux {
-                // Dado pertence ao teclado, ignora neste driver
-                continue;
-            }
+            let mut data: u8 = 0;
+            if !i8042_pop_aux(&mut data) { break; }
 
             let idx = PS2_PACKET_INDEX;
-
-            // Byte 0: Deve ter obrigatoriamente o Bit 3 (0x08) ativo no protocolo PS/2 padrao
-            if idx == 0 {
-                if (data & 0x08) == 0 {
-                    // Perda de sincronismo de pacote: descarta e reinicia busca de cabecalho
-                    PS2_PACKET_INDEX = 0;
-                    continue;
-                }
+            if idx == 0 && (data & 0x08) == 0 {
+                PS2_PACKET_INDEX = 0;
+                continue;
             }
 
             PS2_PACKET_BUFFER[idx as usize] = data;
             PS2_PACKET_INDEX += 1;
 
-            // Pacote completo de 3 bytes recebido com sucesso
             if PS2_PACKET_INDEX >= 3 {
-                let b0: u8 = PS2_PACKET_BUFFER[0];
-                let b1: u8 = PS2_PACKET_BUFFER[1];
-                let b2: u8 = PS2_PACKET_BUFFER[2];
-
+                let b0 = PS2_PACKET_BUFFER[0];
+                let b1 = PS2_PACKET_BUFFER[1];
+                let b2 = PS2_PACKET_BUFFER[2];
                 PS2_PACKET_INDEX = 0;
 
-                // Verificacao de bits de Overflow (se houver, descarta movimento corrompido)
-                let x_overflow = (b0 & 0x40) != 0;
-                let y_overflow = (b0 & 0x80) != 0;
+                if (b0 & 0x40) != 0 || (b0 & 0x80) != 0 { continue; }
 
-                if x_overflow || y_overflow {
-                    continue;
-                }
-
-                // Extracao de botoes
                 let left_btn: u8 = b0 & 0x01;
 
-                // Extracao de deltas com extensao de sinal de 9 bits
                 let mut dx: i32 = b1 as i32;
-                if (b0 & 0x10) != 0 {
-                    dx = dx - 256;
-                }
+                if (b0 & 0x10) != 0 { dx = dx - 256; }
 
                 let mut dy: i32 = b2 as i32;
-                if (b0 & 0x20) != 0 {
-                    dy = dy - 256;
-                }
+                if (b0 & 0x20) != 0 { dy = dy - 256; }
 
-                // Normalizacao de escala e aceleracao balistica suave
                 let mag2 = dx * dx + dy * dy;
                 let scale: i32 = if (mag2 > 64) { 2 } else { 1 };
                 let final_dx: i32 = (dx * scale) / 2;
-                // No protocolo PS/2, dy positivo e para cima. Na tela (Y cresce para baixo), invertemos o sinal.
                 let final_dy: i32 = -((dy * scale) / 2);
 
                 if final_dx != 0 || final_dy != 0 || left_btn != PS2_LAST_BUTTON_STATE {
