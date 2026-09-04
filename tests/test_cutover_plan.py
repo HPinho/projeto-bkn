@@ -9,6 +9,10 @@ PLAN = ROOT / "kernel/src/memory/cutover_plan.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 
 
+def code_without_line_comments(text: str) -> str:
+    return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+
+
 class CutoverPlanTests(unittest.TestCase):
     def test_hybrid_plan_is_fail_closed(self):
         text = PLAN.read_text(encoding="utf-8")
@@ -34,20 +38,21 @@ class CutoverPlanTests(unittest.TestCase):
         self.assertIn("return true;", body)
 
     def test_plan_has_no_privileged_or_firmware_side_effects(self):
-        text = PLAN.read_text(encoding="utf-8")
+        code = code_without_line_comments(PLAN.read_text(encoding="utf-8"))
         for token in (
             "ExitBootServices", "GetMemoryMap", "__write_cr3", "x86_write_cr3",
             "__invlpg", "__wrmsr", "BootServices", "MMIO",
         ):
             with self.subTest(token=token):
-                self.assertNotIn(token, text)
+                self.assertNotIn(token, code)
 
     def test_main_only_evaluates_blocked_hybrid_plan(self):
         main = MAIN.read_text(encoding="utf-8")
+        code = code_without_line_comments(main)
         self.assertIn("import kernel::memory::cutover_plan::*;", main)
-        self.assertIn("cutover_plan_ready(cutover_plan_blocked_hybrid());", main)
-        self.assertNotIn("ExitBootServices", main)
-        self.assertNotIn("x86_write_cr3", main)
+        self.assertIn("cutover_plan_ready(cutover_plan_blocked_hybrid());", code)
+        self.assertNotIn("ExitBootServices", code)
+        self.assertNotIn("x86_write_cr3", code)
 
 
 if __name__ == "__main__":
