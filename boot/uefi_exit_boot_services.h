@@ -4,16 +4,18 @@
 /*
  * Baken OS - algoritmo de handoff final UEFI.
  *
- * Este header pertence exclusivamente ao bootstrap UEFI. Ele NÃO é incluído
- * pelo kernel Sotlas e, nesta etapa, ainda não é chamado por efi_main.
+ * Este header pertence exclusivamente ao bootstrap UEFI. O Memory Map final
+ * alimenta uma callback pura de preparação imediatamente antes de cada
+ * tentativa de ExitBootServices(). A callback pode escrever RAM/page tables,
+ * mas não pode chamar firmware nem realizar qualquer alocação UEFI.
  *
  * Invariantes:
  *  1. o buffer do memory map é alocado enquanto Boot Services ainda vive;
- *  2. GetMemoryMap() é a última operação que pode alterar o map key antes da
- *     tentativa de ExitBootServices();
- *  3. EFI_INVALID_PARAMETER exige adquirir um novo map key e tentar de novo;
- *  4. EFI_BUFFER_TOO_SMALL permite crescer o buffer e reiniciar a sequência;
- *  5. após EFI_SUCCESS nenhum Boot Service pode ser chamado novamente.
+ *  2. GetMemoryMap() é a última operação de firmware antes da callback pura;
+ *  3. a callback reconstrói o cutover para o MapKey que será usado;
+ *  4. EFI_INVALID_PARAMETER exige novo mapa, novo preparo e nova tentativa;
+ *  5. EFI_BUFFER_TOO_SMALL permite crescer o buffer e reiniciar a sequência;
+ *  6. após EFI_SUCCESS nenhum Boot Service pode ser chamado novamente.
  */
 
 #ifndef EFI_SUCCESS
@@ -24,9 +26,13 @@
 #define BAKEN_UEFI_EXIT_MAX_ATTEMPTS 8U
 #endif
 
+#ifndef BAKEN_UEFI_PAGE_SIZE
+#define BAKEN_UEFI_PAGE_SIZE 4096ULL
+#endif
+
 typedef EFI_STATUS (*BAKEN_EFI_EXIT_BOOT_SERVICES)(EFI_HANDLE, UINTN);
 
-typedef struct {
+typedef struct BAKEN_FINAL_MEMORY_MAP {
     void *memory_map;
     UINTN memory_map_size;
     UINTN memory_map_capacity;
@@ -34,6 +40,65 @@ typedef struct {
     UINTN descriptor_size;
     uint32_t descriptor_version;
 } BAKEN_FINAL_MEMORY_MAP;
+
+typedef EFI_STATUS (*BAKEN_PRE_EXIT_CALLBACK)(
+    const BAKEN_FINAL_MEMORY_MAP *state,
+    void *context
+);
+
+/* Layout mínimo comum dos EFI_MEMORY_DESCRIPTOR x86-64. descriptor_size pode
+ * ser maior; por isso a iteração sempre usa o stride entregue pelo firmware. */
+typedef struct {
+    uint32_t type;
+    uint32_t pad;
+    uint64_t physical_start;
+    uint64_t virtual_start;
+    uint64_t number_of_pages;
+    uint64_t attribute;
+} BAKEN_EFI_MEMORY_DESCRIPTOR_PREFIX;
+
+/*
+ * Traduz um endereço observado antes do cutover para o endereço físico que o
+ * Memory Map final descreve. Cobre tanto firmware identity-mapped quanto um
+ * VirtualStart explícito. Zero significa que o endereço não foi localizado.
+ */
+static uint64_t baken_final_map_physical_address(
+    const BAKEN_FINAL_MEMORY_MAP *state,
+    uint64_t address
+) {
+    if (!state || !state->memory_map || state->descriptor_size < 40 ||
+        state->memory_map_size < state->descriptor_size || address == 0) {
+        return 0;
+    }
+
+    const uint8_t *base = (const uint8_t*)state->memory_map;
+    for (UINTN offset = 0;
+         offset + state->descriptor_size <= state->memory_map_size;
+         offset += state->descriptor_size) {
+        const BAKEN_EFI_MEMORY_DESCRIPTOR_PREFIX *descriptor =
+            (const BAKEN_EFI_MEMORY_DESCRIPTOR_PREFIX*)(base + offset);
+        if (descriptor->number_of_pages == 0) continue;
+
+        uint64_t bytes = descriptor->number_of_pages * BAKEN_UEFI_PAGE_SIZE;
+        if (bytes / BAKEN_UEFI_PAGE_SIZE != descriptor->number_of_pages) continue;
+        uint64_t physical_end = descriptor->physical_start + bytes;
+        if (physical_end <= descriptor->physical_start) continue;
+
+        if (address >= descriptor->physical_start && address < physical_end) {
+            return address;
+        }
+
+        if (descriptor->virtual_start != 0) {
+            uint64_t virtual_end = descriptor->virtual_start + bytes;
+            if (virtual_end > descriptor->virtual_start &&
+                address >= descriptor->virtual_start && address < virtual_end) {
+                return descriptor->physical_start +
+                    (address - descriptor->virtual_start);
+            }
+        }
+    }
+    return 0;
+}
 
 static EFI_STATUS baken_prepare_final_memory_map(EFI_BOOT_SERVICES *bs,
                                                   BAKEN_FINAL_MEMORY_MAP *state) {
@@ -73,11 +138,7 @@ static EFI_STATUS baken_prepare_final_memory_map(EFI_BOOT_SERVICES *bs,
     return EFI_SUCCESS;
 }
 
-/*
- * Adquire o mapa dentro de um buffer já reservado. Esta função não aloca e
- * não libera memória, porque qualquer alocação depois do GetMemoryMap final
- * invalidaria o map key que acabou de ser obtido.
- */
+/* Adquire o mapa em buffer já reservado. Não aloca nem libera memória. */
 static EFI_STATUS baken_refresh_final_memory_map(EFI_BOOT_SERVICES *bs,
                                                   BAKEN_FINAL_MEMORY_MAP *state) {
     if (!bs || !state || !state->memory_map || state->memory_map_capacity == 0 ||
@@ -106,17 +167,20 @@ static EFI_STATUS baken_refresh_final_memory_map(EFI_BOOT_SERVICES *bs,
 }
 
 /*
- * Prepara e executa o corte. O caller só deve usar esta função quando TODAS
- * as dependências de Boot Services do kernel já tiverem sido removidas.
- *
- * Ao retornar EFI_SUCCESS, o firmware Boot Services acabou. O caller deve
- * atualizar BakenBootInfo com `state` antes da tentativa final ou garantir que
- * o kernel consuma este mesmo buffer depois do corte sem qualquer Boot Service.
+ * Executa o corte real. Entre o GetMemoryMap final e ExitBootServices existe
+ * somente `prepare_cutover`: uma callback que não recebe EFI_BOOT_SERVICES e
+ * deve ser estritamente livre de chamadas ao firmware.
  */
-static EFI_STATUS baken_exit_boot_services_final(EFI_HANDLE image_handle,
-                                                  EFI_BOOT_SERVICES *bs,
-                                                  BAKEN_FINAL_MEMORY_MAP *state) {
-    if (!bs || !state || !bs->ExitBootServices) return EFI_INVALID_PARAMETER;
+static EFI_STATUS baken_exit_boot_services_final(
+    EFI_HANDLE image_handle,
+    EFI_BOOT_SERVICES *bs,
+    BAKEN_FINAL_MEMORY_MAP *state,
+    BAKEN_PRE_EXIT_CALLBACK prepare_cutover,
+    void *prepare_context
+) {
+    if (!bs || !state || !bs->ExitBootServices || !prepare_cutover) {
+        return EFI_INVALID_PARAMETER;
+    }
 
     BAKEN_EFI_EXIT_BOOT_SERVICES exit_boot_services =
         (BAKEN_EFI_EXIT_BOOT_SERVICES)bs->ExitBootServices;
@@ -136,8 +200,11 @@ static EFI_STATUS baken_exit_boot_services_final(EFI_HANDLE image_handle,
         }
         if (status != EFI_SUCCESS) return status;
 
-        /* CRÍTICO: nenhuma chamada de Boot Service pode existir entre este
-         * GetMemoryMap bem-sucedido e ExitBootServices. */
+        /* Nenhum Boot Service daqui até ExitBootServices. A callback recebe
+         * apenas RAM + o snapshot final, e deve reconstruir PML4/contexto. */
+        status = prepare_cutover(state, prepare_context);
+        if (status != EFI_SUCCESS) return status;
+
         status = exit_boot_services(image_handle, state->map_key);
         if (status == EFI_SUCCESS) {
             return EFI_SUCCESS;
@@ -146,8 +213,7 @@ static EFI_STATUS baken_exit_boot_services_final(EFI_HANDLE image_handle,
             return status;
         }
 
-        /* Map key mudou. Não aloca, não libera, não imprime: apenas refaz
-         * GetMemoryMap no mesmo buffer e tenta novamente. */
+        /* MapKey mudou: refaz GetMemoryMap e a callback, sem cleanup/log. */
     }
 
     return EFI_ABORTED;
