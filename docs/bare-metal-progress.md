@@ -30,11 +30,11 @@ Critério de status:
 | ACPI pós-CR3 | ✅ | 100% | 100% | `BAKEN:STEP=A` observado |
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
-| DMA real | ⚙️ | 77% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas e buffers DMA dos descriptors implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 73% | 22% | QEMU validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Rings, port reset, Enable Slot, contexts, Address Device, EP0, Event consumer, GET_DESCRIPTOR(Device) e leitura/parsing de Configuration + HID Boot + Interrupt IN estão implementados. Configure Endpoint, SET_CONFIGURATION e reports HID ainda pendentes |
+| DMA real | ⚙️ | 79% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas, buffers de descriptors e Transfer Ring HID dedicada estão implementados; o primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
+| xHCI → USB HID | ⚙️ | 76% | 22% | QEMU validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Rings, port reset, Enable Slot, Address Device, EP0, descriptors, parser HID Boot e agora Endpoint Context + Interrupt IN Transfer Ring estão implementados. Configure Endpoint, SET_CONFIGURATION e reports HID ainda pendentes |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~77%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS; a enumeração USB está estruturalmente avançada. O gate runtime imediato continua no controller entre `STEP=8` e `STEP=9`, agora com subcheckpoints adicionais para localizar a falha |
+| **Fundação bare-metal geral** | ⚙️ | **~78%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS; a enumeração USB já chegou estruturalmente até o contexto do endpoint HID. O gate runtime imediato continua no controller entre `STEP=8` e `STEP=9`, agora instrumentado com `h/j` |
 
 ## Estado xHCI atual
 
@@ -91,13 +91,12 @@ Supported Protocol
 → Device/Input Context + EP0 ring
 → Address Device
 → Setup/Data/Status Transfer TRBs
-→ produtor EP0 stateful + doorbell
-→ consumidor único compartilhado do Event Ring
-→ waiter de Transfer Event
-→ GET_DESCRIPTOR(Device) de 18 bytes
-→ GET_DESCRIPTOR(Configuration) em duas fases
+→ produtor EP0 + Event Ring consumer
+→ GET_DESCRIPTOR(Device)
+→ GET_DESCRIPTOR(Configuration)
 → parser Interface/HID/Endpoint
 → seleção HID Boot keyboard/mouse + Interrupt IN
+→ HID Endpoint Context + Transfer Ring dedicada
 → Configure Endpoint
 → SET_CONFIGURATION
 → HID reports / keyboard / mouse
