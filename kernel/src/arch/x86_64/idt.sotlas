@@ -1,8 +1,7 @@
 // Baken OS - x86_64 Interrupt Descriptor Table foundation.
 //
-// Constroi gates de 16 bytes em memoria. O backend ja possui LIDT real e entry
-// stubs 0-31, mas o carregamento permanece bloqueado enquanto o kernel depende
-// de UEFI Boot Services.
+// Constrói gates de 16 bytes em memória. Exceções e IRQs externos usam stubs
+// reais do backend x86; LIDT continua separado da política de roteamento.
 
 module kernel::arch::x86_64::idt;
 
@@ -100,12 +99,22 @@ pub fn idt_set_exception_gate(vector: u16, handler: u64) -> bool {
     );
 }
 
-// Popula os vetores 0..31 com os stubs gerados pelo backend x86. Isso apenas
-// escreve a tabela em RAM: LIDT continua proibido durante a fase UEFI híbrida.
+@system
+pub fn idt_set_irq_gate(vector: u16, handler: u64) -> bool {
+    if vector < IDT_EXCEPTION_COUNT || vector >= IDT_VECTOR_COUNT as u16 { return false; }
+    return idt_set_gate(
+        vector,
+        handler,
+        GDT_KERNEL_CODE_SELECTOR,
+        0,
+        IDT_GATE_INTERRUPT
+    );
+}
+
 @system
 pub fn idt_prepare_exceptions() -> bool {
     idt_prepare_empty();
-    let vector: u16 = 0;
+    let mut vector: u16 = 0;
     while vector < IDT_EXCEPTION_COUNT {
         let handler: u64 = x86_exception_stub_address(vector);
         if handler == 0 { return false; }
@@ -118,7 +127,6 @@ pub fn idt_prepare_exceptions() -> bool {
 
 @system
 pub fn idt_prepare_empty() -> void {
-    // Zero-init estatico garante que vetores nao registrados permanecam non-present.
     unsafe {
         IDT_PREPARED = true;
         IDT_EXCEPTIONS_READY = false;
