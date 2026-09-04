@@ -23,7 +23,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/baken_design.sotlas", "kernel/src/acpi/tables.sotlas",
         "kernel/src/acpi/madt.sotlas", "kernel/src/acpi/mcfg.sotlas",
         "kernel/src/acpi/hpet.sotlas", "kernel/src/acpi/fadt.sotlas",
-        "kernel/src/acpi/pm_timer.sotlas",
+        "kernel/src/acpi/pm_timer.sotlas", "kernel/src/interrupts/route.sotlas",
         "kernel/src/drivers/display_driver.sotlas",
         "kernel/src/drivers/pci_bus.sotlas", "kernel/src/drivers/storage_discovery.sotlas",
         "kernel/src/drivers/i8042.sotlas", "kernel/src/drivers/ps2_mouse.sotlas",
