@@ -10,7 +10,10 @@ import kernel::baken_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 
-// Estrutura de Informações de Inicialização repassada pelo Bootloader UEFI
+// Envelope de transição BakenBootInfo v2.
+// Os primeiros campos preservam o ABI legado enquanto input/storage/timing
+// ainda usam pontes UEFI. Os campos finais já carregam metadados necessários
+// ao futuro handoff pós-ExitBootServices.
 pub struct BakenBootInfo {
     pub framebuffer_base: *mut u32;
     pub framebuffer_size: usize;
@@ -23,11 +26,18 @@ pub struct BakenBootInfo {
     pub pointer_protocol: *mut u8;
     pub block_io_protocol: *mut u8;
     pub install_target_block_io_protocol: *mut u8;
+
+    pub version: u32;
+    pub struct_size: u32;
+    pub flags: u64;
+    pub memory_descriptor_size: u64;
+    pub memory_descriptor_version: u32;
+    pub pixel_format: u32;
+    pub acpi_rsdp: *const u8;
 }
 
-// Entrada inicial do kernel Sotlas. A primeira meta é iniciar uma sessão gráfica
-// íntegra; drivers e serviços só entram aqui depois de terem testes de I/O e
-// de falha correspondentes.
+// Entrada inicial do kernel Sotlas. Durante a migração, a sessão gráfica ainda
+// usa o adaptador UEFI do runtime; nenhum código novo deve aumentar essa dívida.
 @system
 @export
 pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
@@ -35,7 +45,7 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         loop {}
     }
 
-    // O framebuffer GOP é o único recurso de hardware necessário nesta fase.
+    // O framebuffer GOP é transportado como endereço físico/passivo no handoff.
     display_init(
         boot_info.framebuffer_base,
         boot_info.screen_width,
@@ -47,8 +57,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // A composição é dona do ciclo visual; nenhum aplicativo grava no GOP.
     desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
 
-    // O adaptador UEFI entrega entrada e tempo; a composição continua sendo
-    // a única dona da renderização.
+    // Compatibilidade temporária: baken_runtime ainda interpreta o prefixo
+    // legado do BootInfo. Isso será removido quando Input HAL, timer e storage
+    // nativos permitirem ExitBootServices antes da entrada normal do kernel.
     baken_runtime_run(boot_info as *const void, boot_info.screen_width, boot_info.screen_height);
     loop {}
 }
