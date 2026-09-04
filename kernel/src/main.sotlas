@@ -44,11 +44,9 @@ import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
 
 pub const BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID: u64 = 8;
+pub const BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID: u64 = 16;
+pub const BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID: u64 = 32;
 
-// Envelope de transição BakenBootInfo v2.
-// Os primeiros campos preservam o ABI legado enquanto input/storage/timing
-// ainda usam pontes UEFI. Os campos finais já carregam metadados necessários
-// ao futuro handoff pós-ExitBootServices.
 pub struct BakenBootInfo {
     pub framebuffer_base: *mut u32;
     pub framebuffer_size: usize;
@@ -73,6 +71,14 @@ pub struct BakenBootInfo {
     pub page_table_arena_physical_base: u64;
     pub page_table_arena_virtual_base: *mut u8;
     pub page_table_arena_page_count: u64;
+
+    pub loaded_image_physical_base: u64;
+    pub loaded_image_virtual_base: *mut u8;
+    pub loaded_image_size: u64;
+
+    pub transition_stack_physical_base: u64;
+    pub transition_stack_virtual_base: *mut u8;
+    pub transition_stack_page_count: u64;
 }
 
 @system
@@ -94,11 +100,26 @@ pub fn baken_bootinfo_v2_valid(boot_info: *const BakenBootInfo) -> bool {
             return false;
         }
     }
+
+    if (boot_info.flags & BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID) != 0 {
+        if boot_info.struct_size < 192 { return false; }
+        if boot_info.loaded_image_physical_base == 0 || boot_info.loaded_image_size == 0 { return false; }
+        if boot_info.loaded_image_virtual_base == (null as *mut u8) { return false; }
+    }
+
+    if (boot_info.flags & BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID) != 0 {
+        if boot_info.struct_size < 192 { return false; }
+        if boot_info.transition_stack_physical_base == 0 { return false; }
+        if boot_info.transition_stack_virtual_base == (null as *mut u8) { return false; }
+        if boot_info.transition_stack_page_count == 0 { return false; }
+        if (boot_info.transition_stack_physical_base % X86_PAGE_SIZE) != 0 { return false; }
+        if ((boot_info.transition_stack_virtual_base as usize) % (X86_PAGE_SIZE as usize)) != 0 {
+            return false;
+        }
+    }
     return true;
 }
 
-// Entrada inicial do kernel Sotlas. Durante a migração, a sessão gráfica ainda
-// usa o adaptador UEFI do runtime; nenhum código novo deve aumentar essa dívida.
 @system
 @export
 pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
@@ -106,9 +127,6 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         loop {}
     }
 
-    // Prepara estruturas x86-64 concretas em memória antes das demais camadas.
-    // Os gates 0..31 recebem endereços reais dos stubs, mas LGDT/LIDT/LTR
-    // continuam proibidos enquanto Boot Services ainda é usado.
     exception_state_reset();
     tss_prepare_default_stacks();
     gdt_prepare();
@@ -117,9 +135,6 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         loop {}
     }
 
-    // O bit 1 indica que o bootloader entregou um snapshot real do UEFI
-    // Memory Map. Por enquanto o PMM apenas inventaria/classifica as regiões:
-    // nenhuma EfiConventionalMemory é reutilizada enquanto Boot Services vive.
     if ((boot_info.flags & 2) != 0 &&
         boot_info.memory_map_base != (null as *const u8) &&
         boot_info.memory_descriptor_size >= 40) {
@@ -130,31 +145,18 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         );
     }
 
-    // A arena de page tables já pode ser reservada pelo bootstrap, mas ainda
-    // não é consumida nesta rota híbrida. O alias permanece apenas metadado até
-    // o caminho pós-ExitBootServices possuir imagem/stack de transição mapeadas.
+    // Arena, imagem carregada e stack própria podem estar presentes no handoff,
+    // mas continuam apenas como metadados durante a rota híbrida. O mapper de
+    // transição NÃO é executado enquanto Boot Services ainda for necessário.
     pmm_allocator_is_active();
-
-    // Política do Memory Map + paging/VMM/direct-map/range-builder/arena/writer/
-    // mapper/builder/transition-map são contratos fail-closed. Nenhum deles
-    // materializa o mapa na rota híbrida. IA32_PAT e CR3 permanecem inalterados.
     x86_page_aligned(X86_PAGE_SIZE);
     x86_pat_index_valid(0);
     vmm_is_active();
 
-    // Os contratos DMA/xHCI ring/TRB/event/ERST/event-ring já fazem parte do
-    // grafo, mas permanecem fail-closed enquanto o PMM não possuir allocator físico.
     dma_allocator_available();
 
-    // ACPI é validada por assinatura/checksum antes de qualquer consumidor
-    // usar MADT/MCFG/HPET/FADT. Falha de ACPI não é fatal nesta fase híbrida;
-    // apenas mantém essas capacidades indisponíveis.
     if boot_info.acpi_rsdp != (null as *const u8) {
         if acpi_init(boot_info.acpi_rsdp) {
-            // Inventários passivos: nenhum LAPIC/IOAPIC/HPET/PM timer é
-            // ativado e nenhum endereço ECAM/MMIO é acessado enquanto
-            // VMM/page tables próprios ainda não existem. O módulo de rotas
-            // consome MADT apenas quando um IRQ for planejado futuramente.
             madt_init();
             mcfg_init();
             hpet_init();
@@ -162,17 +164,9 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         }
     }
 
-    // Descoberta PCI é somente leitura. Ela registra hardware real, mas não
-    // habilita Bus Master, I/O/Memory Space nem promove dispositivos para
-    // "drivers prontos". O mechanism #1 continua temporário; MCFG apenas
-    // inventaria ECAM por ora.
     pci_scan_all();
-
-    // xHCI discovery apenas registra candidatos PCI 0C/03/30 e BAR0. Nenhum
-    // reset de controlador, MMIO, DMA, MSI/MSI-X ou ring é criado aqui.
     xhci_discovery_scan();
 
-    // O framebuffer GOP é transportado como endereço físico/passivo no handoff.
     display_init(
         boot_info.framebuffer_base,
         boot_info.screen_width,
@@ -180,13 +174,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
         boot_info.pixels_per_scanline
     );
     baken_runtime_init_assets();
-
-    // A composição é dona do ciclo visual; nenhum aplicativo grava no GOP.
     desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
 
-    // Compatibilidade temporária: baken_runtime ainda interpreta o prefixo
-    // legado do BootInfo. Isso será removido quando Input HAL, timer e storage
-    // nativos permitirem ExitBootServices antes da entrada normal do kernel.
+    // Compatibilidade temporária: baken_runtime ainda interpreta somente o
+    // prefixo legado congelado do BootInfo.
     baken_runtime_run(boot_info as *const void, boot_info.screen_width, boot_info.screen_height);
     loop {}
 }
