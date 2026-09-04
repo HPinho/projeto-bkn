@@ -1,0 +1,48 @@
+// Baken OS — backend nativo do ACPI PM Timer em System I/O.
+//
+// Esta camada é a primeira consumidora ativa do inventário FADT. Somente
+// endereços de porta x86 válidos são lidos; System Memory continua bloqueado
+// até o VMM possuir mapeamento MMIO explícito.
+
+module kernel::acpi::pm_timer;
+
+import kernel::acpi::fadt::*;
+
+pub const ACPI_PM_TIMER_MASK_24: u32 = 0x00FFFFFF;
+pub const ACPI_PM_TIMER_MASK_32: u32 = 0xFFFFFFFF;
+
+@system
+pub fn acpi_pm_timer_port_ready() -> bool {
+    if !fadt_pm_timer_is_ready() { return false; }
+    if fadt_pm_timer_address_space() != ACPI_GAS_SYSTEM_IO { return false; }
+    let address = fadt_pm_timer_address();
+    if address == 0 || address > 0xFFFF { return false; }
+    let bits = fadt_pm_timer_counter_bits();
+    return bits == 24 || bits == 32;
+}
+
+@system
+pub fn acpi_pm_timer_read_counter() -> u32 {
+    if !acpi_pm_timer_port_ready() { return 0; }
+    let port = fadt_pm_timer_address() as u16;
+    let value = __inl(port);
+    if fadt_pm_timer_counter_bits() == 24 {
+        return value & ACPI_PM_TIMER_MASK_24;
+    }
+    return value;
+}
+
+@system
+pub fn acpi_pm_timer_elapsed_ticks(start: u32, current: u32) -> u32 {
+    if !acpi_pm_timer_port_ready() { return 0; }
+    if fadt_pm_timer_counter_bits() == 24 {
+        return (current - start) & ACPI_PM_TIMER_MASK_24;
+    }
+    return current - start;
+}
+
+@system
+pub fn acpi_pm_timer_frequency_hz() -> u64 {
+    if !acpi_pm_timer_port_ready() { return 0; }
+    return fadt_pm_timer_frequency_hz();
+}
