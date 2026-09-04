@@ -10,6 +10,7 @@ import kernel::baken_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
+import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
@@ -94,6 +95,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
             boot_info.memory_descriptor_size as usize
         );
     }
+
+    // O contrato DMA já faz parte do grafo, mas permanece fail-closed enquanto
+    // o PMM não possuir um allocator físico pós-ExitBootServices.
+    dma_allocator_available();
 
     // ACPI é validada por assinatura/checksum antes de qualquer consumidor
     // usar MADT/MCFG/HPET/FADT. Falha de ACPI não é fatal nesta fase híbrida;
