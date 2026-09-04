@@ -12,6 +12,7 @@
 
 typedef uint16_t CHAR16;
 typedef uint64_t UINTN;
+typedef uint64_t EFI_PHYSICAL_ADDRESS;
 typedef void* EFI_HANDLE;
 typedef UINTN EFI_STATUS;
 
@@ -23,8 +24,10 @@ typedef UINTN EFI_STATUS;
 #define EFI_OUT_OF_RESOURCES EFI_ERROR(9)
 #define EFI_ABORTED EFI_ERROR(21)
 #define EFI_LOADER_DATA 2U
+#define ALLOCATE_ANY_PAGES 0U
 #define BY_PROTOCOL 2U
 #define PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR 1U
+#define BAKEN_PAGE_TABLE_ARENA_PAGES 1024ULL
 
 typedef struct {
     uint32_t Data1;
@@ -164,6 +167,7 @@ typedef struct _EFI_BLOCK_IO_PROTOCOL {
 
 typedef EFI_STATUS (*EFI_HANDLE_PROTOCOL)(EFI_HANDLE, const EFI_GUID*, void**);
 typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(uint32_t, const EFI_GUID*, void*, UINTN*, EFI_HANDLE**);
+typedef EFI_STATUS (*EFI_ALLOCATE_PAGES)(uint32_t, uint32_t, UINTN, EFI_PHYSICAL_ADDRESS*);
 typedef EFI_STATUS (*EFI_GET_MEMORY_MAP)(UINTN*, void*, UINTN*, UINTN*, uint32_t*);
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(uint32_t, UINTN, void**);
 typedef EFI_STATUS (*EFI_FREE_POOL)(void*);
@@ -183,6 +187,32 @@ static void *find_acpi_rsdp(const EFI_SYSTEM_TABLE *st) {
         if (guid_equal(&entry->VendorGuid, &EFI_ACPI_10_TABLE_GUID)) rsdp_10 = entry->VendorTable;
     }
     return rsdp_10;
+}
+
+static EFI_STATUS reserve_page_table_arena(EFI_BOOT_SERVICES *bs,
+                                           BakenBootInfo *boot_info) {
+    if (!bs || !bs->AllocatePages || !boot_info) return EFI_INVALID_PARAMETER;
+
+    EFI_ALLOCATE_PAGES allocate_pages = (EFI_ALLOCATE_PAGES)bs->AllocatePages;
+    EFI_PHYSICAL_ADDRESS physical_base = 0;
+    EFI_STATUS status = allocate_pages(
+        ALLOCATE_ANY_PAGES,
+        EFI_LOADER_DATA,
+        BAKEN_PAGE_TABLE_ARENA_PAGES,
+        &physical_base
+    );
+    if (status != EFI_SUCCESS || physical_base == 0 || (physical_base & 0xFFFULL) != 0) {
+        return status == EFI_SUCCESS ? EFI_OUT_OF_RESOURCES : status;
+    }
+
+    boot_info->page_table_arena_physical_base = physical_base;
+    /* Durante Boot Services, a área retornada por AllocatePages é acessível
+     * pelo address space UEFI atual. Guardamos esse alias explicitamente; o
+     * kernel nunca deve reconstruí-lo a partir do PA depois de trocar CR3. */
+    boot_info->page_table_arena_virtual_base = (void*)(uintptr_t)physical_base;
+    boot_info->page_table_arena_page_count = BAKEN_PAGE_TABLE_ARENA_PAGES;
+    boot_info->flags |= BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID;
+    return EFI_SUCCESS;
 }
 
 /* Captura um snapshot real do memory map com folga para alterações causadas
@@ -416,6 +446,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_info.pixel_format = gop->Mode->Info->PixelFormat;
     boot_info.acpi_rsdp = find_acpi_rsdp(SystemTable);
     if (boot_info.acpi_rsdp) boot_info.flags |= BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID;
+
+    /* Reserva todas as páginas de page table ANTES do snapshot entregue ao
+     * kernel. Assim a própria arena aparece como EfiLoaderData no Memory Map e
+     * não poderá ser escolhida pelo futuro PMM como ConventionalMemory. */
+    if (reserve_page_table_arena(bs, &boot_info) != EFI_SUCCESS) {
+        return EFI_OUT_OF_RESOURCES;
+    }
 
     UINTN map_size = 0;
     UINTN descriptor_size = 0;
