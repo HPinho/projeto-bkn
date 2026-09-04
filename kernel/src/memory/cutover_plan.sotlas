@@ -1,0 +1,48 @@
+// Baken OS — contrato fail-closed para o futuro corte de UEFI Boot Services.
+//
+// Este módulo não chama firmware, não toca CR3 e não ativa PMM/VMM. Ele apenas
+// concentra as pré-condições que precisam ser verdadeiras ANTES de o bootstrap
+// poder executar o GetMemoryMap final + ExitBootServices.
+
+module kernel::memory::cutover_plan;
+
+pub struct CutoverPlan {
+    pub handoff_valid: bool;
+    pub final_memory_map_ready: bool;
+    pub page_tables_ready: bool;
+    pub transition_image_ready: bool;
+    pub transition_stack_ready: bool;
+    pub native_timer_ready: bool;
+    pub native_input_ready: bool;
+    pub native_storage_ready: bool;
+    pub uefi_bridge_active: bool;
+}
+
+@system
+pub fn cutover_plan_blocked_hybrid() -> CutoverPlan {
+    return CutoverPlan {
+        handoff_valid: false,
+        final_memory_map_ready: false,
+        page_tables_ready: false,
+        transition_image_ready: false,
+        transition_stack_ready: false,
+        native_timer_ready: false,
+        native_input_ready: false,
+        native_storage_ready: false,
+        uefi_bridge_active: true
+    };
+}
+
+@system
+pub fn cutover_plan_ready(plan: CutoverPlan) -> bool {
+    if plan.uefi_bridge_active { return false; }
+    if !plan.handoff_valid { return false; }
+    if !plan.final_memory_map_ready { return false; }
+    if !plan.page_tables_ready { return false; }
+    if !plan.transition_image_ready { return false; }
+    if !plan.transition_stack_ready { return false; }
+    if !plan.native_timer_ready { return false; }
+    if !plan.native_input_ready { return false; }
+    if !plan.native_storage_ready { return false; }
+    return true;
+}
