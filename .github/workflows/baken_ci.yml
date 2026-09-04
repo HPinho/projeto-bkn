@@ -68,3 +68,6 @@ jobs:
           fi
           test "$status" -eq 124
           grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
+          # TIMER_READY prova calibração; STEP=T só é emitido após STI, entrega
+          # real do vetor 0x40, incremento do contador e EOI pelo dispatcher.
+          grep -q "BAKEN:STEP=T" build/qemu-serial.log
