@@ -1,0 +1,251 @@
+// Baken OS — primeiro DMA ativo xHCI, ainda sem interrupções do controller.
+//
+// Pré-condição: xHC resetado/HALTED e DCBAAP/CRCR/ERST já programados. A arena
+// é marcada CPU+device shared, um No-op Command é publicado no Command Ring,
+// Bus Master é habilitado, Run/Stop inicia o xHC e Doorbell 0 é tocado. O
+// sucesso só é aceito após Command Completion Event real no Event Ring.
+
+module kernel::drivers::xhci_start;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::dma::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::xhci_discovery::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_runtime::*;
+import kernel::drivers::xhci_program::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
+import kernel::drivers::xhci_event::*;
+
+pub const XHCI_START_POLL_LIMIT: u64 = 10000000;
+pub const XHCI_USBSTS_HOST_CONTROLLER_ERROR: u32 = 1 << 12;
+pub const XHCI_ERDP_EHB: u64 = 1 << 3;
+
+static mut XHCI_START_READY: bool = false;
+static mut XHCI_START_NOOP_COMPLETED: bool = false;
+static mut XHCI_START_SHARED_ARENA: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+
+@system
+fn xhci_start_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_start_map_address(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_start_page_base(address));
+}
+
+@system
+fn xhci_start_write64(address: u64, value: u64) -> bool {
+    if !xhci_start_map_address(address) || !xhci_start_map_address(address + 4) {
+        return false;
+    }
+    x86_mmio_write32(address, (value & 0xFFFFFFFF) as u32);
+    x86_mmio_write32(address + 4, ((value >> 32) & 0xFFFFFFFF) as u32);
+    return true;
+}
+
+@system
+fn xhci_start_build_shared_arena() -> DmaBuffer {
+    let physical = xhci_runtime_dcbaa_physical();
+    let pages = xhci_runtime_total_pages();
+    if physical == 0 || pages == 0 { return dma_invalid_buffer(); }
+    let size = pages * XHCI_RUNTIME_PAGE_SIZE;
+    if size / XHCI_RUNTIME_PAGE_SIZE != pages { return dma_invalid_buffer(); }
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 { return dma_invalid_buffer(); }
+    let buffer = DmaBuffer {
+        virtual_address: virtual_address as *mut u8,
+        physical_address: physical,
+        size: size,
+        alignment: XHCI_RUNTIME_PAGE_SIZE,
+        owner: DMA_OWNER_CPU,
+        fence: 0,
+        valid: true
+    };
+    if !dma_buffer_cpu_owned(&buffer) { return dma_invalid_buffer(); }
+    return buffer;
+}
+
+@system
+fn xhci_start_set_bus_master(enabled: bool) -> bool {
+    let candidate = xhci_discovery_candidate(0);
+    if candidate == (null as *const XhciControllerCandidate) || !candidate.valid { return false; }
+    let current = pci_read_config16(candidate.bus, candidate.slot, candidate.func, 0x04);
+    let updated = if enabled {
+        current | PCI_COMMAND_BUS_MASTER | PCI_COMMAND_MEMORY_SPACE
+    } else {
+        current & ~PCI_COMMAND_BUS_MASTER
+    };
+    pci_write_command(candidate.bus, candidate.slot, candidate.func, updated);
+    let after = pci_read_config16(candidate.bus, candidate.slot, candidate.func, 0x04);
+    if enabled {
+        return (after & PCI_COMMAND_BUS_MASTER) != 0 &&
+            (after & PCI_COMMAND_MEMORY_SPACE) != 0;
+    }
+    return (after & PCI_COMMAND_BUS_MASTER) == 0;
+}
+
+@system
+fn xhci_start_stop_controller() -> bool {
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return false; }
+    let command = x86_mmio_read32(operational + XHCI_OP_USBCMD);
+    x86_mmio_write32(operational + XHCI_OP_USBCMD, command & ~XHCI_USBCMD_RUN_STOP);
+    let mut spins: u64 = 0;
+    while spins < XHCI_START_POLL_LIMIT {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HCHALTED) != 0 { return true; }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn xhci_start_wait_running() -> bool {
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return false; }
+    let mut spins: u64 = 0;
+    while spins < XHCI_START_POLL_LIMIT {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HOST_CONTROLLER_ERROR) != 0 { return false; }
+        if (status & XHCI_USBSTS_HCHALTED) == 0 { return true; }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn xhci_start_publish_noop(command_physical: u64) -> bool {
+    let command_virtual = direct_map_virtual_address(command_physical);
+    if command_virtual == 0 { return false; }
+    let slot = command_virtual as *mut XhciTrb;
+    let noop = xhci_trb_noop_command(true);
+    quench {
+        unsafe { *slot = noop; }
+    }
+    return true;
+}
+
+@system
+fn xhci_start_ring_command_doorbell() -> bool {
+    let mmio = xhci_controller_mmio_base();
+    if mmio == 0 { return false; }
+    let dboff = (x86_mmio_read32(mmio + XHCI_DBOFF) as u64) & 0xFFFFFFFC;
+    let doorbell0 = mmio + dboff;
+    if doorbell0 < mmio || !xhci_start_map_address(doorbell0) { return false; }
+    x86_mmio_write32(doorbell0, 0);
+    return true;
+}
+
+@system
+fn xhci_start_wait_noop_completion(command_physical: u64) -> bool {
+    let event_physical = xhci_runtime_event_ring_physical();
+    let event_virtual = direct_map_virtual_address(event_physical);
+    if event_virtual == 0 { return false; }
+    let event = event_virtual as *const XhciTrb;
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return false; }
+
+    let mut spins: u64 = 0;
+    while spins < XHCI_START_POLL_LIMIT {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HOST_CONTROLLER_ERROR) != 0 { return false; }
+
+        if xhci_event_cycle(event) {
+            if xhci_event_type(event) != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT { return false; }
+            if !xhci_event_success(event) { return false; }
+            if xhci_command_completion_trb_pointer(event) != command_physical { return false; }
+
+            let intr0 = xhci_program_runtime_base() + XHCI_RUNTIME_INTERRUPTER0;
+            let next_erdp = event_physical + XHCI_TRB_SIZE;
+            if intr0 < xhci_program_runtime_base() || next_erdp < event_physical { return false; }
+            if !xhci_start_write64(intr0 + XHCI_INTR_ERDP, next_erdp | XHCI_ERDP_EHB) {
+                return false;
+            }
+            return true;
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn xhci_start_rollback() -> void {
+    xhci_start_stop_controller();
+    xhci_start_set_bus_master(false);
+    unsafe {
+        if dma_buffer_shared(&XHCI_START_SHARED_ARENA) {
+            dma_unshare_from_device(&mut XHCI_START_SHARED_ARENA);
+        }
+        XHCI_START_READY = false;
+        XHCI_START_NOOP_COMPLETED = false;
+    }
+}
+
+@system
+pub fn xhci_start_and_prove_noop() -> bool {
+    unsafe {
+        XHCI_START_READY = false;
+        XHCI_START_NOOP_COMPLETED = false;
+        XHCI_START_SHARED_ARENA = dma_invalid_buffer();
+    }
+    if !xhci_controller_is_ready() || !xhci_runtime_is_ready() || !xhci_program_is_ready() {
+        return false;
+    }
+
+    let operational = xhci_controller_operational_base();
+    if operational == 0 ||
+       (x86_mmio_read32(operational + XHCI_OP_USBSTS) & XHCI_USBSTS_HCHALTED) == 0 {
+        return false;
+    }
+
+    let command_physical = xhci_runtime_command_ring_physical();
+    if command_physical == 0 || !xhci_start_publish_noop(command_physical) { return false; }
+
+    let mut shared = xhci_start_build_shared_arena();
+    if !dma_share_with_device(&mut shared) || !dma_buffer_shared(&shared) { return false; }
+    unsafe { XHCI_START_SHARED_ARENA = shared; }
+
+    if !xhci_start_set_bus_master(true) {
+        xhci_start_rollback();
+        return false;
+    }
+
+    let command = x86_mmio_read32(operational + XHCI_OP_USBCMD);
+    x86_mmio_write32(operational + XHCI_OP_USBCMD, command | XHCI_USBCMD_RUN_STOP);
+    if !xhci_start_wait_running() {
+        xhci_start_rollback();
+        return false;
+    }
+
+    if !xhci_start_ring_command_doorbell() ||
+       !xhci_start_wait_noop_completion(command_physical) {
+        xhci_start_rollback();
+        return false;
+    }
+
+    unsafe {
+        XHCI_START_NOOP_COMPLETED = true;
+        XHCI_START_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_start_is_ready() -> bool { unsafe { return XHCI_START_READY; } }
+
+@system
+pub fn xhci_start_noop_completed() -> bool { unsafe { return XHCI_START_NOOP_COMPLETED; } }
