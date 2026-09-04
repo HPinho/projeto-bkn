@@ -10,6 +10,7 @@ import kernel::baken_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
+import kernel::memory::pmm_allocator::*;
 import kernel::memory::dma::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
@@ -100,6 +101,11 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
             boot_info.memory_descriptor_size as usize
         );
     }
+
+    // O bootstrap allocator pós-ExitBootServices já é compilado pelo grafo,
+    // porém NÃO é ativado aqui. O boot atual ainda usa UEFI; ativá-lo nesta
+    // função seria reutilizar memória física antes do firmware liberar ownership.
+    pmm_allocator_is_active();
 
     // Os contratos DMA/xHCI ring/TRB/event/ERST/event-ring já fazem parte do
     // grafo, mas permanecem fail-closed enquanto o PMM não possuir allocator físico.
