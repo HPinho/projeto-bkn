@@ -12,6 +12,7 @@ import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::vmm::*;
+import kernel::memory::memory_map_policy::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::page_table_arena::*;
 import kernel::memory::page_table_writer::*;
@@ -115,9 +116,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // função seria reutilizar memória física antes do firmware liberar ownership.
     pmm_allocator_is_active();
 
-    // Paging/VMM/PAT/direct-map/arena/writer/mapper/builder são contratos fail-closed.
-    // Mapper e builder existem, mas não rodam aqui: sem arena bootstrap válida
-    // não há escrita de page table. IA32_PAT e CR3 permanecem inalterados.
+    // Política do Memory Map + paging/VMM/direct-map/arena/writer/mapper/builder
+    // são contratos fail-closed. Mapper e builder não rodam aqui; o Memory Map
+    // também não é convertido em mappings durante a fase híbrida. IA32_PAT e
+    // CR3 permanecem inalterados.
     x86_page_aligned(X86_PAGE_SIZE);
     x86_pat_index_valid(0);
     vmm_is_active();
