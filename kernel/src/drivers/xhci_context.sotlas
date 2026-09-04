@@ -99,7 +99,7 @@ fn xhci_context_size_bytes() -> u32 {
 }
 
 @system
-fn xhci_context_ep0_max_packet(speed_id: u8) -> u16 {
+fn xhci_context_compute_ep0_max_packet(speed_id: u8) -> u16 {
     if speed_id == 1 || speed_id == 2 { return 8; }
     if speed_id == 3 { return 64; }
     if speed_id >= 4 { return 512; }
@@ -167,7 +167,7 @@ pub fn xhci_context_prepare_for_enabled_slot() -> bool {
     let context_size = xhci_context_size_bytes();
     if context_size != 32 && context_size != 64 { return false; }
     let speed_id = unsafe { (*snapshot).speed_id };
-    let max_packet = xhci_context_ep0_max_packet(speed_id);
+    let max_packet = xhci_context_compute_ep0_max_packet(speed_id);
     if max_packet == 0 { return false; }
 
     let mut arena = dma_alloc(XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE,
