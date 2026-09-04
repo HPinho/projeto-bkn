@@ -1,10 +1,12 @@
 // Baken OS — núcleo ACPI read-only.
 //
-// Valida RSDP/RSDT/XSDT por checksum e localiza SDTs por assinatura. Esta
-// camada não programa APIC, IOAPIC, HPET, PCIe ECAM ou AML; apenas estabelece
-// uma raiz ACPI confiável recebida do handoff UEFI.
+// Valida RSDP/RSDT/XSDT por checksum e localiza SDTs por assinatura. Antes do
+// cutover mantém o modo legado/identidade; depois de CR3 traduz todos os
+// endereços físicos de SDTs pela janela direct-map do Baken.
 
 module kernel::acpi::tables;
+
+import kernel::memory::direct_map::*;
 
 pub const ACPI_RSDP_V1_LENGTH: usize = 20;
 pub const ACPI_RSDP_V2_MIN_LENGTH: usize = 36;
@@ -23,6 +25,7 @@ static mut ACPI_READY: bool = false;
 static mut ACPI_ROOT: *const u8 = null as *const u8;
 static mut ACPI_ROOT_ENTRY_SIZE: usize = 0;
 static mut ACPI_REVISION: u8 = 0;
+static mut ACPI_POST_CUTOVER_DIRECT_MAP: bool = false;
 
 @system
 fn acpi_read_u32(base: *const u8, offset: usize) -> u32 {
@@ -65,6 +68,19 @@ fn acpi_rsdp_signature_valid(rsdp: *const u8) -> bool {
 }
 
 @system
+fn acpi_sdt_pointer(physical_address: u64) -> *const u8 {
+    if physical_address == 0 { return null as *const u8; }
+    unsafe {
+        if ACPI_POST_CUTOVER_DIRECT_MAP {
+            let virtual_address = direct_map_virtual_address(physical_address);
+            if virtual_address == 0 { return null as *const u8; }
+            return virtual_address as *const u8;
+        }
+    }
+    return physical_address as *const u8;
+}
+
+@system
 fn acpi_sdt_valid(table: *const u8, expected_signature: u32) -> bool {
     if table == (null as *const u8) { return false; }
     let signature = acpi_read_u32(table, 0);
@@ -75,12 +91,13 @@ fn acpi_sdt_valid(table: *const u8, expected_signature: u32) -> bool {
 }
 
 @system
-pub fn acpi_init(rsdp: *const u8) -> bool {
+fn acpi_init_mode(rsdp: *const u8, post_cutover_direct_map: bool) -> bool {
     unsafe {
         ACPI_READY = false;
         ACPI_ROOT = null as *const u8;
         ACPI_ROOT_ENTRY_SIZE = 0;
         ACPI_REVISION = 0;
+        ACPI_POST_CUTOVER_DIRECT_MAP = post_cutover_direct_map;
     }
 
     if !acpi_rsdp_signature_valid(rsdp) { return false; }
@@ -99,7 +116,7 @@ pub fn acpi_init(rsdp: *const u8) -> bool {
 
         let xsdt_address = acpi_read_u64(rsdp, 24);
         if xsdt_address != 0 {
-            let xsdt = xsdt_address as *const u8;
+            let xsdt = acpi_sdt_pointer(xsdt_address);
             if acpi_sdt_valid(xsdt, ACPI_SIG_XSDT) {
                 unsafe {
                     ACPI_ROOT = xsdt;
@@ -113,7 +130,7 @@ pub fn acpi_init(rsdp: *const u8) -> bool {
 
     let rsdt_address = acpi_read_u32(rsdp, 16) as u64;
     if rsdt_address == 0 { return false; }
-    let rsdt = rsdt_address as *const u8;
+    let rsdt = acpi_sdt_pointer(rsdt_address);
     if !acpi_sdt_valid(rsdt, ACPI_SIG_RSDT) { return false; }
 
     unsafe {
@@ -125,6 +142,16 @@ pub fn acpi_init(rsdp: *const u8) -> bool {
 }
 
 @system
+pub fn acpi_init(rsdp: *const u8) -> bool {
+    return acpi_init_mode(rsdp, false);
+}
+
+@system
+pub fn acpi_init_post_cutover(rsdp: *const u8) -> bool {
+    return acpi_init_mode(rsdp, true);
+}
+
+@system
 pub fn acpi_is_ready() -> bool {
     unsafe { return ACPI_READY; }
 }
@@ -132,6 +159,11 @@ pub fn acpi_is_ready() -> bool {
 @system
 pub fn acpi_revision() -> u8 {
     unsafe { return ACPI_REVISION; }
+}
+
+@system
+pub fn acpi_uses_post_cutover_direct_map() -> bool {
+    unsafe { return ACPI_POST_CUTOVER_DIRECT_MAP; }
 }
 
 @system
@@ -157,8 +189,9 @@ pub fn acpi_find_table(signature: u32) -> *const u8 {
             };
             if address == 0 { continue; }
 
-            let table = address as *const u8;
-            if acpi_read_u32(table, 0) == signature && acpi_sdt_valid(table, signature) {
+            let table = acpi_sdt_pointer(address);
+            if table != (null as *const u8) &&
+               acpi_read_u32(table, 0) == signature && acpi_sdt_valid(table, signature) {
                 return table;
             }
         }
