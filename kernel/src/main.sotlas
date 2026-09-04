@@ -22,6 +22,7 @@ import kernel::memory::page_table_builder::*;
 import kernel::memory::transition_map::*;
 import kernel::memory::transition_stack::*;
 import kernel::memory::transition_stack_map::*;
+import kernel::memory::pe_image::*;
 import kernel::memory::transition_image_map::*;
 import kernel::memory::transition_page_tables::*;
 import kernel::memory::cutover_plan::*;
