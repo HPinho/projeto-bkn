@@ -237,6 +237,9 @@ pub fn xhci_controller_prepare_first() -> bool {
     let hcsparams1 = x86_mmio_read32(mmio + XHCI_HCSPARAMS1);
     let hcsparams2 = x86_mmio_read32(mmio + XHCI_HCSPARAMS2);
     let hccparams1 = x86_mmio_read32(mmio + XHCI_HCCPARAMS1);
+    x86_serial_write_hex32_marker('1' as u8, hcsparams1);
+    x86_serial_write_hex32_marker('2' as u8, hcsparams2);
+    x86_serial_write_hex32_marker('C' as u8, hccparams1);
     xhci_controller_checkpoint(51, 'r' as u8);
 
     let max_slots = (hcsparams1 & 0xFF) as u8;
