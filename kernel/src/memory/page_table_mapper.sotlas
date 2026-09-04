@@ -57,7 +57,13 @@ fn page_table_mapper_commit(page: PageTablePage,
     if desired == 0 || !page_table_page_writable(page) { return false; }
     let current = page_table_read_entry(page, index);
     if x86_pte_present(current) {
-        return current == desired;
+        // Accessed/Dirty sao mantidos pelo proprio processador. Depois que uma
+        // pagina foi tocada, uma segunda solicitacao do mesmo mapping nao pode
+        // falhar apenas porque A/D mudaram. Todos os demais bits continuam
+        // fazendo parte da politica e precisam coincidir exatamente.
+        let hardware_bits = X86_PTE_ACCESSED | X86_PTE_DIRTY;
+        if x86_pte_address(current) != x86_pte_address(desired) { return false; }
+        return (current & ~hardware_bits) == (desired & ~hardware_bits);
     }
     return page_table_write_entry(page, index, desired);
 }
