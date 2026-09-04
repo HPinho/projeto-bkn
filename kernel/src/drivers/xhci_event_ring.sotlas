@@ -1,0 +1,67 @@
+// Baken OS — estado lógico do Event Ring xHCI.
+//
+// O xHC produz Event TRBs; o software Baken consome. Este módulo mantém apenas
+// dequeue_index e Consumer Cycle State (CCS) para um único segmento lógico.
+// Não lê TRBs da memória, não escreve ERDP/ERST, não toca MMIO/interrupções.
+
+module kernel::drivers::xhci_event_ring;
+
+import kernel::drivers::xhci_erst::*;
+
+pub struct XhciEventRingState {
+    pub trb_count: u32;
+    pub dequeue_index: u32;
+    pub consumer_cycle_state: bool;
+    pub valid: bool;
+}
+
+@system
+pub fn xhci_event_ring_invalid() -> XhciEventRingState {
+    return XhciEventRingState {
+        trb_count: 0,
+        dequeue_index: 0,
+        consumer_cycle_state: true,
+        valid: false
+    };
+}
+
+@system
+pub fn xhci_event_ring_init(entry: *const XhciErstEntry) -> XhciEventRingState {
+    if !xhci_erst_entry_valid(entry) { return xhci_event_ring_invalid(); }
+    unsafe {
+        return XhciEventRingState {
+            trb_count: (*entry).ring_segment_size,
+            dequeue_index: 0,
+            consumer_cycle_state: true,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn xhci_event_ring_ready(state: *const XhciEventRingState) -> bool {
+    if state == (null as *const XhciEventRingState) { return false; }
+    unsafe {
+        return (*state).valid &&
+            (*state).trb_count >= XHCI_EVENT_SEGMENT_MIN_TRBS &&
+            (*state).trb_count <= XHCI_EVENT_SEGMENT_MAX_TRBS &&
+            (*state).dequeue_index < (*state).trb_count;
+    }
+}
+
+// Avança apenas o cursor consumidor. Event Rings não reservam Link TRB.
+// Ao cruzar o fim do segmento, volta a zero e alterna o CCS.
+@system
+pub fn xhci_event_ring_advance(state: *mut XhciEventRingState) -> bool {
+    if state == (null as *mut XhciEventRingState) { return false; }
+    if !xhci_event_ring_ready(state as *const XhciEventRingState) { return false; }
+
+    unsafe {
+        (*state).dequeue_index += 1;
+        if (*state).dequeue_index >= (*state).trb_count {
+            (*state).dequeue_index = 0;
+            (*state).consumer_cycle_state = !(*state).consumer_cycle_state;
+        }
+        return true;
+    }
+}
