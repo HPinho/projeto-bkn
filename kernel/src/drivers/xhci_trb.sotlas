@@ -16,6 +16,7 @@ pub const XHCI_TRB_TYPE_ENABLE_SLOT: u32 = 9;
 pub const XHCI_TRB_TYPE_DISABLE_SLOT: u32 = 10;
 pub const XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11;
 pub const XHCI_TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12;
+pub const XHCI_TRB_TYPE_EVALUATE_CONTEXT: u32 = 13;
 pub const XHCI_TRB_TYPE_NOOP_COMMAND: u32 = 23;
 
 pub const XHCI_TRB_CYCLE_BIT: u32 = 1;
@@ -114,6 +115,20 @@ pub fn xhci_trb_configure_endpoint(input_context_physical: u64,
         xhci_trb_cycle_bits(cycle);
     if deconfigure { control = control | XHCI_TRB_BSR_OR_DC_BIT; }
 
+    return XhciTrb {
+        parameter: input_context_physical & 0xFFFFFFFFFFFFFFF0,
+        status: 0,
+        control: control
+    };
+}
+
+@system
+pub fn xhci_trb_evaluate_context(input_context_physical: u64,
+                                  slot_id: u8,
+                                  cycle: bool) -> XhciTrb {
+    let control = xhci_trb_type_bits(XHCI_TRB_TYPE_EVALUATE_CONTEXT) |
+        ((slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT) |
+        xhci_trb_cycle_bits(cycle);
     return XhciTrb {
         parameter: input_context_physical & 0xFFFFFFFFFFFFFFF0,
         status: 0,
