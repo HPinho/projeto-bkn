@@ -63,6 +63,8 @@ jobs:
             -display none -serial file:build/qemu-serial.log
           status=$?
           set -e
-          cat build/qemu-serial.log || true
+          if test -f build/qemu-serial.log; then
+            cat build/qemu-serial.log
+          fi
           test "$status" -eq 124
           grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
