@@ -1,0 +1,175 @@
+// Baken OS — núcleo ACPI read-only.
+//
+// Valida RSDP/RSDT/XSDT por checksum e localiza SDTs por assinatura. Esta
+// camada não programa APIC, IOAPIC, HPET, PCIe ECAM ou AML; apenas estabelece
+// uma raiz ACPI confiável recebida do handoff UEFI.
+
+module kernel::acpi::tables;
+
+pub const ACPI_RSDP_V1_LENGTH: usize = 20;
+pub const ACPI_RSDP_V2_MIN_LENGTH: usize = 36;
+pub const ACPI_SDT_HEADER_LENGTH: usize = 36;
+pub const ACPI_MAX_RSDP_LENGTH: usize = 4096;
+pub const ACPI_MAX_SDT_LENGTH: usize = 1048576;
+
+pub const ACPI_SIG_RSDT: u32 = 0x54445352;
+pub const ACPI_SIG_XSDT: u32 = 0x54445358;
+pub const ACPI_SIG_MADT: u32 = 0x43495041; // "APIC"
+pub const ACPI_SIG_MCFG: u32 = 0x4746434D; // "MCFG"
+pub const ACPI_SIG_HPET: u32 = 0x54455048; // "HPET"
+pub const ACPI_SIG_FADT: u32 = 0x50434146; // "FACP"
+
+static mut ACPI_READY: bool = false;
+static mut ACPI_ROOT: *const u8 = null as *const u8;
+static mut ACPI_ROOT_ENTRY_SIZE: usize = 0;
+static mut ACPI_REVISION: u8 = 0;
+
+@system
+fn acpi_read_u32(base: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn acpi_read_u64(base: *const u8, offset: usize) -> u64 {
+    let low = acpi_read_u32(base, offset) as u64;
+    let high = acpi_read_u32(base, offset + 4) as u64;
+    return low | (high << 32);
+}
+
+@system
+fn acpi_checksum_zero(base: *const u8, length: usize) -> bool {
+    if base == (null as *const u8) || length == 0 { return false; }
+    let mut sum: u8 = 0;
+    unsafe {
+        for mut i in 0..length {
+            sum = sum + base[i];
+        }
+    }
+    return sum == 0;
+}
+
+@system
+fn acpi_rsdp_signature_valid(rsdp: *const u8) -> bool {
+    if rsdp == (null as *const u8) { return false; }
+    unsafe {
+        return rsdp[0] == 'R' as u8 && rsdp[1] == 'S' as u8 &&
+            rsdp[2] == 'D' as u8 && rsdp[3] == ' ' as u8 &&
+            rsdp[4] == 'P' as u8 && rsdp[5] == 'T' as u8 &&
+            rsdp[6] == 'R' as u8 && rsdp[7] == ' ' as u8;
+    }
+}
+
+@system
+fn acpi_sdt_valid(table: *const u8, expected_signature: u32) -> bool {
+    if table == (null as *const u8) { return false; }
+    let signature = acpi_read_u32(table, 0);
+    if expected_signature != 0 && signature != expected_signature { return false; }
+    let length = acpi_read_u32(table, 4) as usize;
+    if length < ACPI_SDT_HEADER_LENGTH || length > ACPI_MAX_SDT_LENGTH { return false; }
+    return acpi_checksum_zero(table, length);
+}
+
+@system
+pub fn acpi_init(rsdp: *const u8) -> bool {
+    unsafe {
+        ACPI_READY = false;
+        ACPI_ROOT = null as *const u8;
+        ACPI_ROOT_ENTRY_SIZE = 0;
+        ACPI_REVISION = 0;
+    }
+
+    if !acpi_rsdp_signature_valid(rsdp) { return false; }
+    if !acpi_checksum_zero(rsdp, ACPI_RSDP_V1_LENGTH) { return false; }
+
+    unsafe { ACPI_REVISION = rsdp[15]; }
+
+    if unsafe { rsdp[15] } >= 2 {
+        let rsdp_length = acpi_read_u32(rsdp, 20) as usize;
+        if rsdp_length < ACPI_RSDP_V2_MIN_LENGTH || rsdp_length > ACPI_MAX_RSDP_LENGTH { return false; }
+        if !acpi_checksum_zero(rsdp, rsdp_length) { return false; }
+
+        let xsdt_address = acpi_read_u64(rsdp, 24);
+        if xsdt_address != 0 {
+            let xsdt = xsdt_address as *const u8;
+            if acpi_sdt_valid(xsdt, ACPI_SIG_XSDT) {
+                unsafe {
+                    ACPI_ROOT = xsdt;
+                    ACPI_ROOT_ENTRY_SIZE = 8;
+                    ACPI_READY = true;
+                }
+                return true;
+            }
+        }
+    }
+
+    let rsdt_address = acpi_read_u32(rsdp, 16) as u64;
+    if rsdt_address == 0 { return false; }
+    let rsdt = rsdt_address as *const u8;
+    if !acpi_sdt_valid(rsdt, ACPI_SIG_RSDT) { return false; }
+
+    unsafe {
+        ACPI_ROOT = rsdt;
+        ACPI_ROOT_ENTRY_SIZE = 4;
+        ACPI_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn acpi_is_ready() -> bool {
+    unsafe { return ACPI_READY; }
+}
+
+@system
+pub fn acpi_revision() -> u8 {
+    unsafe { return ACPI_REVISION; }
+}
+
+@system
+pub fn acpi_find_table(signature: u32) -> *const u8 {
+    unsafe {
+        if !ACPI_READY || ACPI_ROOT == (null as *const u8) || ACPI_ROOT_ENTRY_SIZE == 0 {
+            return null as *const u8;
+        }
+
+        let root_length = acpi_read_u32(ACPI_ROOT, 4) as usize;
+        if root_length < ACPI_SDT_HEADER_LENGTH || root_length > ACPI_MAX_SDT_LENGTH {
+            return null as *const u8;
+        }
+        let payload = root_length - ACPI_SDT_HEADER_LENGTH;
+        let count = payload / ACPI_ROOT_ENTRY_SIZE;
+
+        for mut index in 0..count {
+            let offset = ACPI_SDT_HEADER_LENGTH + index * ACPI_ROOT_ENTRY_SIZE;
+            let address: u64 = if ACPI_ROOT_ENTRY_SIZE == 8 {
+                acpi_read_u64(ACPI_ROOT, offset)
+            } else {
+                acpi_read_u32(ACPI_ROOT, offset) as u64
+            };
+            if address == 0 { continue; }
+
+            let table = address as *const u8;
+            if acpi_read_u32(table, 0) == signature && acpi_sdt_valid(table, signature) {
+                return table;
+            }
+        }
+    }
+    return null as *const u8;
+}
+
+@system
+pub fn acpi_madt() -> *const u8 { return acpi_find_table(ACPI_SIG_MADT); }
+
+@system
+pub fn acpi_mcfg() -> *const u8 { return acpi_find_table(ACPI_SIG_MCFG); }
+
+@system
+pub fn acpi_hpet() -> *const u8 { return acpi_find_table(ACPI_SIG_HPET); }
+
+@system
+pub fn acpi_fadt() -> *const u8 { return acpi_find_table(ACPI_SIG_FADT); }
