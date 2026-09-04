@@ -37,6 +37,7 @@ pub struct CutoverPrepareInput {
 pub struct CutoverPrepareResult {
     pub root_physical: u64;
     pub root_virtual: u64;
+    pub context_virtual_base: u64;
     pub stack_top: u64;
     pub table_pages_used: u64;
     pub direct_map_bytes: u64;
@@ -51,6 +52,7 @@ pub fn cutover_prepare_invalid() -> CutoverPrepareResult {
     return CutoverPrepareResult {
         root_physical: 0,
         root_virtual: 0,
+        context_virtual_base: 0,
         stack_top: 0,
         table_pages_used: 0,
         direct_map_bytes: 0,
@@ -106,13 +108,14 @@ pub fn cutover_prepare(input: *const CutoverPrepareInput) -> CutoverPrepareResul
         stack
     );
     if !tables.valid { return cutover_prepare_invalid(); }
-    if tables.root_physical == 0 || stack.stack_top == 0 {
+    if tables.root_physical == 0 || stack.context_virtual_base == 0 || stack.stack_top == 0 {
         return cutover_prepare_invalid();
     }
 
     return CutoverPrepareResult {
         root_physical: tables.root_physical,
         root_virtual: tables.root_virtual,
+        context_virtual_base: stack.context_virtual_base,
         stack_top: stack.stack_top,
         table_pages_used: tables.table_pages_used,
         direct_map_bytes: tables.direct_map_bytes,
