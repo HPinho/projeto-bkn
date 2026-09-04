@@ -11,6 +11,7 @@ import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
 import kernel::acpi::tables::*;
+import kernel::acpi::madt::*;
 import kernel::drivers::pci_bus::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
@@ -93,7 +94,11 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // usar MADT/MCFG/HPET/FADT. Falha de ACPI não é fatal nesta fase híbrida;
     // apenas mantém essas capacidades indisponíveis.
     if boot_info.acpi_rsdp != (null as *const u8) {
-        acpi_init(boot_info.acpi_rsdp);
+        if acpi_init(boot_info.acpi_rsdp) {
+            // MADT permanece apenas inventário. Nenhum LAPIC/IOAPIC é ativado
+            // enquanto a IDT própria e o cutover UEFI ainda não estão ativos.
+            madt_init();
+        }
     }
 
     // Descoberta PCI é somente leitura. Ela registra hardware real, mas não
