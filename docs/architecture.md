@@ -68,7 +68,7 @@ A remoção deve ocorrer em ordem segura:
 
 O `BakenBootInfo v2` já está implementado como envelope de transição, com validação no ponto de entrada Sotlas.
 
-O bootloader já coleta um snapshot real do UEFI Memory Map usando a negociação de tamanho com `EFI_BUFFER_TOO_SMALL`, aloca um buffer com folga e registra `memory_descriptor_size` e `memory_descriptor_version`.
+O bootloader coleta um snapshot real do UEFI Memory Map usando a negociação de tamanho com `EFI_BUFFER_TOO_SMALL`, aloca um buffer com folga e registra `memory_descriptor_size` e `memory_descriptor_version`.
 
 Ele também localiza a ACPI RSDP por GUID completa, preferindo ACPI 2.0 e usando 1.0 como fallback. Framebuffer, pixel format, versão, tamanho e flags do handoff também são preenchidos.
 
