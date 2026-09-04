@@ -1,0 +1,73 @@
+// Baken OS — ativa a configuração USB selecionada após Configure Endpoint.
+//
+// Envia SET_CONFIGURATION como control transfer sem Data Stage: Setup OUT
+// seguido por Status IN + IOC no EP0. O sucesso só é aceito após Transfer Event
+// correspondente ao Status TRB. Não publica transfers HID nesta fase.
+
+module kernel::drivers::xhci_set_configuration;
+
+import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_configure_endpoint::*;
+import kernel::drivers::xhci_address::*;
+import kernel::drivers::xhci_ep0::*;
+import kernel::drivers::xhci_trb::*;
+import kernel::drivers::xhci_transfer::*;
+
+pub const USB_REQUEST_SET_CONFIGURATION: u8 = 9;
+pub const USB_REQUEST_TYPE_HOST_TO_DEVICE_STANDARD_DEVICE: u8 = 0x00;
+
+static mut XHCI_SET_CONFIGURATION_READY: bool = false;
+static mut XHCI_SET_CONFIGURATION_VALUE: u8 = 0;
+
+@system
+pub fn xhci_set_first_configuration() -> bool {
+    unsafe {
+        XHCI_SET_CONFIGURATION_READY = false;
+        XHCI_SET_CONFIGURATION_VALUE = 0;
+    }
+    if !xhci_configuration_is_ready() || !xhci_configure_endpoint_is_ready() ||
+       !xhci_ep0_is_ready() || !xhci_address_is_ready() { return false; }
+
+    let configuration_value = xhci_configuration_value();
+    let slot_id = xhci_address_slot_id();
+    if configuration_value == 0 || slot_id == 0 { return false; }
+    if xhci_configure_endpoint_slot_id() != slot_id { return false; }
+
+    let setup = xhci_trb_setup_stage(
+        USB_REQUEST_TYPE_HOST_TO_DEVICE_STANDARD_DEVICE,
+        USB_REQUEST_SET_CONFIGURATION,
+        configuration_value as u16,
+        0,
+        0,
+        XHCI_SETUP_TRT_NO_DATA,
+        xhci_ep0_producer_cycle()
+    );
+    let unused_data = xhci_trb_normal(0, 0, 0, false, xhci_ep0_producer_cycle());
+    // Sem Data Stage, Status segue na direção oposta ao request (IN).
+    let status = xhci_trb_status_stage(true, true, xhci_ep0_producer_cycle());
+
+    let status_physical = xhci_ep0_submit_control_td(
+        setup,
+        unused_data,
+        status,
+        false
+    );
+    if status_physical == 0 { return false; }
+    if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
+    if xhci_transfer_last_residual_length() != 0 { return false; }
+
+    unsafe {
+        XHCI_SET_CONFIGURATION_VALUE = configuration_value;
+        XHCI_SET_CONFIGURATION_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_set_configuration_is_ready() -> bool {
+    unsafe { return XHCI_SET_CONFIGURATION_READY; }
+}
+@system
+pub fn xhci_set_configuration_value() -> u8 {
+    unsafe { return XHCI_SET_CONFIGURATION_VALUE; }
+}
