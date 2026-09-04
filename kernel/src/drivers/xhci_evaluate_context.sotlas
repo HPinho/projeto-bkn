@@ -1,0 +1,79 @@
+// Baken OS — atualização explícita do EP0 via Evaluate Context.
+//
+// Esta etapa altera somente Max Packet Size do Endpoint Context 0 no Input
+// Context já compartilhado e submete Evaluate Context pelo Command Ring.
+// Não busca descriptors e não toca outros endpoints.
+
+module kernel::drivers::xhci_evaluate_context;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::direct_map::*;
+import kernel::drivers::xhci_address::*;
+import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_trb::*;
+
+pub const XHCI_EVALUATE_ADD_EP0: u32 = 1 << 1;
+pub const XHCI_EVALUATE_EP0_MAX_PACKET_SHIFT: u32 = 16;
+pub const XHCI_EVALUATE_EP0_MAX_PACKET_MASK: u32 = 0xFFFF << XHCI_EVALUATE_EP0_MAX_PACKET_SHIFT;
+
+static mut XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET: u16 = 0;
+
+@system
+fn xhci_evaluate_context_valid_ep0_max_packet(max_packet: u16) -> bool {
+    return max_packet == 8 || max_packet == 16 || max_packet == 32 ||
+        max_packet == 64 || max_packet == 512;
+}
+
+@system
+pub fn xhci_evaluate_ep0_max_packet(max_packet: u16) -> bool {
+    unsafe { XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET = 0; }
+    if !xhci_evaluate_context_valid_ep0_max_packet(max_packet) { return false; }
+    if !xhci_address_is_ready() || !xhci_context_is_ready() || !xhci_command_is_ready() {
+        return false;
+    }
+
+    let slot_id = xhci_address_slot_id();
+    if slot_id == 0 || slot_id != xhci_context_slot_id() { return false; }
+    let input_physical = xhci_context_input_physical();
+    let context_size = xhci_context_size();
+    if input_physical == 0 || (input_physical & 0xF) != 0 { return false; }
+    if context_size != 32 && context_size != 64 { return false; }
+
+    let input_virtual = direct_map_virtual_address(input_physical);
+    if input_virtual == 0 { return false; }
+    let ep0_context_offset = (context_size as u64) * 2;
+
+    unsafe {
+        // Evaluate Context considera apenas EP0 nesta operação.
+        let drop_flags = input_virtual as *mut u32;
+        let add_flags = (input_virtual + 4) as *mut u32;
+        *drop_flags = 0;
+        *add_flags = XHCI_EVALUATE_ADD_EP0;
+
+        let ep0_dw1_ptr = (input_virtual + ep0_context_offset + 4) as *mut u32;
+        let current = *ep0_dw1_ptr;
+        *ep0_dw1_ptr = (current & ~XHCI_EVALUATE_EP0_MAX_PACKET_MASK) |
+            ((max_packet as u32) << XHCI_EVALUATE_EP0_MAX_PACKET_SHIFT);
+    }
+
+    // Publication barrier antes de entregar o Input Context ao controller.
+    if x86_read_cr3_raw() == 0 { return false; }
+    let command = xhci_trb_evaluate_context(
+        input_physical,
+        slot_id,
+        xhci_command_producer_cycle()
+    );
+    let command_physical = xhci_command_submit(command);
+    if command_physical == 0 { return false; }
+    if !xhci_command_wait_completion(command_physical) { return false; }
+    if xhci_command_last_slot_id() != slot_id { return false; }
+
+    unsafe { XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET = max_packet; }
+    return true;
+}
+
+@system
+pub fn xhci_evaluate_context_last_ep0_max_packet() -> u16 {
+    unsafe { return XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET; }
+}
