@@ -32,7 +32,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/drivers/xhci_discovery.sotlas", "kernel/src/drivers/xhci_controller.sotlas",
         "kernel/src/drivers/xhci_runtime.sotlas", "kernel/src/drivers/xhci_program.sotlas",
         "kernel/src/drivers/xhci_start.sotlas", "kernel/src/drivers/xhci_command.sotlas",
-        "kernel/src/drivers/xhci_event_consumer.sotlas",
+        "kernel/src/drivers/xhci_event_consumer.sotlas", "kernel/src/drivers/xhci_transfer.sotlas",
         "kernel/src/drivers/xhci_port.sotlas", "kernel/src/drivers/xhci_protocol.sotlas",
         "kernel/src/drivers/xhci_port_reset.sotlas", "kernel/src/drivers/xhci_port_stage.sotlas",
         "kernel/src/drivers/xhci_slot.sotlas", "kernel/src/drivers/xhci_context.sotlas",
