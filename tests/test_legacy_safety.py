@@ -39,6 +39,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/baken_design.sotlas",
         "kernel/src/drivers/display_driver.sotlas",
         "kernel/src/drivers/pci_bus.sotlas",
+        "kernel/src/drivers/i8042.sotlas",
         "kernel/src/drivers/ps2_mouse.sotlas",
         "kernel/src/memory/pmm.sotlas",
         "kernel/src/arch/x86_64/gdt.sotlas",
