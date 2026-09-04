@@ -37,6 +37,9 @@ pub fn interrupt_route_legacy_irq(irq: u8, vector: u16) -> InterruptRoute {
     let polarity = flags & 3;
     let trigger = (flags >> 2) & 3;
 
+    // ACPI/MPS INTI: bits 15:4 são reservados e devem ser zero.
+    if (flags & 0xFFF0) != 0 { return route; }
+
     // ACPI MADT: 00 = conforms, 01 = high/edge, 11 = low/level.
     // O encoding 10 é reservado e não deve ser programado no IOAPIC.
     if polarity == 2 || trigger == 2 { return route; }
