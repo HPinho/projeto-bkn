@@ -115,6 +115,7 @@ pub fn xhci_command_prepare_after_noop() -> bool {
 
 @system
 pub fn xhci_command_submit(command: XhciTrb) -> u64 {
+    unsafe { XHCI_COMMAND_LAST_SLOT_ID = 0; }
     if !xhci_command_is_ready() { return 0; }
     unsafe {
         let usable = XHCI_RUNTIME_COMMAND_TRBS - XHCI_RING_RESERVED_LINK_TRBS;
@@ -164,7 +165,10 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
                 return false;
             }
             unsafe { XHCI_COMMAND_LAST_SLOT_ID = xhci_event_slot_id(event); }
-            if !xhci_event_consumer_consume() { return false; }
+            if !xhci_event_consumer_consume() {
+                unsafe { XHCI_COMMAND_LAST_SLOT_ID = 0; }
+                return false;
+            }
             return true;
         }
         spins += 1;
