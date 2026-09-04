@@ -28,6 +28,7 @@ typedef UINTN EFI_STATUS;
 #define BY_PROTOCOL 2U
 #define PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR 1U
 #define BAKEN_PAGE_TABLE_ARENA_PAGES 1024ULL
+#define BAKEN_TRANSITION_STACK_PAGES 64ULL
 
 typedef struct {
     uint32_t Data1;
@@ -53,6 +54,9 @@ static EFI_GUID EFI_ABSOLUTE_POINTER_PROTOCOL_GUID = {
 };
 static EFI_GUID EFI_BLOCK_IO_PROTOCOL_GUID = {
     0x964e5b21, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}
+};
+static EFI_GUID EFI_LOADED_IMAGE_PROTOCOL_GUID = {
+    0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}
 };
 
 typedef struct {
@@ -148,6 +152,22 @@ typedef struct {
     EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
+typedef struct _EFI_LOADED_IMAGE_PROTOCOL {
+    uint32_t Revision;
+    EFI_HANDLE ParentHandle;
+    EFI_SYSTEM_TABLE *SystemTable;
+    EFI_HANDLE DeviceHandle;
+    void *FilePath;
+    void *Reserved;
+    uint32_t LoadOptionsSize;
+    void *LoadOptions;
+    void *ImageBase;
+    uint64_t ImageSize;
+    uint32_t ImageCodeType;
+    uint32_t ImageDataType;
+    EFI_STATUS (*Unload)(EFI_HANDLE ImageHandle);
+} EFI_LOADED_IMAGE_PROTOCOL;
+
 typedef struct {
     uint32_t MediaId;
     uint8_t RemovableMedia, MediaPresent, LogicalPartition, ReadOnly, WriteCaching;
@@ -212,6 +232,56 @@ static EFI_STATUS reserve_page_table_arena(EFI_BOOT_SERVICES *bs,
     boot_info->page_table_arena_virtual_base = (void*)(uintptr_t)physical_base;
     boot_info->page_table_arena_page_count = BAKEN_PAGE_TABLE_ARENA_PAGES;
     boot_info->flags |= BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS capture_loaded_image(EFI_BOOT_SERVICES *bs,
+                                       EFI_HANDLE image_handle,
+                                       BakenBootInfo *boot_info) {
+    if (!bs || !bs->HandleProtocol || !image_handle || !boot_info) return EFI_INVALID_PARAMETER;
+
+    EFI_HANDLE_PROTOCOL handle_protocol = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
+    EFI_LOADED_IMAGE_PROTOCOL *loaded = NULL;
+    EFI_STATUS status = handle_protocol(
+        image_handle,
+        &EFI_LOADED_IMAGE_PROTOCOL_GUID,
+        (void**)&loaded
+    );
+    if (status != EFI_SUCCESS || !loaded || !loaded->ImageBase || loaded->ImageSize == 0) {
+        return status == EFI_SUCCESS ? EFI_UNSUPPORTED : status;
+    }
+
+    /* No bootstrap x86_64 atual, ImageBase é o endereço pelo qual a imagem PE
+     * está realmente executando. Registramos esse endereço em ambos os campos
+     * de transição, mas o futuro write_cr3 só poderá ocorrer depois de o mapper
+     * verificar/materializar a tradução que mantém esse range acessível. */
+    boot_info->loaded_image_physical_base = (uint64_t)(uintptr_t)loaded->ImageBase;
+    boot_info->loaded_image_virtual_base = loaded->ImageBase;
+    boot_info->loaded_image_size = loaded->ImageSize;
+    boot_info->flags |= BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS reserve_transition_stack(EFI_BOOT_SERVICES *bs,
+                                           BakenBootInfo *boot_info) {
+    if (!bs || !bs->AllocatePages || !boot_info) return EFI_INVALID_PARAMETER;
+
+    EFI_ALLOCATE_PAGES allocate_pages = (EFI_ALLOCATE_PAGES)bs->AllocatePages;
+    EFI_PHYSICAL_ADDRESS physical_base = 0;
+    EFI_STATUS status = allocate_pages(
+        ALLOCATE_ANY_PAGES,
+        EFI_LOADER_DATA,
+        BAKEN_TRANSITION_STACK_PAGES,
+        &physical_base
+    );
+    if (status != EFI_SUCCESS || physical_base == 0 || (physical_base & 0xFFFULL) != 0) {
+        return status == EFI_SUCCESS ? EFI_OUT_OF_RESOURCES : status;
+    }
+
+    boot_info->transition_stack_physical_base = physical_base;
+    boot_info->transition_stack_virtual_base = (void*)(uintptr_t)physical_base;
+    boot_info->transition_stack_page_count = BAKEN_TRANSITION_STACK_PAGES;
+    boot_info->flags |= BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID;
     return EFI_SUCCESS;
 }
 
@@ -406,7 +476,6 @@ static void *find_pointer_protocol(EFI_BOOT_SERVICES *bs) {
 extern void baken_kernel_main(const BakenBootInfo *boot_info);
 
 EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
-    (void)ImageHandle;
     if (!SystemTable || !SystemTable->BootServices) return EFI_INVALID_PARAMETER;
 
     EFI_BOOT_SERVICES *bs = SystemTable->BootServices;
@@ -447,10 +516,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_info.acpi_rsdp = find_acpi_rsdp(SystemTable);
     if (boot_info.acpi_rsdp) boot_info.flags |= BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID;
 
-    /* Reserva todas as páginas de page table ANTES do snapshot entregue ao
-     * kernel. Assim a própria arena aparece como EfiLoaderData no Memory Map e
-     * não poderá ser escolhida pelo futuro PMM como ConventionalMemory. */
+    /* Todos os recursos que o cutover precisará devem existir ANTES do
+     * snapshot entregue ao kernel. Assim arena e stack aparecem como
+     * EfiLoaderData e não podem ser confundidas com ConventionalMemory. */
     if (reserve_page_table_arena(bs, &boot_info) != EFI_SUCCESS) {
+        return EFI_OUT_OF_RESOURCES;
+    }
+    if (capture_loaded_image(bs, ImageHandle, &boot_info) != EFI_SUCCESS) {
+        return EFI_UNSUPPORTED;
+    }
+    if (reserve_transition_stack(bs, &boot_info) != EFI_SUCCESS) {
         return EFI_OUT_OF_RESOURCES;
     }
 
