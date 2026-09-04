@@ -14,14 +14,16 @@ class CutoverPrepareTests(unittest.TestCase):
         self.text = PREPARE.read_text(encoding="utf-8")
         self.main = MAIN.read_text(encoding="utf-8")
 
-    def test_prepare_builds_arena_image_stack_and_tables_in_order(self):
+    def test_prepare_builds_arena_image_framebuffer_stack_and_tables_in_order(self):
         body = self.text.split("pub fn cutover_prepare", 1)[1]
         arena = body.index("page_table_arena_make(")
         image = body.index("transition_image_layout(")
+        framebuffer = body.index("transition_framebuffer_layout(")
         stack = body.index("transition_stack_layout(")
         tables = body.index("transition_page_tables_build(")
         self.assertLess(arena, image)
-        self.assertLess(image, stack)
+        self.assertLess(image, framebuffer)
+        self.assertLess(framebuffer, stack)
         self.assertLess(stack, tables)
 
     def test_result_exposes_only_prepared_addresses_and_counts(self):
@@ -30,6 +32,7 @@ class CutoverPrepareTests(unittest.TestCase):
             "stack_top: stack.stack_top",
             "table_pages_used: tables.table_pages_used",
             "direct_map_bytes: tables.direct_map_bytes",
+            "framebuffer_pages: tables.framebuffer_pages",
         ):
             self.assertIn(token, self.text)
 
