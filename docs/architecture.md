@@ -64,6 +64,14 @@ A remoção deve ocorrer em ordem segura:
 5. executar `ExitBootServices()` antes de `baken_kernel_main`;
 6. remover os campos e caminhos de runtime UEFI restantes.
 
+## Marco implementado: Memory Map + ACPI reais no BootInfo v2
+
+O bootloader já coleta um snapshot real do UEFI Memory Map usando a negociação correta de tamanho (`EFI_BUFFER_TOO_SMALL`), aloca um buffer com folga e registra `memory_descriptor_size` e `memory_descriptor_version`.
+
+Ele também localiza a ACPI RSDP por GUID completa, preferindo ACPI 2.0 e usando 1.0 como fallback.
+
+Esses dados são marcados por flags no `BakenBootInfo v2`. Como o runtime ainda usa Boot Services depois da entrada do kernel, esse snapshot **não é ainda o memory map final associado ao map key do ExitBootServices**. O map final será recapturado imediatamente antes do cutover.
+
 ## BakenBootInfo v2 — envelope de transição
 
 Para evitar quebrar o ABI do runtime atual enquanto a migração ocorre, o v2 preserva os primeiros 80 bytes do layout legado e adiciona depois metadados necessários ao futuro handoff bare-metal:
@@ -87,7 +95,7 @@ v2 extension
 └── acpi_rsdp
 ```
 
-O objetivo desse envelope é permitir que o bootloader comece a produzir dados corretos de Memory Map e ACPI sem deslocar ponteiros que o runtime atual ainda interpreta.
+O objetivo desse envelope é permitir que o bootloader produza dados corretos de Memory Map e ACPI sem deslocar ponteiros que o runtime atual ainda interpreta.
 
 Ele **não é o contrato final**. Depois que input, timer e storage nativos substituírem as pontes de firmware, um ABI limpo removerá os quatro ponteiros UEFI e será usado somente depois de `ExitBootServices()`.
 
@@ -220,7 +228,7 @@ Input, storage, compositor e USB não devem permanecer em um único polling loop
 
 ```text
 0. Sotlas compiler/backend e intrínsecos confiáveis
-1. BootInfo v2 + GetMemoryMap + ACPI handoff
+1. BootInfo v2 + GetMemoryMap + ACPI handoff            [EM ANDAMENTO]
 2. GDT/IDT/TSS/exceptions
 3. PMM/VMM/heap/PAT
 4. ACPI/APIC/IOAPIC/timers
