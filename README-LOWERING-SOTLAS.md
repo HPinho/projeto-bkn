@@ -1,79 +1,91 @@
-# Lowering Sotlas nativo — relatório de alterações
+# Sotlas Compile — lowering modular
 
-Esta mudança remove a última implementação visual paralela da cadeia de build.
-O compilador agora transforma o AST de cada módulo Sotlas em C11 genérico; ele
-não conhece wallpaper, dock, janelas ou telas do Baken OS.
+O Baken OS usa `tools/sotlas_compile/compiler.py` como compilador modular da linguagem Sotlas. O compilador pertence ao host: ele resolve o grafo de módulos, valida interfaces e reduz cada unidade Sotlas para um objeto independente antes da linkedição do `BOOTX64.EFI`.
 
-## O que mudou
+A regra arquitetural é simples:
 
-- `graphics_engine.sotlas`: lowering real, backbuffer de alta resolução,
-  apresentação atômica do quadro e snapshot/composição de transições.
-- `baken_rasterizer.sotlas`: lowering real, acesso corrigido aos atlas,
-  cache do wallpaper por resolução e cópia linear nos quadros seguintes.
-- `baken_animation.sotlas`: lowering real das curvas smootherstep e molas com
-  subpassos e limite de `dt` para quadros atrasados.
-- `baken_ui_oop.sotlas`: o protótipo de classes não executado foi substituído
-  pelo componente procedural real do dock, compatível com o frontend atual.
-- `window_manager.sotlas`: lowering real de criação, foco, arraste,
-  redimensionamento, renderização e despacho dos aplicativos.
-- `desktop_shell.sotlas`: lowering real, frame delta limitado, atualização das
-  molas em cada quadro, bounce do dock e conexão de todas as rotas de janela.
-- `main.sotlas` e `desktop_compositor.sotlas`: agora são a entrada e a fachada
-  efetivamente compiladas, sem um segundo `baken_kernel_main` em C.
-- `baken_runtime.c`: adaptador não visual para eventos UEFI, frame pacing e
-  ligação dos atlas de fonte/logo. Descobre separadamente os protocolos de
-  ponteiro simples e absoluto, sem inferir seus layouts.
-
-Os buffers estáticos são dimensionados para 1920×1200, o mesmo teto aplicado
-pelo bootloader. Backbuffer, snapshot de transição e cache de wallpaper ocupam
-cerca de 28 MiB no total, em vez de reservar memória para um modo que a rota
-canônica nunca seleciona.
-
-## Mudanças no frontend
-
-O bootstrap ganhou interfaces C derivadas da AST, imports por cabeçalho,
-constantes válidas para tamanhos de array, acesso correto a membros de ponteiro,
-atribuições de arrays zerados, `loop {}` e retorno `!`. A análise semântica agora
-visita expressões aninhadas, argumentos, condições, retornos e atribuições.
-
-Os milhares de linhas de C visual específico foram removidos de
-`tools/sotlas_compile/compiler.py`. O arquivo apenas coordena resolução,
-interfaces, emissão, compilação e linkedição.
-
-## Ponte e armazenamento
-
-`kernel/src/baken_kernel_all.c` foi removido. O histórico continua recuperável
-no Git. Os testes BakenFS foram transferidos para o gerador que realmente define
-o disco instalado, `tools/scripts/create_installed_disk.py`, e verificam o
-layout binário produzido.
-
-## Proteção contra regressão
-
-`tests/test_compiler_ui_boundary.py` falha se o compilador voltar a conter
-`gfx_*`, `draw_*`, wallpaper, dock, tela ou screen, se o preâmbulo bootstrap
-voltar a declarar UI, ou se a ponte monolítica reaparecer.
-
-## Validação
-
-```bash
-python tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
-python -m unittest discover -s tests
+```text
+Python/Sotlas Compile = ferramenta de compilação
+Sotlas                = código do sistema
+UEFI                   = bootstrap
+Baken kernel           = dono do hardware após o cutover bare-metal
 ```
 
-Em ambiente com o toolchain PE/COFF/UEFI, o build completo continua sendo:
+A entrada canônica continua sendo:
+
+```text
+kernel/src/main.sotlas
+```
+
+O build oficial valida o grafo, gera uma unidade por módulo e compila `boot/uefi_bootloader.sotlas` separadamente como bootstrap UEFI.
+
+## Estado do lowering
+
+O frontend modular é responsável por:
+
+- descoberta de módulos;
+- imports transitivos;
+- detecção de ciclos e módulos duplicados;
+- parser/typechecker Sotlas;
+- geração de interfaces públicas;
+- lowering para unidades C freestanding;
+- compilação de um objeto por módulo;
+- linkedição PE/COFF UEFI.
+
+Nenhum elemento visual específico deve ser sintetizado pelo compilador. Wallpaper, dock, janelas, animações, compositor, installer e OOBE pertencem aos módulos `.sotlas`.
+
+A suíte `tests/test_compiler_ui_boundary.py` protege essa fronteira.
+
+## Marco bare-metal: BakenBootInfo v2
+
+A branch de fundação bare-metal introduz um envelope `BakenBootInfo v2` sem quebrar os offsets legados ainda consumidos pelo runtime atual.
+
+O bootloader agora coleta de forma real:
+
+- endereço/tamanho/formato do framebuffer GOP;
+- snapshot do UEFI Memory Map;
+- `descriptor_size` e `descriptor_version` do Memory Map;
+- ACPI RSDP 2.0 com fallback 1.0;
+- versão, tamanho e flags do contrato de handoff.
+
+O snapshot é obtido usando `GetMemoryMap()` com alocação dimensionada pelo firmware. Esse mapa ainda não é o map key definitivo do `ExitBootServices()`, porque o runtime atual continua temporariamente usando Boot Services para input, temporização e Block I/O.
+
+Assim, o estado atual é:
+
+```text
+UEFI
+ -> GOP + ACPI + Memory Map real
+ -> BakenBootInfo v2
+ -> kernel Sotlas
+ -> ponte UEFI transitória para input/storage/timing
+```
+
+O estado alvo é:
+
+```text
+UEFI
+ -> GOP + ACPI + Memory Map final
+ -> ExitBootServices()
+ -> kernel Sotlas
+ -> PMM/VMM/PAT
+ -> drivers Baken
+ -> compositor/desktop
+```
+
+O cutover final só deve acontecer quando as dependências de Pointer Protocol, Block I/O e timers UEFI forem substituídas por drivers/serviços nativos.
+
+## Build
+
+Validação:
 
 ```powershell
-./tools/build_uefi_desktop.ps1
+python tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 ```
 
-Em Linux/ELF, a geração e compilação de todos os objetos pode ser verificada,
-mas o link final esperado falha se o `ld` local não oferecer `--subsystem,10`.
-Isso é uma limitação do linker escolhido, não do lowering dos módulos.
+Build:
 
-Nesta auditoria, a suíte executou 272 testes e o link estrutural dos 17 objetos
-(15 módulos, adaptador e bootloader) passou com símbolos indefinidos proibidos.
+```powershell
+& tools\build_uefi_desktop.ps1
+```
 
-O GitHub Actions usa o mesmo resolvedor modular para conferir `main.sotlas`,
-compila o PE/COFF com MinGW, exige uma ISO não vazia e só aceita o smoke test
-QEMU quando a VM permanece executando até o timeout esperado. Falhas de build,
-empacotamento ou QEMU não são mais ocultadas por `|| true`.
+A geração do EFI continua falhando de forma fechada quando o compilador, um módulo ou a linkedição retornam erro.
