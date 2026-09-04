@@ -1,0 +1,61 @@
+// Baken OS — primeiro comando de enumeração após preparar uma porta real.
+//
+// Submete Enable Slot pelo produtor stateful do Command Ring, espera o
+// Command Completion Event correspondente e aceita somente Slot ID válido.
+// Não cria Device/Input Context, não escreve DCBAA[slot] e não envia Address Device.
+
+module kernel::drivers::xhci_slot;
+
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_port_stage::*;
+import kernel::drivers::xhci_trb::*;
+
+static mut XHCI_SLOT_READY: bool = false;
+static mut XHCI_SLOT_ID: u8 = 0;
+static mut XHCI_SLOT_PORT_ID: u8 = 0;
+static mut XHCI_SLOT_TYPE: u8 = 0;
+
+@system
+pub fn xhci_slot_enable_first_port() -> bool {
+    unsafe {
+        XHCI_SLOT_READY = false;
+        XHCI_SLOT_ID = 0;
+        XHCI_SLOT_PORT_ID = 0;
+        XHCI_SLOT_TYPE = 0;
+    }
+
+    if !xhci_port_stage_is_ready() || !xhci_command_is_ready() { return false; }
+    let port_id = xhci_port_stage_port_id();
+    let slot_type = xhci_port_stage_slot_type();
+    if port_id == 0 { return false; }
+
+    let command = xhci_trb_enable_slot(slot_type, xhci_command_producer_cycle());
+    let command_physical = xhci_command_submit(command);
+    if command_physical == 0 { return false; }
+    if !xhci_command_wait_completion(command_physical) { return false; }
+
+    let slot_id = xhci_command_last_slot_id();
+    let max_slots = xhci_controller_max_slots();
+    if slot_id == 0 || max_slots == 0 || slot_id > max_slots { return false; }
+
+    unsafe {
+        XHCI_SLOT_ID = slot_id;
+        XHCI_SLOT_PORT_ID = port_id;
+        XHCI_SLOT_TYPE = slot_type;
+        XHCI_SLOT_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_is_ready() -> bool { unsafe { return XHCI_SLOT_READY; } }
+
+@system
+pub fn xhci_slot_id() -> u8 { unsafe { return XHCI_SLOT_ID; } }
+
+@system
+pub fn xhci_slot_port_id() -> u8 { unsafe { return XHCI_SLOT_PORT_ID; } }
+
+@system
+pub fn xhci_slot_type() -> u8 { unsafe { return XHCI_SLOT_TYPE; } }
