@@ -1,0 +1,92 @@
+// Baken OS — Configure Endpoint para o primeiro HID Interrupt IN.
+//
+// Usa o Input Context já preparado com Add Context flag + Endpoint Context,
+// envia Configure Endpoint pelo Command Ring stateful e só aceita sucesso quando
+// o Output Device Context mostra o endpoint em estado Running.
+
+module kernel::drivers::xhci_configure_endpoint;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::direct_map::*;
+import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_trb::*;
+
+pub const XHCI_ENDPOINT_STATE_MASK: u32 = 0x7;
+pub const XHCI_ENDPOINT_STATE_RUNNING: u8 = 1;
+
+static mut XHCI_CONFIGURE_ENDPOINT_READY: bool = false;
+static mut XHCI_CONFIGURE_ENDPOINT_SLOT_ID: u8 = 0;
+static mut XHCI_CONFIGURE_ENDPOINT_DCI: u8 = 0;
+
+@system
+fn xhci_configure_endpoint_output_dw0(dci: u8) -> u32 {
+    if dci <= 1 { return 0; }
+    let device_physical = xhci_context_device_physical();
+    let context_size = xhci_context_size();
+    if device_physical == 0 || (context_size != 32 && context_size != 64) { return 0; }
+    let device_virtual = direct_map_virtual_address(device_physical);
+    if device_virtual == 0 { return 0; }
+
+    // Device Context não possui Input Control Context: Slot Context é índice 0,
+    // então Endpoint Context DCI n começa em n * ContextSize.
+    let offset = (dci as u64) * (context_size as u64);
+    unsafe {
+        return *((device_virtual + offset) as *const u32);
+    }
+}
+
+@system
+pub fn xhci_configure_first_hid_endpoint() -> bool {
+    unsafe {
+        XHCI_CONFIGURE_ENDPOINT_READY = false;
+        XHCI_CONFIGURE_ENDPOINT_SLOT_ID = 0;
+        XHCI_CONFIGURE_ENDPOINT_DCI = 0;
+    }
+    if !xhci_hid_context_is_ready() || !xhci_context_is_ready() ||
+       !xhci_command_is_ready() { return false; }
+
+    let slot_id = xhci_context_slot_id();
+    let dci = xhci_hid_context_dci();
+    let input_physical = xhci_context_input_physical();
+    if slot_id == 0 || dci <= 1 || input_physical == 0 ||
+       (input_physical & 0xF) != 0 { return false; }
+
+    let command = xhci_trb_configure_endpoint(
+        input_physical,
+        slot_id,
+        false,
+        xhci_command_producer_cycle()
+    );
+    let command_physical = xhci_command_submit(command);
+    if command_physical == 0 { return false; }
+    if !xhci_command_wait_completion(command_physical) { return false; }
+    if xhci_command_last_slot_id() != slot_id { return false; }
+
+    // Garante que a observação do Output Context venha depois do DMA do xHC.
+    if x86_read_cr3_raw() == 0 { return false; }
+    let dw0 = xhci_configure_endpoint_output_dw0(dci);
+    let endpoint_state = (dw0 & XHCI_ENDPOINT_STATE_MASK) as u8;
+    if endpoint_state != XHCI_ENDPOINT_STATE_RUNNING { return false; }
+
+    unsafe {
+        XHCI_CONFIGURE_ENDPOINT_SLOT_ID = slot_id;
+        XHCI_CONFIGURE_ENDPOINT_DCI = dci;
+        XHCI_CONFIGURE_ENDPOINT_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_configure_endpoint_is_ready() -> bool {
+    unsafe { return XHCI_CONFIGURE_ENDPOINT_READY; }
+}
+@system
+pub fn xhci_configure_endpoint_slot_id() -> u8 {
+    unsafe { return XHCI_CONFIGURE_ENDPOINT_SLOT_ID; }
+}
+@system
+pub fn xhci_configure_endpoint_dci() -> u8 {
+    unsafe { return XHCI_CONFIGURE_ENDPOINT_DCI; }
+}
