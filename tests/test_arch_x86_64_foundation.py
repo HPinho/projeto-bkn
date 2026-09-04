@@ -32,6 +32,18 @@ class X8664FoundationTests(unittest.TestCase):
         self.assertIn("pub fn tss_size() -> u32", text)
         self.assertIn("return 104;", text)
 
+    def test_tss_has_real_rsp0_and_critical_ist_stack_storage(self):
+        text = (ARCH / "tss.sotlas").read_text(encoding="utf-8")
+        for token in (
+            "static mut KERNEL_RSP0_STACK",
+            "static mut DOUBLE_FAULT_STACK",
+            "static mut NMI_STACK",
+            "static mut MACHINE_CHECK_STACK",
+            "TSS_STACK_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0",
+            "pub fn tss_prepare_default_stacks()",
+        ):
+            self.assertIn(token, text)
+
     def test_idt_owns_256_concrete_packed_16_byte_gates(self):
         text = (ARCH / "idt.sotlas").read_text(encoding="utf-8")
         self.assertIn("IDT_VECTOR_COUNT: usize = 256", text)
@@ -45,7 +57,7 @@ class X8664FoundationTests(unittest.TestCase):
     def test_kernel_prepares_but_does_not_claim_cpu_tables_are_loaded(self):
         main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
         for token in (
-            "tss_prepare(0, 0, 0, 0)",
+            "tss_prepare_default_stacks()",
             "gdt_prepare()",
             "gdt_set_tss_descriptor(tss_base(), tss_limit())",
             "idt_prepare_empty()",
@@ -54,6 +66,9 @@ class X8664FoundationTests(unittest.TestCase):
         self.assertNotIn("__lgdt(", main)
         self.assertNotIn("__lidt(", main)
         self.assertNotIn("__ltr(", main)
+        self.assertNotIn("x86_lgdt_raw(", main)
+        self.assertNotIn("x86_lidt_raw(", main)
+        self.assertNotIn("x86_ltr_raw(", main)
 
 
 if __name__ == "__main__":
