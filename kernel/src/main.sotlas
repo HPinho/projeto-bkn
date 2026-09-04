@@ -51,6 +51,7 @@ import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_protocol::*;
 import kernel::drivers::xhci_port_reset::*;
+import kernel::drivers::xhci_port_stage::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
