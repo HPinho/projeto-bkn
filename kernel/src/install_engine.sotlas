@@ -7,6 +7,7 @@
 module kernel::install_engine;
 
 import kernel::storage::block_device::*;
+import kernel::storage::gpt::*;
 
 pub const INSTALL_STATE_IDLE: u32 = 0;
 pub const INSTALL_STATE_UNAVAILABLE: u32 = 1;
@@ -33,7 +34,9 @@ pub fn install_engine_reset() -> void {
 
 @system
 pub fn install_engine_available() -> bool {
-    return block_device_has_writable_native_target();
+    if !block_device_has_writable_native_target() { return false; }
+    let layout = gpt_plan_default(block_device_block_size(), block_device_last_lba());
+    return layout.valid;
 }
 
 @system
@@ -41,14 +44,15 @@ pub fn install_engine_start() -> bool {
     unsafe {
         INSTALL_PROGRESS = 0;
         INSTALL_ERROR = 0;
-        if !block_device_has_writable_native_target() {
+        if !install_engine_available() {
             INSTALL_STATE = INSTALL_STATE_UNAVAILABLE;
             return false;
         }
 
-        // Quando GPT/FAT32/BakenFS e write path nativos estiverem ligados,
-        // esta transição passa a disparar trabalho real. Até lá não fingimos
-        // que uma instalação começou.
+        // O alvo e a geometria GPT podem ser válidos, mas isso ainda não
+        // equivale a possuir um write path de particionamento/filesystem
+        // completo. Até GPT/FAT32/BakenFS efetuarem I/O e verificarem o que foi
+        // gravado, não declaramos instalação em andamento nem sucesso.
         INSTALL_STATE = INSTALL_STATE_UNAVAILABLE;
         return false;
     }
