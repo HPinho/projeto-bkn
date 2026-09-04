@@ -84,5 +84,8 @@ jobs:
           grep -q "BAKEN:STEP=T" build/qemu-serial.log
           grep -q "BAKEN:STEP=K" build/qemu-serial.log
           # STEP=X só aparece depois de discovery PCI pós-EBS, BAR0 UC,
-          # capability validation, halt, HCRST e CNR=0 no xHC.
+          # capability validation, legacy handoff, halt, HCRST e CNR=0.
           grep -q "BAKEN:STEP=X" build/qemu-serial.log
+          # STEP=D exige arena DMA real, DCBAAP/CRCR/ERST/ERDP programados,
+          # readback válido e HCHalted ainda ativo. Bus Master continua off.
+          grep -q "BAKEN:STEP=D" build/qemu-serial.log
