@@ -37,6 +37,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/storage/block_device.sotlas", "kernel/src/storage/gpt.sotlas",
         "kernel/src/storage/fat32.sotlas", "kernel/src/storage/crc32.sotlas",
         "kernel/src/memory/pmm.sotlas", "kernel/src/memory/pmm_allocator.sotlas",
+        "kernel/src/memory/pmm_bitmap.sotlas",
         "kernel/src/memory/vmm.sotlas", "kernel/src/memory/memory_map_policy.sotlas",
         "kernel/src/memory/direct_map.sotlas", "kernel/src/memory/direct_map_ranges.sotlas",
         "kernel/src/memory/page_table_arena.sotlas", "kernel/src/memory/page_table_writer.sotlas",
