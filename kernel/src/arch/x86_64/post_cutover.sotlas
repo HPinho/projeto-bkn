@@ -1,7 +1,8 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
-// -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado. Mouse/IRQ12 permanece mascarado.
+// -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas.
+// Mouse/IRQ12 permanece mascarado.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -26,6 +27,8 @@ import kernel::interrupts::lapic_timer::*;
 import kernel::interrupts::interrupt_enable::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_runtime::*;
+import kernel::drivers::xhci_program::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 pub const POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS: u64 = 10000;
@@ -60,6 +63,7 @@ static mut POST_CUTOVER_TIMER_READY: bool = false;
 static mut POST_CUTOVER_TIMER_LIVE: bool = false;
 static mut POST_CUTOVER_KEYBOARD_LIVE: bool = false;
 static mut POST_CUTOVER_XHCI_READY: bool = false;
+static mut POST_CUTOVER_XHCI_DMA_READY: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -216,6 +220,7 @@ pub fn post_cutover_prepare_timer() -> bool {
         POST_CUTOVER_TIMER_LIVE = false;
         POST_CUTOVER_KEYBOARD_LIVE = false;
         POST_CUTOVER_XHCI_READY = false;
+        POST_CUTOVER_XHCI_DMA_READY = false;
     }
     return true;
 }
@@ -231,6 +236,9 @@ pub fn post_cutover_keyboard_live() -> bool { unsafe { return POST_CUTOVER_KEYBO
 
 @system
 pub fn post_cutover_xhci_ready() -> bool { unsafe { return POST_CUTOVER_XHCI_READY; } }
+
+@system
+pub fn post_cutover_xhci_dma_ready() -> bool { unsafe { return POST_CUTOVER_XHCI_DMA_READY; } }
 
 @system
 pub fn post_cutover_enable_timer_interrupts() -> bool {
@@ -279,16 +287,30 @@ pub fn post_cutover_enable_keyboard_interrupts() -> bool {
     }
 }
 
-// O xHCI só entra depois de memória virtual e IRQs básicas já terem sido
-// provadas. A enumeração PCI é refeita pós-cutover e o controller permanece
-// HALTED após HCRST; Bus Master e qualquer estrutura DMA seguem desligados.
 @system
 pub fn post_cutover_prepare_xhci_controller() -> bool {
-    unsafe { POST_CUTOVER_XHCI_READY = false; }
+    unsafe {
+        POST_CUTOVER_XHCI_READY = false;
+        POST_CUTOVER_XHCI_DMA_READY = false;
+    }
     if !post_cutover_keyboard_live() || !active_page_tables_is_ready() { return false; }
     if pci_scan_all() == 0 { return false; }
     if !xhci_controller_prepare_first() || !xhci_controller_is_ready() { return false; }
     unsafe { POST_CUTOVER_XHCI_READY = true; }
+    return true;
+}
+
+// Prepara e programa as estruturas DMA com o xHC ainda parado. Nenhum Bus
+// Master, Run/Stop ou Doorbell é permitido nesta etapa.
+@system
+pub fn post_cutover_prepare_xhci_dma_tables() -> bool {
+    unsafe { POST_CUTOVER_XHCI_DMA_READY = false; }
+    if !post_cutover_xhci_ready() || !xhci_controller_is_ready() { return false; }
+    if !xhci_runtime_prepare() || !xhci_runtime_is_ready() { return false; }
+    if !xhci_program_halted_runtime() || !xhci_program_is_ready() { return false; }
+    if (x86_mmio_read32(xhci_controller_operational_base() + XHCI_OP_USBSTS) &
+        XHCI_USBSTS_HCHALTED) == 0 { return false; }
+    unsafe { POST_CUTOVER_XHCI_DMA_READY = true; }
     return true;
 }
 
@@ -329,6 +351,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     // X prova discovery PCI pós-EBS + BAR MMIO UC + halt/HCRST/CNR do xHC.
     if !post_cutover_prepare_xhci_controller() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('X' as u8); }
+
+    // D prova arena DMA + DCBAAP/CRCR/ERST programados com readback e xHC parado.
+    if !post_cutover_prepare_xhci_dma_tables() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('D' as u8); }
 
     loop {}
 }
