@@ -50,6 +50,17 @@ class XhciCommandTests(unittest.TestCase):
         self.assertNotIn("XHCI_EVENT_DEQUEUE_INDEX", text)
         self.assertNotIn("xhci_command_update_erdp", text)
 
+    def test_slot_id_state_is_fail_closed_per_command(self):
+        text = COMMAND.read_text(encoding="utf-8")
+        submit = text.split("pub fn xhci_command_submit(command: XhciTrb)", 1)[1]
+        submit = submit.split("pub fn xhci_command_wait_completion", 1)[0]
+        wait = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
+        self.assertIn("XHCI_COMMAND_LAST_SLOT_ID = 0", submit)
+        self.assertIn("XHCI_COMMAND_LAST_SLOT_ID = xhci_event_slot_id(event)", wait)
+        consume = wait.index("xhci_event_consumer_consume()")
+        clear_after_consume_failure = wait.index("XHCI_COMMAND_LAST_SLOT_ID = 0", consume)
+        self.assertGreater(clear_after_consume_failure, consume)
+
     def test_event_cursor_getters_delegate_to_shared_consumer(self):
         text = COMMAND.read_text(encoding="utf-8")
         self.assertIn("return xhci_event_consumer_index();", text)
