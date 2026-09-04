@@ -1,0 +1,129 @@
+// Baken OS — consumidor único compartilhado do Event Ring xHCI.
+//
+// É inicializado após o No-op inicial, que já consumiu o Event TRB 0. A partir
+// daí Command Completion e Transfer Event compartilham este mesmo dequeue_index
+// e Consumer Cycle State. Só este módulo avança ERDP após STEP=N.
+
+module kernel::drivers::xhci_event_consumer;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::xhci_runtime::*;
+import kernel::drivers::xhci_program::*;
+import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_event::*;
+
+pub const XHCI_EVENT_CONSUMER_FIRST_INDEX: u32 = 1;
+pub const XHCI_EVENT_CONSUMER_ERDP_EHB: u64 = 1 << 3;
+
+static mut XHCI_EVENT_CONSUMER_READY: bool = false;
+static mut XHCI_EVENT_CONSUMER_INDEX: u32 = XHCI_EVENT_CONSUMER_FIRST_INDEX;
+static mut XHCI_EVENT_CONSUMER_CYCLE: bool = true;
+
+@system
+fn xhci_event_consumer_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn xhci_event_consumer_map_address(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(xhci_event_consumer_page_base(address));
+}
+
+@system
+fn xhci_event_consumer_write64(address: u64, value: u64) -> bool {
+    if !xhci_event_consumer_map_address(address) ||
+       !xhci_event_consumer_map_address(address + 4) { return false; }
+    x86_mmio_write32(address, (value & 0xFFFFFFFF) as u32);
+    x86_mmio_write32(address + 4, ((value >> 32) & 0xFFFFFFFF) as u32);
+    return true;
+}
+
+@system
+fn xhci_event_consumer_slot(index: u32) -> *const XhciTrb {
+    if index >= XHCI_RUNTIME_EVENT_TRBS { return null as *const XhciTrb; }
+    let base = direct_map_virtual_address(xhci_runtime_event_ring_physical());
+    if base == 0 { return null as *const XhciTrb; }
+    let offset = (index as u64) * XHCI_TRB_SIZE;
+    return (base + offset) as *const XhciTrb;
+}
+
+@system
+fn xhci_event_consumer_update_erdp() -> bool {
+    let event_base = xhci_runtime_event_ring_physical();
+    let runtime = xhci_program_runtime_base();
+    if event_base == 0 || runtime == 0 { return false; }
+
+    unsafe {
+        let offset = (XHCI_EVENT_CONSUMER_INDEX as u64) * XHCI_TRB_SIZE;
+        let next = event_base + offset;
+        if next < event_base { return false; }
+        let intr0 = runtime + XHCI_RUNTIME_INTERRUPTER0;
+        if intr0 < runtime { return false; }
+        return xhci_event_consumer_write64(
+            intr0 + XHCI_INTR_ERDP,
+            next | XHCI_EVENT_CONSUMER_ERDP_EHB
+        );
+    }
+}
+
+@system
+pub fn xhci_event_consumer_prepare_after_noop() -> bool {
+    unsafe {
+        XHCI_EVENT_CONSUMER_READY = false;
+        XHCI_EVENT_CONSUMER_INDEX = XHCI_EVENT_CONSUMER_FIRST_INDEX;
+        XHCI_EVENT_CONSUMER_CYCLE = true;
+    }
+    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
+    if !xhci_runtime_is_ready() || !xhci_program_is_ready() { return false; }
+    if xhci_runtime_event_ring_physical() == 0 { return false; }
+    unsafe { XHCI_EVENT_CONSUMER_READY = true; }
+    return true;
+}
+
+// Retorna o próximo Event TRB somente quando o Cycle Bit pertence ao consumidor.
+// Não avança o ring; o chamador primeiro valida tipo/slot/pointer/completion code.
+@system
+pub fn xhci_event_consumer_peek() -> *const XhciTrb {
+    if !xhci_event_consumer_is_ready() { return null as *const XhciTrb; }
+    unsafe {
+        let event = xhci_event_consumer_slot(XHCI_EVENT_CONSUMER_INDEX);
+        if event == (null as *const XhciTrb) { return null as *const XhciTrb; }
+        if xhci_event_cycle(event) != XHCI_EVENT_CONSUMER_CYCLE {
+            return null as *const XhciTrb;
+        }
+        return event;
+    }
+}
+
+// Só deve ser chamado depois que o dono lógico do evento o validou.
+@system
+pub fn xhci_event_consumer_consume() -> bool {
+    if xhci_event_consumer_peek() == (null as *const XhciTrb) { return false; }
+    unsafe {
+        XHCI_EVENT_CONSUMER_INDEX += 1;
+        if XHCI_EVENT_CONSUMER_INDEX >= XHCI_RUNTIME_EVENT_TRBS {
+            XHCI_EVENT_CONSUMER_INDEX = 0;
+            XHCI_EVENT_CONSUMER_CYCLE = !XHCI_EVENT_CONSUMER_CYCLE;
+        }
+    }
+    return xhci_event_consumer_update_erdp();
+}
+
+@system
+pub fn xhci_event_consumer_is_ready() -> bool {
+    unsafe { return XHCI_EVENT_CONSUMER_READY; }
+}
+
+@system
+pub fn xhci_event_consumer_index() -> u32 {
+    unsafe { return XHCI_EVENT_CONSUMER_INDEX; }
+}
+
+@system
+pub fn xhci_event_consumer_cycle() -> bool {
+    unsafe { return XHCI_EVENT_CONSUMER_CYCLE; }
+}
