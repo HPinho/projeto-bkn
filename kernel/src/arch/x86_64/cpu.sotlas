@@ -1,8 +1,8 @@
 // Baken OS - wrappers x86-64 privilegiados do backend Sotlas.
 //
 // Estes wrappers existem no grafo canônico para que o build produza e valide
-// as instruções reais. Carregar GDT/IDT/TSS, substituir CR3 ou tocar MMIO só é
-// permitido pelo caminho pós-ExitBootServices que possui os mappings corretos.
+// as instruções reais. Carregar GDT/IDT/TSS, substituir CR3, tocar MMIO ou abrir
+// interrupções só é permitido pelo caminho pós-ExitBootServices validado.
 
 module kernel::arch::x86_64::cpu;
 
@@ -54,6 +54,12 @@ pub fn x86_mmio_read32(address: u64) -> u32 { return __mmio_read32(address); }
 
 @system
 pub fn x86_mmio_write32(address: u64, value: u32) -> void { __mmio_write32(address, value); }
+
+@system
+pub fn x86_cli_raw() -> void { __cli(); }
+
+@system
+pub fn x86_sti_raw() -> void { __sti(); }
 
 @system
 pub fn x86_exception_stub_address(vector: u16) -> u64 {
