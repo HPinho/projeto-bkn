@@ -56,6 +56,24 @@ class SotlasFrontendCompatTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "retorno incompatível"):
             bootstrap.check(bootstrap.parse(source))
 
+    def test_typed_integer_literals_are_sotlas_syntax_and_emit_valid_c(self):
+        source = """
+        module core::literals;
+        pub fn mask() -> u32 { return 1u32 << 7u32; }
+        pub fn address() -> usize { return 0x1000usize; }
+        """
+        module = bootstrap.parse(source)
+        bootstrap.check(module)
+        emitted = bootstrap.emit_c(module)
+        self.assertIn("((uint32_t)(1))", emitted)
+        self.assertIn("((uint32_t)(7))", emitted)
+        self.assertIn("((size_t)(0x1000))", emitted)
+
+    def test_integer_suffix_cannot_be_applied_to_decimal_literal(self):
+        source = "module core::bad_literal; fn x() -> f64 { return 1.5u32; }"
+        with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "sufixo inteiro"):
+            bootstrap.check(bootstrap.parse(source))
+
     def test_reports_unknown_symbol(self):
         source = "module core::bad; fn x() -> i64 { return missing; }"
         with self.assertRaisesRegex(bootstrap.SotlasBootstrapError, "símbolo não declarado"):

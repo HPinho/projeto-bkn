@@ -53,6 +53,38 @@ C_TYPES = {"void": "void", "bool": "_Bool", "u8": "uint8_t", "u16": "uint16_t",
            "i8": "int8_t", "i16": "int16_t", "i32": "int32_t", "i64": "int64_t",
            "isize": "intptr_t", "f32": "float", "f64": "double", "str": "char"}
 
+# Literais com sufixo mantêm a intenção de tipo na AST, mas o backend C emite
+# um cast explícito, pois `1u32` não é sintaxe válida em C. O formato segue a
+# linguagem Sotlas, não os sufixos do C/C++.
+INTEGER_LITERAL_SUFFIXES = ("usize", "isize", "u64", "i64", "u32", "i32", "u16", "i16", "u8", "i8")
+FLOAT_LITERAL_SUFFIXES = ("f32", "f64")
+NUMBER_LITERAL_RE = re.compile(
+    r"(?:[0-9]+\.[0-9]+(?:usize|isize|u64|i64|u32|i32|u16|i16|u8|i8|f32|f64)?|(?:0x[0-9A-Fa-f]+|0b[01]+|[0-9]+)(?:usize|isize|u64|i64|u32|i32|u16|i16|u8|i8)?)"
+)
+
+
+def numeric_literal_parts(text: str) -> tuple[str, str | None]:
+    for suffix in INTEGER_LITERAL_SUFFIXES + FLOAT_LITERAL_SUFFIXES:
+        if text.endswith(suffix):
+            return text[:-len(suffix)], suffix
+    return text, None
+
+
+def numeric_literal_type(text: str) -> str:
+    base, suffix = numeric_literal_parts(text)
+    if suffix:
+        if "." in base and suffix not in FLOAT_LITERAL_SUFFIXES:
+            raise ValueError("sufixo inteiro não pode ser aplicado a literal decimal")
+        return suffix
+    return "f64" if "." in base else "i64"
+
+
+def integer_literal_value(text: str) -> int:
+    base, suffix = numeric_literal_parts(text)
+    if suffix in FLOAT_LITERAL_SUFFIXES or "." in base:
+        raise ValueError("literal inteiro esperado")
+    return int(base, 0)
+
 
 def lex(source: str, filename: str | None = None) -> list[Token]:
     tokens: list[Token] = []
@@ -125,7 +157,7 @@ def lex(source: str, filename: str | None = None) -> list[Token]:
         if ch in SINGLE:
             tokens.append(Token(ch, ch, line + 1, start_col)); i += 1; column += 1; continue
         if ch.isdigit():
-            match = re.match(r"(?:0x[0-9A-Fa-f]+|[0-9]+(?:\.[0-9]+)?)", source[i:])
+            match = NUMBER_LITERAL_RE.match(source[i:])
             assert match
             text = match.group(0); tokens.append(Token("NUMBER", text, line + 1, start_col)); i += len(text); column += len(text); continue
         if ch.isalpha() or ch == "_":
@@ -404,7 +436,7 @@ class Parser:
             self.expect(";")
             if self.current.kind == "NUMBER":
                 size_tok = self.expect("NUMBER")
-                size = int(size_tok.text, 0)
+                size = integer_literal_value(size_tok.text)
             else:
                 size_tok = self.expect("IDENT")
                 size = size_tok.text
@@ -496,7 +528,7 @@ class Parser:
                     vval = None
                     if self.accept("="):
                         val_tok = self.expect("NUMBER")
-                        vval = int(val_tok.text, 0)
+                        vval = integer_literal_value(val_tok.text)
                     variants.append(EnumVariant(vname, vval))
                     if not self.accept(","):
                         if self.current.kind != "}":
@@ -660,7 +692,7 @@ class Parser:
                 if self.accept(";"):
                     if self.current.kind == "NUMBER":
                         size_tok = self.expect("NUMBER")
-                        size = int(size_tok.text, 0)
+                        size = integer_literal_value(size_tok.text)
                     else:
                         size_tok = self.expect("IDENT")
                         size = size_tok.text
@@ -872,7 +904,10 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
 
     def expr_type(expr: Expr, scope: dict[str, Type], in_unsafe: bool, is_system_fn: bool) -> Type:
         if isinstance(expr, Number):
-            return Type("f64" if "." in expr.value else "i64")
+            try:
+                return Type(numeric_literal_type(expr.value))
+            except ValueError as error:
+                raise SotlasBootstrapError(str(error), expr.token.line, expr.token.column, filename, source)
         if isinstance(expr, Boolean):
             return Type("bool")
         if isinstance(expr, StringLit):
@@ -1041,7 +1076,9 @@ def _c_ident(name: str) -> str:
 
 
 def _emit_expr(expr: Expr, mod_prefix: str = "") -> str:
-    if isinstance(expr, Number): return expr.value
+    if isinstance(expr, Number):
+        base, suffix = numeric_literal_parts(expr.value)
+        return f"(({C_TYPES[suffix]})({base}))" if suffix else base
     if isinstance(expr, Boolean): return "1" if expr.value else "0"
     if isinstance(expr, StringLit): return f"((const uint8_t *){expr.value})"
     if isinstance(expr, CharLit): return expr.value
