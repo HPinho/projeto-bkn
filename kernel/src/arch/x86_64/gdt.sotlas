@@ -21,6 +21,8 @@ pub const GDT_USER_CODE_SELECTOR: u16 = 0x1B;
 pub const GDT_USER_DATA_SELECTOR: u16 = 0x23;
 pub const GDT_TSS_SELECTOR: u16 = 0x28;
 
+@repr(C)
+@packed
 pub struct DescriptorTablePointer {
     pub limit: u16;
     pub base: u64;
@@ -62,7 +64,7 @@ pub fn gdt_set_tss_descriptor(base: u64, limit: u32) -> void {
     let mut low: u64 = 0;
     low = low | ((limit as u64) & 0xFFFF);
     low = low | ((base & 0xFFFFFF) << 16);
-    low = low | (0x89 << 40); // present + available 64-bit TSS
+    low = low | ((0x89 as u64) << 40); // present + available 64-bit TSS
     low = low | ((((limit as u64) >> 16) & 0x0F) << 48);
     low = low | (((base >> 24) & 0xFF) << 56);
 
