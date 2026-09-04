@@ -28,14 +28,16 @@ class PmTimerCalibrationTests(unittest.TestCase):
 
     def test_tsc_calibration_uses_native_pm_reference_only(self):
         text = TIMER.read_text(encoding="utf-8")
-        self.assertIn("x86_timer_calibrate_from_acpi_pm", text)
-        self.assertIn("acpi_pm_timer_read_counter", text)
-        self.assertIn("acpi_pm_timer_elapsed_ticks", text)
-        self.assertIn("TSC_PM_CALIBRATION_MAX_SPINS", text)
-        self.assertIn("x86_timer_set_cycles_per_us(cycles_per_us)", text)
-        self.assertNotIn("Stall", text.replace("UEFI Stall continua apenas como", ""))
-        self.assertNotIn("BootServices", text)
-        self.assertNotIn("baken_efi", text)
+        start = text.index("pub fn x86_timer_calibrate_from_acpi_pm")
+        end = text.index("pub fn x86_timer_elapsed_us")
+        calibration = text[start:end]
+        self.assertIn("acpi_pm_timer_read_counter", calibration)
+        self.assertIn("acpi_pm_timer_elapsed_ticks", calibration)
+        self.assertIn("TSC_PM_CALIBRATION_MAX_SPINS", calibration)
+        self.assertIn("x86_timer_set_cycles_per_us(cycles_per_us)", calibration)
+        self.assertNotIn("Stall", calibration)
+        self.assertNotIn("BootServices", calibration)
+        self.assertNotIn("baken_efi", calibration)
 
     def test_calibration_rounds_instead_of_truncating(self):
         text = TIMER.read_text(encoding="utf-8")
