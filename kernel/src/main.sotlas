@@ -12,6 +12,7 @@ import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
+import kernel::acpi::mcfg::*;
 import kernel::drivers::pci_bus::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
@@ -95,14 +96,16 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // apenas mantém essas capacidades indisponíveis.
     if boot_info.acpi_rsdp != (null as *const u8) {
         if acpi_init(boot_info.acpi_rsdp) {
-            // MADT permanece apenas inventário. Nenhum LAPIC/IOAPIC é ativado
-            // enquanto a IDT própria e o cutover UEFI ainda não estão ativos.
+            // Inventários passivos: nenhum LAPIC/IOAPIC é ativado e nenhum
+            // endereço ECAM é acessado enquanto VMM/MMIO próprios não existem.
             madt_init();
+            mcfg_init();
         }
     }
 
     // Descoberta PCI é somente leitura. Ela registra hardware real, mas não
     // habilita Bus Master, I/O/Memory Space nem promove GPU para aceleração.
+    // O mecanismo #1 continua temporário; MCFG apenas inventaria ECAM por ora.
     pci_scan_all();
 
     // O framebuffer GOP é transportado como endereço físico/passivo no handoff.
