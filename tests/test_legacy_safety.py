@@ -45,6 +45,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/arch/x86_64/tss.sotlas",
         "kernel/src/arch/x86_64/idt.sotlas",
         "kernel/src/arch/x86_64/cpu.sotlas",
+        "kernel/src/arch/x86_64/exceptions.sotlas",
     }
 
     def test_sotlas_tree_contains_only_known_canonical_modules(self):
