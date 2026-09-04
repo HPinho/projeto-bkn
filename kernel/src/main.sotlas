@@ -67,7 +67,7 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // O backend já contém entry stubs 0-31 e LGDT/LIDT/LTR, mas NAO carregamos
     // as tabelas enquanto Boot Services ainda é usado. A IDT continua inativa.
     exception_state_reset();
-    tss_prepare(0, 0, 0, 0);
+    tss_prepare_default_stacks();
     gdt_prepare();
     gdt_set_tss_descriptor(tss_base(), tss_limit());
     idt_prepare_empty();
