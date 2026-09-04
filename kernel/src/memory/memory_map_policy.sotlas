@@ -1,0 +1,79 @@
+// Baken OS — política conservadora para descritores do UEFI Memory Map.
+//
+// Este módulo é puro: não percorre ponteiros, não aloca páginas, não escreve
+// page tables e não chama firmware. Ele classifica tipos/atributos para que o
+// VMM pós-cutover decida quais ranges podem receber direct-map WB automático.
+
+module kernel::memory::memory_map_policy;
+
+pub const EFI_RESERVED_MEMORY_TYPE: u32 = 0;
+pub const EFI_LOADER_CODE: u32 = 1;
+pub const EFI_LOADER_DATA: u32 = 2;
+pub const EFI_BOOT_SERVICES_CODE: u32 = 3;
+pub const EFI_BOOT_SERVICES_DATA: u32 = 4;
+pub const EFI_RUNTIME_SERVICES_CODE: u32 = 5;
+pub const EFI_RUNTIME_SERVICES_DATA: u32 = 6;
+pub const EFI_CONVENTIONAL_MEMORY_TYPE: u32 = 7;
+pub const EFI_UNUSABLE_MEMORY: u32 = 8;
+pub const EFI_ACPI_RECLAIM_MEMORY_TYPE: u32 = 9;
+pub const EFI_ACPI_MEMORY_NVS_TYPE: u32 = 10;
+pub const EFI_MEMORY_MAPPED_IO_TYPE: u32 = 11;
+pub const EFI_MEMORY_MAPPED_IO_PORT_SPACE_TYPE: u32 = 12;
+pub const EFI_PAL_CODE: u32 = 13;
+pub const EFI_PERSISTENT_MEMORY: u32 = 14;
+pub const EFI_UNACCEPTED_MEMORY_TYPE: u32 = 15;
+
+pub const EFI_MEMORY_UC: u64 = 0x0000000000000001;
+pub const EFI_MEMORY_WC: u64 = 0x0000000000000002;
+pub const EFI_MEMORY_WT: u64 = 0x0000000000000004;
+pub const EFI_MEMORY_WB: u64 = 0x0000000000000008;
+pub const EFI_MEMORY_RUNTIME: u64 = 0x8000000000000000;
+
+@system
+pub fn uefi_memory_type_is_mmio(type_code: u32) -> bool {
+    return type_code == EFI_MEMORY_MAPPED_IO_TYPE ||
+        type_code == EFI_MEMORY_MAPPED_IO_PORT_SPACE_TYPE;
+}
+
+// Ranges que podem receber alias alto do kernel depois de ExitBootServices.
+// Runtime Services são excluídos deliberadamente: Baken não deve depender
+// deles no primeiro cutover. Reserved/Unusable/MMIO/PAL/Unaccepted também não
+// entram automaticamente.
+@system
+pub fn uefi_memory_type_is_direct_map_ram(type_code: u32) -> bool {
+    return type_code == EFI_LOADER_CODE ||
+        type_code == EFI_LOADER_DATA ||
+        type_code == EFI_BOOT_SERVICES_CODE ||
+        type_code == EFI_BOOT_SERVICES_DATA ||
+        type_code == EFI_CONVENTIONAL_MEMORY_TYPE ||
+        type_code == EFI_ACPI_RECLAIM_MEMORY_TYPE ||
+        type_code == EFI_ACPI_MEMORY_NVS_TYPE;
+}
+
+// O primeiro direct-map usa somente WB. WC/UC/WT ficam para mappings explícitos
+// depois que o kernel possuir política PAT/MTRR própria. Exigir o bit WB evita
+// transformar um range MMIO/firmware em memória cacheável por inferência.
+@system
+pub fn uefi_memory_descriptor_is_direct_map_wb(type_code: u32,
+                                               attribute: u64) -> bool {
+    if !uefi_memory_type_is_direct_map_ram(type_code) { return false; }
+    if (attribute & EFI_MEMORY_RUNTIME) != 0 { return false; }
+    return (attribute & EFI_MEMORY_WB) != 0;
+}
+
+// Memória que pode alimentar o PMM imediatamente após ExitBootServices. ACPI
+// Reclaim só poderá ser liberada depois que as tabelas necessárias forem
+// copiadas/consumidas; NVS permanece reservada.
+@system
+pub fn uefi_memory_type_is_immediately_reclaimable(type_code: u32) -> bool {
+    return type_code == EFI_LOADER_CODE ||
+        type_code == EFI_LOADER_DATA ||
+        type_code == EFI_BOOT_SERVICES_CODE ||
+        type_code == EFI_BOOT_SERVICES_DATA ||
+        type_code == EFI_CONVENTIONAL_MEMORY_TYPE;
+}
+
+@system
+pub fn uefi_memory_type_is_acpi_reclaimable_later(type_code: u32) -> bool {
+    return type_code == EFI_ACPI_RECLAIM_MEMORY_TYPE;
+}
