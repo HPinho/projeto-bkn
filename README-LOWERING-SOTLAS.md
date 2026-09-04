@@ -1,6 +1,6 @@
 # Sotlas Compile — lowering modular
 
-O Baken OS usa `tools/sotlas_compile/compiler.py` como compilador modular da linguagem Sotlas. O compilador pertence ao host: ele resolve o grafo de módulos, valida interfaces e reduz cada unidade Sotlas para um objeto independente antes da linkedição do `BOOTX64.EFI`.
+O Baken OS usa `tools/sotlas_compile/compiler.py` como compilador modular da linguagem Sotlas. O compilador pertence ao host: resolve o grafo de módulos, valida interfaces e reduz cada unidade Sotlas para um objeto independente antes da linkedição do `BOOTX64.EFI`.
 
 A regra arquitetural é:
 
@@ -11,7 +11,7 @@ UEFI                   = bootstrap
 Baken kernel           = dono do hardware após o cutover bare-metal
 ```
 
-A entrada canônica continua sendo `kernel/src/main.sotlas`.
+A entrada canônica é `kernel/src/main.sotlas`.
 
 ## Responsabilidades do compilador
 
@@ -21,15 +21,9 @@ Nenhum elemento visual específico deve ser sintetizado pelo compilador. Wallpap
 
 ## Marco bare-metal atual
 
-A branch de fundação bare-metal introduz `BakenBootInfo v2` como envelope de transição, preservando os offsets legados ainda usados pelo runtime enquanto adiciona metadados reais para o futuro handoff.
+`BakenBootInfo v2` foi introduzido como envelope de transição, preservando os offsets legados ainda usados pelo runtime enquanto adiciona metadados reais para o futuro handoff.
 
-O bootloader já coleta:
-
-- framebuffer GOP e formato;
-- snapshot real do UEFI Memory Map via `GetMemoryMap()`;
-- `memory_descriptor_size` e `memory_descriptor_version`;
-- ACPI RSDP 2.0 com fallback 1.0;
-- versão, tamanho e flags do contrato.
+O bootloader já coleta framebuffer GOP, pixel format, snapshot real do UEFI Memory Map via `GetMemoryMap()`, `memory_descriptor_size`, `memory_descriptor_version` e ACPI RSDP 2.0 com fallback 1.0. O kernel valida versão, tamanho, framebuffer, dimensões e pitch antes de prosseguir.
 
 O snapshot de Memory Map ainda não é o map final do `ExitBootServices()`, pois input/storage/timing continuam usando pontes UEFI. O cutover final exige recapturar o mapa imediatamente antes de `ExitBootServices()` e só então entrar no kernel sem Boot Services.
 
@@ -57,16 +51,9 @@ UEFI
 
 ## Build
 
-Validação:
-
 ```powershell
 python tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
-```
-
-Build:
-
-```powershell
 & tools\build_uefi_desktop.ps1
 ```
 
-A geração do EFI deve continuar falhando de forma fechada quando o compilador, um módulo ou a linkedição retornarem erro.
+A geração do EFI deve continuar falhando de forma fechada quando compilação ou linkedição retornarem erro.
