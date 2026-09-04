@@ -96,7 +96,11 @@ pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
 @system
 pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !post_cutover_context_valid(context) { return false; }
+    // Subetapas do primeiro cutover: 0=contexto, 1=CR3, 2=tabelas prontas,
+    // 3=segmentos/TSS/IDT carregados. COM1 já foi inicializada pela entrada.
+    x86_serial_write_stage_marker('0' as u8);
     if !x86_mmu_activate_root(context.root_physical) { return false; }
+    x86_serial_write_stage_marker('1' as u8);
 
     tss_prepare_default_stacks();
     if !tss_is_prepared() { return false; }
@@ -104,6 +108,7 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     gdt_set_tss_descriptor(tss_base(), tss_limit());
     if !gdt_is_prepared() { return false; }
     if !idt_prepare_exceptions() || !idt_exceptions_ready() { return false; }
+    x86_serial_write_stage_marker('2' as u8);
 
     let gdt_address = gdt_base() as u64;
     let idt_address = idt_base() as u64;
@@ -112,6 +117,7 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     x86_gdt_activate_segments_raw(gdt_address, gdt_limit(), GDT_KERNEL_CODE_SELECTOR, GDT_KERNEL_DATA_SELECTOR);
     x86_ltr_raw(GDT_TSS_SELECTOR);
     x86_lidt_table_raw(idt_address, idt_limit());
+    x86_serial_write_stage_marker('3' as u8);
     unsafe { POST_CUTOVER_CPU_TABLES_ACTIVE = true; }
     return true;
 }
@@ -209,16 +215,36 @@ pub fn post_cutover_timer_ready() -> bool { unsafe { return POST_CUTOVER_TIMER_R
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = argument as *const PostCutoverContext;
+    // COM1 é I/O de porta e não depende de Boot Services, de CR3 novo ou de
+    // tabelas de descritor. Este primeiro marcador separa falha no trampoline
+    // ou no contexto de falha da ativação de CPU propriamente dita.
+    let serial_ready = x86_serial_init();
+    if serial_ready { x86_serial_write_stage_marker('B' as u8); }
+
+    // Cada marcador é emitido antes da próxima etapa: o último visto no QEMU
+    // identifica o subsistema que falhou sem tocar em serviços UEFI.
     if !post_cutover_activate_cpu(context) { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('C' as u8); }
+
     if !post_cutover_activate_pmm(context) { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('P' as u8); }
+
     if !post_cutover_activate_vmm(context) { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('V' as u8); }
+
     if !post_cutover_activate_acpi(context) { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('A' as u8); }
+
     if !post_cutover_activate_interrupt_controllers() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('I' as u8); }
+
     if !post_cutover_prepare_irqs() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('R' as u8); }
+
     if !post_cutover_prepare_timer() { loop {} }
 
     // Diagnóstico best-effort: não é pré-requisito de hardware do kernel.
-    if x86_serial_init() {
+    if serial_ready {
         x86_serial_write_timer_ready_marker();
     }
 

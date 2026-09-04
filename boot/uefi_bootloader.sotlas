@@ -536,6 +536,11 @@ static EFI_STATUS baken_prepare_cutover_from_final_map(
     post->memory_map_size = state->memory_map_size;
     post->memory_descriptor_size = state->descriptor_size;
     post->acpi_rsdp = acpi_physical;
+    // A arena de tabelas já existe antes do mapa final. O runtime pós-exit a
+    // reabre pelo direct map, sem solicitar memória ao firmware encerrado.
+    post->page_table_arena_physical_base = boot_info->page_table_arena_physical_base;
+    post->page_table_arena_page_count = boot_info->page_table_arena_page_count;
+    post->page_table_pages_used = prepared.table_pages_used;
     post->valid = true;
 
     bridge->stack_top = prepared.stack_top;

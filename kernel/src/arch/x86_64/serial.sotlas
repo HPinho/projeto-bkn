@@ -49,6 +49,28 @@ pub fn x86_serial_write_byte(value: u8) -> bool {
     return false;
 }
 
+// Checkpoint curto e delimitado para o bring-up pós-cutover.  Um único
+// caractere de etapa evita depender de alocação, formatação ou framebuffer
+// enquanto a MMU, o PMM e os controladores de interrupção são validados.
+// Convenção: C=CPU, P=PMM, V=VMM, A=ACPI, I=APIC/IOAPIC, R=rotas IRQ.
+@system
+pub fn x86_serial_write_stage_marker(stage: u8) -> bool {
+    if !x86_serial_write_byte('B' as u8) { return false; }
+    if !x86_serial_write_byte('A' as u8) { return false; }
+    if !x86_serial_write_byte('K' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('N' as u8) { return false; }
+    if !x86_serial_write_byte(':' as u8) { return false; }
+    if !x86_serial_write_byte('S' as u8) { return false; }
+    if !x86_serial_write_byte('T' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('P' as u8) { return false; }
+    if !x86_serial_write_byte('=' as u8) { return false; }
+    if !x86_serial_write_byte(stage) { return false; }
+    if !x86_serial_write_byte('\n' as u8) { return false; }
+    return true;
+}
+
 @system
 pub fn x86_serial_write_timer_ready_marker() -> bool {
     if !x86_serial_write_byte('B' as u8) { return false; }

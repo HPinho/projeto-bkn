@@ -20,14 +20,43 @@ class PostCutoverSerialCheckpointTests(unittest.TestCase):
         self.assertNotIn("BootServices", text)
         self.assertNotIn("Stall", text)
 
-    def test_marker_is_emitted_only_after_timer_prepare(self):
+    def test_markers_bound_each_post_cutover_phase_and_timer_remains_last(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
-        timer = body.index("post_cutover_prepare_timer()")
         serial = body.index("x86_serial_init()")
+        cpu = body.index("post_cutover_activate_cpu(context)")
+        pmm = body.index("post_cutover_activate_pmm(context)")
+        vmm = body.index("post_cutover_activate_vmm(context)")
+        acpi = body.index("post_cutover_activate_acpi(context)")
+        apic = body.index("post_cutover_activate_interrupt_controllers()")
+        irqs = body.index("post_cutover_prepare_irqs()")
+        timer = body.index("post_cutover_prepare_timer()")
         marker = body.index("x86_serial_write_timer_ready_marker()")
-        self.assertLess(timer, serial)
-        self.assertLess(serial, marker)
+        self.assertLess(serial, cpu)
+        self.assertLess(cpu, pmm)
+        self.assertLess(pmm, vmm)
+        self.assertLess(vmm, acpi)
+        self.assertLess(acpi, apic)
+        self.assertLess(apic, irqs)
+        self.assertLess(irqs, timer)
+        self.assertLess(timer, marker)
+        for stage in ("'B' as u8", "'C' as u8", "'P' as u8", "'V' as u8", "'A' as u8", "'I' as u8", "'R' as u8"):
+            self.assertIn(f"x86_serial_write_stage_marker({stage})", body)
+
+    def test_cpu_cutover_has_bounded_substage_checkpoints(self):
+        text = POST.read_text(encoding="utf-8")
+        body = text.split("pub fn post_cutover_activate_cpu", 1)[1].split(
+            "pub fn post_cutover_cpu_tables_active", 1
+        )[0]
+        context = body.index("x86_serial_write_stage_marker('0' as u8)")
+        cr3 = body.index("x86_mmu_activate_root(context.root_physical)")
+        after_cr3 = body.index("x86_serial_write_stage_marker('1' as u8)")
+        tables = body.index("x86_serial_write_stage_marker('2' as u8)")
+        loaded = body.index("x86_serial_write_stage_marker('3' as u8)")
+        self.assertLess(context, cr3)
+        self.assertLess(cr3, after_cr3)
+        self.assertLess(after_cr3, tables)
+        self.assertLess(tables, loaded)
 
     def test_qemu_smoke_requires_actual_post_cutover_marker(self):
         text = WORKFLOW.read_text(encoding="utf-8")

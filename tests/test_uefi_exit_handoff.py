@@ -97,6 +97,9 @@ class UefiExitHandoffTests(unittest.TestCase):
         self.assertIn("post->memory_map_base = map_physical", bootloader)
         self.assertIn("post->acpi_rsdp = acpi_physical", bootloader)
         self.assertIn("post->root_physical = prepared.root_physical", bootloader)
+        self.assertIn("post->page_table_arena_physical_base = boot_info->page_table_arena_physical_base", bootloader)
+        self.assertIn("post->page_table_arena_page_count = boot_info->page_table_arena_page_count", bootloader)
+        self.assertIn("post->page_table_pages_used = prepared.table_pages_used", bootloader)
         self.assertIn("post->valid = true", bootloader)
 
 
