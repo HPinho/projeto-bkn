@@ -1,0 +1,243 @@
+// Baken OS — estruturas DMA xHCI preparadas com o controller ainda parado.
+//
+// Toda a memória desta fase vem de uma única arena DMA física contígua para
+// respeitar o allocator bootstrap LIFO. A arena contém DCBAA, Command Ring,
+// Event Ring, ERST, Scratchpad Buffer Array e scratchpad pages. Nenhum doorbell
+// é tocado aqui e Bus Master continua desligado até a fase de start.
+
+module kernel::drivers::xhci_runtime;
+
+import kernel::memory::dma::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
+import kernel::drivers::xhci_erst::*;
+import kernel::drivers::xhci_event_ring::*;
+
+pub const XHCI_RUNTIME_PAGE_SIZE: u64 = 4096;
+pub const XHCI_RUNTIME_COMMAND_TRBS: u32 = 256;
+pub const XHCI_RUNTIME_EVENT_TRBS: u32 = 256;
+pub const XHCI_RUNTIME_BASE_PAGES: u64 = 4;
+pub const XHCI_DCBAA_PAGE_INDEX: u64 = 0;
+pub const XHCI_COMMAND_RING_PAGE_INDEX: u64 = 1;
+pub const XHCI_EVENT_RING_PAGE_INDEX: u64 = 2;
+pub const XHCI_ERST_PAGE_INDEX: u64 = 3;
+
+static mut XHCI_RUNTIME_READY: bool = false;
+static mut XHCI_RUNTIME_ARENA: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+static mut XHCI_RUNTIME_COMMAND_RING: XhciRing = XhciRing {
+    virtual_base: null as *mut XhciTrb,
+    physical_base: 0,
+    trb_count: 0,
+    enqueue_index: 0,
+    cycle_state: true,
+    valid: false
+};
+static mut XHCI_RUNTIME_EVENT_STATE: XhciEventRingState = XhciEventRingState {
+    trb_count: 0,
+    dequeue_index: 0,
+    consumer_cycle_state: true,
+    valid: false
+};
+static mut XHCI_RUNTIME_ERST_ENTRY: XhciErstEntry = XhciErstEntry {
+    ring_segment_base_address: 0,
+    ring_segment_size: 0,
+    reserved: 0
+};
+static mut XHCI_RUNTIME_DCBAA_PHYSICAL: u64 = 0;
+static mut XHCI_RUNTIME_COMMAND_PHYSICAL: u64 = 0;
+static mut XHCI_RUNTIME_EVENT_PHYSICAL: u64 = 0;
+static mut XHCI_RUNTIME_ERST_PHYSICAL: u64 = 0;
+static mut XHCI_RUNTIME_SCRATCHPAD_ARRAY_PHYSICAL: u64 = 0;
+static mut XHCI_RUNTIME_SCRATCHPAD_COUNT: u16 = 0;
+static mut XHCI_RUNTIME_TOTAL_PAGES: u64 = 0;
+
+@system
+fn xhci_runtime_pages_for_bytes(bytes: u64) -> u64 {
+    if bytes == 0 { return 0; }
+    let rounded = bytes + XHCI_RUNTIME_PAGE_SIZE - 1;
+    if rounded < bytes { return 0; }
+    return rounded / XHCI_RUNTIME_PAGE_SIZE;
+}
+
+@system
+fn xhci_runtime_pointer_array_pages(scratchpads: u16) -> u64 {
+    if scratchpads == 0 { return 0; }
+    return xhci_runtime_pages_for_bytes((scratchpads as u64) * 8);
+}
+
+@system
+fn xhci_runtime_zero(base: *mut u8, size: u64) -> bool {
+    if base == (null as *mut u8) || size == 0 { return false; }
+    unsafe {
+        let mut offset: u64 = 0;
+        while offset < size {
+            let address = (base as usize) + (offset as usize);
+            let slot = address as *mut u8;
+            *slot = 0;
+            offset += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn xhci_runtime_subbuffer(arena: *const DmaBuffer, page_index: u64, page_count: u64) -> DmaBuffer {
+    if arena == (null as *const DmaBuffer) || page_count == 0 { return dma_invalid_buffer(); }
+    if !dma_buffer_cpu_owned(arena) { return dma_invalid_buffer(); }
+    unsafe {
+        let byte_offset = page_index * XHCI_RUNTIME_PAGE_SIZE;
+        let byte_size = page_count * XHCI_RUNTIME_PAGE_SIZE;
+        if byte_offset >= (*arena).size || byte_size > ((*arena).size - byte_offset) {
+            return dma_invalid_buffer();
+        }
+        let physical = (*arena).physical_address + byte_offset;
+        let virtual_address = ((*arena).virtual_address as usize) + (byte_offset as usize);
+        return DmaBuffer {
+            virtual_address: virtual_address as *mut u8,
+            physical_address: physical,
+            size: byte_size,
+            alignment: XHCI_RUNTIME_PAGE_SIZE,
+            owner: DMA_OWNER_CPU,
+            fence: 0,
+            valid: true
+        };
+    }
+}
+
+@system
+fn xhci_runtime_write_u64(base: *mut u8, index: u64, value: u64) -> bool {
+    if base == (null as *mut u8) { return false; }
+    unsafe {
+        let address = (base as usize) + ((index as usize) * 8);
+        let slot = address as *mut u64;
+        *slot = value;
+    }
+    return true;
+}
+
+@system
+fn xhci_runtime_write_trb(base: *mut XhciTrb, index: u32, value: XhciTrb) -> bool {
+    if base == (null as *mut XhciTrb) { return false; }
+    unsafe {
+        let address = (base as usize) + ((index as usize) * 16);
+        let slot = address as *mut XhciTrb;
+        *slot = value;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_runtime_prepare() -> bool {
+    unsafe { XHCI_RUNTIME_READY = false; }
+    if !xhci_controller_is_ready() || !dma_allocator_available() { return false; }
+
+    let scratchpads = xhci_controller_max_scratchpads();
+    let pointer_pages = xhci_runtime_pointer_array_pages(scratchpads);
+    let total_pages = XHCI_RUNTIME_BASE_PAGES + pointer_pages + (scratchpads as u64);
+    if total_pages < XHCI_RUNTIME_BASE_PAGES { return false; }
+
+    let arena = dma_alloc(total_pages * XHCI_RUNTIME_PAGE_SIZE, XHCI_RUNTIME_PAGE_SIZE);
+    if !dma_buffer_cpu_owned(&arena) { return false; }
+    if !xhci_runtime_zero(arena.virtual_address, arena.size) { return false; }
+
+    let dcbaa = xhci_runtime_subbuffer(&arena, XHCI_DCBAA_PAGE_INDEX, 1);
+    let command_buffer = xhci_runtime_subbuffer(&arena, XHCI_COMMAND_RING_PAGE_INDEX, 1);
+    let event_buffer = xhci_runtime_subbuffer(&arena, XHCI_EVENT_RING_PAGE_INDEX, 1);
+    let erst_buffer = xhci_runtime_subbuffer(&arena, XHCI_ERST_PAGE_INDEX, 1);
+    if !dma_buffer_cpu_owned(&dcbaa) || !dma_buffer_cpu_owned(&command_buffer) ||
+       !dma_buffer_cpu_owned(&event_buffer) || !dma_buffer_cpu_owned(&erst_buffer) {
+        return false;
+    }
+
+    let mut command_ring = xhci_ring_bind(command_buffer, XHCI_RUNTIME_COMMAND_TRBS);
+    if !xhci_ring_is_ready(&command_ring) { return false; }
+    let link_index = XHCI_RUNTIME_COMMAND_TRBS - 1;
+    let link = xhci_trb_link(command_ring.physical_base, true, command_ring.cycle_state);
+    if !xhci_runtime_write_trb(command_ring.virtual_base, link_index, link) { return false; }
+
+    let erst_entry = xhci_erst_entry_from_dma(event_buffer, XHCI_RUNTIME_EVENT_TRBS);
+    if !xhci_erst_entry_valid(&erst_entry) { return false; }
+    let event_state = xhci_event_ring_init(&erst_entry);
+    if !xhci_event_ring_ready(&event_state) { return false; }
+
+    unsafe {
+        let erst_ptr = erst_buffer.virtual_address as *mut XhciErstEntry;
+        *erst_ptr = erst_entry;
+    }
+
+    let mut scratchpad_array_physical: u64 = 0;
+    if scratchpads != 0 {
+        if pointer_pages == 0 { return false; }
+        let pointer_first_page = XHCI_RUNTIME_BASE_PAGES;
+        let pointer_buffer = xhci_runtime_subbuffer(&arena, pointer_first_page, pointer_pages);
+        if !dma_buffer_cpu_owned(&pointer_buffer) { return false; }
+        scratchpad_array_physical = pointer_buffer.physical_address;
+        if !xhci_runtime_write_u64(dcbaa.virtual_address, 0, scratchpad_array_physical) {
+            return false;
+        }
+
+        let scratchpad_first_page = XHCI_RUNTIME_BASE_PAGES + pointer_pages;
+        let mut index: u16 = 0;
+        while index < scratchpads {
+            let page_index = scratchpad_first_page + (index as u64);
+            let scratchpad = xhci_runtime_subbuffer(&arena, page_index, 1);
+            if !dma_buffer_cpu_owned(&scratchpad) { return false; }
+            if !xhci_runtime_write_u64(pointer_buffer.virtual_address, index as u64,
+                                       scratchpad.physical_address) {
+                return false;
+            }
+            index += 1;
+        }
+    }
+
+    unsafe {
+        XHCI_RUNTIME_ARENA = arena;
+        XHCI_RUNTIME_COMMAND_RING = command_ring;
+        XHCI_RUNTIME_EVENT_STATE = event_state;
+        XHCI_RUNTIME_ERST_ENTRY = erst_entry;
+        XHCI_RUNTIME_DCBAA_PHYSICAL = dcbaa.physical_address;
+        XHCI_RUNTIME_COMMAND_PHYSICAL = command_buffer.physical_address;
+        XHCI_RUNTIME_EVENT_PHYSICAL = event_buffer.physical_address;
+        XHCI_RUNTIME_ERST_PHYSICAL = erst_buffer.physical_address;
+        XHCI_RUNTIME_SCRATCHPAD_ARRAY_PHYSICAL = scratchpad_array_physical;
+        XHCI_RUNTIME_SCRATCHPAD_COUNT = scratchpads;
+        XHCI_RUNTIME_TOTAL_PAGES = total_pages;
+        XHCI_RUNTIME_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_runtime_is_ready() -> bool { unsafe { return XHCI_RUNTIME_READY; } }
+
+@system
+pub fn xhci_runtime_dcbaa_physical() -> u64 { unsafe { return XHCI_RUNTIME_DCBAA_PHYSICAL; } }
+
+@system
+pub fn xhci_runtime_command_ring_physical() -> u64 { unsafe { return XHCI_RUNTIME_COMMAND_PHYSICAL; } }
+
+@system
+pub fn xhci_runtime_event_ring_physical() -> u64 { unsafe { return XHCI_RUNTIME_EVENT_PHYSICAL; } }
+
+@system
+pub fn xhci_runtime_erst_physical() -> u64 { unsafe { return XHCI_RUNTIME_ERST_PHYSICAL; } }
+
+@system
+pub fn xhci_runtime_scratchpad_array_physical() -> u64 {
+    unsafe { return XHCI_RUNTIME_SCRATCHPAD_ARRAY_PHYSICAL; }
+}
+
+@system
+pub fn xhci_runtime_scratchpad_count() -> u16 { unsafe { return XHCI_RUNTIME_SCRATCHPAD_COUNT; } }
+
+@system
+pub fn xhci_runtime_total_pages() -> u64 { unsafe { return XHCI_RUNTIME_TOTAL_PAGES; } }
