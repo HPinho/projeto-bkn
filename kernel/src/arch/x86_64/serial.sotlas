@@ -1,0 +1,73 @@
+// Baken OS — diagnóstico serial x86-64 mínimo, independente de UEFI.
+//
+// Usado pelo bring-up para transformar o smoke QEMU em prova de progresso real.
+// Não faz parte da UI e nunca espera indefinidamente por hardware ausente.
+
+module kernel::arch::x86_64::serial;
+
+pub const X86_SERIAL_COM1: u16 = 0x3F8;
+pub const X86_SERIAL_MAX_SPINS: u32 = 100000;
+
+static mut X86_SERIAL_READY: bool = false;
+
+@system
+pub fn x86_serial_init() -> bool {
+    unsafe { X86_SERIAL_READY = false; }
+
+    __outb(X86_SERIAL_COM1 + 1, 0x00);
+    __outb(X86_SERIAL_COM1 + 3, 0x80);
+    __outb(X86_SERIAL_COM1 + 0, 0x03);
+    __outb(X86_SERIAL_COM1 + 1, 0x00);
+    __outb(X86_SERIAL_COM1 + 3, 0x03);
+    __outb(X86_SERIAL_COM1 + 2, 0xC7);
+    __outb(X86_SERIAL_COM1 + 4, 0x0B);
+
+    // Um UART ausente costuma retornar 0xFF. Não tratamos isso como COM1 real.
+    let status = __inb(X86_SERIAL_COM1 + 5);
+    if status == 0xFF { return false; }
+
+    unsafe { X86_SERIAL_READY = true; }
+    return true;
+}
+
+@system
+pub fn x86_serial_is_ready() -> bool {
+    unsafe { return X86_SERIAL_READY; }
+}
+
+@system
+pub fn x86_serial_write_byte(value: u8) -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let mut spins: u32 = 0;
+    while spins < X86_SERIAL_MAX_SPINS {
+        if (__inb(X86_SERIAL_COM1 + 5) & 0x20) != 0 {
+            __outb(X86_SERIAL_COM1, value);
+            return true;
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn x86_serial_write_timer_ready_marker() -> bool {
+    if !x86_serial_write_byte('B' as u8) { return false; }
+    if !x86_serial_write_byte('A' as u8) { return false; }
+    if !x86_serial_write_byte('K' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('N' as u8) { return false; }
+    if !x86_serial_write_byte(':' as u8) { return false; }
+    if !x86_serial_write_byte('T' as u8) { return false; }
+    if !x86_serial_write_byte('I' as u8) { return false; }
+    if !x86_serial_write_byte('M' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('R' as u8) { return false; }
+    if !x86_serial_write_byte('_' as u8) { return false; }
+    if !x86_serial_write_byte('R' as u8) { return false; }
+    if !x86_serial_write_byte('E' as u8) { return false; }
+    if !x86_serial_write_byte('A' as u8) { return false; }
+    if !x86_serial_write_byte('D' as u8) { return false; }
+    if !x86_serial_write_byte('Y' as u8) { return false; }
+    if !x86_serial_write_byte('\n' as u8) { return false; }
+    return true;
+}
