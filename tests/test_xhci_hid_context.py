@@ -30,7 +30,7 @@ class XhciHidContextTests(unittest.TestCase):
 
     def test_input_context_add_flag_and_context_entries_use_dci(self):
         text = HID.read_text(encoding="utf-8")
-        self.assertIn("1u32 << (dci as u32)", text)
+        self.assertIn("1 << (dci as u32)", text)
         self.assertIn("XHCI_SLOT_CONTEXT_ENTRIES_SHIFT", text)
         self.assertIn("((dci as u64) + 1) * (context_size as u64)", text)
 
@@ -51,7 +51,11 @@ class XhciHidContextTests(unittest.TestCase):
     def test_stage_stays_bootstrap_compatible(self):
         text = code_only(HID.read_text(encoding="utf-8"))
         self.assertNotIn("<<=", text)
+        self.assertNotIn("1u32", text)
+        self.assertNotIn("0x1Fu32", text)
         self.assertIn("power = power << 1", text)
+        self.assertIn("1 << (dci as u32)", text)
+        self.assertIn("0x1F << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT", text)
 
     def test_main_registers_hid_context(self):
         text = MAIN.read_text(encoding="utf-8")
