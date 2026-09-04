@@ -8,6 +8,7 @@
 module kernel::drivers::xhci_controller;
 
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
 import kernel::memory::active_page_tables::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::xhci_discovery::*;
@@ -48,6 +49,13 @@ static mut XHCI_CONTROLLER_MAX_PORTS: u8 = 0;
 static mut XHCI_CONTROLLER_MAX_SCRATCHPADS: u16 = 0;
 static mut XHCI_CONTROLLER_PAGE_SIZE_MASK: u32 = 0;
 static mut XHCI_CONTROLLER_LEGACY_HANDOFF_DONE: bool = false;
+static mut XHCI_CONTROLLER_BRINGUP_STAGE: u8 = 0;
+
+@system
+fn xhci_controller_checkpoint(stage: u8, marker: u8) -> void {
+    unsafe { XHCI_CONTROLLER_BRINGUP_STAGE = stage; }
+    x86_serial_write_stage_marker(marker);
+}
 
 @system
 fn xhci_page_base(address: u64) -> u64 {
@@ -77,8 +85,6 @@ fn xhci_max_scratchpads(hcsparams2: u32) -> u16 {
     return (high << 5) | low;
 }
 
-// Percorre a lista de xHCI Extended Capabilities. Se encontrar USB Legacy
-// Support, solicita OS Owned e espera BIOS Owned cair antes de qualquer reset.
 @system
 fn xhci_legacy_handoff(mmio: u64, hccparams1: u32) -> bool {
     let mut offset_dwords = (hccparams1 >> 16) & 0xFFFF;
@@ -106,7 +112,6 @@ fn xhci_legacy_handoff(mmio: u64, hccparams1: u32) -> bool {
                 }
                 return false;
             }
-
             if (header & XHCI_LEGACY_OS_OWNED) == 0 {
                 x86_mmio_write32(address, header | XHCI_LEGACY_OS_OWNED);
             }
@@ -176,28 +181,32 @@ pub fn xhci_controller_prepare_first() -> bool {
         XHCI_CONTROLLER_MAX_SCRATCHPADS = 0;
         XHCI_CONTROLLER_PAGE_SIZE_MASK = 0;
         XHCI_CONTROLLER_LEGACY_HANDOFF_DONE = false;
+        XHCI_CONTROLLER_BRINGUP_STAGE = 0;
     }
 
     if !active_page_tables_is_ready() { return false; }
+    xhci_controller_checkpoint(1, '4' as u8);
     if xhci_discovery_scan() == 0 { return false; }
+    xhci_controller_checkpoint(2, '5' as u8);
 
     let candidate = xhci_discovery_candidate(0);
     if candidate == (null as *const XhciControllerCandidate) { return false; }
     if !candidate.valid || !candidate.mmio_usable || candidate.mmio_base == 0 { return false; }
+    xhci_controller_checkpoint(3, '6' as u8);
 
-    // Sem rings/DMA ainda: só Memory Space. Bus Master não é solicitado aqui.
     pci_enable_command_bits(candidate.bus, candidate.slot, candidate.func, PCI_COMMAND_MEMORY_SPACE);
     let command_after = pci_read_config16(candidate.bus, candidate.slot, candidate.func, 0x04);
     if (command_after & PCI_COMMAND_MEMORY_SPACE) == 0 { return false; }
+    xhci_controller_checkpoint(4, '7' as u8);
 
     let mmio = candidate.mmio_base;
     if !xhci_map_mmio_address(mmio) { return false; }
-
     let capability = x86_mmio_read32(mmio + XHCI_CAPLENGTH_HCIVERSION);
     let caplength = (capability & 0xFF) as u8;
     let version = ((capability >> 16) & 0xFFFF) as u16;
     if caplength < 0x20 { return false; }
     if version < XHCI_MIN_VERSION || version > XHCI_MAX_VERSION { return false; }
+    xhci_controller_checkpoint(5, '8' as u8);
 
     let operational = mmio + (caplength as u64);
     if !xhci_map_required_mmio(mmio, operational) { return false; }
@@ -212,14 +221,17 @@ pub fn xhci_controller_prepare_first() -> bool {
 
     if !xhci_legacy_handoff(mmio, hccparams1) { return false; }
     unsafe { XHCI_CONTROLLER_LEGACY_HANDOFF_DONE = true; }
+    xhci_controller_checkpoint(6, '9' as u8);
 
     let page_size_mask = x86_mmio_read32(operational + XHCI_OP_PAGESIZE);
     if (page_size_mask & 1) == 0 { return false; }
+    xhci_controller_checkpoint(7, 'q' as u8);
 
     if !xhci_stop_and_reset(operational) { return false; }
     if (x86_mmio_read32(operational + XHCI_OP_USBSTS) & XHCI_USBSTS_HCHALTED) == 0 {
         return false;
     }
+    xhci_controller_checkpoint(8, 'w' as u8);
 
     unsafe {
         XHCI_CONTROLLER_PCI_INDEX = candidate.pci_index;
@@ -260,6 +272,4 @@ pub fn xhci_controller_max_scratchpads() -> u16 { unsafe { return XHCI_CONTROLLE
 pub fn xhci_controller_page_size_mask() -> u32 { unsafe { return XHCI_CONTROLLER_PAGE_SIZE_MASK; } }
 
 @system
-pub fn xhci_controller_legacy_handoff_done() -> bool {
-    unsafe { return XHCI_CONTROLLER_LEGACY_HANDOFF_DONE; }
-}
+pub fn xhci_controller_bringup_stage() -> u8 { unsafe { return XHCI_CONTROLLER_BRINGUP_STAGE; } }
