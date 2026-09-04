@@ -50,8 +50,11 @@ fn pe_range_valid(size: u64, offset: u64, width: u64) -> bool {
 fn pe_read_u16(base: *const u8, size: u64, offset: u64) -> u16 {
     if base == (null as *const u8) || !pe_range_valid(size, offset, 2) { return 0; }
     unsafe {
-        let address = (base as usize) + (offset as usize);
-        if address < (base as usize) { return 0; }
+        let base_address = base as usize;
+        let address = base_address + (offset as usize);
+        if address < base_address { return 0; }
+        let end_address = address + 2;
+        if end_address < address { return 0; }
         let p0 = address as *const u8;
         let p1 = (address + 1) as *const u8;
         return (*p0 as u16) | ((*p1 as u16) << 8);
@@ -62,8 +65,11 @@ fn pe_read_u16(base: *const u8, size: u64, offset: u64) -> u16 {
 fn pe_read_u32(base: *const u8, size: u64, offset: u64) -> u32 {
     if base == (null as *const u8) || !pe_range_valid(size, offset, 4) { return 0; }
     unsafe {
-        let address = (base as usize) + (offset as usize);
-        if address < (base as usize) { return 0; }
+        let base_address = base as usize;
+        let address = base_address + (offset as usize);
+        if address < base_address { return 0; }
+        let end_address = address + 4;
+        if end_address < address { return 0; }
         let p0 = address as *const u8;
         let p1 = (address + 1) as *const u8;
         let p2 = (address + 2) as *const u8;
@@ -105,6 +111,9 @@ pub fn pe_section_invalid() -> PeSectionInfo {
 @system
 pub fn pe_image_parse(base: *const u8, loaded_size: u64) -> PeImageInfo {
     if base == (null as *const u8) || loaded_size < 64 { return pe_image_invalid(); }
+    let image_base = base as u64;
+    let loaded_end = image_base + loaded_size;
+    if loaded_end <= image_base { return pe_image_invalid(); }
     if pe_read_u16(base, loaded_size, 0) != PE_DOS_MAGIC { return pe_image_invalid(); }
 
     let pe_offset = pe_read_u32(base, loaded_size, 0x3C) as u64;
@@ -144,9 +153,13 @@ pub fn pe_image_parse(base: *const u8, loaded_size: u64) -> PeImageInfo {
     if !pe_range_valid(loaded_size, section_table_offset, section_bytes) {
         return pe_image_invalid();
     }
+    let section_table_end = section_table_offset + section_bytes;
+    if section_table_end < section_table_offset || section_table_end > (size_of_headers as u64) {
+        return pe_image_invalid();
+    }
 
     return PeImageInfo {
-        image_base: base as u64,
+        image_base: image_base,
         loaded_size: loaded_size,
         section_table_offset: section_table_offset,
         section_count: section_count,
