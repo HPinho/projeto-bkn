@@ -1,0 +1,25 @@
+// Baken OS — CRC32 IEEE 802.3 / polynomial 0xEDB88320.
+// Usado por GPT para Header CRC32 e Partition Entry Array CRC32.
+
+module kernel::storage::crc32;
+
+pub const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
+
+@system
+pub fn crc32_ieee(data: *const u8, length: usize) -> u32 {
+    if data == (null as *const u8) && length != 0 { return 0; }
+
+    let mut crc: u32 = 0xFFFFFFFF;
+    for mut i in 0..length {
+        let mut current = crc ^ (data[i] as u32);
+        for mut bit in 0..8 {
+            if (current & 1) != 0 {
+                current = (current >> 1) ^ CRC32_POLYNOMIAL;
+            } else {
+                current = current >> 1;
+            }
+        }
+        crc = current;
+    }
+    return crc ^ 0xFFFFFFFF;
+}
