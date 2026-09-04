@@ -1,0 +1,33 @@
+// Baken OS — ativação mínima das page tables próprias após o cutover UEFI.
+//
+// Este módulo contém somente o mecanismo CR3. Ele NÃO troca stack, NÃO carrega
+// GDT/IDT/TSS, NÃO habilita interrupções e NÃO chama firmware. O caller deve
+// garantir que imagem, stack e todos os dados em uso já estejam mapeados pelas
+// novas tabelas antes de chamar x86_mmu_activate_root().
+
+module kernel::memory::mmu_activate;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
+
+@system
+pub fn x86_mmu_root_valid(root_physical: u64) -> bool {
+    if root_physical == 0 { return false; }
+    if !x86_page_aligned(root_physical) { return false; }
+    // CR3 deve apontar para uma página física representável pelas entries x86-64
+    // que o Baken já codifica neste estágio de paging de quatro níveis.
+    if (root_physical & ~X86_PAGE_ADDRESS_MASK) != 0 { return false; }
+    return true;
+}
+
+@system
+pub fn x86_mmu_current_root() -> u64 {
+    return x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+}
+
+@system
+pub fn x86_mmu_activate_root(root_physical: u64) -> bool {
+    if !x86_mmu_root_valid(root_physical) { return false; }
+    x86_write_cr3_raw(root_physical);
+    return x86_mmu_current_root() == root_physical;
+}
