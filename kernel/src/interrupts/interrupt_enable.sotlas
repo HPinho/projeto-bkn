@@ -47,13 +47,22 @@ pub fn interrupt_enable_keyboard_after_timer() -> bool {
         if !EXTERNAL_INTERRUPTS_ENABLED || KEYBOARD_IRQ_ENABLED { return false; }
     }
     if !lapic_timer_is_ready() || !irq_idt_ready() || !irq_routes_ready() { return false; }
-    if !i8042_initialize_polling() || !i8042_first_port_present() { return false; }
+
+    // O timer já está live. Suspende interrupções durante toda a transição do
+    // i8042 + IOAPIC para que nenhum ISR observe o controlador pela metade.
+    x86_cli_raw();
+    if !i8042_initialize_polling() || !i8042_first_port_present() {
+        x86_sti_raw();
+        return false;
+    }
 
     let keyboard = interrupt_route_keyboard(IRQ_VECTOR_KEYBOARD);
-    if !keyboard.valid { return false; }
+    if !keyboard.valid {
+        x86_sti_raw();
+        return false;
+    }
     let destination = lapic_id();
 
-    x86_cli_raw();
     if !i8042_enable_native_irqs() {
         x86_sti_raw();
         return false;
