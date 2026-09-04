@@ -120,10 +120,10 @@ pub fn mcfg_ecam_address(segment_group: u16, bus: u8, device: u8, function: u8, 
             if bus < entry.start_bus || bus > entry.end_bus { continue; }
 
             let relative_bus = (bus - entry.start_bus) as u64;
-            return entry.base_address |
-                (relative_bus << 20) |
-                ((device as u64) << 15) |
-                ((function as u64) << 12) |
+            return entry.base_address +
+                (relative_bus << 20) +
+                ((device as u64) << 15) +
+                ((function as u64) << 12) +
                 (offset as u64);
         }
     }
