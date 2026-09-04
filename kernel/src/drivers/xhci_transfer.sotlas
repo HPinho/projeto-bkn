@@ -1,0 +1,74 @@
+// Baken OS — espera polling de Transfer Events xHCI sobre consumidor compartilhado.
+//
+// Valida Slot ID, Endpoint ID, completion code e o ponteiro do TRB de conclusão
+// antes de consumir o Event Ring global. Não publica Transfer TRBs e não toca
+// doorbells; essa responsabilidade permanece no produtor do endpoint.
+
+module kernel::drivers::xhci_transfer;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_event::*;
+import kernel::drivers::xhci_event_consumer::*;
+
+pub const XHCI_TRANSFER_POLL_LIMIT: u64 = 10000000;
+pub const XHCI_TRANSFER_EP0_ENDPOINT_ID: u8 = 1;
+
+static mut XHCI_TRANSFER_LAST_RESIDUAL_LENGTH: u32 = 0;
+static mut XHCI_TRANSFER_LAST_COMPLETION_CODE: u8 = 0;
+
+@system
+pub fn xhci_transfer_wait_ep0_completion(slot_id: u8,
+                                          completion_trb_physical: u64) -> bool {
+    unsafe {
+        XHCI_TRANSFER_LAST_RESIDUAL_LENGTH = 0;
+        XHCI_TRANSFER_LAST_COMPLETION_CODE = 0;
+    }
+    if !xhci_start_is_ready() || !xhci_event_consumer_is_ready() { return false; }
+    if slot_id == 0 || completion_trb_physical == 0 { return false; }
+
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return false; }
+
+    let mut spins: u64 = 0;
+    while spins < XHCI_TRANSFER_POLL_LIMIT {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HOST_CONTROLLER_ERROR) != 0 { return false; }
+
+        let event = xhci_event_consumer_peek();
+        if event != (null as *const XhciTrb) {
+            if xhci_event_type(event) != XHCI_TRB_TYPE_TRANSFER_EVENT { return false; }
+            if xhci_event_slot_id(event) != slot_id { return false; }
+            if xhci_transfer_event_endpoint_id(event) != XHCI_TRANSFER_EP0_ENDPOINT_ID {
+                return false;
+            }
+            if xhci_transfer_event_has_event_data(event) { return false; }
+            if xhci_transfer_event_trb_pointer(event) != completion_trb_physical {
+                return false;
+            }
+
+            let completion = xhci_event_completion_code(event);
+            let residual = xhci_transfer_event_residual_length(event);
+            unsafe {
+                XHCI_TRANSFER_LAST_COMPLETION_CODE = completion;
+                XHCI_TRANSFER_LAST_RESIDUAL_LENGTH = residual;
+            }
+            if !xhci_event_success(event) { return false; }
+            if !xhci_event_consumer_consume() { return false; }
+            return true;
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn xhci_transfer_last_residual_length() -> u32 {
+    unsafe { return XHCI_TRANSFER_LAST_RESIDUAL_LENGTH; }
+}
+
+@system
+pub fn xhci_transfer_last_completion_code() -> u8 {
+    unsafe { return XHCI_TRANSFER_LAST_COMPLETION_CODE; }
+}
