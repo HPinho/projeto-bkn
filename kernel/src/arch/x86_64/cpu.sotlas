@@ -1,0 +1,32 @@
+// Baken OS - wrappers x86-64 privilegiados do backend Sotlas.
+//
+// Estes wrappers existem no grafo canônico para que o build produza e valide
+// as instruções reais. Carregar GDT/IDT/TSS continua proibido enquanto o kernel
+// depender de UEFI Boot Services e enquanto a IDT não possuir exception stubs.
+
+module kernel::arch::x86_64::cpu;
+
+@system
+pub fn x86_lgdt_raw(descriptor_address: u64) -> void {
+    __lgdt(descriptor_address);
+}
+
+@system
+pub fn x86_lidt_raw(descriptor_address: u64) -> void {
+    __lidt(descriptor_address);
+}
+
+@system
+pub fn x86_ltr_raw(selector: u16) -> void {
+    __ltr(selector);
+}
+
+@system
+pub fn x86_read_cr2() -> u64 {
+    return __read_cr2();
+}
+
+@system
+pub fn x86_invlpg(address: u64) -> void {
+    __invlpg(address);
+}
