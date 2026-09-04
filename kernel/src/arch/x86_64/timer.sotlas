@@ -1,12 +1,16 @@
 // Baken OS - temporização x86-64 independente de UEFI após calibração.
 //
-// A frequência ainda pode ser calibrada durante a fase transitória usando uma
-// referência do firmware. Depois de x86_timer_set_cycles_per_us(), leitura e
-// espera usam somente TSC da CPU e permanecem válidas após ExitBootServices.
-// A substituição futura do busy-wait por APIC timer/HPET pertence à etapa de
-// interrupções e scheduler.
+// A frequência pode ser obtida de uma referência nativa de plataforma. Depois
+// de x86_timer_set_cycles_per_us(), leitura e espera usam somente TSC da CPU e
+// permanecem válidas após ExitBootServices. UEFI Stall continua apenas como
+// fallback transitório no runtime até esta calibração ser conectada ao boot.
 
 module kernel::arch::x86_64::timer;
+
+import kernel::acpi::pm_timer::*;
+
+pub const TSC_PM_CALIBRATION_DIVISOR: u64 = 100;
+pub const TSC_PM_CALIBRATION_MAX_SPINS: u64 = 20000000;
 
 static mut TSC_CYCLES_PER_US: u64 = 0;
 static mut TSC_CALIBRATED: bool = false;
@@ -36,6 +40,42 @@ pub fn x86_timer_cycles_per_us() -> u64 {
 @system
 pub fn x86_timer_is_calibrated() -> bool {
     unsafe { return TSC_CALIBRATED; }
+}
+
+// Calibra o TSC contra aproximadamente 10 ms do ACPI PM Timer. O contador
+// pode ter 24 ou 32 bits; o backend ACPI calcula wrap-around corretamente.
+// O limite de spins impede travamento se firmware anunciar um timer parado.
+@system
+pub fn x86_timer_calibrate_from_acpi_pm() -> bool {
+    if !acpi_pm_timer_port_ready() { return false; }
+
+    let frequency = acpi_pm_timer_frequency_hz();
+    if frequency == 0 { return false; }
+    let target_ticks = frequency / TSC_PM_CALIBRATION_DIVISOR;
+    if target_ticks == 0 { return false; }
+
+    let pm_start = acpi_pm_timer_read_counter();
+    let tsc_start = x86_timer_read_tsc();
+    let mut elapsed_ticks: u32 = 0;
+    let mut spins: u64 = 0;
+
+    while spins < TSC_PM_CALIBRATION_MAX_SPINS {
+        let pm_now = acpi_pm_timer_read_counter();
+        elapsed_ticks = acpi_pm_timer_elapsed_ticks(pm_start, pm_now);
+        if (elapsed_ticks as u64) >= target_ticks { break; }
+        spins += 1;
+    }
+
+    if (elapsed_ticks as u64) < target_ticks { return false; }
+    let tsc_finish = x86_timer_read_tsc();
+    if tsc_finish <= tsc_start { return false; }
+
+    let tsc_delta = tsc_finish - tsc_start;
+    let denominator = (elapsed_ticks as u64) * 1000000;
+    if denominator == 0 { return false; }
+
+    let cycles_per_us = (tsc_delta * frequency) / denominator;
+    return x86_timer_set_cycles_per_us(cycles_per_us);
 }
 
 @system
