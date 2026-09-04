@@ -54,6 +54,16 @@ class X8664FoundationTests(unittest.TestCase):
         self.assertIn("IDT[idx].ist = ist & 7", text)
         self.assertIn("((IDT_VECTOR_COUNT * 16) - 1) as u16", text)
 
+    def test_exception_gate_policy_reserves_critical_ists(self):
+        text = (ARCH / "idt.sotlas").read_text(encoding="utf-8")
+        self.assertIn("IDT_VECTOR_DOUBLE_FAULT: u16 = 8", text)
+        self.assertIn("IDT_VECTOR_NMI: u16 = 2", text)
+        self.assertIn("IDT_VECTOR_MACHINE_CHECK: u16 = 18", text)
+        self.assertIn("if vector == IDT_VECTOR_DOUBLE_FAULT { return 1; }", text)
+        self.assertIn("if vector == IDT_VECTOR_NMI { return 2; }", text)
+        self.assertIn("if vector == IDT_VECTOR_MACHINE_CHECK { return 3; }", text)
+        self.assertIn("pub fn idt_set_exception_gate(vector: u16, handler: u64)", text)
+
     def test_kernel_prepares_but_does_not_claim_cpu_tables_are_loaded(self):
         main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
         for token in (
