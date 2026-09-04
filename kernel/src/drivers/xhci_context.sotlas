@@ -1,0 +1,255 @@
+// Baken OS — memória por slot xHCI após Enable Slot.
+//
+// Reserva uma arena DMA contígua de 3 páginas: Device Context, Input Context e
+// EP0 Transfer Ring. Suporta Context Size de 32 ou 64 bytes via HCCPARAMS1.CSZ.
+// Esta fase prepara DCBAA[slot], Slot Context e EP0 Context, mas NÃO envia
+// Address Device e não toca doorbell de endpoint.
+
+module kernel::drivers::xhci_context;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::dma::*;
+import kernel::memory::direct_map::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_runtime::*;
+import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_port::*;
+import kernel::drivers::xhci_ring::*;
+import kernel::drivers::xhci_trb::*;
+
+pub const XHCI_CONTEXT_PAGE_SIZE: u64 = 4096;
+pub const XHCI_CONTEXT_ARENA_PAGES: u64 = 3;
+pub const XHCI_DEVICE_CONTEXT_PAGE: u64 = 0;
+pub const XHCI_INPUT_CONTEXT_PAGE: u64 = 1;
+pub const XHCI_EP0_RING_PAGE: u64 = 2;
+pub const XHCI_EP0_RING_TRBS: u32 = 256;
+pub const XHCI_HCCPARAMS1_CSZ: u32 = 1 << 2;
+
+pub const XHCI_INPUT_CONTROL_ADD_SLOT: u32 = 1 << 0;
+pub const XHCI_INPUT_CONTROL_ADD_EP0: u32 = 1 << 1;
+pub const XHCI_SLOT_CONTEXT_ENTRIES_SHIFT: u32 = 27;
+pub const XHCI_SLOT_CONTEXT_SPEED_SHIFT: u32 = 20;
+pub const XHCI_SLOT_CONTEXT_ROOT_PORT_SHIFT: u32 = 16;
+pub const XHCI_EP_CONTEXT_TYPE_SHIFT: u32 = 3;
+pub const XHCI_EP_TYPE_CONTROL: u32 = 4;
+pub const XHCI_EP_CONTEXT_CERR_SHIFT: u32 = 1;
+pub const XHCI_EP_CONTEXT_CERR_3: u32 = 3;
+pub const XHCI_EP_CONTEXT_MAX_PACKET_SHIFT: u32 = 16;
+pub const XHCI_TR_DEQUEUE_DCS: u64 = 1;
+
+static mut XHCI_CONTEXT_READY: bool = false;
+static mut XHCI_CONTEXT_SLOT_ID: u8 = 0;
+static mut XHCI_CONTEXT_SIZE: u32 = 0;
+static mut XHCI_CONTEXT_ARENA: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+static mut XHCI_CONTEXT_DEVICE_PHYSICAL: u64 = 0;
+static mut XHCI_CONTEXT_INPUT_PHYSICAL: u64 = 0;
+static mut XHCI_CONTEXT_EP0_RING_PHYSICAL: u64 = 0;
+static mut XHCI_CONTEXT_EP0_MAX_PACKET: u16 = 0;
+
+@system
+fn xhci_context_zero(base: *mut u8, size: u64) -> bool {
+    if base == (null as *mut u8) || size == 0 { return false; }
+    unsafe {
+        let mut offset: u64 = 0;
+        while offset < size {
+            let address = (base as usize) + (offset as usize);
+            let slot = address as *mut u8;
+            *slot = 0;
+            offset += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn xhci_context_subbuffer(arena: *const DmaBuffer, page: u64) -> DmaBuffer {
+    if arena == (null as *const DmaBuffer) { return dma_invalid_buffer(); }
+    if !dma_buffer_cpu_owned(arena) || page >= XHCI_CONTEXT_ARENA_PAGES {
+        return dma_invalid_buffer();
+    }
+    unsafe {
+        let offset = page * XHCI_CONTEXT_PAGE_SIZE;
+        return DmaBuffer {
+            virtual_address: (((*arena).virtual_address as usize) + (offset as usize)) as *mut u8,
+            physical_address: (*arena).physical_address + offset,
+            size: XHCI_CONTEXT_PAGE_SIZE,
+            alignment: XHCI_CONTEXT_PAGE_SIZE,
+            owner: DMA_OWNER_CPU,
+            fence: 0,
+            valid: true
+        };
+    }
+}
+
+@system
+fn xhci_context_size_bytes() -> u32 {
+    let mmio = xhci_controller_mmio_base();
+    if mmio == 0 { return 0; }
+    let hccparams1 = x86_mmio_read32(mmio + XHCI_HCCPARAMS1);
+    if (hccparams1 & XHCI_HCCPARAMS1_CSZ) != 0 { return 64; }
+    return 32;
+}
+
+@system
+fn xhci_context_ep0_max_packet(speed_id: u8) -> u16 {
+    if speed_id == 1 || speed_id == 2 { return 8; }
+    if speed_id == 3 { return 64; }
+    if speed_id >= 4 { return 512; }
+    return 0;
+}
+
+@system
+fn xhci_context_write32(base: *mut u8, byte_offset: u64, value: u32) -> bool {
+    if base == (null as *mut u8) { return false; }
+    unsafe {
+        let address = (base as usize) + (byte_offset as usize);
+        let slot = address as *mut u32;
+        *slot = value;
+    }
+    return true;
+}
+
+@system
+fn xhci_context_write64(base: *mut u8, byte_offset: u64, value: u64) -> bool {
+    if base == (null as *mut u8) { return false; }
+    unsafe {
+        let address = (base as usize) + (byte_offset as usize);
+        let slot = address as *mut u64;
+        *slot = value;
+    }
+    return true;
+}
+
+@system
+fn xhci_context_write_dcbaa_slot(slot_id: u8, device_physical: u64) -> bool {
+    if slot_id == 0 || device_physical == 0 || (device_physical & 0x3F) != 0 { return false; }
+    let dcbaa_physical = xhci_runtime_dcbaa_physical();
+    if dcbaa_physical == 0 { return false; }
+    let dcbaa_virtual = direct_map_virtual_address(dcbaa_physical);
+    if dcbaa_virtual == 0 { return false; }
+    let offset = (slot_id as u64) * 8;
+    unsafe {
+        let address = (dcbaa_virtual + offset) as *mut u64;
+        *address = device_physical;
+    }
+    return x86_read_cr3_raw() != 0;
+}
+
+@system
+pub fn xhci_context_prepare_for_enabled_slot() -> bool {
+    unsafe {
+        XHCI_CONTEXT_READY = false;
+        XHCI_CONTEXT_SLOT_ID = 0;
+        XHCI_CONTEXT_SIZE = 0;
+        XHCI_CONTEXT_DEVICE_PHYSICAL = 0;
+        XHCI_CONTEXT_INPUT_PHYSICAL = 0;
+        XHCI_CONTEXT_EP0_RING_PHYSICAL = 0;
+        XHCI_CONTEXT_EP0_MAX_PACKET = 0;
+    }
+    if !xhci_slot_is_ready() || !xhci_controller_is_ready() || !xhci_runtime_is_ready() {
+        return false;
+    }
+
+    let slot_id = xhci_slot_id();
+    let port_id = xhci_slot_port_id();
+    if slot_id == 0 || port_id == 0 { return false; }
+    let snapshot = xhci_port_snapshot(port_id);
+    if snapshot == (null as *const XhciPortSnapshot) { return false; }
+
+    let context_size = xhci_context_size_bytes();
+    if context_size != 32 && context_size != 64 { return false; }
+    let speed_id = unsafe { (*snapshot).speed_id };
+    let max_packet = xhci_context_ep0_max_packet(speed_id);
+    if max_packet == 0 { return false; }
+
+    let mut arena = dma_alloc(XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE,
+                              XHCI_CONTEXT_PAGE_SIZE);
+    if !dma_buffer_cpu_owned(&arena) { return false; }
+    if !xhci_context_zero(arena.virtual_address, arena.size) { return false; }
+
+    let device = xhci_context_subbuffer(&arena, XHCI_DEVICE_CONTEXT_PAGE);
+    let input = xhci_context_subbuffer(&arena, XHCI_INPUT_CONTEXT_PAGE);
+    let ep0_ring_buffer = xhci_context_subbuffer(&arena, XHCI_EP0_RING_PAGE);
+    if !dma_buffer_cpu_owned(&device) || !dma_buffer_cpu_owned(&input) ||
+       !dma_buffer_cpu_owned(&ep0_ring_buffer) { return false; }
+
+    let ep0_ring = xhci_ring_bind(ep0_ring_buffer, XHCI_EP0_RING_TRBS);
+    if !xhci_ring_is_ready(&ep0_ring) { return false; }
+    let link_index = XHCI_EP0_RING_TRBS - 1;
+    unsafe {
+        let link_address = (ep0_ring.virtual_base as usize) + ((link_index as usize) * 16);
+        let link_slot = link_address as *mut XhciTrb;
+        *link_slot = xhci_trb_link(ep0_ring.physical_base, true, true);
+    }
+
+    // Input Control Context ocupa sempre 32 bytes; Slot Context vem logo após.
+    if !xhci_context_write32(input.virtual_address, 4, XHCI_INPUT_CONTROL_ADD_SLOT |
+        XHCI_INPUT_CONTROL_ADD_EP0) { return false; }
+
+    let slot_context_offset = 32;
+    let ep0_context_offset = 32 + (context_size as u64);
+    let slot_dw0 = (1 << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT) |
+        ((speed_id as u32) << XHCI_SLOT_CONTEXT_SPEED_SHIFT);
+    let slot_dw1 = (port_id as u32) << XHCI_SLOT_CONTEXT_ROOT_PORT_SHIFT;
+    if !xhci_context_write32(input.virtual_address, slot_context_offset, slot_dw0) ||
+       !xhci_context_write32(input.virtual_address, slot_context_offset + 4, slot_dw1) {
+        return false;
+    }
+
+    let ep0_dw1 = (XHCI_EP_CONTEXT_CERR_3 << XHCI_EP_CONTEXT_CERR_SHIFT) |
+        (XHCI_EP_TYPE_CONTROL << XHCI_EP_CONTEXT_TYPE_SHIFT) |
+        ((max_packet as u32) << XHCI_EP_CONTEXT_MAX_PACKET_SHIFT);
+    if !xhci_context_write32(input.virtual_address, ep0_context_offset + 4, ep0_dw1) {
+        return false;
+    }
+    if !xhci_context_write64(input.virtual_address, ep0_context_offset + 8,
+        ep0_ring.physical_base | XHCI_TR_DEQUEUE_DCS) { return false; }
+    if !xhci_context_write32(input.virtual_address, ep0_context_offset + 16, 8) {
+        return false;
+    }
+
+    // DCBAA[slot] aponta para Device Context; Input Context é usado apenas pelo command.
+    if !xhci_context_write_dcbaa_slot(slot_id, device.physical_address) { return false; }
+    if !dma_share_with_device(&arena) { return false; }
+
+    unsafe {
+        XHCI_CONTEXT_ARENA = arena;
+        XHCI_CONTEXT_SLOT_ID = slot_id;
+        XHCI_CONTEXT_SIZE = context_size;
+        XHCI_CONTEXT_DEVICE_PHYSICAL = device.physical_address;
+        XHCI_CONTEXT_INPUT_PHYSICAL = input.physical_address;
+        XHCI_CONTEXT_EP0_RING_PHYSICAL = ep0_ring.physical_base;
+        XHCI_CONTEXT_EP0_MAX_PACKET = max_packet;
+        XHCI_CONTEXT_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_context_is_ready() -> bool { unsafe { return XHCI_CONTEXT_READY; } }
+
+@system
+pub fn xhci_context_slot_id() -> u8 { unsafe { return XHCI_CONTEXT_SLOT_ID; } }
+
+@system
+pub fn xhci_context_size() -> u32 { unsafe { return XHCI_CONTEXT_SIZE; } }
+
+@system
+pub fn xhci_context_device_physical() -> u64 { unsafe { return XHCI_CONTEXT_DEVICE_PHYSICAL; } }
+
+@system
+pub fn xhci_context_input_physical() -> u64 { unsafe { return XHCI_CONTEXT_INPUT_PHYSICAL; } }
+
+@system
+pub fn xhci_context_ep0_ring_physical() -> u64 { unsafe { return XHCI_CONTEXT_EP0_RING_PHYSICAL; } }
+
+@system
+pub fn xhci_context_ep0_max_packet() -> u16 { unsafe { return XHCI_CONTEXT_EP0_MAX_PACKET; } }
