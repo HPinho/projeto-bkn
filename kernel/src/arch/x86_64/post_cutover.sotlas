@@ -16,25 +16,28 @@ import kernel::memory::direct_map::*;
 import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::vmm::*;
+import kernel::memory::active_page_tables::*;
 import kernel::arch::x86_64::paging::*;
 
 @repr(C)
 pub struct PostCutoverContext {
     pub root_physical: u64;
     pub stack_top: u64;
-    // Framebuffer permanece identidade-mapeado explicitamente durante o primeiro cutover.
     pub framebuffer_base: u64;
     pub framebuffer_size: u64;
     pub screen_width: u32;
     pub screen_height: u32;
     pub pixels_per_scanline: u32;
     pub reserved0: u32;
-    // Estes dois campos são endereços físicos de handoff. Após CR3, consumidores
-    // devem usar os aliases altos abaixo, nunca dereferenciar os valores crus.
+    // Endereços físicos de handoff; consumidores pós-CR3 usam direct-map.
     pub memory_map_base: u64;
     pub memory_map_size: u64;
     pub memory_descriptor_size: u64;
     pub acpi_rsdp: u64;
+    // Reserva bootstrap das próprias page tables, retomada após CR3 pelo alias alto.
+    pub page_table_arena_physical_base: u64;
+    pub page_table_arena_page_count: u64;
+    pub page_table_pages_used: u64;
     pub valid: bool;
 }
 
@@ -75,13 +78,16 @@ pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
     if context.memory_descriptor_size < 40 { return false; }
     if post_cutover_memory_map_virtual(context) == (null as *const u8) { return false; }
     if context.acpi_rsdp != 0 && post_cutover_acpi_rsdp_virtual(context) == (null as *const u8) { return false; }
+    if context.page_table_arena_physical_base == 0 ||
+       !x86_page_aligned(context.page_table_arena_physical_base) { return false; }
+    if context.page_table_arena_page_count == 0 || context.page_table_pages_used == 0 ||
+       context.page_table_pages_used > context.page_table_arena_page_count { return false; }
     return true;
 }
 
 @system
 pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !post_cutover_context_valid(context) { return false; }
-
     if !x86_mmu_activate_root(context.root_physical) { return false; }
 
     tss_prepare_default_stacks();
@@ -90,7 +96,6 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     gdt_prepare();
     gdt_set_tss_descriptor(tss_base(), tss_limit());
     if !gdt_is_prepared() { return false; }
-
     if !idt_prepare_exceptions() || !idt_exceptions_ready() { return false; }
 
     let gdt_address = gdt_base() as u64;
@@ -140,8 +145,6 @@ pub fn post_cutover_pmm_active() -> bool {
     unsafe { return POST_CUTOVER_PMM_ACTIVE; }
 }
 
-// O VMM só se declara ativo depois do PMM e depois de provar que o CR3 atual
-// é exatamente a raiz entregue pelo cutover. Nenhuma segunda troca de CR3 ocorre.
 @system
 pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
     if !post_cutover_pmm_active() { return false; }
@@ -150,6 +153,14 @@ pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
         return false;
     }
     if !vmm_is_active() { return false; }
+
+    if !active_page_tables_resume(
+        context.root_physical,
+        context.page_table_arena_physical_base,
+        context.page_table_arena_page_count,
+        context.page_table_pages_used
+    ) { return false; }
+    if !active_page_tables_is_ready() { return false; }
 
     unsafe { POST_CUTOVER_VMM_ACTIVE = true; }
     return true;
@@ -164,15 +175,9 @@ pub fn post_cutover_vmm_active() -> bool {
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = argument as *const PostCutoverContext;
-    if !post_cutover_activate_cpu(context) {
-        loop {}
-    }
-    if !post_cutover_activate_pmm(context) {
-        loop {}
-    }
-    if !post_cutover_activate_vmm(context) {
-        loop {}
-    }
+    if !post_cutover_activate_cpu(context) { loop {} }
+    if !post_cutover_activate_pmm(context) { loop {} }
+    if !post_cutover_activate_vmm(context) { loop {} }
 
     // Próximo marco: APIC/IOAPIC. STI continua proibido até haver rotas e
     // handlers de IRQ/timer realmente instalados.
