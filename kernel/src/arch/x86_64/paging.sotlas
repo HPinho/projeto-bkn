@@ -20,7 +20,9 @@ pub const X86_PTE_ACCESSED: u64 = 1 << 5;
 pub const X86_PTE_DIRTY: u64 = 1 << 6;
 pub const X86_PTE_HUGE: u64 = 1 << 7;
 pub const X86_PTE_GLOBAL: u64 = 1 << 8;
-pub const X86_PTE_NX: u64 = 1 << 63;
+// Literal de 64 bits deliberado: evita o backend C inferir `1` como int32
+// antes do shift 63, o que é inválido com -Werror=shift-count-overflow.
+pub const X86_PTE_NX: u64 = 0x8000000000000000;
 
 @system
 pub fn x86_page_aligned(address: u64) -> bool {
