@@ -74,7 +74,10 @@ pub fn x86_timer_calibrate_from_acpi_pm() -> bool {
     let denominator = (elapsed_ticks as u64) * 1000000;
     if denominator == 0 { return false; }
 
-    let cycles_per_us = (tsc_delta * frequency) / denominator;
+    // Arredonda para o inteiro mais próximo em vez de enviesar a calibração
+    // para baixo por truncamento da divisão inteira.
+    let numerator = tsc_delta * frequency;
+    let cycles_per_us = (numerator + (denominator / 2)) / denominator;
     return x86_timer_set_cycles_per_us(cycles_per_us);
 }
 
