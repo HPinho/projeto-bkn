@@ -169,6 +169,17 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertLess(boot.index("capture_loaded_image(bs, ImageHandle, &boot_info)"), boot.index("capture_memory_map(bs,"))
         self.assertLess(boot.index("reserve_transition_stack(bs, &boot_info)"), boot.index("capture_memory_map(bs,"))
 
+    def test_transition_mapper_keeps_physical_and_virtual_addresses_separate(self):
+        transition = (ROOT / "kernel/src/memory/transition_map.sotlas").read_text(encoding="utf-8")
+        self.assertIn("pub fn transition_map_range", transition)
+        self.assertIn("virtual_address: u64", transition)
+        self.assertIn("physical_address: u64", transition)
+        self.assertIn("virtual_cursor", transition)
+        self.assertIn("physical_cursor", transition)
+        self.assertIn("page_table_map_4k(arena, root, virtual_cursor, physical_cursor, clean_flags)", transition)
+        self.assertIn("return transition_map_range(arena, root, address, address, size, flags);", transition)
+        self.assertNotIn("write_cr3", transition)
+
     def test_bootloader_labels_uefi_bridge_as_transitional(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
         self.assertIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
@@ -179,6 +190,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertIn("continuam apenas como metadados", main)
         self.assertNotIn("write_cr3(", main)
         self.assertNotIn("transition_map_identity_range(", main)
+        self.assertNotIn("transition_map_range(", main)
 
     def test_compiler_remains_host_tool_not_ui_runtime(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
