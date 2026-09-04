@@ -17,6 +17,7 @@ import kernel::acpi::hpet::*;
 import kernel::acpi::fadt::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::pci_bus::*;
+import kernel::drivers::xhci_discovery::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
@@ -111,9 +112,14 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     }
 
     // Descoberta PCI é somente leitura. Ela registra hardware real, mas não
-    // habilita Bus Master, I/O/Memory Space nem promove GPU para aceleração.
-    // O mecanismo #1 continua temporário; MCFG apenas inventaria ECAM por ora.
+    // habilita Bus Master, I/O/Memory Space nem promove dispositivos para
+    // "drivers prontos". O mechanism #1 continua temporário; MCFG apenas
+    // inventaria ECAM por ora.
     pci_scan_all();
+
+    // xHCI discovery apenas registra candidatos PCI 0C/03/30 e BAR0. Nenhum
+    // reset de controlador, MMIO, DMA, MSI/MSI-X ou ring é criado aqui.
+    xhci_discovery_scan();
 
     // O framebuffer GOP é transportado como endereço físico/passivo no handoff.
     display_init(
