@@ -67,7 +67,7 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
 
     let pml4 = page_table_arena_alloc(arena);
     if !pml4.valid { return page_table_build_invalid(); }
-    if !page_table_zero(&pml4 as *const PageTablePage) { return page_table_build_invalid(); }
+    if !page_table_zero(pml4) { return page_table_build_invalid(); }
 
     let mut physical_cursor: u64 = 0;
     let mut huge_pages_mapped: u64 = 0;
@@ -81,9 +81,9 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
 
         let pdpt = page_table_arena_alloc(arena);
         if !pdpt.valid { return page_table_build_invalid(); }
-        if !page_table_zero(&pdpt as *const PageTablePage) { return page_table_build_invalid(); }
+        if !page_table_zero(pdpt) { return page_table_build_invalid(); }
         if !page_table_write_entry(
-            &pml4 as *const PageTablePage,
+            pml4,
             pml4_index,
             x86_pte_make(pdpt.physical_address, page_table_link_flags())
         ) { return page_table_build_invalid(); }
@@ -97,9 +97,9 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
 
             let pd = page_table_arena_alloc(arena);
             if !pd.valid { return page_table_build_invalid(); }
-            if !page_table_zero(&pd as *const PageTablePage) { return page_table_build_invalid(); }
+            if !page_table_zero(pd) { return page_table_build_invalid(); }
             if !page_table_write_entry(
-                &pdpt as *const PageTablePage,
+                pdpt,
                 pdpt_index,
                 x86_pte_make(pd.physical_address, page_table_link_flags())
             ) { return page_table_build_invalid(); }
@@ -119,7 +119,7 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
                         page_table_direct_map_huge_flags()
                     );
                     if !page_table_write_entry(
-                        &pd as *const PageTablePage,
+                        pd,
                         pd_index,
                         huge_entry
                     ) { return page_table_build_invalid(); }
@@ -128,9 +128,9 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
                 } else {
                     let pt = page_table_arena_alloc(arena);
                     if !pt.valid { return page_table_build_invalid(); }
-                    if !page_table_zero(&pt as *const PageTablePage) { return page_table_build_invalid(); }
+                    if !page_table_zero(pt) { return page_table_build_invalid(); }
                     if !page_table_write_entry(
-                        &pd as *const PageTablePage,
+                        pd,
                         pd_index,
                         x86_pte_make(pt.physical_address, page_table_link_flags())
                     ) { return page_table_build_invalid(); }
@@ -150,7 +150,7 @@ pub fn page_table_build_direct_map(arena: *mut PageTableArena,
                             page_table_direct_map_flags()
                         );
                         if !page_table_write_entry(
-                            &pt as *const PageTablePage,
+                            pt,
                             pt_index,
                             pte
                         ) { return page_table_build_invalid(); }
