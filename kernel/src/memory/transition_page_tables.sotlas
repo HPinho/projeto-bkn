@@ -2,8 +2,9 @@
 //
 // Recebe uma arena bootstrap já válida, cria a PML4 raiz e materializa:
 //   1) direct-map somente dos ranges UEFI/RAM aprovados;
-//   2) imagem PE com política W^X por seção (headers R+NX, código RX, dados RW+NX);
-//   3) mapping RW+NX da stack, mantendo a guard page ausente.
+//   2) imagem PE com política W^X por seção;
+//   3) framebuffer MMIO identidade RW+NX+UC;
+//   4) stack RW+NX, mantendo a guard page ausente.
 //
 // Falha fechada se qualquer etapa falhar. NÃO escreve CR3, NÃO chama UEFI e
 // NÃO ativa PMM/VMM. A ativação da MMU é uma etapa posterior e separada.
@@ -15,6 +16,7 @@ import kernel::memory::page_table_writer::*;
 import kernel::memory::direct_map_ranges::*;
 import kernel::memory::transition_image_map::*;
 import kernel::memory::transition_image_wx::*;
+import kernel::memory::transition_framebuffer_map::*;
 import kernel::memory::transition_stack::*;
 import kernel::memory::transition_stack_map::*;
 
@@ -24,6 +26,7 @@ pub struct TransitionPageTableResult {
     pub table_pages_used: u64;
     pub direct_map_bytes: u64;
     pub image_pages: u64;
+    pub framebuffer_pages: u64;
     pub stack_pages: u64;
     pub valid: bool;
 }
@@ -36,6 +39,7 @@ pub fn transition_page_tables_invalid() -> TransitionPageTableResult {
         table_pages_used: 0,
         direct_map_bytes: 0,
         image_pages: 0,
+        framebuffer_pages: 0,
         stack_pages: 0,
         valid: false
     };
@@ -47,9 +51,10 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
                                     memory_map_size: usize,
                                     descriptor_size: usize,
                                     image: TransitionImageLayout,
+                                    framebuffer: TransitionFramebufferLayout,
                                     stack: TransitionStackLayout) -> TransitionPageTableResult {
     if arena == (null as *mut PageTableArena) { return transition_page_tables_invalid(); }
-    if !image.valid || !stack.valid { return transition_page_tables_invalid(); }
+    if !image.valid || !framebuffer.valid || !stack.valid { return transition_page_tables_invalid(); }
 
     unsafe {
         if !(*arena).valid || (*arena).next_page_index != 0 {
@@ -75,6 +80,9 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
     let image_map = transition_image_map_wx(arena, root, image, image_base);
     if !image_map.valid { return transition_page_tables_invalid(); }
 
+    let framebuffer_map = transition_framebuffer_map(arena, root, framebuffer);
+    if !framebuffer_map.valid { return transition_page_tables_invalid(); }
+
     let stack_map = transition_stack_map(arena, root, stack);
     if !stack_map.valid { return transition_page_tables_invalid(); }
 
@@ -88,6 +96,7 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
         table_pages_used: table_pages_used,
         direct_map_bytes: direct.bytes_mapped,
         image_pages: image_map.pages_mapped,
+        framebuffer_pages: framebuffer_map.mapped_page_count,
         stack_pages: stack_map.mapped_page_count,
         valid: true
     };
