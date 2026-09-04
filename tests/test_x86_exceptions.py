@@ -23,8 +23,8 @@ class X86ExceptionTests(unittest.TestCase):
         self.assertIn("__sotlas_x86_exception_common", text)
         self.assertIn("call sotlas_x86_exception_dispatch", text)
         self.assertNotIn("baken_exception_dispatch", text)
-        self.assertNotIn("__attribute__((naked, used))", text)
-        self.assertIn("__attribute__((naked, unused))", text)
+        self.assertIn("__attribute__((naked, used)) static void __sotlas_x86_exception_common", text)
+        self.assertIn("__attribute__((naked, unused)) static void __sotlas_x86_isr_##n", text)
 
     def test_error_code_vectors_are_not_given_synthetic_error_codes(self):
         text = BACKEND.read_text(encoding="utf-8")
