@@ -53,6 +53,7 @@ import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::pat::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
+import kernel::arch::x86_64::post_cutover::*;
 
 pub const BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID: u64 = 8;
 pub const BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID: u64 = 16;
@@ -193,8 +194,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
 
     // Compatibilidade temporária: baken_runtime ainda interpreta somente o
-    // prefixo legado congelado do BootInfo. A rota baken_native_runtime permanece
-    // compilada, mas não é chamada antes do cutover real.
+    // prefixo legado congelado do BootInfo. A rota pós-cutover está compilada,
+    // mas não pode ser chamada enquanto Boot Services permanecer ativo.
     baken_runtime_run(boot_info as *const void, boot_info.screen_width, boot_info.screen_height);
     loop {}
 }
