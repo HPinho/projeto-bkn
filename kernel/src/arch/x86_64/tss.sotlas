@@ -6,6 +6,8 @@
 
 module kernel::arch::x86_64::tss;
 
+@repr(C)
+@packed
 pub struct Tss64 {
     pub reserved0: u32;
     pub rsp0: u64;
@@ -57,6 +59,9 @@ pub fn tss_prepare(kernel_rsp0: u64, ist_double_fault: u64, ist_nmi: u64, ist_ma
         TSS.ist5 = 0;
         TSS.ist6 = 0;
         TSS.ist7 = 0;
+        // sizeof(Tss64) = 104 bytes; apontar o I/O bitmap para o byte seguinte
+        // significa que nenhum bitmap esta presente enquanto o mecanismo nao
+        // for implementado explicitamente.
         TSS.io_map_base = 104;
         TSS_PREPARED = true;
     }
@@ -70,6 +75,11 @@ pub fn tss_base() -> u64 {
 @system
 pub fn tss_limit() -> u32 {
     return 103;
+}
+
+@system
+pub fn tss_size() -> u32 {
+    return 104;
 }
 
 @system
