@@ -1,0 +1,104 @@
+// Baken OS — entrada x86-64 executada somente após ExitBootServices.
+//
+// O trampoline do backend troca para a stack de transição e chama o símbolo
+// exportado abaixo. A ordem é deliberada: primeiro CR3, depois tabelas de CPU.
+// Interrupções continuam desabilitadas; APIC/IOAPIC/timer entram em fase posterior.
+
+module kernel::arch::x86_64::post_cutover;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::gdt::*;
+import kernel::arch::x86_64::tss::*;
+import kernel::arch::x86_64::idt::*;
+import kernel::memory::mmu_activate::*;
+import kernel::arch::x86_64::paging::*;
+
+@repr(C)
+pub struct PostCutoverContext {
+    pub root_physical: u64;
+    pub stack_top: u64;
+    pub framebuffer_base: u64;
+    pub framebuffer_size: u64;
+    pub screen_width: u32;
+    pub screen_height: u32;
+    pub pixels_per_scanline: u32;
+    pub reserved0: u32;
+    pub memory_map_base: u64;
+    pub memory_map_size: u64;
+    pub memory_descriptor_size: u64;
+    pub acpi_rsdp: u64;
+    pub valid: bool;
+}
+
+static mut POST_CUTOVER_CPU_TABLES_ACTIVE: bool = false;
+
+@system
+pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
+    if context == (null as *const PostCutoverContext) { return false; }
+    if !context.valid { return false; }
+    if context.root_physical == 0 || !x86_page_aligned(context.root_physical) { return false; }
+    if context.stack_top == 0 || (context.stack_top & 15) != 0 { return false; }
+    if context.framebuffer_base == 0 || context.framebuffer_size == 0 { return false; }
+    if context.screen_width == 0 || context.screen_height == 0 { return false; }
+    if context.pixels_per_scanline < context.screen_width { return false; }
+    if context.memory_map_base == 0 || context.memory_map_size == 0 { return false; }
+    if context.memory_descriptor_size < 40 { return false; }
+    return true;
+}
+
+@system
+pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
+    if !post_cutover_context_valid(context) { return false; }
+
+    // A nova PML4 precisa mapear a imagem, esta stack e todos os objetos abaixo.
+    if !x86_mmu_activate(context.root_physical) { return false; }
+
+    tss_prepare_default_stacks();
+    if !tss_is_prepared() { return false; }
+
+    gdt_prepare();
+    gdt_set_tss_descriptor(tss_base(), tss_limit());
+    if !gdt_is_prepared() { return false; }
+
+    if !idt_prepare_exceptions() || !idt_exceptions_ready() { return false; }
+
+    let gdt_address = gdt_base() as u64;
+    let idt_address = idt_base() as u64;
+    if gdt_address == 0 || idt_address == 0 { return false; }
+
+    // LGDT sozinho não altera CS. O backend recarrega DS/ES/SS e usa LRETQ
+    // para instalar GDT_KERNEL_CODE_SELECTOR em CS.
+    x86_gdt_activate_segments_raw(
+        gdt_address,
+        gdt_limit(),
+        GDT_KERNEL_CODE_SELECTOR,
+        GDT_KERNEL_DATA_SELECTOR
+    );
+
+    // A TSS já possui RSP0 e IST1/IST2/IST3 válidos antes de LTR.
+    x86_ltr_raw(GDT_TSS_SELECTOR);
+
+    // Todos os vetores 0..31 já apontam para stubs reais antes de LIDT.
+    x86_lidt_table_raw(idt_address, idt_limit());
+
+    unsafe { POST_CUTOVER_CPU_TABLES_ACTIVE = true; }
+    return true;
+}
+
+@system
+pub fn post_cutover_cpu_tables_active() -> bool {
+    unsafe { return POST_CUTOVER_CPU_TABLES_ACTIVE; }
+}
+
+@system
+@export
+pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
+    let context = argument as *const PostCutoverContext;
+    if !post_cutover_activate_cpu(context) {
+        loop {}
+    }
+
+    // Próximo marco: ativar PMM/VMM e controladores de interrupção. Enquanto
+    // isso não existir, nunca habilitamos STI e nunca retornamos à stack antiga.
+    loop {}
+}
