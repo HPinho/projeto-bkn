@@ -39,6 +39,10 @@ class PagingFoundationTests(unittest.TestCase):
         ):
             self.assertIn(flag, self.paging)
 
+    def test_nx_uses_explicit_64bit_literal(self):
+        self.assertIn("X86_PTE_NX: u64 = 0x8000000000000000", self.paging)
+        self.assertNotIn("X86_PTE_NX: u64 = 1 << 63", self.paging)
+
     def test_paging_module_does_not_activate_mmu(self):
         code = "\n".join(
             line.split("//", 1)[0] for line in self.paging.splitlines()
