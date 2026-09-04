@@ -1,0 +1,61 @@
+// Baken OS - temporização x86-64 independente de UEFI após calibração.
+//
+// A frequência ainda pode ser calibrada durante a fase transitória usando uma
+// referência do firmware. Depois de x86_timer_set_cycles_per_us(), leitura e
+// espera usam somente TSC da CPU e permanecem válidas após ExitBootServices.
+// A substituição futura do busy-wait por APIC timer/HPET pertence à etapa de
+// interrupções e scheduler.
+
+module kernel::arch::x86_64::timer;
+
+static mut TSC_CYCLES_PER_US: u64 = 0;
+static mut TSC_CALIBRATED: bool = false;
+
+@system
+pub fn x86_timer_read_tsc() -> u64 {
+    // baken_rdtsc já é lowering freestanding para a instrução RDTSC. O wrapper
+    // arquitetural impede que runtime/UI dependam diretamente do builtin.
+    return baken_rdtsc();
+}
+
+@system
+pub fn x86_timer_set_cycles_per_us(cycles_per_us: u64) -> bool {
+    if cycles_per_us == 0 { return false; }
+    unsafe {
+        TSC_CYCLES_PER_US = cycles_per_us;
+        TSC_CALIBRATED = true;
+    }
+    return true;
+}
+
+@system
+pub fn x86_timer_cycles_per_us() -> u64 {
+    unsafe { return TSC_CYCLES_PER_US; }
+}
+
+@system
+pub fn x86_timer_is_calibrated() -> bool {
+    unsafe { return TSC_CALIBRATED; }
+}
+
+@system
+pub fn x86_timer_elapsed_us(start_tsc: u64, end_tsc: u64) -> u64 {
+    let cycles_per_us = x86_timer_cycles_per_us();
+    if cycles_per_us == 0 || end_tsc <= start_tsc { return 0; }
+    return (end_tsc - start_tsc) / cycles_per_us;
+}
+
+// Bootstrap-only busy wait. Não chama Stall/Boot Services; será substituído
+// por sleep baseado em interrupções quando Local APIC timer/HPET estiver ativo.
+@system
+pub fn x86_timer_spin_wait_us(delay_us: u64) -> void {
+    let cycles_per_us = x86_timer_cycles_per_us();
+    if delay_us == 0 || cycles_per_us == 0 { return; }
+
+    let start = x86_timer_read_tsc();
+    let target_cycles = delay_us * cycles_per_us;
+    loop {
+        let now = x86_timer_read_tsc();
+        if now >= start && (now - start) >= target_cycles { return; }
+    }
+}
