@@ -48,6 +48,11 @@ class XhciHidContextTests(unittest.TestCase):
         self.assertNotIn("doorbell", text)
         self.assertNotIn("x86_mmio_write32", text)
 
+    def test_stage_stays_bootstrap_compatible(self):
+        text = code_only(HID.read_text(encoding="utf-8"))
+        self.assertNotIn("<<=", text)
+        self.assertIn("power = power << 1", text)
+
     def test_main_registers_hid_context(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::xhci_hid_context::*;", text)
