@@ -1,0 +1,143 @@
+// Baken OS - inventario inicial do Physical Memory Manager.
+//
+// Esta fase interpreta o Memory Map UEFI real recebido pelo BakenBootInfo v2,
+// mas NAO aloca paginas ainda. Enquanto a ponte UEFI continuar ativa, Boot
+// Services ainda podem consumir EfiConventionalMemory. A alocacao fisica so
+// sera habilitada depois do cutover real para ExitBootServices().
+
+module kernel::memory::pmm;
+
+pub const BAKEN_PAGE_SIZE: u64 = 4096;
+pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;
+pub const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
+pub const EFI_ACPI_MEMORY_NVS: u32 = 10;
+pub const EFI_MEMORY_MAPPED_IO: u32 = 11;
+pub const EFI_MEMORY_MAPPED_IO_PORT_SPACE: u32 = 12;
+
+pub struct EfiMemoryDescriptor {
+    pub type_code: u32;
+    pub padding: u32;
+    pub physical_start: u64;
+    pub virtual_start: u64;
+    pub number_of_pages: u64;
+    pub attribute: u64;
+}
+
+pub struct PmmInventory {
+    pub descriptor_count: u64;
+    pub total_pages: u64;
+    pub conventional_pages: u64;
+    pub acpi_reclaim_pages: u64;
+    pub acpi_nvs_pages: u64;
+    pub mmio_pages: u64;
+    pub largest_conventional_base: u64;
+    pub largest_conventional_pages: u64;
+    pub highest_physical_address: u64;
+    pub valid: bool;
+}
+
+static mut PMM_INVENTORY: PmmInventory = PmmInventory {
+    descriptor_count: 0,
+    total_pages: 0,
+    conventional_pages: 0,
+    acpi_reclaim_pages: 0,
+    acpi_nvs_pages: 0,
+    mmio_pages: 0,
+    largest_conventional_base: 0,
+    largest_conventional_pages: 0,
+    highest_physical_address: 0,
+    valid: false
+};
+
+@system
+pub fn pmm_inventory_init(memory_map_base: *const u8,
+                          memory_map_size: usize,
+                          descriptor_size: usize) -> bool {
+    if (memory_map_base == (null as *const u8)) { return false; }
+    if (memory_map_size == 0) { return false; }
+    if (descriptor_size < 40) { return false; }
+    if (descriptor_size > memory_map_size) { return false; }
+
+    unsafe {
+        PMM_INVENTORY.descriptor_count = 0;
+        PMM_INVENTORY.total_pages = 0;
+        PMM_INVENTORY.conventional_pages = 0;
+        PMM_INVENTORY.acpi_reclaim_pages = 0;
+        PMM_INVENTORY.acpi_nvs_pages = 0;
+        PMM_INVENTORY.mmio_pages = 0;
+        PMM_INVENTORY.largest_conventional_base = 0;
+        PMM_INVENTORY.largest_conventional_pages = 0;
+        PMM_INVENTORY.highest_physical_address = 0;
+        PMM_INVENTORY.valid = false;
+
+        let mut offset: usize = 0;
+        while (offset + descriptor_size) <= memory_map_size {
+            let address: usize = (memory_map_base as usize) + offset;
+            let descriptor = address as *const EfiMemoryDescriptor;
+            let pages: u64 = descriptor.number_of_pages;
+            let base: u64 = descriptor.physical_start;
+            let end: u64 = base + (pages * BAKEN_PAGE_SIZE);
+
+            PMM_INVENTORY.descriptor_count += 1;
+            PMM_INVENTORY.total_pages += pages;
+            if end > PMM_INVENTORY.highest_physical_address {
+                PMM_INVENTORY.highest_physical_address = end;
+            }
+
+            if descriptor.type_code == EFI_CONVENTIONAL_MEMORY {
+                PMM_INVENTORY.conventional_pages += pages;
+                if pages > PMM_INVENTORY.largest_conventional_pages {
+                    PMM_INVENTORY.largest_conventional_pages = pages;
+                    PMM_INVENTORY.largest_conventional_base = base;
+                }
+            } else if descriptor.type_code == EFI_ACPI_RECLAIM_MEMORY {
+                PMM_INVENTORY.acpi_reclaim_pages += pages;
+            } else if descriptor.type_code == EFI_ACPI_MEMORY_NVS {
+                PMM_INVENTORY.acpi_nvs_pages += pages;
+            } else if descriptor.type_code == EFI_MEMORY_MAPPED_IO ||
+                      descriptor.type_code == EFI_MEMORY_MAPPED_IO_PORT_SPACE {
+                PMM_INVENTORY.mmio_pages += pages;
+            }
+
+            offset += descriptor_size;
+        }
+
+        PMM_INVENTORY.valid = PMM_INVENTORY.descriptor_count > 0;
+        return PMM_INVENTORY.valid;
+    }
+}
+
+@system
+pub fn pmm_inventory_is_valid() -> bool {
+    unsafe { return PMM_INVENTORY.valid; }
+}
+
+@system
+pub fn pmm_get_descriptor_count() -> u64 {
+    unsafe { return PMM_INVENTORY.descriptor_count; }
+}
+
+@system
+pub fn pmm_get_total_pages() -> u64 {
+    unsafe { return PMM_INVENTORY.total_pages; }
+}
+
+@system
+pub fn pmm_get_conventional_pages() -> u64 {
+    unsafe { return PMM_INVENTORY.conventional_pages; }
+}
+
+@system
+pub fn pmm_get_largest_conventional_base() -> u64 {
+    unsafe { return PMM_INVENTORY.largest_conventional_base; }
+}
+
+@system
+pub fn pmm_get_largest_conventional_pages() -> u64 {
+    unsafe { return PMM_INVENTORY.largest_conventional_pages; }
+}
+
+@system
+pub fn pmm_get_highest_physical_address() -> u64 {
+    unsafe { return PMM_INVENTORY.highest_physical_address; }
+}
