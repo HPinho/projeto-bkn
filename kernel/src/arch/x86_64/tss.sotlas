@@ -69,7 +69,10 @@ pub fn tss_prepare(kernel_rsp0: u64, ist_double_fault: u64, ist_nmi: u64, ist_ma
 
 @system
 pub fn tss_base() -> u64 {
-    unsafe { return (&TSS as *const Tss64) as u64; }
+    unsafe {
+        let ptr: *const Tss64 = &TSS;
+        return ptr as u64;
+    }
 }
 
 @system
