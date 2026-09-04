@@ -31,14 +31,14 @@ Critério de status:
 | LAPIC / IOAPIC | ✅/⚙️ | 95% | 90% | Inicialização mascarada real observada em `BAKEN:STEP=I`; cobertura total de rotas ainda não concluída |
 | IRQs / timer | ⚙️ | 85% | 80% | `BAKEN:TIMER_READY`, `STEP=T` e `STEP=K` observados; LAPIC timer e IRQ1 estão vivos; IRQ12/MSI/MSI-X ainda pendentes |
 | DMA real | ⚙️ | 75% | 45% | PMM-backed DMA, ownership/shared state, DCBAA/rings/ERST/context arenas implementados; primeiro DMA de dispositivo ainda depende do xHCI ultrapassar `STEP=X` |
-| xHCI → USB HID | ⚙️ | 58% | 15% | Controller/discovery/reset, rings, protocol ranges, port reset, Enable Slot, contexts, Address Device e construtores puros de Setup/Data/Status/Normal Transfer TRBs estão implementados; QEMU ainda precisa ultrapassar `STEP=X`; publicação EP0, GET_DESCRIPTOR, Configure Endpoint e HID continuam pendentes |
+| xHCI → USB HID | ⚙️ | 61% | 22% | QEMU já validou discovery PCI, BAR/MMIO, PCI Memory Space e capability/version até `STEP=8`. Legacy handoff foi corrigido com fallback forçado; rings, port reset, Enable Slot, contexts, Address Device, Transfer TRBs e produtor EP0 stateful estão implementados. GET_DESCRIPTOR, Event consumer compartilhado, Configure Endpoint e HID ainda pendentes |
 | NVMe / AHCI | ⬜ | 10% | 0% | Apenas fundações compartilháveis de PCI/DMA existem; driver real ainda não implementado |
 | PAT / WC final | ⚙️ | 40% | 20% | PAT e mappings UC existem; política final WC/framebuffer e validação completa ainda pendentes |
-| **Fundação bare-metal geral** | ⚙️ | **~73%** | **~60%** | Base CPU/memória/ACPI/IRQ já roda pós-EBS; principal bloqueio runtime atual é xHCI antes de `STEP=X`, seguido por USB HID, storage e PAT/WC final |
+| **Fundação bare-metal geral** | ⚙️ | **~74%** | **~61%** | Base CPU/memória/ACPI/IRQ roda pós-EBS e o xHCI já chega a capability validation. O gate imediato é provar `STEP=9/q/w/X`, depois DMA ativo/USB HID, storage e PAT/WC final |
 
 ## Estado xHCI atual
 
-Último smoke QEMU confirmado antes dos checkpoints internos:
+Último smoke QEMU confirmado:
 
 ```text
 BAKEN:STEP=B
@@ -55,23 +55,30 @@ BAKEN:STEP=R
 BAKEN:TIMER_READY
 BAKEN:STEP=T
 BAKEN:STEP=K
+BAKEN:STEP=4
+BAKEN:STEP=5
+BAKEN:STEP=6
+BAKEN:STEP=7
+BAKEN:STEP=8
 ```
 
-O próximo objetivo é observar os checkpoints internos do controller e alcançar:
+Isso prova em runtime:
 
 ```text
-STEP=4  active page tables prontas
-STEP=5  xHCI PCI candidate encontrado
-STEP=6  BAR/MMIO válido
-STEP=7  PCI Memory Space habilitado
-STEP=8  capability/version válidos
-STEP=9  legacy ownership concluído
-STEP=q  page size 4 KiB suportado
-STEP=w  halt/HCRST/CNR concluídos
-STEP=X  controller pronto
-STEP=D  DCBAA/CRCR/ERST/ERDP programados
-STEP=N  No-op Command Completion real
+STEP=4  active page tables prontas                 ✅
+STEP=5  xHCI PCI candidate encontrado              ✅
+STEP=6  BAR/MMIO válido                            ✅
+STEP=7  PCI Memory Space habilitado                ✅
+STEP=8  capability/version válidos                 ✅
+STEP=9  legacy ownership concluído                 ⚙️ correção em validação
+STEP=q  page size 4 KiB suportado                  ⬜ aguardando gate anterior
+STEP=w  halt/HCRST/CNR concluídos                  ⬜ aguardando gate anterior
+STEP=X  controller pronto                          ⬜ aguardando gate anterior
+STEP=D  DCBAA/CRCR/ERST/ERDP programados           ⬜ aguardando gate anterior
+STEP=N  No-op Command Completion real              ⬜ aguardando gate anterior
 ```
+
+A falha do smoke anterior foi localizada exatamente entre `STEP=8` e `STEP=9`. O handoff agora segue uma política robusta: solicita OS Owned, espera BIOS Owned limpar e, se firmware/emulação não liberar o semáforo, desabilita USB Legacy SMIs e assume ownership após timeout em vez de abortar todo o bring-up.
 
 Depois de `STEP=N`, a sequência preparada/planejada é:
 
@@ -82,7 +89,8 @@ Supported Protocol
 → Device/Input Context + EP0 ring
 → Address Device
 → Setup/Data/Status Transfer TRBs
-→ publicação/doorbell EP0
+→ produtor EP0 stateful + doorbell
+→ Event Ring consumer compartilhado
 → GET_DESCRIPTOR
 → Configure Endpoint
 → HID keyboard/mouse
