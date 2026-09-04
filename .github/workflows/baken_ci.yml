@@ -56,9 +56,6 @@ jobs:
           cp "$OVMF_VARS" build/OVMF_VARS.fd
           rm -f build/qemu-serial.log
 
-          # Injeta repetidamente uma tecla via monitor HMP. As primeiras podem
-          # ocorrer ainda durante OVMF; pelo menos uma deve chegar depois que
-          # Baken habilitar IRQ1 no IOAPIC.
           set +e
           {
             sleep 4
@@ -72,6 +69,7 @@ jobs:
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
             -cdrom build/baken_os.iso \
+            -device qemu-xhci,id=xhci \
             -display none \
             -monitor stdio \
             -serial file:build/qemu-serial.log
@@ -84,6 +82,7 @@ jobs:
           test "$status" -eq 124
           grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
           grep -q "BAKEN:STEP=T" build/qemu-serial.log
-          # STEP=K só aparece depois que IRQ1/0x41 foi realmente entregue,
-          # o i8042 drenou o byte e o dispatcher incrementou o contador + EOI.
           grep -q "BAKEN:STEP=K" build/qemu-serial.log
+          # STEP=X só aparece depois de discovery PCI pós-EBS, BAR0 UC,
+          # capability validation, halt, HCRST e CNR=0 no xHC.
+          grep -q "BAKEN:STEP=X" build/qemu-serial.log
