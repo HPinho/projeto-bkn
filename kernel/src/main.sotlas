@@ -61,6 +61,7 @@ import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_descriptor::*;
 import kernel::drivers::xhci_configuration::*;
 import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_configure_endpoint::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
