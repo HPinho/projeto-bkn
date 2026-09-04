@@ -32,14 +32,22 @@ class XhciStartTests(unittest.TestCase):
         self.assertLess(share, bus_master)
         self.assertIn("dma_buffer_shared(&shared)", body)
 
-    def test_noop_is_published_before_controller_runs(self):
+    def test_noop_is_published_with_bootstrap_compatible_barrier_before_run(self):
         text = START.read_text(encoding="utf-8")
+        publish_fn = text.split("fn xhci_start_publish_noop", 1)[1].split(
+            "fn xhci_start_ring_command_doorbell", 1
+        )[0]
+        self.assertIn("xhci_trb_noop_command(true)", publish_fn)
+        self.assertIn("unsafe { *slot = noop; }", publish_fn)
+        self.assertIn("x86_read_cr3_raw()", publish_fn)
+        self.assertLess(publish_fn.index("*slot = noop"), publish_fn.index("x86_read_cr3_raw()"))
+        self.assertNotIn("quench {", text)
+
         body = text.split("pub fn xhci_start_and_prove_noop()", 1)[1]
-        publish = body.index("xhci_start_publish_noop(command_physical)")
-        run = body.index("XHCI_USBCMD_RUN_STOP")
-        self.assertLess(publish, run)
-        self.assertIn("quench {", text)
-        self.assertIn("xhci_trb_noop_command(true)", text)
+        self.assertLess(
+            body.index("xhci_start_publish_noop(command_physical)"),
+            body.index("XHCI_USBCMD_RUN_STOP"),
+        )
 
     def test_doorbell_and_completion_event_are_both_required(self):
         text = START.read_text(encoding="utf-8")
