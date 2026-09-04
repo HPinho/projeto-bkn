@@ -506,6 +506,7 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
             "baken_pci_out32", "baken_pci_in32", "baken_pci_out16", "baken_pci_in16", "baken_pci_out8", "baken_pci_in8",
             "__rdmsr", "__wrmsr", "baken_io_wait",
             "__cli", "__sti", "__hlt",
+            "__lgdt", "__lidt", "__ltr", "__read_cr2", "__invlpg",
             "baken_runtime_init_assets", "baken_runtime_run",
             "baken_efi_init", "baken_efi_poll_key", "baken_efi_poll_mouse_rel", "baken_efi_poll_mouse_abs",
             "baken_fast_memcpy",
@@ -541,14 +542,22 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
 def _c_identifier(module: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", module)
 
+def _bootstrap_backend():
+    """Carrega o frontend bootstrap com extensões de backend da arquitetura."""
+    try:
+        from tools.sotlas_compile import bootstrap
+        from tools.sotlas_compile import x86_intrinsics
+    except ImportError:
+        import bootstrap
+        import x86_intrinsics
+    x86_intrinsics.install(bootstrap)
+    return bootstrap
+
 def emit_c_header(ast: SotlasModuleAst, output: Path, unit: dict | None = None) -> Path:
     """Gera a ABI C real diretamente da interface pública Sotlas."""
     if unit is None:
         raise SotlasError(f"fonte ausente para interface do módulo {ast.name}")
-    try:
-        from tools.sotlas_compile import bootstrap
-    except ImportError:
-        import bootstrap
+    bootstrap = _bootstrap_backend()
     module = bootstrap.parse(unit["text"], filename=str(unit["path"]))
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(bootstrap.emit_header(module), encoding="utf-8")
@@ -587,10 +596,7 @@ def emit_c_module(ast: SotlasModuleAst, output: Path, header: Path, unit: dict |
     """
     if unit is None:
         raise SotlasError(f"fonte ausente para lowering do módulo {ast.name}")
-    try:
-        from tools.sotlas_compile import bootstrap
-    except ImportError:
-        import bootstrap
+    bootstrap = _bootstrap_backend()
 
     module = bootstrap.parse(unit["text"], filename=str(unit["path"]))
     dependencies = [
@@ -731,16 +737,16 @@ def main():
     args = parser.parse_args()
     try:
         if args.command.startswith("bootstrap-"):
-            from bootstrap import compile_file, compile_project, emit_c_project, parse as bootstrap_parse, check as bootstrap_check
+            bootstrap = _bootstrap_backend()
             if args.command == "bootstrap-build":
-                modules = compile_project(args.input)
-                emit_c_project(args.input, args.output)
+                modules = bootstrap.compile_project(args.input)
+                bootstrap.emit_c_project(args.input, args.output)
                 print(f"[OK] projeto Sotlas Bootstrap emitido: {args.output} ({len(modules)} módulos)")
                 return 0
-            module = bootstrap_parse(args.input.read_text(encoding="utf-8"))
-            bootstrap_check(module)
+            module = bootstrap.parse(args.input.read_text(encoding="utf-8"))
+            bootstrap.check(module)
             if args.command == "bootstrap-emit-c":
-                compile_file(args.input, args.output)
+                bootstrap.compile_file(args.input, args.output)
                 print(f"[OK] Sotlas Bootstrap emitido: {args.output}")
             else:
                 print(f"[OK] Sotlas Bootstrap: {module.name}; {len(module.structs)} structs; {len(module.functions)} funções")
