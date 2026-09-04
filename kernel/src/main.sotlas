@@ -36,12 +36,23 @@ pub struct BakenBootInfo {
     pub acpi_rsdp: *const u8;
 }
 
+@system
+pub fn baken_bootinfo_v2_valid(boot_info: *const BakenBootInfo) -> bool {
+    if (boot_info == (null as *const BakenBootInfo)) { return false; }
+    if (boot_info.version != 2) { return false; }
+    if (boot_info.struct_size < 120) { return false; }
+    if (boot_info.framebuffer_base == (null as *mut u32)) { return false; }
+    if (boot_info.screen_width == 0 || boot_info.screen_height == 0) { return false; }
+    if (boot_info.pixels_per_scanline < boot_info.screen_width) { return false; }
+    return true;
+}
+
 // Entrada inicial do kernel Sotlas. Durante a migração, a sessão gráfica ainda
 // usa o adaptador UEFI do runtime; nenhum código novo deve aumentar essa dívida.
 @system
 @export
 pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
-    if boot_info == (null as *const BakenBootInfo) {
+    if (!baken_bootinfo_v2_valid(boot_info)) {
         loop {}
     }
 
