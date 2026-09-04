@@ -28,7 +28,16 @@ class PageTableMapperTests(unittest.TestCase):
 
     def test_mapper_is_idempotent_but_rejects_conflicting_remap(self):
         self.assertIn("if x86_pte_present(current)", self.mapper)
-        self.assertIn("return current == desired;", self.mapper)
+        self.assertIn("X86_PTE_ACCESSED | X86_PTE_DIRTY", self.mapper)
+        self.assertIn(
+            "x86_pte_address(current) != x86_pte_address(desired)",
+            self.mapper,
+        )
+        self.assertIn(
+            "(current & ~hardware_bits) == (desired & ~hardware_bits)",
+            self.mapper,
+        )
+        self.assertNotIn("return current == desired;", self.mapper)
 
     def test_4k_mapping_clears_huge_and_2m_sets_huge(self):
         self.assertIn("(flags | X86_PTE_PRESENT) & ~X86_PTE_HUGE", self.mapper)
