@@ -2,6 +2,7 @@
 """Safety contracts for the shared i8042 input controller."""
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,10 +11,15 @@ MOUSE = ROOT / "kernel/src/drivers/ps2_mouse.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 
 
+def _code_only(text: str) -> str:
+    text = re.sub(r"//[^\n]*", "", text)
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+
+
 class I8042RoutingTests(unittest.TestCase):
     def test_only_controller_owns_raw_ps2_ports(self):
         controller = I8042.read_text(encoding="utf-8")
-        mouse = MOUSE.read_text(encoding="utf-8")
+        mouse = _code_only(MOUSE.read_text(encoding="utf-8"))
         self.assertIn("I8042_DATA_PORT: u16 = 0x60", controller)
         self.assertIn("I8042_STATUS_PORT: u16 = 0x64", controller)
         self.assertNotIn("__inb(", mouse)
