@@ -1,0 +1,101 @@
+// Baken OS — planejamento GPT nativo independente de firmware.
+//
+// Esta camada calcula a geometria de uma GPT válida para qualquer logical
+// block size suportado pelo dispositivo. Ela ainda não escreve setores: o
+// commit físico ficará ligado ao Block Device API quando AHCI/NVMe expuserem
+// read/write reais.
+
+module kernel::storage::gpt;
+
+pub const GPT_HEADER_MIN_SIZE: u32 = 92;
+pub const GPT_DEFAULT_ENTRY_SIZE: u32 = 128;
+pub const GPT_DEFAULT_ENTRY_COUNT: u32 = 128;
+pub const GPT_MIN_USABLE_ALIGNMENT_BYTES: u64 = 1048576;
+
+pub struct GptLayout {
+    pub valid: bool;
+    pub block_size: u32;
+    pub total_lbas: u64;
+    pub primary_header_lba: u64;
+    pub primary_entries_lba: u64;
+    pub primary_entries_blocks: u64;
+    pub first_usable_lba: u64;
+    pub last_usable_lba: u64;
+    pub backup_entries_lba: u64;
+    pub backup_header_lba: u64;
+    pub entry_count: u32;
+    pub entry_size: u32;
+}
+
+@system
+fn gpt_div_ceil_u64(value: u64, divisor: u64) -> u64 {
+    if divisor == 0 { return 0; }
+    return (value + divisor - 1) / divisor;
+}
+
+@system
+fn gpt_align_up_lba(lba: u64, block_size: u32, alignment_bytes: u64) -> u64 {
+    if block_size == 0 || alignment_bytes == 0 { return lba; }
+    let alignment_lbas = gpt_div_ceil_u64(alignment_bytes, block_size as u64);
+    if alignment_lbas <= 1 { return lba; }
+    return gpt_div_ceil_u64(lba, alignment_lbas) * alignment_lbas;
+}
+
+@system
+pub fn gpt_plan_layout(block_size: u32, last_lba: u64, entry_count: u32, entry_size: u32) -> GptLayout {
+    let mut result = GptLayout {
+        valid: false,
+        block_size: block_size,
+        total_lbas: if last_lba < 0xFFFFFFFFFFFFFFFF { last_lba + 1 } else { 0 },
+        primary_header_lba: 1,
+        primary_entries_lba: 2,
+        primary_entries_blocks: 0,
+        first_usable_lba: 0,
+        last_usable_lba: 0,
+        backup_entries_lba: 0,
+        backup_header_lba: last_lba,
+        entry_count: entry_count,
+        entry_size: entry_size,
+    };
+
+    if block_size < 512 || entry_count == 0 || entry_size < GPT_DEFAULT_ENTRY_SIZE { return result; }
+    if (entry_size % 8) != 0 { return result; }
+    if last_lba < 16 { return result; }
+
+    let entries_bytes = (entry_count as u64) * (entry_size as u64);
+    let entries_blocks = gpt_div_ceil_u64(entries_bytes, block_size as u64);
+    if entries_blocks == 0 { return result; }
+
+    // Protective MBR ocupa LBA0, primary header LBA1 e array inicia no LBA2.
+    let first_after_primary = 2 + entries_blocks;
+    let first_usable = gpt_align_up_lba(first_after_primary, block_size, GPT_MIN_USABLE_ALIGNMENT_BYTES);
+
+    // Backup header fica no último LBA e o backup entry array imediatamente
+    // antes dele. Não assumimos 512 B nem os LBAs fixos 2..33.
+    if last_lba <= entries_blocks + 1 { return result; }
+    let backup_entries = last_lba - entries_blocks;
+    if backup_entries <= first_usable { return result; }
+
+    let last_usable = backup_entries - 1;
+    if last_usable <= first_usable { return result; }
+
+    result.primary_entries_blocks = entries_blocks;
+    result.first_usable_lba = first_usable;
+    result.last_usable_lba = last_usable;
+    result.backup_entries_lba = backup_entries;
+    result.valid = true;
+    return result;
+}
+
+@system
+pub fn gpt_plan_default(block_size: u32, last_lba: u64) -> GptLayout {
+    return gpt_plan_layout(block_size, last_lba, GPT_DEFAULT_ENTRY_COUNT, GPT_DEFAULT_ENTRY_SIZE);
+}
+
+// Protective MBR usa um campo de 32 bits para número de setores. Discos cujo
+// último LBA excede o representável devem publicar 0xFFFFFFFF conforme GPT.
+@system
+pub fn gpt_protective_mbr_sector_count(last_lba: u64) -> u32 {
+    if last_lba >= 0xFFFFFFFF { return 0xFFFFFFFF; }
+    return last_lba as u32;
+}
