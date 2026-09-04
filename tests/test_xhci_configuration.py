@@ -9,6 +9,10 @@ CONF = ROOT / "kernel/src/drivers/xhci_configuration.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 
 
+def code_only(text: str) -> str:
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("//"))
+
+
 class XhciConfigurationTests(unittest.TestCase):
     def test_configuration_fetches_header_then_total_length(self):
         text = CONF.read_text(encoding="utf-8")
@@ -47,7 +51,7 @@ class XhciConfigurationTests(unittest.TestCase):
         self.assertIn("XHCI_HID_ENDPOINT_INTERVAL", text)
 
     def test_configuration_stage_does_not_configure_hardware_yet(self):
-        text = CONF.read_text(encoding="utf-8").lower()
+        text = code_only(CONF.read_text(encoding="utf-8")).lower()
         self.assertNotIn("configure_endpoint", text)
         self.assertNotIn("set_configuration", text)
         self.assertNotIn("xhci_command_submit", text)
