@@ -34,16 +34,18 @@ if (-not (Test-Path -LiteralPath $sotlasCompiler) -or -not (Test-Path -LiteralPa
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputPath) | Out-Null
 $env:PATH = "$toolchain;$env:PATH"
 
-& python $font_packer
+$py = if (Get-Command py -ErrorAction SilentlyContinue) { "py" } elseif (Get-Command python -ErrorAction SilentlyContinue) { "python" } elseif (Test-Path "C:\Python314\python.exe") { "C:\Python314\python.exe" } else { "python" }
+
+& $py $font_packer
 if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar o atlas local Inter." }
-& python $color_lut_packer
+& $py $color_lut_packer
 if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar a LUT sRGB do compositor." }
 if (Test-Path -LiteralPath $resvg_runtime) {
-    & python $icon_packer
+    & $py $icon_packer
     if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar o atlas local Material Symbols." }
-    & python $app_icon_packer
+    & $py $app_icon_packer
     if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar o atlas Phosphor dos aplicativos." }
-    & python $motion_icon_packer
+    & $py $motion_icon_packer
     if ($LASTEXITCODE -ne 0) { throw "Falha ao gerar o atlas Morphicons de movimento." }
 } elseif (-not (Test-Path -LiteralPath $icon_header) -or -not (Test-Path -LiteralPath $app_icon_header) -or -not (Test-Path -LiteralPath $motion_icon_header)) {
     throw "Atlas Material/Phosphor/Morphicons ausente. Execute o empacotador de ativos no host."
@@ -51,7 +53,7 @@ if (Test-Path -LiteralPath $resvg_runtime) {
     Write-Host "Usando atlas Material Symbols, Phosphor e Morphicons ja gerados." -ForegroundColor Yellow
 }
 
-& python $sotlasCompiler build $entry '-o' $OutputPath '-m' (Join-Path $root 'build\sotlas-main.manifest.json')
+& $py $sotlasCompiler build $entry '-o' $OutputPath '-m' (Join-Path $root 'build\sotlas-main.manifest.json')
 if ($LASTEXITCODE -ne 0) { throw "Falha no build modular Sotlas do BOOTX64.EFI." }
 
 Write-Host "OK: EFI modular Sotlas vinculado em $OutputPath" -ForegroundColor Green

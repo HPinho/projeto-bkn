@@ -7,6 +7,7 @@ import kernel::graphics_engine::*;
 import kernel::baken_installer::*;
 import kernel::baken_oobe_screen::*;
 import kernel::desktop_shell::*;
+import kernel::bakenfx::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 
@@ -113,6 +114,16 @@ pub fn desktop_compositor_get_session() -> u32 {
     }
 }
 
+// Propaga o tempo de quadro medido pelo runtime para todas as sessões. Cada
+// sessão conserva sua própria fração, evitando animações em câmera lenta.
+@system
+pub fn desktop_compositor_set_frame_delta(dt: f32) -> void {
+    bakenfx_set_frame_delta(dt);
+    baken_installer_set_frame_delta(dt);
+    baken_oobe_set_frame_delta(dt);
+    desktop_shell_set_frame_delta(dt);
+}
+
 @system
 pub fn desktop_compositor_init(screen_w: u32, screen_h: u32) -> void {
     unsafe {
@@ -134,6 +145,7 @@ pub fn desktop_compositor_init(screen_w: u32, screen_h: u32) -> void {
 pub fn desktop_compositor_render_frame() -> void {
     unsafe {
         if !COMPOSITOR_READY { return; }
+        bakenfx_invalidate_backdrop();
 
         if (desktop_shell_wants_installer() == 1) {
             desktop_shell_clear_installer_request();

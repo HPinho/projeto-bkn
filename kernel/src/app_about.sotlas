@@ -1,11 +1,11 @@
-// Baken OS - BakenAbout System Info Card
+// Baken OS - BakenAbout System Info Card (Tema Claro)
 // 100% Implementado em SOTLAS UI (RenderTree, Material e Layout Engine)
-// ZERO chamadas procedurais a rotinas legadas de gfx.
 
 module kernel::app_about;
 
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
+import kernel::drivers::display_driver::*;
 
 pub struct AboutState {
     pub pulse_phase: u32;
@@ -63,33 +63,33 @@ pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
         // 1. Inicializa e limpa a RenderTree da janela
         RenderTree_clear(&mut ABOUT_TREE);
 
-        // 2. Container Raiz com Material Acrílico/Mica e VStack
+        // 2. Container Raiz com Material Acrílico Claro e VStack
         let root = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(x as i32, y as i32, w, h));
         let root_mat = material_acrylic(
-            color_rgba(15, 23, 42, 245),
+            color_rgba(255, 255, 255, 245),
             24,
-            color_rgba(56, 189, 248, 80),
+            color_rgba(203, 213, 225, 200),
             12
         );
         RenderTree_set_material(&mut ABOUT_TREE, root, root_mat);
         RenderTree_set_layout(&mut ABOUT_TREE, root, layout_vstack(10, 16, ALIGN_CENTER));
 
-        // 3. Cabeçalho Central (VStack com Título e Versão)
+        // 3. Cabeçalho Central
         let header = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, w - 32, 60));
         RenderTree_set_layout(&mut ABOUT_TREE, header, layout_vstack(4, 0, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, root, header);
 
         let title_node = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 0, 0));
         let title_str = "Baken OS Desktop Edition\0";
-        RenderTree_set_text(&mut ABOUT_TREE, title_node, title_str.as_ptr(), 1, color_rgba(248, 250, 252, 255));
+        RenderTree_set_text(&mut ABOUT_TREE, title_node, title_str.as_ptr(), 1, color_rgba(15, 23, 42, 255));
         RenderTree_add_child(&mut ABOUT_TREE, header, title_node);
 
         let ver_node = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 0, 0));
         let ver_str = "Versao 0.2.0 (Build 2026.09 - SOTLAS Native)\0";
-        RenderTree_set_text(&mut ABOUT_TREE, ver_node, ver_str.as_ptr(), 1, color_rgba(56, 189, 248, 230));
+        RenderTree_set_text(&mut ABOUT_TREE, ver_node, ver_str.as_ptr(), 1, color_rgba(2, 132, 199, 240));
         RenderTree_add_child(&mut ABOUT_TREE, header, ver_node);
 
-        // 4. Grade de Especificações do Sistema (VStack com HStacks)
+        // 4. Grade de Especificações do Sistema
         let grid = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, w - 48, 120));
         RenderTree_set_layout(&mut ABOUT_TREE, grid, layout_vstack(4, 8, ALIGN_START));
         RenderTree_add_child(&mut ABOUT_TREE, root, grid);
@@ -99,10 +99,10 @@ pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
         RenderTree_set_layout(&mut ABOUT_TREE, r1, layout_hstack(12, 0, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, grid, r1);
         let l1 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 100, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, l1, "Arquitetura:\0".as_ptr(), 1, color_rgba(148, 163, 184, 220));
+        RenderTree_set_text(&mut ABOUT_TREE, l1, "Arquitetura:\0".as_ptr(), 1, color_rgba(100, 116, 139, 220));
         RenderTree_add_child(&mut ABOUT_TREE, r1, l1);
         let v1 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 240, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, v1, "x86_64 SMP (UEFI 64-bit)\0".as_ptr(), 1, color_rgba(226, 232, 240, 240));
+        RenderTree_set_text(&mut ABOUT_TREE, v1, "x86_64 SMP (UEFI 64-bit)\0".as_ptr(), 1, color_rgba(15, 23, 42, 240));
         RenderTree_add_child(&mut ABOUT_TREE, r1, v1);
 
         // Linha 2: Kernel
@@ -110,10 +110,10 @@ pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
         RenderTree_set_layout(&mut ABOUT_TREE, r2, layout_hstack(12, 0, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, grid, r2);
         let l2 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 100, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, l2, "Kernel:\0".as_ptr(), 1, color_rgba(148, 163, 184, 220));
+        RenderTree_set_text(&mut ABOUT_TREE, l2, "Kernel:\0".as_ptr(), 1, color_rgba(100, 116, 139, 220));
         RenderTree_add_child(&mut ABOUT_TREE, r2, l2);
         let v2 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 240, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, v2, "Modular Micro-Core em Sotlas (@system)\0".as_ptr(), 1, color_rgba(226, 232, 240, 240));
+        RenderTree_set_text(&mut ABOUT_TREE, v2, "Modular Micro-Core em Sotlas (@system)\0".as_ptr(), 1, color_rgba(15, 23, 42, 240));
         RenderTree_add_child(&mut ABOUT_TREE, r2, v2);
 
         // Linha 3: Linguagem
@@ -121,65 +121,76 @@ pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
         RenderTree_set_layout(&mut ABOUT_TREE, r3, layout_hstack(12, 0, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, grid, r3);
         let l3 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 100, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, l3, "Linguagem:\0".as_ptr(), 1, color_rgba(148, 163, 184, 220));
+        RenderTree_set_text(&mut ABOUT_TREE, l3, "Linguagem:\0".as_ptr(), 1, color_rgba(100, 116, 139, 220));
         RenderTree_add_child(&mut ABOUT_TREE, r3, l3);
         let v3 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 240, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, v3, "SOTLAS Unified Toolchain v0.2.0\0".as_ptr(), 1, color_rgba(56, 189, 248, 240));
+        RenderTree_set_text(&mut ABOUT_TREE, v3, "SOTLAS Unified Toolchain v0.2.0\0".as_ptr(), 1, color_rgba(2, 132, 199, 240));
         RenderTree_add_child(&mut ABOUT_TREE, r3, v3);
 
-        // Linha 4: Motor Gráfico
+        // Linha 4: GPU / Display Hardware
         let r4 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, w - 64, 20));
         RenderTree_set_layout(&mut ABOUT_TREE, r4, layout_hstack(12, 0, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, grid, r4);
         let l4 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 100, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, l4, "Graficos:\0".as_ptr(), 1, color_rgba(148, 163, 184, 220));
+        RenderTree_set_text(&mut ABOUT_TREE, l4, "GPU / Video:\0".as_ptr(), 1, color_rgba(100, 116, 139, 220));
         RenderTree_add_child(&mut ABOUT_TREE, r4, l4);
         let v4 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 240, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, v4, "SOTLAS UI / SOTLAS Graphics Core\0".as_ptr(), 1, color_rgba(226, 232, 240, 240));
+        RenderTree_set_text(&mut ABOUT_TREE, v4, display_driver_get_device_desc(), 1, color_rgba(15, 23, 42, 240));
         RenderTree_add_child(&mut ABOUT_TREE, r4, v4);
 
-        // Linha 5: Memória RAM
+        // Linha 5: Subsistema de Driver
         let r5 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, w - 64, 20));
         RenderTree_set_layout(&mut ABOUT_TREE, r5, layout_hstack(12, 0, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, grid, r5);
         let l5 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 100, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, l5, "Memoria RAM:\0".as_ptr(), 1, color_rgba(148, 163, 184, 220));
+        RenderTree_set_text(&mut ABOUT_TREE, l5, "DriverKit:\0".as_ptr(), 1, color_rgba(100, 116, 139, 220));
         RenderTree_add_child(&mut ABOUT_TREE, r5, l5);
         let v5 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 240, 18));
-        RenderTree_set_text(&mut ABOUT_TREE, v5, "4096 MB DDR4 (Linear sRGB)\0".as_ptr(), 1, color_rgba(16, 185, 129, 240));
+        RenderTree_set_text(&mut ABOUT_TREE, v5, display_driver_get_name(), 1, color_rgba(2, 132, 199, 240));
         RenderTree_add_child(&mut ABOUT_TREE, r5, v5);
 
-        // 5. Rodapé com Botões de Ação (HStack)
+        // Linha 6: Barramento e Fabricante
+        let r6 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, w - 64, 20));
+        RenderTree_set_layout(&mut ABOUT_TREE, r6, layout_hstack(12, 0, ALIGN_CENTER));
+        RenderTree_add_child(&mut ABOUT_TREE, grid, r6);
+        let l6 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 100, 18));
+        RenderTree_set_text(&mut ABOUT_TREE, l6, "Fabricante:\0".as_ptr(), 1, color_rgba(100, 116, 139, 220));
+        RenderTree_add_child(&mut ABOUT_TREE, r6, l6);
+        let v6 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 240, 18));
+        RenderTree_set_text(&mut ABOUT_TREE, v6, display_driver_get_vendor_name(), 1, color_rgba(16, 185, 129, 240));
+        RenderTree_add_child(&mut ABOUT_TREE, r6, v6);
+
+        // 5. Rodapé com Botões de Ação
         let footer = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, w - 48, 36));
         RenderTree_set_layout(&mut ABOUT_TREE, footer, layout_hstack(16, 4, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, root, footer);
 
         // Botão 1: Atualizações
         let btn1 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, 160, 28));
-        let b1_mat = material_glass(color_rgba(30, 41, 59, 200), color_rgba(56, 189, 248, 220), 8);
+        let b1_mat = material_glass(color_rgba(224, 242, 254, 230), color_rgba(2, 132, 199, 220), 8);
         RenderTree_set_material(&mut ABOUT_TREE, btn1, b1_mat);
         RenderTree_set_layout(&mut ABOUT_TREE, btn1, layout_vstack(0, 6, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, footer, btn1);
 
         let t_btn1 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 0, 0));
-        RenderTree_set_text(&mut ABOUT_TREE, t_btn1, "Checar Atualizacoes\0".as_ptr(), 1, color_rgba(56, 189, 248, 255));
+        RenderTree_set_text(&mut ABOUT_TREE, t_btn1, "Checar Atualizacoes\0".as_ptr(), 1, color_rgba(2, 132, 199, 255));
         RenderTree_add_child(&mut ABOUT_TREE, btn1, t_btn1);
 
         // Botão 2: Licença
         let btn2 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_CONTAINER, rect_make(0, 0, 140, 28));
-        let b2_mat = material_glass(color_rgba(30, 41, 59, 200), color_rgba(71, 85, 105, 200), 8);
+        let b2_mat = material_glass(color_rgba(241, 245, 249, 230), color_rgba(203, 213, 225, 200), 8);
         RenderTree_set_material(&mut ABOUT_TREE, btn2, b2_mat);
         RenderTree_set_layout(&mut ABOUT_TREE, btn2, layout_vstack(0, 6, ALIGN_CENTER));
         RenderTree_add_child(&mut ABOUT_TREE, footer, btn2);
 
         let t_btn2 = RenderTree_alloc_node(&mut ABOUT_TREE, NODE_TEXT, rect_make(0, 0, 0, 0));
-        RenderTree_set_text(&mut ABOUT_TREE, t_btn2, "Licenca MIT\0".as_ptr(), 1, color_rgba(148, 163, 184, 220));
+        RenderTree_set_text(&mut ABOUT_TREE, t_btn2, "Licenca MIT\0".as_ptr(), 1, color_rgba(51, 65, 85, 240));
         RenderTree_add_child(&mut ABOUT_TREE, btn2, t_btn2);
 
-        // 6. Dispara o ciclo de Layout (measure + layout espacial)
+        // 6. Dispara o ciclo de Layout
         RenderTree_layout(&mut ABOUT_TREE, root, x as i32, y as i32, w, h);
 
-        // 7. Renderiza a árvore de nós no Canvas oficial do compositor
+        // 7. Renderiza no Canvas
         let canvas = sotlas_get_default_canvas();
         RenderTree_draw(&mut ABOUT_TREE, canvas);
     }
@@ -187,5 +198,4 @@ pub fn app_about_render(x: u32, y: u32, w: u32, h: u32) -> void {
 
 @system
 pub fn app_about_handle_click(rel_x: i32, rel_y: i32) -> void {
-    // Tratamento de eventos de clique da janela
 }

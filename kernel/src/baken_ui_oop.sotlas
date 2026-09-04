@@ -1,5 +1,5 @@
-// Baken OS - componentes de interface usados pela rota executavel.
-// A implementacao permanece em Sotlas; o compilador apenas reduz a AST.
+// Baken OS - componentes de interface usados pela rota executavel (Tema Claro).
+// Doca Reativa flutuante estilo macOS com Física de Mola e Liquid Glass Claro.
 
 module kernel::baken_ui_oop;
 
@@ -124,11 +124,11 @@ pub fn dock_draw(dock: *const DesktopDock) -> void {
         baken_dock_layout((*dock).item_count, &mut geo);
         // Sombra física profunda sob o dock
         raster_draw_physical_shadow(geo.x, geo.y, geo.width, geo.height, ELEVATION_DOCK);
-        // Superfície de vidro escuro acrílico com borda translúcida
-        raster_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x000B132B, 225, 0x00334155, 20);
-        // Linha de luz especular superior
-        raster_fill_rect_alpha(geo.x + 14, geo.y + 1, geo.width - 28, 1, 0x00FFFFFF, 80);
-        raster_fill_rect_alpha(geo.x + 14, geo.y + 2, geo.width - 28, 1, 0x00FFFFFF, 30);
+        // Superfície de vidro claro translúcido com borda suave
+        raster_draw_glass_rect(geo.x, geo.y, geo.width, geo.height, 0x00FFFFFF, 205, 0x00CBD5E1, 20);
+        // Linha de reflexo especular superior
+        raster_fill_rect_alpha(geo.x + 14, geo.y + 1, geo.width - 28, 1, 0x00FFFFFF, 160);
+        raster_fill_rect_alpha(geo.x + 14, geo.y + 2, geo.width - 28, 1, 0x00FFFFFF, 80);
         for mut i in 0..(*dock).item_count {
             let scale = (*dock).item_springs[i as usize].current_val;
             let bounce = (*dock).bounce_springs[i as usize].current_val;
@@ -137,9 +137,11 @@ pub fn dock_draw(dock: *const DesktopDock) -> void {
             let ix = base_x - (icon - geo.icon) / 2;
             let iy = ((geo.y + (geo.height - geo.icon) / 2 - (icon - geo.icon) / 2) as f32 + bounce) as u32;
             if scale > 1.02 {
-                raster_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 5, 0x0000E5FF, 50);
+                raster_draw_circle_alpha(ix + icon / 2, iy + icon / 2, icon / 2 + 5, 0x000284C7, 40);
             }
             raster_draw_app_icon_hd(ix, iy, icon, i);
+            // Ponto indicador de aplicativo ativo sob o ícone
+            raster_draw_circle_alpha(base_x + geo.icon / 2, geo.y + geo.height - 4, 2, 0x000F172A, 200);
         }
     }
 }

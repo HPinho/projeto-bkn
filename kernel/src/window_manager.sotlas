@@ -58,7 +58,7 @@ static mut WINDOWS: [Window; MAX_WINDOWS] = [Window {
     id: 0, x: 0, y: 0, width: 0, height: 0, min_width: 240, min_height: 160, z_index: 0,
     is_open: false, is_focused: false, is_minimized: false, is_maximized: false,
     saved_x: 0, saved_y: 0, saved_w: 0, saved_h: 0,
-    title: [0; 48], bg_color: 0x000F172A, bg_alpha: 225, border_color: 0x0038BDF8,
+    title: [0; 48], bg_color: 0x00FFFFFF, bg_alpha: 245, border_color: 0x00CBD5E1,
 }; MAX_WINDOWS];
 
 @system
@@ -267,13 +267,14 @@ pub fn wm_render_windows() -> void {
 fn wm_render_single_window(win: &Window) -> void {
     if win.x + win.width as i32 < 0 || win.y + win.height as i32 < 0 { return; }
     let x = if win.x < 0 { 0 } else { win.x as u32 }; let y = if win.y < 0 { 0 } else { win.y as u32 };
-    let border = if win.is_focused { win.border_color } else { 0x00475569 };
+    let border = if win.is_focused { win.border_color } else { 0x00E2E8F0 };
     
-    let panel_alpha: u8 = if win.is_focused { 238 } else { 218 };
+    let panel_alpha: u8 = if win.is_focused { 248 } else { 235 };
     bakenfx_draw_elevated_panel(x, y, win.width, win.height, win.bg_color, panel_alpha, border, 14, if win.is_focused { 4 } else { 2 });
-    bakenfx_draw_rect(x + 1, y + TITLE_BAR_HEIGHT, win.width - 2, 1, border, 60);
+    bakenfx_draw_rect(x + 1, y + TITLE_BAR_HEIGHT, win.width - 2, 1, 0x00E2E8F0, 180);
     material_draw_traffic_lights(x + 18, y + 18);
-    bakenfx_draw_text(x + 72, y + 11, win.title.as_ptr(), 0x00FFFFFF, 230);
+    let title_col = if win.id == 4 { 0x00FFFFFF } else { 0x000F172A };
+    bakenfx_draw_text(x + 72, y + 11, win.title.as_ptr(), title_col, 245);
 
     // Renderiza o corpo do aplicativo
     let content_x = x + 1;

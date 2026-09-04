@@ -1,5 +1,5 @@
-// Baken OS - Desktop Shell em Sotlas (@system).
-// Interface nativa fluida com Glassmorphism, Top Bar com Widgets e Dock Reativo.
+// Baken OS - Desktop Shell em Sotlas (@system) — Tema Claro (Light Theme).
+// Interface nativa fluida com Glassmorphism Claro, Top Bar com Widgets e Dock Reativo.
 
 module kernel::desktop_shell;
 
@@ -78,8 +78,6 @@ pub fn desktop_shell_init(w: u32, h: u32) -> void {
         dock_add_item(&mut MAIN_DOCK, "Sobre");
 
         wm_init();
-        // O desktop inicializa limpo, sem janelas empilhadas no boot.
-        // O usuario abre cada aplicativo ao clicar na Dock ou Topbar.
     }
 }
 
@@ -87,55 +85,56 @@ pub fn desktop_shell_init(w: u32, h: u32) -> void {
 pub fn render_top_bar() -> void {
     unsafe {
         let sw = SHELL.screen_w;
-        // A barra pertence ao BakenFX: uma única superfície, material e
-        // tipografia compartilhados com as demais telas.
-        bakenfx_draw_panel(0, 0, sw, 36, 0x00070B14, 230, 0x001E293B, 0);
+        // Top Bar em Vidro Claro Translúcido estilo macOS Liquid Glass
+        bakenfx_draw_panel(0, 0, sw, 36, 0x00FFFFFF, 215, 0x00CBD5E1, 0);
+        bakenfx_draw_hline(0, 35, sw, 0x00E2E8F0, 200);
 
-        bakenfx_draw_circle(22, 18, 12, 0x000F172A, 255);
-        bakenfx_draw_circle(22, 18, 9, 0x0000E5FF, 255);
-        bakenfx_draw_circle(22, 18, 6, 0x00070B14, 255);
-        bakenfx_draw_circle(22, 18, 3, 0x0038BDF8, 255);
+        // Logo Swirl Baken OS com Contraste Perfeito
+        bakenfx_draw_circle(22, 18, 12, 0x00FFFFFF, 255);
+        bakenfx_draw_circle(22, 18, 9, 0x000284C7, 255);
+        bakenfx_draw_circle(22, 18, 6, 0x00FFFFFF, 255);
+        bakenfx_draw_circle(22, 18, 3, 0x000284C7, 255);
 
-        // Menus da Barra Superior com Tradução Dinâmica Multilíngue (11 Idiomas)
-        bakenfx_draw_text(42, 8, "Baken OS", 0x00FFFFFF, 255);
+        // Menus da Barra Superior em Tipografia Escura de Alto Contraste
+        bakenfx_draw_text(42, 8, "Baken OS", 0x000F172A, 255);
         
         let t_file = i18n_top_file();
         let t_file_w = bakenfx_measure_text(t_file);
-        bakenfx_draw_text(130, 8, t_file, 0x00CBD5E1, 220);
+        bakenfx_draw_text(130, 8, t_file, 0x00334155, 235);
 
         let t_edit = i18n_top_edit();
         let t_edit_x = 130 + t_file_w + 24;
         let t_edit_w = bakenfx_measure_text(t_edit);
-        bakenfx_draw_text(t_edit_x, 8, t_edit, 0x00CBD5E1, 220);
+        bakenfx_draw_text(t_edit_x, 8, t_edit, 0x00334155, 235);
 
         let t_view = i18n_top_view();
         let t_view_x = t_edit_x + t_edit_w + 24;
-        bakenfx_draw_text(t_view_x, 8, t_view, 0x00CBD5E1, 220);
+        bakenfx_draw_text(t_view_x, 8, t_view, 0x00334155, 235);
 
-        // Widgets a Direita:
-        // 1. Botão de Instalação do Baken OS Multilíngue
+        // Widgets à Direita:
+        // 1. Botão de Instalação do Baken OS em Azul Vibrante Apple
         let t_inst = i18n_top_install();
         let t_inst_tw = bakenfx_measure_text(t_inst);
         let inst_w: u32 = t_inst_tw + 34;
         let inst_x = sw - inst_w - 220;
-        bakenfx_draw_panel(inst_x, 5, inst_w, 26, 0x000284C7, 240, 0x0038BDF8, 7);
+        bakenfx_draw_panel(inst_x, 5, inst_w, 26, 0x000284C7, 255, 0x000284C7, 7);
         bakenfx_draw_text(inst_x + 16, 8, t_inst, 0x00FFFFFF, 255);
 
-        // 2. Chip de Status da Sessão Multilíngue
+        // 2. Chip de Status da Sessão em Vidro Claro
         let t_live = i18n_top_live();
         let t_live_tw = bakenfx_measure_text(t_live);
         let chip_w: u32 = t_live_tw + 34;
         let chip_x = sw - chip_w - 90;
-        bakenfx_draw_panel(chip_x, 5, chip_w, 26, 0x001E293B, 220, 0x00334155, 7);
+        bakenfx_draw_panel(chip_x, 5, chip_w, 26, 0x00FFFFFF, 220, 0x00CBD5E1, 7);
         bakenfx_draw_circle(chip_x + 14, 18, 4, 0x0010B981, 255);
         bakenfx_draw_circle(chip_x + 14, 18, 7, 0x0010B981, 65);
-        bakenfx_draw_text(chip_x + 24, 8, t_live, 0x00E2E8F0, 240);
+        bakenfx_draw_text(chip_x + 24, 8, t_live, 0x000F172A, 240);
 
-        // 3. Relógio Digital do Sistema
+        // 3. Relógio Digital do Sistema em Vidro Claro
         let clock_w: u32 = 72;
         let clock_x = sw - 80;
-        bakenfx_draw_panel(clock_x, 5, clock_w, 26, 0x000F172A, 220, 0x00334155, 7);
-        bakenfx_draw_text(clock_x + 14, 8, "10:42", 0x0000E5FF, 255);
+        bakenfx_draw_panel(clock_x, 5, clock_w, 26, 0x00FFFFFF, 220, 0x00CBD5E1, 7);
+        bakenfx_draw_text(clock_x + 14, 8, "10:42", 0x000F172A, 255);
     }
 }
 
@@ -177,15 +176,15 @@ pub fn desktop_shell_open_app(idx: u32) -> void {
             dock_trigger_bounce(&mut MAIN_DOCK, idx);
         }
         if win_id == 1 {
-            wm_create_window(1, i18n_win_title(0), (sw / 2 - 320) as i32, (sh / 2 - 210) as i32, 640, 420, 0x000F172A, 235, 0x0038BDF8);
+            wm_create_window(1, i18n_win_title(0), (sw / 2 - 320) as i32, (sh / 2 - 210) as i32, 640, 420, 0x00FFFFFF, 245, 0x00CBD5E1);
         } else if win_id == 2 {
-            wm_create_window(2, i18n_win_title(1), (sw / 2 - 300) as i32, (sh / 2 - 200) as i32, 600, 400, 0x00090D16, 235, 0x00818CF8);
+            wm_create_window(2, i18n_win_title(1), (sw / 2 - 300) as i32, (sh / 2 - 200) as i32, 600, 400, 0x00FFFFFF, 245, 0x00CBD5E1);
         } else if win_id == 3 {
-            wm_create_window(3, i18n_win_title(2), (sw / 2 - 310) as i32, (sh / 2 - 200) as i32, 620, 400, 0x000F172A, 235, 0x0038BDF8);
+            wm_create_window(3, i18n_win_title(2), (sw / 2 - 310) as i32, (sh / 2 - 200) as i32, 620, 400, 0x00FFFFFF, 245, 0x00CBD5E1);
         } else if win_id == 4 {
-            wm_create_window(4, i18n_win_title(3), (sw / 2 - 300) as i32, (sh / 2 - 190) as i32, 600, 380, 0x00050811, 240, 0x0010B981);
+            wm_create_window(4, i18n_win_title(3), (sw / 2 - 300) as i32, (sh / 2 - 190) as i32, 600, 380, 0x000F172A, 245, 0x00334155);
         } else if win_id == 5 {
-            wm_create_window(5, i18n_win_title(4), (sw / 2 - 260) as i32, (sh / 2 - 180) as i32, 520, 360, 0x000F172A, 240, 0x0038BDF8);
+            wm_create_window(5, i18n_win_title(4), (sw / 2 - 260) as i32, (sh / 2 - 180) as i32, 520, 360, 0x00FFFFFF, 245, 0x00CBD5E1);
         }
         wm_bring_to_front(win_id);
     }
@@ -241,8 +240,7 @@ pub fn desktop_shell_render_frame() -> void {
         SHELL.time_tick = (SHELL.time_tick + 1) % 3600;
         desktop_shell_update(SHELL.frame_delta);
 
-        // 1. Fundo BakenFX estático: nenhuma imagem é gerada proceduralmente
-        // durante o frame; o desenho é uma composição declarativa de tokens.
+        // 1. Fundo BakenFX Luminoso Tema Claro
         bakenfx_draw_desktop_background(sotlas_get_default_canvas(), SHELL.screen_w, SHELL.screen_h);
         bakenfx_capture_backdrop();
 

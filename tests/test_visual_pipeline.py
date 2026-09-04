@@ -15,8 +15,10 @@ class VisualPipelineTests(unittest.TestCase):
 
     def test_runtime_uses_real_frame_time_and_not_cpu_dependent_spin_delay(self):
         runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
+        compositor = (ROOT / "kernel/src/desktop_compositor.sotlas").read_text(encoding="utf-8")
         self.assertIn("CYCLES_PER_US", runtime.upper())
-        self.assertIn("desktop_shell_set_frame_delta(dt)", runtime)
+        self.assertIn("desktop_compositor_set_frame_delta(dt)", runtime)
+        self.assertIn("baken_installer_set_frame_delta(dt)", compositor)
         self.assertIn("1000000 / refresh_hz as u64", runtime)
         self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", runtime)
 
@@ -30,6 +32,14 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("EfiAbsolutePointerState", runtime)
         self.assertIn("LocateProtocol(&G_ABSOLUTE_GUID", runtime)
         self.assertIn("raw_x > range_x", runtime)
+        self.assertIn("mx == 0 && my == 0", runtime)
+
+    def test_installer_translation_motion_uses_measured_time(self):
+        installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
+        self.assertIn("INSTALLER.frame_delta * 60.0", installer)
+        self.assertIn("let lang_period: u32 = 156", installer)
+        self.assertIn("i18n_btn_start_for_lang(show_idx)", installer)
+        self.assertIn("i18n_footer_help_for_lang(show_idx)", installer)
 
     def test_background_is_a_static_bakenfx_composition(self):
         bakenfx = (ROOT / "kernel/src/bakenfx.sotlas").read_text(encoding="utf-8")
@@ -38,6 +48,9 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("bakenfx_draw_desktop_background", bakenfx)
         self.assertIn("bakenfx_draw_desktop_background", shell)
         self.assertIn("bakenfx_draw_desktop_background", installer)
+        self.assertIn("if BAKENFX_BACKDROP_READY { return; }", bakenfx)
+        self.assertIn("pub fn bakenfx_invalidate_backdrop", bakenfx)
+        self.assertIn("pub fn bakenfx_set_frame_delta", bakenfx)
         self.assertNotIn("raster_draw_mesh_wallpaper();", shell)
         self.assertNotIn("raster_draw_aurora_parallax_bg", installer)
 

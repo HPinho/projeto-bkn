@@ -1,5 +1,5 @@
 // Baken Lua Design — tokens canônicos, densidade e acessibilidade.
-// Não contém desenho nem estado de hardware; é seguro para toda a UI.
+// Tema Claro (Light Theme) macOS Liquid Glass padrão e exclusivo.
 
 module kernel::baken_design;
 
@@ -14,7 +14,7 @@ pub const BAKEN_SPACE_6: u32 = 32;
 
 pub const BAKEN_RADIUS_CONTROL: u32 = 10;
 pub const BAKEN_RADIUS_CARD: u32 = 18;
-pub const BAKEN_RADIUS_WINDOW: u32 = 24;
+pub const BAKEN_RADIUS_WINDOW: u32 = 22;
 
 pub const BAKEN_MIN_HIT_TARGET: u32 = 36;
 pub const BAKEN_MIN_TEXT_CONTRAST: u32 = 112;
@@ -22,6 +22,24 @@ pub const BAKEN_MIN_TEXT_CONTRAST: u32 = 112;
 pub const BAKEN_MOTION_FAST_MS: u32 = 120;
 pub const BAKEN_MOTION_STANDARD_MS: u32 = 200;
 pub const BAKEN_MOTION_SLOW_MS: u32 = 320;
+
+// Paleta Canônica do Tema Claro (macOS Light Aesthetic)
+pub const BAKEN_LIGHT_BG_CANVAS: u32 = 0x00F8FAFC;
+pub const BAKEN_LIGHT_CARD_SURFACE: u32 = 0x00FFFFFF;
+pub const BAKEN_LIGHT_CARD_SURFACE_MUTED: u32 = 0x00F1F5F9;
+pub const BAKEN_LIGHT_BORDER_SUBTLE: u32 = 0x00E2E8F0;
+pub const BAKEN_LIGHT_BORDER_SPECULAR: u32 = 0x00FFFFFF;
+
+pub const BAKEN_LIGHT_TEXT_PRIMARY: u32 = 0x000F172A;
+pub const BAKEN_LIGHT_TEXT_SECONDARY: u32 = 0x00334155;
+pub const BAKEN_LIGHT_TEXT_MUTED: u32 = 0x0064748B;
+pub const BAKEN_LIGHT_TEXT_INVERTED: u32 = 0x00FFFFFF;
+
+pub const BAKEN_ACCENT_BLUE_PRIMARY: u32 = 0x000284C7;
+pub const BAKEN_ACCENT_BLUE_HOVER: u32 = 0x000EA5E9;
+pub const BAKEN_ACCENT_BLUE_TINT: u32 = 0x00E0F2FE;
+pub const BAKEN_ACCENT_EMERALD: u32 = 0x0010B981;
+pub const BAKEN_ACCENT_AMBER: u32 = 0x00F59E0B;
 
 pub struct BakenMaterialToken {
     pub fill: Color;
@@ -33,22 +51,17 @@ pub struct BakenMaterialToken {
 
 pub fn baken_material_glass_light() -> BakenMaterialToken {
     return BakenMaterialToken {
-        fill: color_rgba(246, 249, 255, 184),
-        border: color_rgba(255, 255, 255, 132),
-        shadow: color_rgba(8, 15, 34, 62),
+        fill: color_rgba(255, 255, 255, 215),
+        border: color_rgba(255, 255, 255, 240),
+        shadow: color_rgba(15, 23, 42, 35),
         corner_radius: BAKEN_RADIUS_CARD,
         elevation: 2,
     };
 }
 
 pub fn baken_material_glass_dark() -> BakenMaterialToken {
-    return BakenMaterialToken {
-        fill: color_rgba(15, 23, 42, 218),
-        border: color_rgba(148, 198, 255, 96),
-        shadow: color_rgba(2, 6, 23, 110),
-        corner_radius: BAKEN_RADIUS_CARD,
-        elevation: 3,
-    };
+    // Redireciona para o tema claro conforme solicitação estrita
+    return baken_material_glass_light();
 }
 
 pub const MACOS_TRAFFIC_RED: u32 = 0x00FF5F56;
@@ -57,9 +70,9 @@ pub const MACOS_TRAFFIC_GREEN: u32 = 0x0027C93F;
 
 pub fn baken_material_macos_sheet_light() -> BakenMaterialToken {
     return BakenMaterialToken {
-        fill: color_rgba(255, 255, 255, 140),
-        border: color_rgba(255, 255, 255, 175),
-        shadow: color_rgba(15, 23, 42, 35),
+        fill: color_rgba(255, 255, 255, 195),
+        border: color_rgba(255, 255, 255, 240),
+        shadow: color_rgba(15, 23, 42, 32),
         corner_radius: BAKEN_RADIUS_WINDOW,
         elevation: 3,
     };
@@ -73,16 +86,16 @@ pub fn baken_material_macos_button(is_primary: bool, is_hover: bool) -> BakenMat
     if is_primary {
         return BakenMaterialToken {
             fill: if is_hover { color_rgba(14, 165, 233, 255) } else { color_rgba(2, 132, 199, 255) },
-            border: color_rgba(255, 255, 255, 110),
-            shadow: color_rgba(2, 132, 199, 60),
-            corner_radius: 14,
+            border: color_rgba(255, 255, 255, 120),
+            shadow: color_rgba(2, 132, 199, 65),
+            corner_radius: 12,
             elevation: 2,
         };
     } else {
         return BakenMaterialToken {
-            fill: if is_hover { color_rgba(255, 255, 255, 200) } else { color_rgba(255, 255, 255, 150) },
-            border: color_rgba(255, 255, 255, 90),
-            shadow: color_rgba(15, 23, 42, 25),
+            fill: if is_hover { color_rgba(255, 255, 255, 245) } else { color_rgba(255, 255, 255, 210) },
+            border: if is_hover { color_rgba(148, 163, 184, 180) } else { color_rgba(203, 213, 225, 160) },
+            shadow: color_rgba(15, 23, 42, 20),
             corner_radius: 12,
             elevation: 1,
         };

@@ -19,8 +19,8 @@ class BakenFxPhysicsTests(unittest.TestCase):
         self.assertIn("pub fn bakenfx_interrupt_and_redirect", self.bakenfx)
         self.assertIn("pub fn bakenfx_tick_spring_physics", self.bakenfx)
 
-    def test_simd_blur_and_premium_panel_exist(self):
-        self.assertIn("pub fn bakenfx_blur_backdrop_simd", self.bakenfx)
+    def test_separable_blur_and_premium_panel_exist(self):
+        self.assertIn("pub fn bakenfx_blur_backdrop_separable", self.bakenfx)
         self.assertIn("pub fn bakenfx_draw_premium_panel", self.bakenfx)
         self.assertIn("BAKENFX_CORNER_CURVE_CONTINUOUS", self.bakenfx)
 
@@ -45,12 +45,12 @@ class BakenFxPhysicsTests(unittest.TestCase):
     def test_genie_transform_animation(self):
         self.assertIn("pub fn bakenfx_draw_genie_transform", self.bakenfx)
 
-    def test_gpu_device_offload_hooks(self):
+    def test_gpu_device_capability_is_not_advertised_as_active_blur(self):
         self.assertIn("pub struct GpuDeviceState", self.graphics_engine)
         self.assertIn("pub fn gpu_device_init", self.graphics_engine)
         self.assertIn("pub fn gpu_device_is_available", self.graphics_engine)
         self.assertIn("pub fn gpu_device_submit_blur_command", self.graphics_engine)
-        self.assertIn("gpu_device_submit_blur_command", self.bakenfx)
+        self.assertNotIn("gpu_device_submit_blur_command", self.bakenfx)
 
     def test_magnetic_cursor_state_and_dispatch_exist(self):
         self.assertIn("pub struct MagneticCursorState", self.bakenfx)

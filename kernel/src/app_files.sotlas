@@ -1,4 +1,4 @@
-// Baken OS - BakenFS Graphical File Manager
+// Baken OS - BakenFS Graphical File Manager (Tema Claro)
 // 100% Implementado na linguagem Sotlas (@system)
 
 module kernel::app_files;
@@ -43,7 +43,6 @@ static mut ITEMS: [FileItem; 8] = [
 @system
 pub fn app_files_init() -> void {
     unsafe {
-        // Inicializa itens padrão
         let path = "/home/documentos";
         for mut i in 0..16 {
             FILES_STATE.current_path[i] = *path.add(i);
@@ -96,47 +95,47 @@ pub fn app_files_render(x: u32, y: u32, w: u32, h: u32) -> void {
             app_files_init();
         }
 
-        // Fundo da Janela de Arquivos (Glass Dark Acrylic)
-        bakenfx_fill_rect_alpha(x, y, w, h, 0x000F172A, 240);
+        // Fundo da Janela de Arquivos (Tema Claro - Branco Cristal)
+        bakenfx_fill_rect_alpha(x, y, w, h, 0x00FFFFFF, 250);
 
         // 1. Barra de Ferramentas Superior
         let bar_h: u32 = 40;
-        bakenfx_fill_rect_alpha(x, y, w, bar_h, 0x001E293B, 200);
-        bakenfx_draw_hline(x, y + bar_h, w, 0x00334155, 180);
+        bakenfx_fill_rect_alpha(x, y, w, bar_h, 0x00F1F5F9, 230);
+        bakenfx_draw_hline(x, y + bar_h, w, 0x00CBD5E1, 180);
 
         // Breadcrumb Path Box
         let box_x = x + 12;
         let box_y = y + 8;
         let box_w = w - 160;
         let box_h: u32 = 24;
-        bakenfx_draw_panel(box_x, box_y, box_w, box_h, 0x000F172A, 200, 0x00475569, 6);
-        bakenfx_draw_text_alpha(box_x + 8, box_y + 5, "/home/documentos", 0x0038BDF8, 1, 255);
+        bakenfx_draw_panel(box_x, box_y, box_w, box_h, 0x00FFFFFF, 220, 0x00CBD5E1, 6);
+        bakenfx_draw_text_alpha(box_x + 8, box_y + 5, "/home/documentos", 0x000284C7, 1, 255);
 
         // Botões de Ação na barra superior
         let btn_x = x + w - 135;
-        bakenfx_draw_panel(btn_x, box_y, 60, box_h, 0x00334155, 180, 0x0064748B, 6);
-        bakenfx_draw_text_alpha(btn_x + 8, box_y + 5, "+ Pasta", 0x00E2E8F0, 1, 230);
+        bakenfx_draw_panel(btn_x, box_y, 60, box_h, 0x00FFFFFF, 220, 0x00CBD5E1, 6);
+        bakenfx_draw_text_alpha(btn_x + 8, box_y + 5, "+ Pasta", 0x00334155, 1, 240);
 
         let ref_x = btn_x + 68;
-        bakenfx_draw_panel(ref_x, box_y, 55, box_h, 0x00334155, 180, 0x0064748B, 6);
-        bakenfx_draw_text_alpha(ref_x + 8, box_y + 5, "Recarregar", 0x0094A3B8, 1, 220);
+        bakenfx_draw_panel(ref_x, box_y, 55, box_h, 0x00FFFFFF, 220, 0x00CBD5E1, 6);
+        bakenfx_draw_text_alpha(ref_x + 8, box_y + 5, "Recarregar", 0x0064748B, 1, 230);
 
         // 2. Barra Lateral de Acesso Rápido (Sidebar)
         let sidebar_w: u32 = 130;
         let body_y = y + bar_h + 1;
-        let body_h = h - bar_h - 32; // deixa 32px para o rodapé
-        bakenfx_fill_rect_alpha(x, body_y, sidebar_w, body_h, 0x000F172A, 220);
-        bakenfx_draw_hline(x + sidebar_w, body_y, 1, 0x00334155, 150);
+        let body_h = h - bar_h - 32;
+        bakenfx_fill_rect_alpha(x, body_y, sidebar_w, body_h, 0x00F8FAFC, 230);
+        bakenfx_draw_hline(x + sidebar_w, body_y, 1, 0x00CBD5E1, 150);
 
         let side_items = ["Inicio", "Documentos", "Projetos", "Sistema", "Midias"];
         for mut si in 0..5 {
             let sy = body_y + 12 + (si * 28) as u32;
-            let is_sel = si == 1; // Documentos selecionado
+            let is_sel = si == 1;
             if is_sel {
-                bakenfx_draw_panel(x + 6, sy - 2, sidebar_w - 12, 22, 0x0038BDF8, 80, 0x0038BDF8, 6);
-                bakenfx_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0038BDF8, 1, 255);
+                bakenfx_draw_panel(x + 6, sy - 2, sidebar_w - 12, 22, 0x00E0F2FE, 220, 0x000284C7, 6);
+                bakenfx_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x000369A1, 1, 255);
             } else {
-                bakenfx_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0094A3B8, 1, 200);
+                bakenfx_draw_text_alpha(x + 16, sy + 2, side_items[si], 0x0064748B, 1, 220);
             }
         }
 
@@ -154,47 +153,42 @@ pub fn app_files_render(x: u32, y: u32, w: u32, h: u32) -> void {
             let cy = content_y + row * (card_h + 8);
 
             let is_active = (i as i32) == FILES_STATE.selected_index;
-            let bg_c = if is_active { 0x001E293B } else { 0x00131E32 };
-            let border_c = if is_active { 0x0038BDF8 } else { 0x00334155 };
+            let bg_c = if is_active { 0x00E0F2FE } else { 0x00F8FAFC };
+            let border_c = if is_active { 0x000284C7 } else { 0x00E2E8F0 };
 
-            bakenfx_draw_panel(cx, cy, card_w, card_h, bg_c, 210, border_c, 8);
+            bakenfx_draw_panel(cx, cy, card_w, card_h, bg_c, 220, border_c, 8);
 
-            // Ícone do Arquivo/Pasta
             let is_folder = ITEMS[i].is_dir;
-            let icon_col = if is_folder { 0x00FCD34D } else { 0x00BAE6FD };
-            // Ícones do atlas nativo ocupam o espaço óptico do card; não são
-            // círculos genéricos nem bitmap ampliado.
+            let icon_col = if is_folder { 0x00D97706 } else { 0x000284C7 };
             bakenfx_draw_icon(ITEMS[i].icon_id, cx + 8, cy + 18, 20, icon_col, 255);
 
-            // Nome e Tamanho do Arquivo
             let name_ptr = ITEMS[i].name.as_ptr();
             let size_ptr = ITEMS[i].size_str.as_ptr();
-            bakenfx_draw_text_alpha(cx + 36, cy + 14, name_ptr, 0x00F8FAFC, 1, 240);
-            bakenfx_draw_text_alpha(cx + 36, cy + 32, size_ptr, 0x0064748B, 1, 200);
+            bakenfx_draw_text_alpha(cx + 36, cy + 14, name_ptr, 0x000F172A, 1, 255);
+            bakenfx_draw_text_alpha(cx + 36, cy + 32, size_ptr, 0x0064748B, 1, 220);
         }
 
         // 4. Rodapé de Status do Armazenamento
         let foot_y = y + h - 28;
-        bakenfx_fill_rect_alpha(x, foot_y, w, 28, 0x000B1120, 240);
-        bakenfx_draw_hline(x, foot_y, w, 0x001E293B, 150);
+        bakenfx_fill_rect_alpha(x, foot_y, w, 28, 0x00F1F5F9, 240);
+        bakenfx_draw_hline(x, foot_y, w, 0x00CBD5E1, 150);
 
-        bakenfx_draw_text_alpha(x + 12, foot_y + 8, "BakenFS: 14.2 GB livres de 32.0 GB (44% usado)", 0x0094A3B8, 1, 220);
+        bakenfx_draw_text_alpha(x + 12, foot_y + 8, "BakenFS: 14.2 GB livres de 32.0 GB (44% usado)", 0x0064748B, 1, 240);
 
         // Barra de Progresso do Disco
         let bar_bg_x = x + w - 160;
         let bar_bg_y = foot_y + 10;
         let bar_len: u32 = 140;
         let bar_thick: u32 = 8;
-        bakenfx_draw_panel(bar_bg_x, bar_bg_y, bar_len, bar_thick, 0x001E293B, 200, 0x00334155, 4);
+        bakenfx_draw_panel(bar_bg_x, bar_bg_y, bar_len, bar_thick, 0x00E2E8F0, 200, 0x00CBD5E1, 4);
         let used_len = (bar_len * 44) / 100;
-        bakenfx_fill_rect_alpha(bar_bg_x, bar_bg_y, used_len, bar_thick, 0x0038BDF8, 255);
+        bakenfx_fill_rect_alpha(bar_bg_x, bar_bg_y, used_len, bar_thick, 0x000284C7, 255);
     }
 }
 
 @system
 pub fn app_files_handle_click(rel_x: i32, rel_y: i32) -> void {
     unsafe {
-        // Detecção de clique nos cards do grid
         if rel_y > 40 && rel_x > 130 {
             let grid_x = (rel_x - 142) as u32;
             let grid_y = (rel_y - 52) as u32;

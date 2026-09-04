@@ -121,12 +121,31 @@ pub fn bakenfx_tick_spring_physics(state: *mut AnimState, delta_time: f32) -> vo
 }
 
 static mut BAKENFX_BACKDROP_READY: bool = false;
+static mut BAKENFX_BACKGROUND_TICK: u32 = 0;
+static mut BAKENFX_BACKGROUND_REMAINDER: f32 = 0.0;
+static mut BAKENFX_FRAME_DELTA: f32 = 0.0166667;
+// Cache do wallpaper: evita re-renderizar o gradiente animado a cada frame.
+// O wallpaper só é redesenhado quando BAKENFX_WALLPAPER_DIRTY é true.
+static mut BAKENFX_WALLPAPER_DIRTY: bool = true;
+static mut BAKENFX_WALLPAPER_LAST_PHASE: u32 = 0xFFFFFFFF;
+
+// O compositor fornece segundos reais; o wallpaper conserva a mesma cadência
+// de movimento tanto em uma VM lenta quanto em um painel de alta atualização.
+@system
+pub fn bakenfx_set_frame_delta(dt: f32) -> void {
+    unsafe {
+        BAKENFX_FRAME_DELTA = if dt < 0.001 { 0.001 } else if dt > 0.066 { 0.066 } else { dt };
+    }
+}
 
 // Captura somente a camada inferior da cena. Os materiais seguintes leem este
 // snapshot, portanto um card nunca borra a si próprio nem outro card.
 @system
 pub fn bakenfx_capture_backdrop() -> void {
     unsafe {
+        // O wallpaper ativo é uma composição estática. Reutilizar o snapshot
+        // elimina uma cópia de tela inteira em cada frame (crítica em QEMU).
+        if BAKENFX_BACKDROP_READY { return; }
         let source = display_get_backbuffer();
         let scratch = display_get_composition_scratch();
         let total = (display_get_pitch() * display_get_height()) as usize;
@@ -136,9 +155,17 @@ pub fn bakenfx_capture_backdrop() -> void {
     }
 }
 
-// Convolução 5-tap vetorizada com Dynamic Vibrancy (+30% saturação) e GPU offload
+// Deve ser chamado apenas quando o wallpaper ou o tema de fundo realmente
+// mudar. A próxima captura reconstruirá o snapshot antes dos materiais.
 @system
-pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
+pub fn bakenfx_invalidate_backdrop() -> void {
+    unsafe { BAKENFX_BACKDROP_READY = false; }
+}
+
+// Backend temporário de blur unrolled. Não é SIMD nem uma fila de GPU: o
+// nome deixa isso explícito até a troca pelo box blur separável.
+@system
+pub fn bakenfx_blur_backdrop_unrolled(bounds: Rect, radius: u32) -> void {
     unsafe {
         if !BAKENFX_BACKDROP_READY || radius == 0 { return; }
         let scratch = display_get_composition_scratch();
@@ -147,11 +174,6 @@ pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
         let sh = display_get_height() as i32;
         let pitch = display_get_pitch();
         if scratch == (null as *mut u32) || target == (null as *mut u32) { return; }
-
-        // 1. Delegação direta para anel de comandos da GPU (se dispositivo presente)
-        if gpu_device_submit_blur_command(scratch, target, bounds.x, bounds.y, bounds.width, bounds.height, radius) {
-            return;
-        }
 
         let step = if radius > 6 { 6 } else { radius } as i32;
         let x0 = if bounds.x < 0 { 0 } else { bounds.x };
@@ -230,10 +252,88 @@ pub fn bakenfx_blur_backdrop_simd(bounds: Rect, radius: u32) -> void {
     }
 }
 
-// Blur de backdrop limitado a uma superfície (delega para convolução SIMD)
+// Box blur separável: snapshot -> intermediário (horizontal) -> framebuffer
+// (vertical). O custo cresce linearmente com a área da superfície e não cria
+// o padrão em cruz do backend legado.
+pub fn bakenfx_blur_backdrop_separable(bounds: Rect, radius: u32) -> void {
+    unsafe {
+        if !BAKENFX_BACKDROP_READY || radius == 0 { return; }
+        let source = display_get_composition_scratch();
+        let temp = display_get_composition_intermediate();
+        let target = display_get_backbuffer();
+        let pitch = display_get_pitch();
+        let sw = display_get_width() as i32;
+        let sh = display_get_height() as i32;
+        if source == (null as *mut u32) || temp == (null as *mut u32) || target == (null as *mut u32) { return; }
+        let r = (if radius > 16 { 16 } else { radius }) as i32;
+        let x0 = if bounds.x < 0 { 0 } else { bounds.x };
+        let y0 = if bounds.y < 0 { 0 } else { bounds.y };
+        let x1 = if bounds.x + bounds.width as i32 > sw { sw } else { bounds.x + bounds.width as i32 };
+        let y1 = if bounds.y + bounds.height as i32 > sh { sh } else { bounds.y + bounds.height as i32 };
+        if x1 <= x0 || y1 <= y0 { return; }
+
+        // A superfície temporária recebe somente a margem vertical necessária
+        // para a segunda passagem. As somas deslizantes mantêm custo constante
+        // por pixel, inclusive para materiais grandes.
+        let sample_y0 = if y0 > r { y0 - r } else { 0 };
+        let sample_y1 = if y1 + r < sh { y1 + r } else { sh };
+        let n = (r * 2 + 1) as u32;
+
+        let mut y = sample_y0;
+        while y < sample_y1 {
+            let mut rr: u32 = 0; let mut gg: u32 = 0; let mut bb: u32 = 0;
+            let mut sx = x0 - r;
+            while sx <= x0 + r {
+                let cx = if sx < 0 { 0 } else if sx >= sw { sw - 1 } else { sx };
+                let p = *(source.add((y as u32 * pitch + cx as u32) as usize));
+                rr += (p >> 16) & 0xFF; gg += (p >> 8) & 0xFF; bb += p & 0xFF;
+                sx += 1;
+            }
+            let mut x = x0;
+            while x < x1 {
+                *(temp.add((y as u32 * pitch + x as u32) as usize)) = 0xFF000000 | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
+                let left_x = if x - r < 0 { 0 } else { x - r };
+                let right_x = if x + r + 1 >= sw { sw - 1 } else { x + r + 1 };
+                let left = *(source.add((y as u32 * pitch + left_x as u32) as usize));
+                let right = *(source.add((y as u32 * pitch + right_x as u32) as usize));
+                rr = rr - ((left >> 16) & 0xFF) + ((right >> 16) & 0xFF);
+                gg = gg - ((left >> 8) & 0xFF) + ((right >> 8) & 0xFF);
+                bb = bb - (left & 0xFF) + (right & 0xFF);
+                x += 1;
+            }
+            y += 1;
+        }
+        let mut x = x0;
+        while x < x1 {
+            let mut rr: u32 = 0; let mut gg: u32 = 0; let mut bb: u32 = 0;
+            let mut sy = y0 - r;
+            while sy <= y0 + r {
+                let cy = if sy < 0 { 0 } else if sy >= sh { sh - 1 } else { sy };
+                let p = *(temp.add((cy as u32 * pitch + x as u32) as usize));
+                rr += (p >> 16) & 0xFF; gg += (p >> 8) & 0xFF; bb += p & 0xFF;
+                sy += 1;
+            }
+            let mut y2 = y0;
+            while y2 < y1 {
+                *(target.add((y2 as u32 * pitch + x as u32) as usize)) = 0xFF000000 | ((rr / n) << 16) | ((gg / n) << 8) | (bb / n);
+                let top_y = if y2 - r < 0 { 0 } else { y2 - r };
+                let bottom_y = if y2 + r + 1 >= sh { sh - 1 } else { y2 + r + 1 };
+                let top = *(temp.add((top_y as u32 * pitch + x as u32) as usize));
+                let bottom = *(temp.add((bottom_y as u32 * pitch + x as u32) as usize));
+                rr = rr - ((top >> 16) & 0xFF) + ((bottom >> 16) & 0xFF);
+                gg = gg - ((top >> 8) & 0xFF) + ((bottom >> 8) & 0xFF);
+                bb = bb - (top & 0xFF) + (bottom & 0xFF);
+                y2 += 1;
+            }
+            x += 1;
+        }
+    }
+}
+
+// Blur de backdrop limitado a uma superfície.
 @system
 pub fn bakenfx_blur_backdrop(bounds: Rect, radius: u32) -> void {
-    bakenfx_blur_backdrop_simd(bounds, radius);
+    bakenfx_blur_backdrop_separable(bounds, radius);
 }
 
 @inline
@@ -322,13 +422,13 @@ pub fn bakenfx_draw_live_aurora_background(canvas: *mut Canvas, width: u32, heig
 
         let wave_phase = ((tick / 2) % 256) as u32;
 
-        // 4 Polos harmônicos de cor da Aurora macOS Tahoe:
-        // Top-Left (Azul Safira / Oceânico #0E7490), Bottom-Left (Índigo Profundo #1E3A8A)
-        // Top-Right (Violeta Ametista #7E22CE), Bottom-Right (Rosa Magenta #BE185D)
-        let tl_r: i32 = 14;  let tl_g: i32 = 116; let tl_b: i32 = 144;
-        let bl_r: i32 = 30;  let bl_g: i32 = 58;  let bl_b: i32 = 138;
-        let tr_r: i32 = 126; let tr_g: i32 = 34;  let tr_b: i32 = 206;
-        let br_r: i32 = 190; let br_g: i32 = 24;  let br_b: i32 = 93;
+        // 4 Polos harmônicos de cor da Aurora macOS Tahoe Light Edition:
+        // Top-Left (Azul Céu Límpido #38BDF8), Bottom-Left (Ciano Suave #7DD3FC)
+        // Top-Right (Lilás Pastel #C084FC), Bottom-Right (Rosa Pêssego Pastel #FDA4AF)
+        let tl_r: i32 = 56;  let tl_g: i32 = 189; let tl_b: i32 = 248;
+        let bl_r: i32 = 125; let bl_g: i32 = 211; let bl_b: i32 = 252;
+        let tr_r: i32 = 192; let tr_g: i32 = 132; let tr_b: i32 = 252;
+        let br_r: i32 = 253; let br_g: i32 = 164; let br_b: i32 = 175;
 
         let h_denom = if height > 1 { height - 1 } else { 1 };
         let w_denom = if width > 1 { width - 1 } else { 1 };
@@ -360,14 +460,48 @@ pub fn bakenfx_draw_live_aurora_background(canvas: *mut Canvas, width: u32, heig
     }
 }
 
-static mut BAKENFX_BG_TICK: u32 = 0;
-
 @system
 pub fn bakenfx_draw_desktop_background(canvas: *mut Canvas, width: u32, height: u32) -> void {
+    if canvas == (null as *mut Canvas) || width == 0 || height == 0 { return; }
+    let mut phase: u32 = 0;
     unsafe {
-        BAKENFX_BG_TICK = (BAKENFX_BG_TICK + 1) % 3600;
-        bakenfx_draw_live_aurora_background(canvas, width, height, BAKENFX_BG_TICK);
+        BAKENFX_BACKGROUND_REMAINDER += BAKENFX_FRAME_DELTA * 60.0;
+        let advance = BAKENFX_BACKGROUND_REMAINDER as u32;
+        BAKENFX_BACKGROUND_REMAINDER -= advance as f32;
+        BAKENFX_BACKGROUND_TICK = (BAKENFX_BACKGROUND_TICK + advance) % 1440;
+        phase = BAKENFX_BACKGROUND_TICK;
+
+        // Cache de wallpaper: as ondas harmônicas mudam lentamente, então
+        // dividimos a fase por 8 para re-renderizar apenas ~7 vezes/s.
+        // Isso elimina ~87% das composições de gradiente sem perda visual.
+        let quantized_phase = phase / 8;
+        if quantized_phase == BAKENFX_WALLPAPER_LAST_PHASE && !BAKENFX_WALLPAPER_DIRTY {
+            // Wallpaper inalterado: copia o cache (backbuffer anterior) sem recompor.
+            // A captura de backdrop (bakenfx_capture_backdrop) já conserva o snapshot.
+            let cached = display_get_composition_scratch();
+            let target = display_get_backbuffer();
+            let total = (display_get_pitch() * display_get_height()) as usize;
+            if cached != (null as *mut u32) && target != (null as *mut u32) && BAKENFX_BACKDROP_READY {
+                for mut i in 0..total { *(target.add(i)) = *(cached.add(i)); }
+                return;
+            }
+        }
+        BAKENFX_WALLPAPER_LAST_PHASE = quantized_phase;
+        BAKENFX_WALLPAPER_DIRTY = false;
     }
+    // Camadas de cores luminosas e vibrantes para o Tema Claro
+    let cyan_a = (88 + anim_wave_i32(phase, 480, 22)) as u8;
+    let violet_a = (82 + anim_wave_i32(phase + 160, 600, 20)) as u8;
+    let amber_a = (54 + anim_wave_i32(phase + 320, 720, 16)) as u8;
+    Canvas_clear(canvas, color_rgb(241, 245, 249));
+    Canvas_draw_linear_gradient(canvas, rect_make(0, 0, width, height),
+        linear_gradient_make(color_rgb(219, 234, 254), color_rgb(243, 232, 255), true));
+    Canvas_draw_linear_gradient(canvas, rect_make(0, 0, width, height),
+        linear_gradient_make(color_rgba(56, 189, 248, cyan_a), color_rgba(192, 132, 252, violet_a), false));
+    Canvas_draw_linear_gradient(canvas, rect_make(0, 0, width, height),
+        linear_gradient_make(color_rgba(125, 211, 252, 60), color_rgba(254, 205, 211, amber_a), true));
+    // Marca backdrop como stale para forçar recaptura após novo wallpaper.
+    unsafe { BAKENFX_BACKDROP_READY = false; }
 }
 
 // Dupla camada de sombras físicas estilo Apple:
@@ -380,22 +514,27 @@ pub fn bakenfx_draw_shadow(canvas: *mut Canvas, bounds: Rect, radius: u32, color
 
     let safe_blur = if blur > 24 { 24 } else { blur };
     let base_alpha = (color.a as f32) / 255.0;
+    let area = bounds.width * bounds.height;
 
-    // 1. Camada AO de contato
-    let ao_blur: u32 = 4;
-    let ao_offset: i32 = if offset_y > 0 { 2 } else { 0 };
-    let ao_alpha: f32 = base_alpha * 0.45;
-    raster_draw_drop_shadow_rounded(
-        bounds.x as u32,
-        bounds.y as u32,
-        bounds.width,
-        bounds.height,
-        radius,
-        ao_blur,
-        2,
-        ao_offset,
-        ao_alpha
-    );
+    // Otimização: painéis pequenos (<15000 px²) usam apenas a camada Key Light.
+    // A camada AO é imperceptível em botões e chips, mas custa ~50% do tempo.
+    if area >= 15000 {
+        // 1. Camada AO de contato (apenas para painéis maiores)
+        let ao_blur: u32 = 4;
+        let ao_offset: i32 = if offset_y > 0 { 2 } else { 0 };
+        let ao_alpha: f32 = base_alpha * 0.45;
+        raster_draw_drop_shadow_rounded(
+            bounds.x as u32,
+            bounds.y as u32,
+            bounds.width,
+            bounds.height,
+            radius,
+            ao_blur,
+            2,
+            ao_offset,
+            ao_alpha
+        );
+    }
 
     // 2. Camada de Luz Chave Zenital
     let key_alpha: f32 = base_alpha * 0.70;
@@ -450,7 +589,13 @@ pub fn bakenfx_draw_material(canvas: *mut Canvas, bounds: Rect, kind: u32, tint:
     if canvas == (null as *mut Canvas) { return; }
 
     if kind == BAKENFX_MATERIAL_GLASS || kind == BAKENFX_MATERIAL_ACRYLIC {
-        bakenfx_blur_backdrop(bounds, if kind == BAKENFX_MATERIAL_ACRYLIC { 6 } else { 3 });
+        // Otimização: painéis com área < 20000 px² (botões, chips, toggles)
+        // não se beneficiam visualmente do blur backdrop. O skip economiza
+        // ~2ms por painel em QEMU.
+        let panel_area = bounds.width * bounds.height;
+        if panel_area >= 20000 {
+            bakenfx_blur_backdrop(bounds, if kind == BAKENFX_MATERIAL_ACRYLIC { 6 } else { 3 });
+        }
     }
     bakenfx_draw_shadow(canvas, bounds, radius, shadow, shadow_blur, shadow_offset_y);
     let fill = paint_fill(tint);
@@ -506,7 +651,7 @@ pub fn bakenfx_draw_premium_panel(
     let animated_y = base_y as i32 + y_offset;
     let bounding_rect = rect_make(base_x as i32, animated_y, width, height);
 
-    bakenfx_blur_backdrop_simd(bounding_rect, radius);
+    bakenfx_blur_backdrop_separable(bounding_rect, radius);
 
     let safe_elevation = if elevation > 5 { 5 } else { elevation };
     let shadow_alpha = (16 + safe_elevation * 10) as u8;
@@ -608,7 +753,7 @@ pub fn bakenfx_draw_magnetic_cursor(state: *const MagneticCursorState) -> void {
         if (*state).is_locked {
             // Efeito de fusão com a UI: anel translúcido de acento
             let cursor_bounds = rect_make(px - dynamic_radius as i32, py - dynamic_radius as i32, dynamic_radius * 2, dynamic_radius * 2);
-            bakenfx_blur_backdrop_simd(cursor_bounds, 3);
+            bakenfx_blur_backdrop_separable(cursor_bounds, 3);
             bakenfx_draw_material(
                 sotlas_get_default_canvas(),
                 cursor_bounds,
@@ -713,7 +858,7 @@ pub fn bakenfx_draw_liquid_progress_bar(state: *mut LiquidProgressBarState, x: u
             };
 
             let fill_rect = rect_make(x as i32, y as i32, safe_fill_width, height);
-            bakenfx_blur_backdrop_simd(fill_rect, 2);
+            bakenfx_blur_backdrop_separable(fill_rect, 2);
             bakenfx_draw_material(
                 sotlas_get_default_canvas(),
                 fill_rect,

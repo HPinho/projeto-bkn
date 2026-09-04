@@ -1,4 +1,4 @@
-// Baken OS first-boot experience (OOBE). No disk/partition privileges by design.
+// Baken OS first-boot experience (OOBE) — Tema Claro (Light Theme).
 module kernel::baken_oobe_screen;
 
 import kernel::graphics_engine::*;
@@ -6,6 +6,7 @@ import kernel::baken_rasterizer::*;
 import kernel::bakenfx::*;
 import kernel::sotlas_graphics::*;
 import kernel::baken_materials::*;
+import kernel::baken_animation::*;
 
 const REGION: u32 = 0;
 const NETWORK: u32 = 1;
@@ -14,15 +15,15 @@ const PRIVACY: u32 = 3;
 const STYLE: u32 = 4;
 const READY: u32 = 5;
 
-const BG: u32 = 0x00070B14;
-const CARD: u32 = 0x00101825;
-const CARD2: u32 = 0x00172232;
-const LINE: u32 = 0x00283A51;
-const TEXT: u32 = 0x00F7FAFC;
-const MUTED: u32 = 0x009AA9BC;
-const BLUE: u32 = 0x004CC9F0;
-const VIOLET: u32 = 0x007C6CFF;
-const GREEN: u32 = 0x003DDC97;
+const BG: u32 = 0x00F8FAFC;
+const CARD: u32 = 0x00FFFFFF;
+const CARD2: u32 = 0x00F1F5F9;
+const LINE: u32 = 0x00CBD5E1;
+const TEXT: u32 = 0x000F172A;
+const MUTED: u32 = 0x0064748B;
+const BLUE: u32 = 0x000284C7;
+const VIOLET: u32 = 0x007C3AED;
+const GREEN: u32 = 0x0010B981;
 
 pub struct OobeState {
     pub step: u32;
@@ -32,6 +33,8 @@ pub struct OobeState {
     pub location: u8;
     pub theme: u32;
     pub tick: u32;
+    pub frame_remainder: f32;
+    pub frame_delta: f32;
     pub completed: u8;
     pub previous_step: u32;
     pub transition_tick: u32;
@@ -46,6 +49,8 @@ static mut O: OobeState = OobeState {
     location: 0,
     theme: 0,
     tick: 0,
+    frame_remainder: 0.0,
+    frame_delta: 0.0166667,
     completed: 0,
     previous_step: REGION,
     transition_tick: 24,
@@ -73,10 +78,19 @@ pub fn baken_oobe_init() -> void {
         O.location = 0;
         O.theme = 0;
         O.tick = 0;
+        O.frame_remainder = 0.0;
+        O.frame_delta = 0.0166667;
         O.completed = 0;
         O.previous_step = REGION;
-        O.transition_tick = 24;
+        O.transition_tick = 36;
         O.transition_direction = 1;
+    }
+}
+
+@system
+pub fn baken_oobe_set_frame_delta(dt: f32) -> void {
+    unsafe {
+        O.frame_delta = if dt < 0.001 { 0.001 } else if dt > 0.066 { 0.066 } else { dt };
     }
 }
 
@@ -84,8 +98,8 @@ pub fn baken_oobe_init() -> void {
 fn draw_specular_box(x: u32, y: u32, w: u32, h: u32, bg: u32, a: u8, brd: u32, rad: u32) -> void {
     raster_draw_glass_rect(x, y, w, h, bg, a, brd, rad);
     if (w > 20 && h > 10) {
-        raster_fill_rect_alpha(x + rad / 2, y + 1, w - rad, 1, 0x00FFFFFF, 75);
-        raster_fill_rect_alpha(x + rad / 2, y + h - 2, w - rad, 1, 0x00000000, 45);
+        raster_fill_rect_alpha(x + rad / 2, y + 1, w - rad, 1, 0x00FFFFFF, 120);
+        raster_fill_rect_alpha(x + rad / 2, y + h - 2, w - rad, 1, 0x00000000, 20);
     }
 }
 
@@ -96,16 +110,16 @@ fn btn(x: u32, y: u32, w: u32, s: *const u8, p: u8) -> void {
 
 @system
 fn option(x: u32, y: u32, w: u32, a: *const u8, b: *const u8, on: u8) -> void {
-    draw_specular_box(x, y, w, 58, if (on == 1) { 0x00132338 } else { CARD2 }, 235, if (on == 1) { BLUE } else { LINE }, 11);
-    raster_draw_text_alpha(x + 16, y + 10, a, TEXT, 1, 255);
+    draw_specular_box(x, y, w, 58, if (on == 1) { 0x00E0F2FE } else { CARD }, 235, if (on == 1) { BLUE } else { LINE }, 11);
+    raster_draw_text_alpha(x + 16, y + 10, a, if (on == 1) { 0x000369A1 } else { TEXT }, 1, 255);
     raster_draw_text_alpha(x + 16, y + 32, b, MUTED, 1, 230);
     raster_draw_circle_alpha(x + w - 22, y + 20, 6, if (on == 1) { BLUE } else { LINE }, 255);
 }
 
 @system
 fn toggle(x: u32, y: u32, on: u8) -> void {
-    raster_draw_glass_rect(x, y, 42, 22, if (on == 1) { GREEN } else { LINE }, 255, LINE, 11);
-    raster_draw_circle_alpha(if (on == 1) { x + 31 } else { x + 11 }, y + 11, 8, TEXT, 255);
+    raster_draw_glass_rect(x, y, 42, 22, if (on == 1) { GREEN } else { 0x00CBD5E1 }, 255, if (on == 1) { GREEN } else { LINE }, 11);
+    raster_draw_circle_alpha(if (on == 1) { x + 31 } else { x + 11 }, y + 11, 8, 0x00FFFFFF, 255);
 }
 
 @inline
@@ -136,17 +150,22 @@ fn frame(x: u32, y: u32, w: u32, h: u32) -> void {
 @system
 pub fn baken_oobe_render(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
-        O.tick = (O.tick + 1) % 3600;
-        if (O.transition_tick < 24) { O.transition_tick += 1; }
+        O.frame_remainder += O.frame_delta * 60.0;
+        let advance = O.frame_remainder as u32;
+        O.frame_remainder -= advance as f32;
+        O.tick = (O.tick + advance) % 3600;
+        if (O.transition_tick < 36) {
+            O.transition_tick += advance;
+            if (O.transition_tick > 36) { O.transition_tick = 36; }
+        }
     }
-    // Composição estática compartilhada com o desktop e o instalador.
     bakenfx_draw_desktop_background(sotlas_get_default_canvas(), w, h);
     bakenfx_capture_backdrop();
     frame(x, y, w, h);
 
-    let prog = raster_smoothstep_u8(unsafe { O.transition_tick }, 24) as u32;
-    let slide_ox = if (unsafe { O.transition_tick } < 24) {
-        unsafe { O.transition_direction } * (((255 - prog as i32) * 32) / 255)
+    let prog = raster_smoothstep_u8(unsafe { O.transition_tick }, 36) as u32;
+    let slide_ox = if (unsafe { O.transition_tick } < 36) {
+        unsafe { O.transition_direction } * (((255 - prog as i32) * 40) / 255)
     } else {
         0
     };
@@ -196,17 +215,16 @@ fn profile(x: u32, y: u32, w: u32, h: u32) -> void {
     raster_draw_text_alpha(cx, t, "Criacao de Conta e Perfil Local".as_ptr(), TEXT, 1, 255);
     raster_draw_text_alpha(cx, t + 26, "Crie um perfil local protegido. BakenID e opcional.".as_ptr(), MUTED, 1, 235);
     
-    // Avatar Picker Preview
-    raster_draw_circle_alpha(cx + 32, t + 82, 22, 0x000284C7, 240);
-    raster_draw_circle_alpha(cx + 32, t + 82, 10, 0x0000E5FF, 255);
+    raster_draw_circle_alpha(cx + 32, t + 82, 22, 0x00E0F2FE, 240);
+    raster_draw_circle_alpha(cx + 32, t + 82, 10, BLUE, 255);
     raster_draw_text_alpha(cx + 68, t + 72, "Avatar: Aurora Cosmos (Personalizavel)".as_ptr(), BLUE, 1, 245);
 
     raster_draw_text_alpha(cx, t + 116, "Nome de exibicao".as_ptr(), MUTED, 1, 230);
-    draw_specular_box(cx, t + 138, cw, 38, CARD2, 240, BLUE, 8);
+    draw_specular_box(cx, t + 138, cw, 38, CARD, 240, BLUE, 8);
     raster_draw_text_alpha(cx + 14, t + 148, "Usuario Baken".as_ptr(), TEXT, 1, 255);
     
     raster_draw_text_alpha(cx, t + 188, "Senha do dispositivo / PIN".as_ptr(), MUTED, 1, 230);
-    draw_specular_box(cx, t + 210, cw, 38, CARD2, 240, LINE, 8);
+    draw_specular_box(cx, t + 210, cw, 38, CARD, 240, LINE, 8);
     raster_draw_text_alpha(cx + 14, t + 220, "••••••••".as_ptr(), TEXT, 1, 255);
     
     btn(cx, y + h - 78, 110, "<  Voltar".as_ptr(), 0);
@@ -220,11 +238,11 @@ fn privacy(x: u32, y: u32, w: u32, h: u32) -> void {
     let t = y + 78;
     raster_draw_text_alpha(cx, t, "Privacidade Total por Padrao".as_ptr(), TEXT, 1, 255);
     raster_draw_text_alpha(cx, t + 26, "Tudo comeca desligado. Voce tem controle absoluto.".as_ptr(), MUTED, 1, 235);
-    draw_specular_box(cx, t + 70, cw, 66, CARD2, 235, LINE, 11);
+    draw_specular_box(cx, t + 70, cw, 66, CARD, 235, LINE, 11);
     raster_draw_text_alpha(cx + 16, t + 82, "Diagnostico anonimo".as_ptr(), TEXT, 1, 255);
     raster_draw_text_alpha(cx + 16, t + 106, "Encontra falhas sem coletar dados pessoais".as_ptr(), MUTED, 1, 225);
     toggle(cx + cw - 58, t + 90, unsafe { O.diagnostics });
-    draw_specular_box(cx, t + 144, cw, 66, CARD2, 235, LINE, 11);
+    draw_specular_box(cx, t + 144, cw, 66, CARD, 235, LINE, 11);
     raster_draw_text_alpha(cx + 16, t + 156, "Servicos de localizacao".as_ptr(), TEXT, 1, 255);
     raster_draw_text_alpha(cx + 16, t + 180, "Permissao individual por aplicativo".as_ptr(), MUTED, 1, 225);
     toggle(cx + cw - 58, t + 164, unsafe { O.location });
@@ -241,20 +259,17 @@ fn style(x: u32, y: u32, w: u32, h: u32) -> void {
     raster_draw_text_alpha(cx, t + 26, "A aparencia pode ser alterada a qualquer momento nos Ajustes.".as_ptr(), MUTED, 1, 235);
     let gap: u32 = 12;
     let tile = (cw - gap * 2) / 3;
-    let names = ["Aurora Glass".as_ptr(), "Mica Claro".as_ptr(), "Cyber Neon".as_ptr()];
+    let names = ["Mica Claro".as_ptr(), "Aurora Glass".as_ptr(), "Pure Light".as_ptr()];
     for mut i in 0..3 {
         let tx = cx + (i as u32 * (tile + gap));
-        draw_specular_box(tx, t + 72, tile, 128, if (i == 0) { 0x00132338 } else { CARD2 }, 240, if (i == 0) { BLUE } else { LINE }, 12);
-        // Mini Desktop Live Mockup Preview
+        draw_specular_box(tx, t + 72, tile, 128, if (i == 0) { 0x00E0F2FE } else { CARD }, 240, if (i == 0) { BLUE } else { LINE }, 12);
         let mock_y = t + 84;
         let mock_w = tile - 20;
         let mock_x = tx + 10;
-        raster_fill_rect_alpha(mock_x, mock_y, mock_w, 48, if (i == 0) { 0x000F172A } else if (i == 1) { 0x00E2E8F0 } else { 0x00050505 }, 255);
-        // Mock Topbar
-        raster_fill_rect_alpha(mock_x, mock_y, mock_w, 5, if (i == 1) { 0x00CBD5E1 } else { 0x001E293B }, 255);
-        // Mock Dock
+        raster_fill_rect_alpha(mock_x, mock_y, mock_w, 48, if (i == 0) { 0x00F8FAFC } else if (i == 1) { 0x00E2E8F0 } else { 0x00FFFFFF }, 255);
+        raster_fill_rect_alpha(mock_x, mock_y, mock_w, 5, 0x00CBD5E1, 255);
         let dk_w = mock_w * 60 / 100;
-        raster_fill_rect_alpha(mock_x + (mock_w - dk_w) / 2, mock_y + 40, dk_w, 4, if (i == 0) { 0x0000E5FF } else { 0x0038BDF8 }, 255);
+        raster_fill_rect_alpha(mock_x + (mock_w - dk_w) / 2, mock_y + 40, dk_w, 4, 0x000284C7, 255);
 
         raster_draw_text_alpha(tx + 12, t + 168, names[i], TEXT, 1, 245);
     }
@@ -267,14 +282,22 @@ fn ready(x: u32, y: u32, w: u32, h: u32) -> void {
     let cx = get_bounds_cx(x, w);
     let cw = get_bounds_cw(w);
     let t = y + 108;
-    let pulse_phase = unsafe { O.tick } % 120;
-    let pulse_leg = if (pulse_phase < 60) { pulse_phase } else { 120 - pulse_phase };
-    let p = 34 + ((raster_smoothstep_u8(pulse_leg, 60) as u32 * 3) / 255);
-    raster_draw_circle_alpha(cx + cw / 2, t + 48, p + 16, VIOLET, 28);
+    let pulse_phase = unsafe { O.tick } % 180;
+    let pulse_leg = if (pulse_phase < 90) { pulse_phase } else { 180 - pulse_phase };
+    let p = 34 + ((raster_smoothstep_u8(pulse_leg, 90) as u32 * 5) / 255);
+    raster_draw_circle_alpha(cx + cw / 2, t + 48, p + 24, 0x0038BDF8, 16);
+    raster_draw_circle_alpha(cx + cw / 2, t + 48, p + 16, 0x0038BDF8, 28);
     raster_draw_circle_alpha(cx + cw / 2, t + 48, p, BLUE, 210);
-    raster_draw_circle_alpha(cx + cw / 2, t + 48, p / 3, BG, 255);
+    raster_draw_circle_alpha(cx + cw / 2, t + 48, p / 3, 0x00FFFFFF, 255);
+    let orbit_phase = unsafe { O.tick } % 256;
+    let orb1_x = (cx + cw / 2) as i32 + anim_orbit_cos(orbit_phase, (p + 28) as i32);
+    let orb1_y = t as i32 + 48 + anim_orbit_sin(orbit_phase, (p + 28) as i32);
+    raster_draw_circle_alpha(orb1_x as u32, orb1_y as u32, 3, BLUE, 180);
+    let orb2_x = (cx + cw / 2) as i32 + anim_orbit_cos((orbit_phase + 128) % 256, (p + 22) as i32);
+    let orb2_y = t as i32 + 48 + anim_orbit_sin((orbit_phase + 128) % 256, (p + 22) as i32);
+    raster_draw_circle_alpha(orb2_x as u32, orb2_y as u32, 2, GREEN, 150);
     let a = "Pronto para Explorar!";
-    raster_draw_text_alpha(cx + (cw - raster_measure_text(a.as_ptr())) / 2, t + 112, a.as_ptr(), TEXT, 1, 255);
+    raster_draw_text_alpha(cx + (cw - raster_measure_text(a.as_ptr())) / 2, t + 112, a.as_ptr(), 0x00059669, 1, 255);
     let b = "Seu ambiente Baken OS foi configurado com sucesso.";
     raster_draw_text_alpha(cx + (cw - raster_measure_text(b.as_ptr())) / 2, t + 140, b.as_ptr(), MUTED, 1, 235);
     btn(cx + (cw - 220) / 2, t + 192, 220, "Abrir meu Baken OS >".as_ptr(), 1);

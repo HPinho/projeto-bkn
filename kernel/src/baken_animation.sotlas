@@ -136,3 +136,87 @@ pub fn anim_orbit_sin(phase: u32, radius: i32) -> i32 {
         return ((255 - s * 2) * radius) / 255;
     }
 }
+
+// Curva elástica com overshoot configurável (cards que "saltam" ao entrar).
+// overshoot_pct: 5 = 5% de overshoot, 12 = 12%, etc.
+@system
+pub fn anim_elastic_overshoot(t: f32, overshoot_pct: u32) -> f32 {
+    if t <= 0.0 { return 0.0; }
+    if t >= 1.0 { return 1.0; }
+    let base = anim_caspring_f32(t);
+    let ov = (overshoot_pct as f32) / 100.0;
+    // Amplifica o overshoot natural da CASpring proporcionalmente
+    if base > 1.0 {
+        return 1.0 + (base - 1.0) * (1.0 + ov * 3.0);
+    }
+    return base;
+}
+
+// Alpha e deslocamento para fade-in sequencial escalonado (staggered entry).
+// tick: contador de animação atual
+// duration: duração total do fade em ticks (ex: 18 = ~300ms a 60Hz)
+// delay: delay deste item em ticks (ex: item 0=0, item 1=4, item 2=8...)
+// Retorna alpha 0..255. Use com slide_y = (255 - alpha) * dist / 255.
+@system
+pub fn anim_fade_slide_alpha(tick: u32, duration: u32, delay: u32) -> u8 {
+    if duration == 0 { return 255; }
+    if tick < delay { return 0; }
+    let elapsed = tick - delay;
+    if elapsed >= duration { return 255; }
+    let prog = anim_caspring_f32((elapsed as f32) / (duration as f32));
+    let a = (prog * 255.0) as i32;
+    return if a < 0 { 0 } else if a > 255 { 255 } else { a as u8 };
+}
+
+// Pulso de brilho suave cíclico para elementos interativos.
+// Retorna alpha variando entre min_a e max_a com curva smooth.
+@system
+pub fn anim_pulse_glow(tick: u32, period: u32, min_a: u8, max_a: u8) -> u8 {
+    if period == 0 || max_a <= min_a { return min_a; }
+    let phase = tick % period;
+    let half = period / 2;
+    if half == 0 { return min_a; }
+    let t = if phase < half {
+        (phase as f32) / (half as f32)
+    } else {
+        1.0 - (((phase - half) as f32) / (half as f32))
+    };
+    let smooth = ease_smooth_surface(t);
+    let range = (max_a - min_a) as f32;
+    let result = (min_a as f32) + smooth * range;
+    return if result < 0.0 { 0 } else if result > 255.0 { 255 } else { result as u8 };
+}
+
+// Variante de CASpring com bounce mais pronunciado para entrada de cards.
+// Maior overshoot (~15%) e settling mais expressivo.
+@system
+pub fn anim_spring_bounce(t: f32) -> f32 {
+    if t <= 0.0 { return 0.0; }
+    if t >= 1.0 { return 1.0; }
+    let lut: [f32; 17] = [
+        0.0, 0.185, 0.420, 0.665, 0.870, 1.040, 1.150, 1.145,
+        1.095, 1.040, 1.010, 0.990, 0.985, 0.992, 0.998, 1.000,
+        1.0
+    ];
+    let scaled = t * 16.0;
+    let idx = scaled as usize;
+    if idx >= 16 { return 1.0; }
+    let frac = scaled - (idx as f32);
+    let v0 = lut[idx];
+    let v1 = lut[idx + 1];
+    return v0 + frac * (v1 - v0);
+}
+
+// Offset horizontal para efeito shimmer (faixa de luz que percorre um botão).
+// Retorna posição normalizada 0..width do shimmer highlight.
+@system
+pub fn anim_shimmer_offset(tick: u32, period: u32, width: u32) -> u32 {
+    if period == 0 || width == 0 { return 0; }
+    let phase = tick % period;
+    // A faixa percorre de -width/4 a width+width/4 para sair suavemente
+    let total_travel = width + width / 2;
+    let pos = (phase * total_travel) / period;
+    if pos < width / 4 { return 0; }
+    let adjusted = pos - width / 4;
+    return if adjusted > width { width } else { adjusted };
+}

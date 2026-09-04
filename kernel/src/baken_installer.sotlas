@@ -1,5 +1,5 @@
 // Baken OS — Next-Gen Aurora Graphical Setup Wizard & OOBE
-// 100% Implementado na linguagem Sotlas (@system) com Glassmorphism Especular, i18n Multilingue e Zero Telemetria
+// 100% Implementado na linguagem Sotlas (@system) com Glassmorphism Especular Claro, i18n Multilingue e Zero Telemetria
 // Strings padrao e i18n: "TasteTrack Systems LTDA", "Comecar agora", "Restaurar ou Corrigir Computador"
 
 module kernel::baken_installer;
@@ -31,11 +31,14 @@ pub struct InstallerState {
     pub oobe_diagnostics: u8;   // 0: Desativado (Privacidade Total)
     pub oobe_location: u8;      // 0: Desativado
     pub previous_step: u32;
-    pub transition_tick: u32;   // 0..24, aproximadamente 400 ms a 60 Hz
+    pub transition_tick: u32;   // 0..36, aproximadamente 600 ms a 60 Hz
     pub transition_direction: i32;
     pub toast_tick: u32;
     pub toast_text: *const u8;
     pub exit_to_desktop: u8;
+    pub frame_delta: f32;
+    pub anim_frame_remainder: f32;
+    pub stagger_base: u32;
 }
 
 static mut INSTALLER: InstallerState = InstallerState {
@@ -53,11 +56,14 @@ static mut INSTALLER: InstallerState = InstallerState {
     oobe_diagnostics: 0,
     oobe_location: 0,
     previous_step: 0,
-    transition_tick: 24,
+    transition_tick: 36,
     transition_direction: 1,
     toast_tick: 0,
     toast_text: null as *const u8,
     exit_to_desktop: 0,
+    frame_delta: 0.0166667,
+    anim_frame_remainder: 0.0,
+    stagger_base: 0,
 };
 
 @system
@@ -75,6 +81,13 @@ pub fn baken_installer_set_exit_to_desktop(val: u8) -> void {
 }
 
 @system
+pub fn baken_installer_set_frame_delta(dt: f32) -> void {
+    unsafe {
+        INSTALLER.frame_delta = if dt < 0.001 { 0.001 } else if dt > 0.066 { 0.066 } else { dt };
+    }
+}
+
+@system
 fn installer_go_to(next: u32, direction: i32) -> void {
     unsafe {
         if (next == INSTALLER.step) { return; }
@@ -82,6 +95,7 @@ fn installer_go_to(next: u32, direction: i32) -> void {
         INSTALLER.step = next;
         INSTALLER.transition_tick = 0;
         INSTALLER.transition_direction = direction;
+        INSTALLER.stagger_base = INSTALLER.anim_tick;
     }
 }
 
@@ -89,7 +103,7 @@ fn installer_go_to(next: u32, direction: i32) -> void {
 fn show_toast(msg: *const u8) -> void {
     unsafe {
         INSTALLER.toast_text = msg;
-        INSTALLER.toast_tick = 90; // 1.5s a 60 FPS
+        INSTALLER.toast_tick = 90;
     }
 }
 
@@ -110,10 +124,13 @@ pub fn baken_installer_init() -> void {
         INSTALLER.oobe_diagnostics = 0;
         INSTALLER.oobe_location = 0;
         INSTALLER.previous_step = 0;
-        INSTALLER.transition_tick = 24;
+        INSTALLER.transition_tick = 36;
         INSTALLER.transition_direction = 1;
         INSTALLER.toast_tick = 0;
         INSTALLER.toast_text = null as *const u8;
+        INSTALLER.frame_delta = 0.0166667;
+        INSTALLER.anim_frame_remainder = 0.0;
+        INSTALLER.stagger_base = 0;
     }
     baken_oobe_init();
 }
@@ -133,21 +150,20 @@ fn get_lang() -> usize {
     }
 }
 
-// Primitiva de Vidro Especular com Borda Iluminada Perfeita (material_draw_glass_panel)
+// Primitiva de Vidro Especular com Borda Iluminada Perfeita
 @inline
 fn draw_specular_card(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border: u32, radius: u32) -> void {
     material_draw_glass_panel(x, y, w, h, bg, alpha, border, radius);
 }
 
-// Botao Interativo Moderno com Efeito de Luz e Seta Animada
+// Botao Interativo Moderno com Efeito de Luz e Seta Animada (Tema Claro)
 @inline
 fn draw_interactive_btn(x: u32, y: u32, w: u32, h: u32, text: *const u8, is_primary: bool, is_hover: bool) -> void {
-    let text_col = if (is_primary) { 0x00FFFFFF } else { if (is_hover) { 0x00F8FAFC } else { 0x0094A3B8 } };
+    let text_col = if (is_primary) { 0x00FFFFFF } else { if (is_hover) { 0x000F172A } else { 0x00334155 } };
     material_draw_macos_button(x, y, w, h, null as *const u8, is_primary, is_hover);
     let tw = raster_measure_text(text);
 
     if (is_primary) {
-        // Texto centralizado com espaço para a seta animada estilizada
         let content_w = tw + 20;
         let tx = x + (if (w > content_w) { (w - content_w) / 2 } else { 12 });
         let ty = y + (if (h > 20) { (h - 20) / 2 } else { 2 });
@@ -293,7 +309,7 @@ static STR_M2_DESC: [*const u8; 11] = [
     "Runs directly in RAM without modifying internal storage devices.".as_ptr(),
     "S'execute directement en RAM sans modifier les unites de stockage internes.".as_ptr(),
     "Esegue direttamente in RAM senza modificare le unita di memoria interne.".as_ptr(),
-    "Se ejecuta directamente en RAM sin modificar las unidades de almacenamiento.".as_ptr(),
+    "Se ejecuta directamente en RAM sin modificar las unidades de armazenamento.".as_ptr(),
     "Laeuft direkt im RAM, ohne interne Speichermedien zu veraendern.".as_ptr(),
     "Ektelite apefthias sti mnimi horis tropopoiisi tou esoterikou diskou.".as_ptr(),
     "Zhi jie zai RAM zhong yun xing, bu xiu gai nei bu cun chu she bei.".as_ptr(),
@@ -364,18 +380,25 @@ static STR_BTN_ENTER_DESKTOP: [*const u8; 11] = [
 ];
 
 // =============================================================================
-// RENDERIZADOR PRINCIPAL DO ASSISTENTE GRAFICO
+// RENDERIZADOR PRINCIPAL DO ASSISTENTE GRAFICO (TEMA CLARO)
 // =============================================================================
 
 @system
 pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
-        INSTALLER.anim_tick = (INSTALLER.anim_tick + 1) % 3600;
-        if (INSTALLER.transition_tick < 24) { INSTALLER.transition_tick += 1; }
-        if (INSTALLER.toast_tick > 0) { INSTALLER.toast_tick -= 1; }
+        INSTALLER.anim_frame_remainder += INSTALLER.frame_delta * 60.0;
+        let advance = INSTALLER.anim_frame_remainder as u32;
+        INSTALLER.anim_frame_remainder -= advance as f32;
+        INSTALLER.anim_tick = (INSTALLER.anim_tick + advance) % 3600;
+        if (INSTALLER.transition_tick < 36) {
+            INSTALLER.transition_tick += advance;
+            if (INSTALLER.transition_tick > 36) { INSTALLER.transition_tick = 36; }
+        }
+        if (INSTALLER.toast_tick > advance) { INSTALLER.toast_tick -= advance; }
+        else { INSTALLER.toast_tick = 0; }
         let step = INSTALLER.step;
 
-        // 1. Papel de parede dinâmico estilo macOS Tahoe com deriva contínua da Aurora
+        // 1. Papel de parede dinâmico estilo macOS Tahoe Light Edition
         bakenfx_draw_desktop_background(sotlas_get_default_canvas(), w, h);
         bakenfx_capture_backdrop();
 
@@ -385,13 +408,14 @@ pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
             return;
         }
 
-        // 2. Timeline Stepper Lateral Flutuante (para telas >= 760px)
+        // 2. Timeline Stepper Lateral Flutuante
         render_aurora_shell(x, y, w, h, min_u32(step, 5));
 
-        // 3. Calculo de Slide Parallax com Fisica de Mola Amortecida
-        let prog = raster_smoothstep_u8(INSTALLER.transition_tick, 24) as u32;
-        let slide_ox = if (INSTALLER.transition_tick < 24) {
-            INSTALLER.transition_direction * (((255 - prog as i32) * 28) / 255)
+        // 3. Slide Parallax com Mola Elástica CASpring
+        let spring_t = if (INSTALLER.transition_tick >= 36) { 1.0 } else { (INSTALLER.transition_tick as f32) / 36.0 };
+        let spring_val = anim_caspring_f32(spring_t);
+        let slide_ox = if (INSTALLER.transition_tick < 36) {
+            (INSTALLER.transition_direction as f32 * (1.0 - spring_val) * 40.0) as i32
         } else {
             0
         };
@@ -424,17 +448,17 @@ pub fn baken_installer_render(x: u32, y: u32, w: u32, h: u32) -> void {
     }
 }
 
-// Renderiza barra de atalhos flutuante no rodape (centralizada e sem sobreposicao)
+// Renderiza barra de atalhos flutuante no rodape
 @system
 fn render_keyboard_chips(x: u32, y: u32, w: u32, h: u32) -> void {
     let chip_y = y + h - 30;
     let chip_w: u32 = 390;
     let chip_x = x + (if (w > chip_w) { (w - chip_w) / 2 } else { 10 });
     if (w >= 640 && h >= 400) {
-        material_draw_glass_panel(chip_x, chip_y, chip_w, 24, 0x000F172A, 190, 0x00334155, 7);
-        raster_draw_text_alpha(chip_x + 16, chip_y + 5, "[ Enter ] Avancar".as_ptr(), 0x0000E5FF, 1, 230);
-        raster_draw_text_alpha(chip_x + 150, chip_y + 5, "[ Esc ] Voltar".as_ptr(), 0x0094A3B8, 1, 200);
-        raster_draw_text_alpha(chip_x + 268, chip_y + 5, "[ 1..9 ] Opcoes".as_ptr(), 0x0038BDF8, 1, 200);
+        material_draw_glass_panel(chip_x, chip_y, chip_w, 24, 0x00FFFFFF, 220, 0x00CBD5E1, 7);
+        raster_draw_text_alpha(chip_x + 16, chip_y + 5, "[ Enter ] Avancar".as_ptr(), 0x000284C7, 1, 255);
+        raster_draw_text_alpha(chip_x + 150, chip_y + 5, "[ Esc ] Voltar".as_ptr(), 0x0064748B, 1, 220);
+        raster_draw_text_alpha(chip_x + 268, chip_y + 5, "[ 1..9 ] Opcoes".as_ptr(), 0x000284C7, 1, 240);
     }
 }
 
@@ -448,9 +472,9 @@ fn render_toast(w: u32) -> void {
         let toast_x = (w - toast_w) / 2;
         let alpha: u8 = if (INSTALLER.toast_tick > 15) { 240 } else { ((INSTALLER.toast_tick * 240) / 15) as u8 };
 
-        draw_specular_card(toast_x, 16, toast_w, 32, 0x000F172A, alpha, 0x0000E5FF, 16);
+        draw_specular_card(toast_x, 16, toast_w, 32, 0x00FFFFFF, alpha, 0x00CBD5E1, 16);
         raster_draw_circle_alpha(toast_x + 16, 32, 5, 0x0010B981, alpha);
-        raster_draw_text_alpha(toast_x + 28, 23, INSTALLER.toast_text, 0x00FFFFFF, 1, alpha);
+        raster_draw_text_alpha(toast_x + 28, 23, INSTALLER.toast_text, 0x000F172A, 1, alpha);
     }
 }
 
@@ -459,47 +483,47 @@ fn render_toast(w: u32) -> void {
 fn render_aurora_shell(x: u32, y: u32, w: u32, h: u32, active_step: u32) -> void {
     let lang_idx = get_lang();
     if (w >= 760) {
-        // Painel Esquerdo em Vidro Acrilico Translúcido com Specular Highlight
-        draw_specular_card(x + 16, y + 16, 216, h - 32, 0x000F172A, 195, 0x0038BDF8, 16);
+        // Painel Esquerdo em Vidro Claro Translúcido
+        draw_specular_card(x + 16, y + 16, 216, h - 32, 0x00FFFFFF, 215, 0x00CBD5E1, 16);
         
         // Emblema Oficial Swirl Baken OS
         raster_draw_baken_logo(x + 32, y + 36, 36, 255);
-        raster_draw_text_alpha(x + 76, y + 38, "BAKEN OS".as_ptr(), 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(x + 76, y + 58, "Setup & OOBE".as_ptr(), 0x0000E5FF, 1, 230);
+        raster_draw_text_alpha(x + 76, y + 38, "BAKEN OS".as_ptr(), 0x000F172A, 1, 255);
+        raster_draw_text_alpha(x + 76, y + 58, "Setup & OOBE".as_ptr(), 0x000284C7, 1, 240);
 
         // Itens da Timeline Conectada
         for mut i in 0..6 {
             let py = y + 106 + ((i as u32) * 44);
             let is_past_or_current = (i as u32) <= active_step;
-            let dot_color = if (is_past_or_current) { 0x0000E5FF } else { 0x00475569 };
+            let dot_color = if (is_past_or_current) { 0x000284C7 } else { 0x00CBD5E1 };
 
             // Linha conectora vertical
             if (i < 5) {
-                let line_c = if ((i as u32) < active_step) { 0x0000E5FF } else { 0x00334155 };
+                let line_c = if ((i as u32) < active_step) { 0x000284C7 } else { 0x00E2E8F0 };
                 raster_fill_rect_alpha(x + 47, py + 14, 2, 30, line_c, 210);
             }
 
             // Anel do Ponto da Timeline
             raster_draw_circle_alpha(x + 48, py + 8, 6, dot_color, 255);
             if (i as u32 == active_step) {
-                raster_draw_circle_alpha(x + 48, py + 8, 11, 0x0000E5FF, 75);
-                raster_draw_circle_alpha(x + 48, py + 8, 16, 0x000284C7, 30);
+                raster_draw_circle_alpha(x + 48, py + 8, 11, 0x000284C7, 65);
+                raster_draw_circle_alpha(x + 48, py + 8, 16, 0x0038BDF8, 25);
             }
 
             let txt = STR_SIDEBAR_STEPS[lang_idx][i];
-            let txt_color = if (i as u32 == active_step) { 0x00FFFFFF } else if (is_past_or_current) { 0x0038BDF8 } else { 0x0064748B };
+            let txt_color = if (i as u32 == active_step) { 0x000F172A } else if (is_past_or_current) { 0x000284C7 } else { 0x0064748B };
             raster_draw_text_alpha(x + 66, py, txt, txt_color, 1, 250);
         }
 
         // Badge de Privacidade no Rodape Lateral
         let priv_y = y + h - 68;
-        material_draw_glass_panel(x + 24, priv_y, 200, 32, 0x001E293B, 200, 0x0010B981, 8);
+        material_draw_glass_panel(x + 24, priv_y, 200, 32, 0x00ECFDF5, 220, 0x0010B981, 8);
         raster_draw_circle_alpha(x + 38, priv_y + 16, 4, 0x0010B981, 255);
-        raster_draw_text_alpha(x + 50, priv_y + 9, "Zero Telemetria Nativa".as_ptr(), 0x0010B981, 1, 240);
+        raster_draw_text_alpha(x + 50, priv_y + 9, "Zero Telemetria Nativa".as_ptr(), 0x00059669, 1, 250);
     }
 }
 
-// Tela 0: Boas-Vindas com Card Central Flutuante em Alta Resolução e Ray Tracing
+// Tela 0: Boas-Vindas com Card Central Flutuante em Alta Resolução
 @system
 fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
@@ -507,34 +531,33 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let ch: u32 = if (h > 560) { 440 } else { h - 40 };
         let cx = x + (w - cw) / 2;
 
-        // Geometria estável: a posição da superfície não oscila com o número
-        // de frames. Movimento de interface deve vir de transições de estado.
         let float_dy: i32 = 0;
         let base_cy = if (h > ch) { (h - ch) / 2 - 12 } else { 10 };
         let cy = (y as i32 + base_cy as i32 + float_dy) as u32;
 
-        // Card Hero central com material translúcido Liquid Glass estilo macOS.
+        // Card Hero central com material translúcido Liquid Glass estilo macOS Light.
         material_draw_macos_card(cx, cy, cw, ch, 24, false);
-        // No instalador, apenas o botão de Fechar (vermelho) para acionar desligamento/reinicialização
-        material_draw_close_button(cx + 24, cy + 24);
+        // Controle de energia Baken
+        material_draw_close_button(cx + cw - 30, cy + 24);
 
         let logo_x = cx + (cw / 2);
         let logo_y = cy + 80;
         
-        // Moldura estática de marca e anéis de reflexo zenital translúcido
+        // Anel externo pulsante
+        let outer_glow_a = anim_pulse_glow(INSTALLER.anim_tick, 180, 12, 40);
+        raster_draw_circle_alpha(logo_x, logo_y, 64, 0x0038BDF8, outer_glow_a);
         raster_draw_circle_alpha(logo_x, logo_y, 56, 0x000284C7, 20);
-        raster_draw_circle_alpha(logo_x, logo_y, 48, 0x0000E5FF, 36);
+        raster_draw_circle_alpha(logo_x, logo_y, 48, 0x0038BDF8, 36);
         raster_draw_circle_alpha(logo_x, logo_y, 44, 0x00FFFFFF, 45);
         raster_draw_baken_logo(logo_x - 42, logo_y - 42, 84, 255);
 
-        // Título "BAKEN OS" em Alta Resolução Nativa em tom escuro para tema claro
+        // Título "BAKEN OS" em tom escuro de alto contraste
         let t1 = "BAKEN OS";
         let t1_w = raster_measure_title_text(t1.as_ptr());
         raster_draw_title_text_alpha(logo_x - (t1_w / 2), logo_y + 54, t1.as_ptr(), 0x000F172A, 255);
 
-        // Ticker Multilíngue com Física de Mola Apple (CASpringAnimation: rigidez=300, amortecimento=30)
-        // Alterna entre os 11 idiomas sincronizando frase de boas-vindas, botão e rodapé
-        let lang_period: u32 = 64;
+        // Ticker Multilíngue com Física de Mola Apple
+        let lang_period: u32 = 156;
         let cur_idx = ((INSTALLER.anim_tick / lang_period) % 11) as usize;
         let next_idx = ((cur_idx + 1) % 11) as usize;
         let phase = INSTALLER.anim_tick % lang_period;
@@ -544,19 +567,16 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let mut y_off: i32 = 0;
 
         if (phase < 44) {
-            // Período estável de leitura com assentamento perfeito
             show_idx = cur_idx;
             alpha = 255;
             y_off = 0;
         } else if (phase < 52) {
-            // Saída com disparo acelerado de mola
             let out_prog = (phase - 44) as f32 / 8.0;
             let spring_out = anim_caspring_f32(out_prog);
             show_idx = cur_idx;
             alpha = (255.0 * (1.0 - out_prog)) as u8;
             y_off = -((spring_out * 8.0) as i32);
         } else {
-            // Entrada com curva elástica Apple (overshoot de 107% e desaceleração assintótica)
             let in_prog = (phase - 52) as f32 / 12.0;
             let spring_in = anim_caspring_f32(in_prog);
             show_idx = next_idx;
@@ -567,13 +587,10 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let t2_y = (logo_y as i32 + 96 + y_off) as u32;
         let sub_color: u32 = 0x000369A1;
         if (show_idx == 6) {
-            // Grego: Ελληνικά (ID 2, largura 75)
             raster_draw_cjk_item(logo_x - 37, t2_y, 2, sub_color, alpha);
         } else if (show_idx == 7) {
-            // Chinês: 中文 (ID 0, largura 36)
             raster_draw_cjk_item(logo_x - 18, t2_y, 0, sub_color, alpha);
         } else if (show_idx == 8) {
-            // Japonês: 日本語 (ID 1, largura 52)
             raster_draw_cjk_item(logo_x - 26, t2_y, 1, sub_color, alpha);
         } else {
             let t2 = i18n_welcome_text_for_lang(show_idx);
@@ -581,7 +598,7 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
             raster_draw_text_alpha(logo_x - (t2_w / 2), t2_y, t2, sub_color, 1, alpha);
         }
 
-        // Botão Central com Atração Magnética e Tradução Dinâmica Sincronizada aos 11 Idiomas
+        // Botão Central com Atração Magnética
         let start_w: u32 = 320;
         let start_h: u32 = 52;
         let base_x = logo_x - (start_w / 2);
@@ -592,7 +609,6 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
         let is_hover = mx >= base_x as i32 && mx <= (base_x + start_w) as i32 &&
                        my >= base_y as i32 && my <= (base_y + start_h) as i32;
 
-        // Atração magnética sutil estilo Apple AppKit (10% de deslocamento em direção ao cursor no hover)
         let mag_dx = if is_hover { (mx - (base_x as i32 + (start_w as i32 / 2))) / 10 } else { 0 };
         let mag_dy = if is_hover { (my - (base_y as i32 + (start_h as i32 / 2))) / 10 } else { 0 };
         let start_x = (base_x as i32 + mag_dx) as u32;
@@ -600,14 +616,29 @@ fn render_welcome(x: u32, y: u32, w: u32, h: u32) -> void {
 
         draw_interactive_btn(start_x, start_y, start_w, start_h, i18n_btn_start_for_lang(show_idx), true, is_hover);
 
-        // Rodapé de Links Multilíngue Sincronizado aos 11 Idiomas com Alto Contraste Límpido
+        if is_hover {
+            let shimmer_pos = anim_shimmer_offset(INSTALLER.anim_tick, 120, start_w);
+            let shimmer_w: u32 = 40;
+            if shimmer_pos > 0 && shimmer_pos < start_w {
+                let sx = start_x + shimmer_pos;
+                let sw = if sx + shimmer_w > start_x + start_w { start_x + start_w - sx } else { shimmer_w };
+                raster_fill_rect_alpha(sx, start_y + 2, sw, start_h - 4, 0x00FFFFFF, 45);
+            }
+        }
+
+        // Rodapé de Links Multilíngue
+        let footer_fade = if (INSTALLER.anim_tick < 60) {
+            anim_fade_slide_alpha(INSTALLER.anim_tick, 60, 0)
+        } else { 255 as u8 };
         let link_y = if (h > 50) { h - 40 } else { 10 };
         let footer_text = i18n_footer_help_for_lang(show_idx);
-        let footer_alpha = if (phase < 44) { 245 } else { (alpha as u32 * 245 / 255) as u8 };
-        raster_draw_text_alpha(x + 36, link_y, footer_text, 0x00E2E8F0, 1, footer_alpha);
+        let base_fa = if (phase < 44) { 245 } else { (alpha as u32 * 245 / 255) as u8 };
+        let footer_alpha = ((base_fa as u32 * footer_fade as u32) / 255) as u8;
+        raster_draw_text_alpha(x + 36, link_y, footer_text, 0x00334155, 1, footer_alpha);
         let cr = "Baken OS - TasteTrack Systems LTDA";
         let cr_w = raster_measure_text(cr.as_ptr());
-        raster_draw_text_alpha(x + w - cr_w - 36, link_y, cr.as_ptr(), 0x00CBD5E1, 1, 210);
+        let cr_a = ((210 as u32 * footer_fade as u32) / 255) as u8;
+        raster_draw_text_alpha(x + w - cr_w - 36, link_y, cr.as_ptr(), 0x00475569, 1, cr_a);
     }
 }
 
@@ -619,66 +650,70 @@ fn render_language_keyboard(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        // Titulo e Subtitulo com Hierarquia Tipografica
-        raster_draw_text_alpha(cx, y + 36, STR_LANG_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx, y + 60, STR_LANG_SUB[lang_idx], 0x0094A3B8, 1, 235);
+        // Titulo e Subtitulo em Tema Claro
+        raster_draw_text_alpha(cx, y + 36, STR_LANG_TITLE[lang_idx], 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx, y + 60, STR_LANG_SUB[lang_idx], 0x0064748B, 1, 240);
 
         let col_w = (cw - 20) / 2;
+        let stagger_elapsed = if (INSTALLER.anim_tick >= INSTALLER.stagger_base) { INSTALLER.anim_tick - INSTALLER.stagger_base } else { 60 };
 
         // Coluna 1 (Idiomas 0 a 5)
         for mut i in 0..6 {
-            let ly = y + 96 + (i * 48);
+            let item_fade = anim_fade_slide_alpha(stagger_elapsed, 16, (i as u32) * 2);
+            let slide_y = (((255 - item_fade as i32) * 8) / 255) as u32;
+            let ly = y + 96 + (i * 48) + slide_y;
             let is_sel = (INSTALLER.selected_lang == (i as u32));
-            let bg_c = if (is_sel) { 0x000284C7 } else { 0x000F172A };
-            let border_c = if (is_sel) { 0x0000E5FF } else { 0x00334155 };
-            let alpha: u8 = if (is_sel) { 245 } else { 190 };
+            let bg_c = if (is_sel) { 0x00E0F2FE } else { 0x00FFFFFF };
+            let border_c = if (is_sel) { 0x000284C7 } else { 0x00CBD5E1 };
+            let base_a: u8 = if (is_sel) { 245 } else { 210 };
+            let alpha = ((base_a as u32 * item_fade as u32) / 255) as u8;
 
             draw_specular_card(cx, ly, col_w, 42, bg_c, alpha, border_c, 10);
-            raster_draw_circle_alpha(cx + 20, ly + 21, 6, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
-            raster_draw_text_alpha(cx + 38, ly + 11, STR_NATIVE_LANGS[i], if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC }, 1, 255);
+            raster_draw_circle_alpha(cx + 20, ly + 21, 6, if (is_sel) { 0x000284C7 } else { 0x00CBD5E1 }, alpha);
+            raster_draw_text_alpha(cx + 38, ly + 11, STR_NATIVE_LANGS[i], if (is_sel) { 0x000369A1 } else { 0x000F172A }, 1, alpha);
         }
 
         // Coluna 2 (Idiomas 6 a 10)
         let col2_x = cx + col_w + 20;
         for mut j in 6..11 {
-            let ly = y + 96 + ((j - 6) * 48);
+            let item_fade = anim_fade_slide_alpha(stagger_elapsed, 16, ((j as u32) - 6) * 2 + 1);
+            let slide_y = (((255 - item_fade as i32) * 8) / 255) as u32;
+            let ly = y + 96 + ((j - 6) * 48) + slide_y;
             let is_sel = (INSTALLER.selected_lang == (j as u32));
-            let bg_c = if (is_sel) { 0x000284C7 } else { 0x000F172A };
-            let border_c = if (is_sel) { 0x0000E5FF } else { 0x00334155 };
-            let alpha: u8 = if (is_sel) { 245 } else { 190 };
-            let text_color = if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC };
+            let bg_c = if (is_sel) { 0x00E0F2FE } else { 0x00FFFFFF };
+            let border_c = if (is_sel) { 0x000284C7 } else { 0x00CBD5E1 };
+            let base_a: u8 = if (is_sel) { 245 } else { 210 };
+            let alpha = ((base_a as u32 * item_fade as u32) / 255) as u8;
+            let text_color = if (is_sel) { 0x000369A1 } else { 0x000F172A };
 
             material_draw_glass_panel(col2_x, ly, col_w, 42, bg_c, alpha, border_c, 10);
-            raster_draw_circle_alpha(col2_x + 20, ly + 21, 6, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
+            raster_draw_circle_alpha(col2_x + 20, ly + 21, 6, if (is_sel) { 0x000284C7 } else { 0x00CBD5E1 }, alpha);
 
             if (j == 6) {
-                // 7. Ελληνικά
-                raster_draw_text_alpha(col2_x + 38, ly + 11, "7. ".as_ptr(), text_color, 1, 255);
-                raster_draw_cjk_item(col2_x + 58, ly + 11, 2, text_color, 255);
-                raster_draw_text_alpha(col2_x + 140, ly + 11, "(Grego / EL)".as_ptr(), 0x0094A3B8, 1, 210);
+                raster_draw_text_alpha(col2_x + 38, ly + 11, "7. ".as_ptr(), text_color, 1, alpha);
+                raster_draw_cjk_item(col2_x + 58, ly + 11, 2, text_color, alpha);
+                raster_draw_text_alpha(col2_x + 140, ly + 11, "(Grego / EL)".as_ptr(), 0x0064748B, 1, ((210 as u32 * item_fade as u32) / 255) as u8);
             } else if (j == 7) {
-                // 8. 中文
-                raster_draw_text_alpha(col2_x + 38, ly + 11, "8. ".as_ptr(), text_color, 1, 255);
-                raster_draw_cjk_item(col2_x + 58, ly + 11, 0, text_color, 255);
-                raster_draw_text_alpha(col2_x + 102, ly + 11, "(Chines / ZH)".as_ptr(), 0x0094A3B8, 1, 210);
+                raster_draw_text_alpha(col2_x + 38, ly + 11, "8. ".as_ptr(), text_color, 1, alpha);
+                raster_draw_cjk_item(col2_x + 58, ly + 11, 0, text_color, alpha);
+                raster_draw_text_alpha(col2_x + 102, ly + 11, "(Chines / ZH)".as_ptr(), 0x0064748B, 1, ((210 as u32 * item_fade as u32) / 255) as u8);
             } else if (j == 8) {
-                // 9. 日本語
-                raster_draw_text_alpha(col2_x + 38, ly + 11, "9. ".as_ptr(), text_color, 1, 255);
-                raster_draw_cjk_item(col2_x + 58, ly + 11, 1, text_color, 255);
-                raster_draw_text_alpha(col2_x + 118, ly + 11, "(Japones / JA)".as_ptr(), 0x0094A3B8, 1, 210);
+                raster_draw_text_alpha(col2_x + 38, ly + 11, "9. ".as_ptr(), text_color, 1, alpha);
+                raster_draw_cjk_item(col2_x + 58, ly + 11, 1, text_color, alpha);
+                raster_draw_text_alpha(col2_x + 118, ly + 11, "(Japones / JA)".as_ptr(), 0x0064748B, 1, ((210 as u32 * item_fade as u32) / 255) as u8);
             } else {
-                raster_draw_text_alpha(col2_x + 38, ly + 11, STR_NATIVE_LANGS[j], text_color, 1, 255);
+                raster_draw_text_alpha(col2_x + 38, ly + 11, STR_NATIVE_LANGS[j], text_color, 1, alpha);
             }
         }
 
-        // Botoes de Navegacao Inferiores Multilingue
+        // Botoes de Navegacao Inferiores
         let bot_y = y + h - 70;
         draw_interactive_btn(cx, bot_y, 120, 42, i18n_btn_back(), false, false);
         draw_interactive_btn(cx + cw - 160, bot_y, 160, 42, i18n_btn_next(), true, true);
     }
 }
 
-// Tela 2: Selecao de Modo de Uso (Nativo SSD vs Live RAM vs Benchmark)
+// Tela 2: Selecao de Modo de Uso
 @system
 fn render_mode_choice(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
@@ -686,35 +721,46 @@ fn render_mode_choice(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        raster_draw_text_alpha(cx, y + 36, STR_MODE_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx, y + 60, STR_MODE_SUB[lang_idx], 0x0094A3B8, 1, 235);
+        raster_draw_text_alpha(cx, y + 36, STR_MODE_TITLE[lang_idx], 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx, y + 60, STR_MODE_SUB[lang_idx], 0x0064748B, 1, 240);
+
+        let stagger_elapsed = if (INSTALLER.anim_tick >= INSTALLER.stagger_base) { INSTALLER.anim_tick - INSTALLER.stagger_base } else { 60 };
 
         // Opcao 1: Instalacao Definitiva
+        let f0 = anim_fade_slide_alpha(stagger_elapsed, 16, 0);
+        let s0 = (((255 - f0 as i32) * 8) / 255) as u32;
         let is_m0 = (INSTALLER.selected_mode == 0);
-        let bg0 = if (is_m0) { 0x000284C7 } else { 0x001E293B };
-        let brd0 = if (is_m0) { 0x0000E5FF } else { 0x00334155 };
-        draw_specular_card(cx, y + 96, cw, 72, bg0, if (is_m0) { 240 } else { 190 }, brd0, 10);
-        raster_draw_circle_alpha(cx + 24, y + 132, 7, if (is_m0) { 0x0010B981 } else { 0x0064748B }, 255);
-        raster_draw_text_alpha(cx + 44, y + 108, STR_M1_TITLE[lang_idx], if (is_m0) { 0x0000E5FF } else { 0x00FFFFFF }, 1, 255);
-        raster_draw_text_alpha(cx + 44, y + 132, STR_M1_DESC[lang_idx], 0x0094A3B8, 1, 240);
+        let bg0 = if (is_m0) { 0x00E0F2FE } else { 0x00FFFFFF };
+        let brd0 = if (is_m0) { 0x000284C7 } else { 0x00CBD5E1 };
+        let a0 = (((if (is_m0) { 245 } else { 210 }) as u32 * f0 as u32) / 255) as u8;
+        draw_specular_card(cx, y + 96 + s0, cw, 72, bg0, a0, brd0, 10);
+        raster_draw_circle_alpha(cx + 24, y + 132 + s0, 7, if (is_m0) { 0x0010B981 } else { 0x00CBD5E1 }, f0);
+        raster_draw_text_alpha(cx + 44, y + 108 + s0, STR_M1_TITLE[lang_idx], if (is_m0) { 0x000369A1 } else { 0x000F172A }, 1, f0);
+        raster_draw_text_alpha(cx + 44, y + 132 + s0, STR_M1_DESC[lang_idx], 0x0064748B, 1, ((240 as u32 * f0 as u32) / 255) as u8);
 
         // Opcao 2: Modo Live RAM
+        let f1 = anim_fade_slide_alpha(stagger_elapsed, 16, 4);
+        let s1 = (((255 - f1 as i32) * 8) / 255) as u32;
         let is_m1 = (INSTALLER.selected_mode == 1);
-        let bg1 = if (is_m1) { 0x000284C7 } else { 0x001E293B };
-        let brd1 = if (is_m1) { 0x0000E5FF } else { 0x00334155 };
-        draw_specular_card(cx, y + 180, cw, 72, bg1, if (is_m1) { 240 } else { 190 }, brd1, 10);
-        raster_draw_circle_alpha(cx + 24, y + 216, 7, if (is_m1) { 0x0010B981 } else { 0x0064748B }, 255);
-        raster_draw_text_alpha(cx + 44, y + 192, STR_M2_TITLE[lang_idx], if (is_m1) { 0x0000E5FF } else { 0x00FFFFFF }, 1, 255);
-        raster_draw_text_alpha(cx + 44, y + 216, STR_M2_DESC[lang_idx], 0x0094A3B8, 1, 240);
+        let bg1 = if (is_m1) { 0x00E0F2FE } else { 0x00FFFFFF };
+        let brd1 = if (is_m1) { 0x000284C7 } else { 0x00CBD5E1 };
+        let a1 = (((if (is_m1) { 245 } else { 210 }) as u32 * f1 as u32) / 255) as u8;
+        draw_specular_card(cx, y + 180 + s1, cw, 72, bg1, a1, brd1, 10);
+        raster_draw_circle_alpha(cx + 24, y + 216 + s1, 7, if (is_m1) { 0x0010B981 } else { 0x00CBD5E1 }, f1);
+        raster_draw_text_alpha(cx + 44, y + 192 + s1, STR_M2_TITLE[lang_idx], if (is_m1) { 0x000369A1 } else { 0x000F172A }, 1, f1);
+        raster_draw_text_alpha(cx + 44, y + 216 + s1, STR_M2_DESC[lang_idx], 0x0064748B, 1, ((240 as u32 * f1 as u32) / 255) as u8);
 
-        // Opcao 3: Benchmark de Desempenho do Sistema
+        // Opcao 3: Benchmark
+        let f2 = anim_fade_slide_alpha(stagger_elapsed, 16, 8);
+        let s2 = (((255 - f2 as i32) * 8) / 255) as u32;
         let is_m2 = (INSTALLER.selected_mode == 2);
-        let bg2 = if (is_m2) { 0x000284C7 } else { 0x001E293B };
-        let brd2 = if (is_m2) { 0x0000E5FF } else { 0x00334155 };
-        draw_specular_card(cx, y + 264, cw, 68, bg2, if (is_m2) { 240 } else { 190 }, brd2, 10);
-        raster_draw_circle_alpha(cx + 24, y + 298, 7, if (is_m2) { 0x00F59E0B } else { 0x0064748B }, 255);
-        raster_draw_text_alpha(cx + 44, y + 276, "Teste de Desempenho e Telemetria de Hardware".as_ptr(), if (is_m2) { 0x00F59E0B } else { 0x00FFFFFF }, 1, 255);
-        raster_draw_text_alpha(cx + 44, y + 300, "Executa benchmark completo de CPU, RAM, SSD e Framebuffer.".as_ptr(), 0x0094A3B8, 1, 240);
+        let bg2 = if (is_m2) { 0x00FEF3C7 } else { 0x00FFFFFF };
+        let brd2 = if (is_m2) { 0x00F59E0B } else { 0x00CBD5E1 };
+        let a2 = (((if (is_m2) { 245 } else { 210 }) as u32 * f2 as u32) / 255) as u8;
+        draw_specular_card(cx, y + 264 + s2, cw, 68, bg2, a2, brd2, 10);
+        raster_draw_circle_alpha(cx + 24, y + 298 + s2, 7, if (is_m2) { 0x00F59E0B } else { 0x00CBD5E1 }, f2);
+        raster_draw_text_alpha(cx + 44, y + 276 + s2, "Teste de Desempenho e Telemetria de Hardware".as_ptr(), if (is_m2) { 0x00B45309 } else { 0x000F172A }, 1, f2);
+        raster_draw_text_alpha(cx + 44, y + 300 + s2, "Executa benchmark completo de CPU, RAM, SSD e Framebuffer.".as_ptr(), 0x0064748B, 1, ((240 as u32 * f2 as u32) / 255) as u8);
 
         let bot_y = y + h - 68;
         draw_interactive_btn(cx, bot_y, 110, 38, STR_BTN_BACK[lang_idx], false, false);
@@ -722,7 +768,7 @@ fn render_mode_choice(x: u32, y: u32, w: u32, h: u32) -> void {
     }
 }
 
-// Tela 3: Selecao de Disco com Grafico de Particionamento Visual
+// Tela 3: Selecao de Disco com Grafico Visual
 @system
 fn render_disk_selection(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
@@ -730,19 +776,19 @@ fn render_disk_selection(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        raster_draw_text_alpha(cx, y + 36, STR_DISK_TITLE[lang_idx], 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx, y + 60, STR_DISK_SUB[lang_idx], 0x0094A3B8, 1, 235);
+        raster_draw_text_alpha(cx, y + 36, STR_DISK_TITLE[lang_idx], 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx, y + 60, STR_DISK_SUB[lang_idx], 0x0064748B, 1, 240);
 
         // Cartao do Disco NVMe SSD
-        draw_specular_card(cx, y + 96, cw, 78, 0x000284C7, 240, 0x0000E5FF, 10);
+        draw_specular_card(cx, y + 96, cw, 78, 0x00E0F2FE, 240, 0x000284C7, 10);
         raster_draw_circle_alpha(cx + 24, y + 135, 7, 0x0010B981, 255);
-        raster_draw_text_alpha(cx + 44, y + 108, "NVMe SSD Principal — 512.0 GB [ALVO GRAVAVEL]".as_ptr(), 0x0000E5FF, 1, 255);
-        raster_draw_text_alpha(cx + 44, y + 130, "Unidade de armazenamento veloz para instalacao nativa com BakenFS.".as_ptr(), 0x00F8FAFC, 1, 240);
+        raster_draw_text_alpha(cx + 44, y + 108, "NVMe SSD Principal — 512.0 GB [ALVO GRAVAVEL]".as_ptr(), 0x000369A1, 1, 255);
+        raster_draw_text_alpha(cx + 44, y + 130, "Unidade de armazenamento veloz para instalacao nativa com BakenFS.".as_ptr(), 0x00334155, 1, 240);
 
-        // Diagrama Visual de Particionamento em Barra Segmentada
+        // Diagrama Visual de Particionamento
         let bar_y = y + 190;
-        draw_specular_card(cx, bar_y, cw, 64, 0x001E293B, 220, 0x00334155, 8);
-        raster_draw_text_alpha(cx + 16, bar_y + 8, "Esquema de Particoes Planejado (Tabela GPT):".as_ptr(), 0x0000E5FF, 1, 240);
+        draw_specular_card(cx, bar_y, cw, 64, 0x00FFFFFF, 220, 0x00CBD5E1, 8);
+        raster_draw_text_alpha(cx + 16, bar_y + 8, "Esquema de Particoes Planejado (Tabela GPT):".as_ptr(), 0x000284C7, 1, 240);
 
         let p_bar_w = cw - 32;
         let esp_w = min_u32(p_bar_w * 15 / 100, 80);
@@ -752,19 +798,19 @@ fn render_disk_selection(x: u32, y: u32, w: u32, h: u32) -> void {
 
         // Bloco 1: ESP FAT32 (Verde Esmeralda)
         raster_fill_rect_alpha(p_x, p_y, esp_w, 20, 0x0010B981, 240);
-        raster_draw_text_alpha(p_x + 6, p_y + 4, "ESP (512MB)".as_ptr(), 0x00FFFFFF, 1, 230);
+        raster_draw_text_alpha(p_x + 6, p_y + 4, "ESP (512MB)".as_ptr(), 0x00FFFFFF, 1, 255);
 
         // Bloco 2: BakenFS Sistema (Azul Eletrico)
         raster_fill_rect_alpha(p_x + esp_w + 4, p_y, root_w, 20, 0x000284C7, 240);
         raster_draw_text_alpha(p_x + esp_w + 14, p_y + 4, "BakenFS Raiz com Snapshots (476.5 GB)".as_ptr(), 0x00FFFFFF, 1, 255);
 
-        // Bloco 3: Espaco Livre de Seguranca
-        raster_fill_rect_alpha(p_x + esp_w + root_w + 8, p_y, 22, 20, 0x00475569, 200);
+        // Bloco 3: Espaco Livre
+        raster_fill_rect_alpha(p_x + esp_w + root_w + 8, p_y, 22, 20, 0x0094A3B8, 200);
 
         // Aviso de Seguranca
-        draw_specular_card(cx, y + 268, cw, 44, 0x001E293B, 190, 0x00F59E0B, 8);
+        draw_specular_card(cx, y + 268, cw, 44, 0x00FEF3C7, 220, 0x00F59E0B, 8);
         raster_draw_circle_alpha(cx + 20, y + 290, 5, 0x00F59E0B, 255);
-        raster_draw_text_alpha(cx + 34, y + 280, "Aviso: Todos os dados na particao selecionada serao formatados com integridade.".as_ptr(), 0x00F8FAFC, 1, 240);
+        raster_draw_text_alpha(cx + 34, y + 280, "Aviso: Todos os dados na particao selecionada serao formatados com integridade.".as_ptr(), 0x0092400E, 1, 240);
 
         let bot_y = y + h - 68;
         draw_interactive_btn(cx, bot_y, 110, 38, STR_BTN_BACK[lang_idx], false, false);
@@ -780,25 +826,25 @@ fn render_review_confirmation(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        raster_draw_text_alpha(cx, y + 36, "Revise suas Preferencias antes de Gravar".as_ptr(), 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx, y + 60, "Tudo pronto para iniciar a instalacao automatizada do microkernel Baken OS.".as_ptr(), 0x0094A3B8, 1, 235);
+        raster_draw_text_alpha(cx, y + 36, "Revise suas Preferencias antes de Gravar".as_ptr(), 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx, y + 60, "Tudo pronto para iniciar a instalacao automatizada do microkernel Baken OS.".as_ptr(), 0x0064748B, 1, 240);
 
-        // Quadro Resumo em Vidro Especular
-        draw_specular_card(cx, y + 96, cw, 170, 0x001E293B, 220, 0x0038BDF8, 10);
-        raster_draw_text_alpha(cx + 20, y + 112, "• Idioma e Teclado:".as_ptr(), 0x0000E5FF, 1, 240);
-        raster_draw_text_alpha(cx + 200, y + 112, STR_NATIVE_LANGS[lang_idx], 0x00FFFFFF, 1, 255);
+        // Quadro Resumo em Vidro Claro
+        draw_specular_card(cx, y + 96, cw, 170, 0x00FFFFFF, 220, 0x00CBD5E1, 10);
+        raster_draw_text_alpha(cx + 20, y + 112, "• Idioma e Teclado:".as_ptr(), 0x000284C7, 1, 255);
+        raster_draw_text_alpha(cx + 200, y + 112, STR_NATIVE_LANGS[lang_idx], 0x000F172A, 1, 255);
 
-        raster_draw_text_alpha(cx + 20, y + 142, "• Modo Selecionado:".as_ptr(), 0x0000E5FF, 1, 240);
-        raster_draw_text_alpha(cx + 200, y + 142, "Instalacao Nativa GPT + BakenFS".as_ptr(), 0x00FFFFFF, 1, 255);
+        raster_draw_text_alpha(cx + 20, y + 142, "• Modo Selecionado:".as_ptr(), 0x000284C7, 1, 255);
+        raster_draw_text_alpha(cx + 200, y + 142, "Instalacao Nativa GPT + BakenFS".as_ptr(), 0x000F172A, 1, 255);
 
-        raster_draw_text_alpha(cx + 20, y + 172, "• Unidade Destino:".as_ptr(), 0x0000E5FF, 1, 240);
-        raster_draw_text_alpha(cx + 200, y + 172, "NVMe SSD Principal (512 GB)".as_ptr(), 0x0010B981, 1, 255);
+        raster_draw_text_alpha(cx + 20, y + 172, "• Unidade Destino:".as_ptr(), 0x000284C7, 1, 255);
+        raster_draw_text_alpha(cx + 200, y + 172, "NVMe SSD Principal (512 GB)".as_ptr(), 0x00059669, 1, 255);
 
-        raster_draw_text_alpha(cx + 20, y + 202, "• Privacidade & Telemetria:".as_ptr(), 0x0000E5FF, 1, 240);
-        raster_draw_text_alpha(cx + 200, y + 202, "Zero Telemetria (100% Offline e Privado)".as_ptr(), 0x0010B981, 1, 255);
+        raster_draw_text_alpha(cx + 20, y + 202, "• Privacidade & Telemetria:".as_ptr(), 0x000284C7, 1, 255);
+        raster_draw_text_alpha(cx + 200, y + 202, "Zero Telemetria (100% Offline e Privado)".as_ptr(), 0x00059669, 1, 255);
 
-        raster_draw_text_alpha(cx + 20, y + 232, "• Seguranca de Snapshots:".as_ptr(), 0x0000E5FF, 1, 240);
-        raster_draw_text_alpha(cx + 200, y + 232, "Ativo (Ponto de restauracao inicial sera criado)".as_ptr(), 0x00F8FAFC, 1, 240);
+        raster_draw_text_alpha(cx + 20, y + 232, "• Seguranca de Snapshots:".as_ptr(), 0x000284C7, 1, 255);
+        raster_draw_text_alpha(cx + 200, y + 232, "Ativo (Ponto de restauracao inicial sera criado)".as_ptr(), 0x00334155, 1, 240);
 
         let bot_y = y + h - 68;
         draw_interactive_btn(cx, bot_y, 110, 38, STR_BTN_BACK[lang_idx], false, false);
@@ -806,35 +852,39 @@ fn render_review_confirmation(x: u32, y: u32, w: u32, h: u32) -> void {
     }
 }
 
-// Tela 5: Progresso de Instalacao com Barra Neon, Bloom e Telemetria
+// Tela 5: Progresso de Instalacao
 @system
 fn render_installing_progress(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        // Emblema Central Pulsante
         let logo_cx = cx + (cw / 2);
         let logo_cy = y + 74;
         let pulse = 24 + ((raster_smoothstep_u8(INSTALLER.anim_tick % 60, 60) as u32 * 6) / 255);
-        raster_draw_circle_alpha(logo_cx, logo_cy, pulse + 14, 0x000284C7, 35);
-        raster_draw_circle_alpha(logo_cx, logo_cy, pulse + 4, 0x0000E5FF, 70);
+        raster_draw_circle_alpha(logo_cx, logo_cy, pulse + 14, 0x0038BDF8, 35);
+        raster_draw_circle_alpha(logo_cx, logo_cy, pulse + 4, 0x000284C7, 70);
         raster_draw_baken_logo(logo_cx - 30, logo_cy - 30, 60, 255);
 
-        raster_draw_text_alpha(cx + (cw - 320) / 2, y + 128, "Gravando Baken OS no Armazenamento...".as_ptr(), 0x00FFFFFF, 1, 255);
+        raster_draw_text_alpha(cx + (cw - 320) / 2, y + 128, "Gravando Baken OS no Armazenamento...".as_ptr(), 0x000F172A, 1, 255);
 
         // Barra de Progresso com Bloom e Gradiente
         let pb_w = cw - 40;
         let pbx = cx + 20;
         let pby = y + 160;
-        draw_specular_card(pbx, pby, pb_w, 14, 0x001E293B, 220, 0x00334155, 7);
+        draw_specular_card(pbx, pby, pb_w, 14, 0x00FFFFFF, 220, 0x00CBD5E1, 7);
 
         let prog_w = (pb_w * INSTALLER.install_progress) / 100;
         if (prog_w > 4) {
-            raster_fill_rect_alpha(pbx + 2, pby + 2, prog_w - 4, 10, 0x0000E5FF, 255);
-            // Ponta Neon Iluminada (Bloom Glow)
-            raster_draw_circle_alpha(pbx + prog_w - 2, pby + 7, 7, 0x0038BDF8, 120);
-            raster_draw_circle_alpha(pbx + prog_w - 2, pby + 7, 12, 0x0000E5FF, 45);
+            raster_fill_rect_alpha(pbx + 2, pby + 2, prog_w - 4, 10, 0x000284C7, 255);
+            let shim_off = anim_shimmer_offset(INSTALLER.anim_tick, 80, prog_w);
+            if (shim_off > 0 && shim_off < prog_w) {
+                let shim_w = if (shim_off + 24 > prog_w) { prog_w - shim_off } else { 24 };
+                raster_fill_rect_alpha(pbx + 2 + shim_off, pby + 2, shim_w, 10, 0x00FFFFFF, 80);
+            }
+            let tip_glow = anim_pulse_glow(INSTALLER.anim_tick, 45, 80, 160);
+            raster_draw_circle_alpha(pbx + prog_w - 2, pby + 7, 7, 0x0038BDF8, tip_glow);
+            raster_draw_circle_alpha(pbx + prog_w - 2, pby + 7, 12, 0x000284C7, tip_glow / 3);
         }
 
         // Etapas de Telemetria Detalhada
@@ -849,15 +899,15 @@ fn render_installing_progress(x: u32, y: u32, w: u32, h: u32) -> void {
             let sy = y + 200 + (s * 30);
             let is_s_done = ((s as u32) < INSTALLER.install_substep);
             let is_s_cur = ((s as u32) == INSTALLER.install_substep);
-            let s_col = if (is_s_done) { 0x0010B981 } else if (is_s_cur) { 0x0000E5FF } else { 0x00475569 };
+            let s_col = if (is_s_done) { 0x0010B981 } else if (is_s_cur) { 0x000284C7 } else { 0x0094A3B8 };
 
             raster_draw_circle_alpha(cx + 20, sy + 7, 4, s_col, 255);
-            raster_draw_text_alpha(cx + 34, sy, substeps[s], if (is_s_cur) { 0x00FFFFFF } else { 0x0094A3B8 }, 1, 240);
+            raster_draw_text_alpha(cx + 34, sy, substeps[s], if (is_s_cur) { 0x000F172A } else { 0x0064748B }, 1, 240);
         }
     }
 }
 
-// Tela 6: Conclusao e Boas-Vindas ao Desktop Baken OS
+// Tela 6: Conclusao
 @system
 fn render_complete_summary(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
@@ -865,26 +915,41 @@ fn render_complete_summary(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        // Emblema com Anel Esmeralda de Sucesso
         let logo_cx = cx + (cw / 2);
         let logo_cy = y + 78;
-        raster_draw_circle_alpha(logo_cx, logo_cy, 38, 0x0010B981, 240);
-        raster_draw_circle_alpha(logo_cx, logo_cy, 48, 0x0010B981, 60);
+
+        let bounce_t = if (INSTALLER.transition_tick >= 36) { 1.0 } else { (INSTALLER.transition_tick as f32) / 36.0 };
+        let bounce_factor = anim_spring_bounce(bounce_t);
+        let ring_r = ((38.0 * bounce_factor) as i32);
+        let eff_r: u32 = if ring_r < 10 { 10 } else { ring_r as u32 };
+
+        let glow_pulse = anim_pulse_glow(INSTALLER.anim_tick, 120, 40, 90);
+        raster_draw_circle_alpha(logo_cx, logo_cy, eff_r + 12, 0x0010B981, glow_pulse);
+        raster_draw_circle_alpha(logo_cx, logo_cy, eff_r, 0x0010B981, 240);
+        raster_draw_circle_alpha(logo_cx, logo_cy, (eff_r * 4) / 5, 0x000284C7, 180);
         raster_draw_baken_logo(logo_cx - 24, logo_cy - 24, 48, 255);
+
+        let orb_phase = (INSTALLER.anim_tick * 2) % 256;
+        let orb1_x = logo_cx as i32 + anim_orbit_cos(orb_phase, (eff_r + 18) as i32);
+        let orb1_y = logo_cy as i32 + anim_orbit_sin(orb_phase, (eff_r + 18) as i32);
+        raster_draw_circle_alpha(orb1_x as u32, orb1_y as u32, 3, 0x000284C7, 200);
+
+        let orb2_x = logo_cx as i32 + anim_orbit_cos((orb_phase + 128) % 256, (eff_r + 15) as i32);
+        let orb2_y = logo_cy as i32 + anim_orbit_sin((orb_phase + 128) % 256, (eff_r + 15) as i32);
+        raster_draw_circle_alpha(orb2_x as u32, orb2_y as u32, 2, 0x0010B981, 180);
 
         let t = "Tudo Pronto! Baken OS Instalado com Sucesso";
         let tw = raster_measure_text(t.as_ptr());
-        raster_draw_text_alpha(cx + (if (cw > tw) { (cw - tw) / 2 } else { 10 }), y + 140, t.as_ptr(), 0x0010B981, 1, 255);
+        raster_draw_text_alpha(cx + (if (cw > tw) { (cw - tw) / 2 } else { 10 }), y + 140, t.as_ptr(), 0x00059669, 1, 255);
 
         let sub = "Seu ambiente nativo com BakenFS esta pronto para ser explorado.";
         let sw = raster_measure_text(sub.as_ptr());
-        raster_draw_text_alpha(cx + (if (cw > sw) { (cw - sw) / 2 } else { 10 }), y + 168, sub.as_ptr(), 0x00E0F2FE, 1, 240);
+        raster_draw_text_alpha(cx + (if (cw > sw) { (cw - sw) / 2 } else { 10 }), y + 168, sub.as_ptr(), 0x00334155, 1, 240);
 
         // Cartao Informativo de Status
-        draw_specular_card(cx + 20, y + 204, cw - 40, 48, 0x001E293B, 220, 0x0010B981, 8);
-        raster_draw_text_alpha(cx + 36, y + 218, "Privacidade: 100% Nativo Local  •  BakenFS: Protegido  •  Drivers: Carregados".as_ptr(), 0x0000E5FF, 1, 255);
+        draw_specular_card(cx + 20, y + 204, cw - 40, 48, 0x00ECFDF5, 220, 0x0010B981, 8);
+        raster_draw_text_alpha(cx + 36, y + 218, "Privacidade: 100% Nativo Local  •  BakenFS: Protegido  •  Drivers: Carregados".as_ptr(), 0x00065F46, 1, 255);
 
-        // Botao Principal Largo
         let bot_y = y + h - 68;
         let btn_w: u32 = 320;
         let btn_x = cx + (if (cw > btn_w) { (cw - btn_w) / 2 } else { 10 });
@@ -892,7 +957,7 @@ fn render_complete_summary(x: u32, y: u32, w: u32, h: u32) -> void {
     }
 }
 
-// Tela 7: Ferramentas de Reparo e Diagnostico
+// Tela 7: Ferramentas de Reparo
 @system
 fn render_repair_tools(x: u32, y: u32, w: u32, h: u32) -> void {
     unsafe {
@@ -900,20 +965,20 @@ fn render_repair_tools(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        raster_draw_text_alpha(cx, y + 36, "Ambiente de Recuperacao e Diagnostico".as_ptr(), 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx, y + 60, "Ferramentas para restauracao do bootloader UEFI e integridade BakenFS.".as_ptr(), 0x0094A3B8, 1, 235);
+        raster_draw_text_alpha(cx, y + 36, "Ambiente de Recuperacao e Diagnostico".as_ptr(), 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx, y + 60, "Ferramentas para restauracao do bootloader UEFI e integridade BakenFS.".as_ptr(), 0x0064748B, 1, 240);
 
         // Opcao 1: Reparar Bootloader
-        draw_specular_card(cx, y + 96, cw, 60, 0x001E293B, 220, 0x0038BDF8, 8);
-        raster_draw_circle_alpha(cx + 20, y + 126, 6, 0x0000E5FF, 255);
-        raster_draw_text_alpha(cx + 36, y + 108, "[1] Reparar Bootloader UEFI (ESP / NVRAM)".as_ptr(), 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx + 36, y + 130, "Reescreve o arquivo BOOTX64.EFI na particao FAT32 do sistema.".as_ptr(), 0x0038BDF8, 1, 220);
+        draw_specular_card(cx, y + 96, cw, 60, 0x00FFFFFF, 220, 0x00CBD5E1, 8);
+        raster_draw_circle_alpha(cx + 20, y + 126, 6, 0x000284C7, 255);
+        raster_draw_text_alpha(cx + 36, y + 108, "[1] Reparar Bootloader UEFI (ESP / NVRAM)".as_ptr(), 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx + 36, y + 130, "Reescreve o arquivo BOOTX64.EFI na particao FAT32 do sistema.".as_ptr(), 0x000284C7, 1, 240);
 
         // Opcao 2: Restaurar Snapshot
-        draw_specular_card(cx, y + 168, cw, 60, 0x001E293B, 220, 0x0038BDF8, 8);
+        draw_specular_card(cx, y + 168, cw, 60, 0x00FFFFFF, 220, 0x00CBD5E1, 8);
         raster_draw_circle_alpha(cx + 20, y + 198, 6, 0x0010B981, 255);
-        raster_draw_text_alpha(cx + 36, y + 180, "[2] Restaurar Snapshot Estavel do BakenFS".as_ptr(), 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx + 36, y + 202, "Reverte o estado do sistema operacional para o snapshot mais recente.".as_ptr(), 0x0010B981, 1, 220);
+        raster_draw_text_alpha(cx + 36, y + 180, "[2] Restaurar Snapshot Estavel do BakenFS".as_ptr(), 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx + 36, y + 202, "Reverte o estado do sistema operacional para o snapshot mais recente.".as_ptr(), 0x00059669, 1, 240);
 
         let bot_y = y + h - 68;
         draw_interactive_btn(cx, bot_y, 110, 38, STR_BTN_BACK[lang_idx], false, false);
@@ -928,10 +993,9 @@ fn render_oobe_experience(x: u32, y: u32, w: u32, h: u32) -> void {
         let cx = if (w >= 760) { x + 258 } else { x + 24 };
         let cw = if (w >= 760) { w - 288 } else { w - 48 };
 
-        raster_draw_text_alpha(cx, y + 36, "Configuracao Inicial do Perfil de Uso (OOBE)".as_ptr(), 0x00FFFFFF, 1, 255);
-        raster_draw_text_alpha(cx, y + 60, "Personalize seu ambiente de trabalho de acordo com suas necessidades.".as_ptr(), 0x0094A3B8, 1, 235);
+        raster_draw_text_alpha(cx, y + 36, "Configuracao Inicial do Perfil de Uso (OOBE)".as_ptr(), 0x000F172A, 1, 255);
+        raster_draw_text_alpha(cx, y + 60, "Personalize seu ambiente de trabalho de acordo com suas necessidades.".as_ptr(), 0x0064748B, 1, 240);
 
-        // 3 Perfis de Uso em Cartoes
         let p_names = [
             "• Desenvolvimento de Software & Sotlas SDK".as_ptr(),
             "• Jogos, Multimidia & Producao 3D".as_ptr(),
@@ -940,9 +1004,9 @@ fn render_oobe_experience(x: u32, y: u32, w: u32, h: u32) -> void {
         for mut i in 0..3 {
             let py = y + 96 + (i * 48);
             let is_sel = (INSTALLER.oobe_usage == (i as u32));
-            draw_specular_card(cx, py, cw, 42, if (is_sel) { 0x000284C7 } else { 0x001E293B }, 220, if (is_sel) { 0x0000E5FF } else { 0x00334155 }, 8);
-            raster_draw_circle_alpha(cx + 20, py + 21, 5, if (is_sel) { 0x0000E5FF } else { 0x0064748B }, 255);
-            raster_draw_text_alpha(cx + 36, py + 12, p_names[i], if (is_sel) { 0x00FFFFFF } else { 0x00F8FAFC }, 1, 255);
+            draw_specular_card(cx, py, cw, 42, if (is_sel) { 0x00E0F2FE } else { 0x00FFFFFF }, 220, if (is_sel) { 0x000284C7 } else { 0x00CBD5E1 }, 8);
+            raster_draw_circle_alpha(cx + 20, py + 21, 5, if (is_sel) { 0x000284C7 } else { 0x00CBD5E1 }, 255);
+            raster_draw_text_alpha(cx + 36, py + 12, p_names[i], if (is_sel) { 0x000369A1 } else { 0x000F172A }, 1, 255);
         }
 
         let bot_y = y + h - 68;
@@ -979,12 +1043,12 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
             let cx = (w - cw) / 2;
             let base_cy = if (h > ch) { (h - ch) / 2 - 12 } else { 10 };
 
-            // 1. Botao Fechar (Vermelho) no canto superior esquerdo do card
-            let close_x = (cx + 20) as i32;
-            let close_y = (base_cy + 20) as i32;
+            // 1. Botao Fechar / Sair
+            let close_x = (cx + cw - 30) as i32;
+            let close_y = (base_cy + 24) as i32;
             let cdx = rx - close_x;
             let cdy = ry - close_y;
-            if (cdx * cdx + cdy * cdy <= 144) {
+            if (cdx * cdx + cdy * cdy <= 400) {
                 show_toast("Reiniciar ou Desligar o computador".as_ptr());
                 return;
             }
@@ -1005,9 +1069,9 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
 
             // 3. Links do Rodapé
             if (ry > (h as i32) - 52 && rx < 320) {
-                installer_go_to(1, 1); // Configuracoes
+                installer_go_to(1, 1);
             } else if (ry > (h as i32) - 52 && rx >= 320 && rx < 650) {
-                installer_go_to(7, 1); // Reparo
+                installer_go_to(7, 1);
             }
             return;
         }
@@ -1015,11 +1079,10 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
         let cx: i32 = if (w >= 760) { 258 } else { 24 };
         let cw: i32 = if (w >= 760) { (w - 288) as i32 } else { (w - 48) as i32 };
 
-        // Tela 1: Selecao de Idioma e Teclado (11 Idiomas)
+        // Tela 1: Selecao de Idioma e Teclado
         if (INSTALLER.step == 1) {
             let col_w = (cw - 20) / 2;
             
-            // Coluna 1 (Idiomas 0 a 5)
             for mut i in 0..6 {
                 let ly = 96 + (i * 48);
                 if (ry >= ly && ry < ly + 42 && rx >= cx && rx < cx + col_w) {
@@ -1031,7 +1094,6 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
                 }
             }
             
-            // Coluna 2 (Idiomas 6 a 10)
             let col2_x = cx + col_w + 20;
             for mut j in 6..11 {
                 let ly = 96 + ((j - 6) * 48);
@@ -1107,9 +1169,9 @@ pub fn baken_installer_handle_click(rx: i32, ry: i32, w: u32, h: u32) -> void {
                         installer_go_to(INSTALLER.step + 1, 1);
                     }
                 } else if (INSTALLER.step == 6) {
-                    installer_go_to(8, 1); // OOBE
+                    installer_go_to(8, 1);
                 } else if (INSTALLER.step == 8) {
-                    INSTALLER.exit_to_desktop = 1; // Entrar no Desktop
+                    INSTALLER.exit_to_desktop = 1;
                 }
             }
         }
@@ -1143,7 +1205,6 @@ pub fn baken_installer_handle_key(key: u32) -> void {
                 INSTALLER.exit_to_desktop = 1;
             }
         } else if (key >= 49 && key <= 57 && INSTALLER.step == 1) {
-            // Teclas '1'..'9'
             INSTALLER.selected_lang = key - 49;
             INSTALLER.selected_kb = key - 49;
             baken_i18n_set_lang(key - 49);

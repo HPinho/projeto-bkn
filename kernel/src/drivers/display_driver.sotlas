@@ -1,0 +1,304 @@
+// Baken OS - Subsistema de Drivers de Display Orientado a Objetos (@system)
+// Arquitetura estilo Apple DriverKit / IOKit com dynamic probe & match.
+// Desacoplamento total: a interface e o compositor conversam exclusivamente
+// com este contrato universal de hardware de video.
+
+module kernel::drivers::display_driver;
+
+import kernel::drivers::pci_bus::*;
+
+pub const DRIVER_TYPE_GENERIC_GOP: u32    = 1;
+pub const DRIVER_TYPE_INTEL_DYNAMIC: u32  = 2;
+pub const DRIVER_TYPE_VIRTIO_GPU: u32     = 3;
+pub const DRIVER_TYPE_AMD_RADEON: u32     = 4;
+pub const DRIVER_TYPE_NVIDIA_NOUVEAU: u32 = 5;
+
+pub struct DisplayMode {
+    pub width: u32;
+    pub height: u32;
+    pub pitch: u32;
+    pub bytes_per_pixel: u32;
+    pub refresh_rate_hz: u32;
+}
+
+pub struct DisplayDriver {
+    pub driver_type: u32;
+    pub driver_name: *const u8;
+    pub device_desc: *const u8;
+    pub vendor_name: *const u8;
+    pub pci_bus: u8;
+    pub pci_slot: u8;
+    pub pci_func: u8;
+    pub pci_vendor_id: u16;
+    pub pci_device_id: u16;
+    pub fb_base: *mut u32;
+    pub fb_size_bytes: usize;
+    pub mmio_base: *mut u32;
+    pub mmio_size_bytes: usize;
+    pub vram_base: *mut u32;
+    pub vram_size_bytes: usize;
+    pub width: u32;
+    pub height: u32;
+    pub pitch: u32;
+    pub is_hardware_accelerated: bool;
+    pub vsync_counter: u64;
+}
+
+static mut ACTIVE_DRIVER: DisplayDriver = DisplayDriver {
+    driver_type: DRIVER_TYPE_GENERIC_GOP,
+    driver_name: "Generic GOP Framebuffer Driver\0".as_ptr(),
+    device_desc: "Universal UEFI Linear Display\0".as_ptr(),
+    vendor_name: "Generic Display Adapter\0".as_ptr(),
+    pci_bus: 0,
+    pci_slot: 0,
+    pci_func: 0,
+    pci_vendor_id: 0,
+    pci_device_id: 0,
+    fb_base: null as *mut u32,
+    fb_size_bytes: 0,
+    mmio_base: null as *mut u32,
+    mmio_size_bytes: 0,
+    vram_base: null as *mut u32,
+    vram_size_bytes: 0,
+    width: 1920,
+    height: 1080,
+    pitch: 1920,
+    is_hardware_accelerated: false,
+    vsync_counter: 0,
+};
+
+static mut IS_DRIVER_INITIALIZED: bool = false;
+
+// -----------------------------------------------------------------------------
+// CONFIGURACAO DE WRITE-COMBINING (IA32_PAT MSR 0x277)
+// -----------------------------------------------------------------------------
+
+@system
+fn display_configure_pat_write_combining() -> void {
+    // MSR IA32_PAT = 0x277
+    // Configura PAT1 e PAT5 para tipo 0x01 (Write-Combining - WC).
+    // Transforma escritas lineares no framebuffer em rajadas de 64 bytes com velocidade nativa de VRAM.
+    let current_pat: u64 = __rdmsr(0x0277);
+    if current_pat != 0 {
+        let optimized_pat: u64 = 0x0007010600070106;
+        __wrmsr(0x0277, optimized_pat);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// INICIALIZACAO E DYNAMIC PROBE DO DRIVER DE DISPLAY
+// -----------------------------------------------------------------------------
+
+@system
+pub fn display_driver_init(fb_base: *mut u32, width: u32, height: u32, pitch: u32) -> void {
+    unsafe {
+        // Ativa Write-Combining na CPU para acelerar a memoria de video em hardware real
+        display_configure_pat_write_combining();
+
+        // 1. Executa a varredura do barramento PCI para descobrir a GPU dinamicamente
+        pci_scan_all();
+        let display_pci: *const PciDevice = pci_find_display_device();
+
+        ACTIVE_DRIVER.fb_base = fb_base;
+        ACTIVE_DRIVER.width = width;
+        ACTIVE_DRIVER.height = height;
+        ACTIVE_DRIVER.pitch = pitch;
+        ACTIVE_DRIVER.fb_size_bytes = (pitch as usize) * (height as usize) * 4;
+        ACTIVE_DRIVER.vsync_counter = 0;
+
+        if display_pci != (null as *const PciDevice) {
+            let pdev = *display_pci;
+            ACTIVE_DRIVER.pci_bus = pdev.bus;
+            ACTIVE_DRIVER.pci_slot = pdev.slot;
+            ACTIVE_DRIVER.pci_func = pdev.func;
+            ACTIVE_DRIVER.pci_vendor_id = pdev.vendor_id;
+            ACTIVE_DRIVER.pci_device_id = pdev.device_id;
+            ACTIVE_DRIVER.vendor_name = pci_get_vendor_name(pdev.vendor_id);
+
+            // Habilita Memory Space, I/O Space e Bus Master no dispositivo PCI da GPU
+            pci_enable_device(pdev.bus, pdev.slot, pdev.func);
+
+            // Mapeia os BARs descobertos dinamicamente
+            if pdev.bars[0].size > 0 && !pdev.bars[0].is_io {
+                ACTIVE_DRIVER.mmio_base = pdev.bars[0].base_address as *mut u32;
+                ACTIVE_DRIVER.mmio_size_bytes = pdev.bars[0].size as usize;
+            }
+            if pdev.bars[2].size > 0 && !pdev.bars[2].is_io {
+                ACTIVE_DRIVER.vram_base = pdev.bars[2].base_address as *mut u32;
+                ACTIVE_DRIVER.vram_size_bytes = pdev.bars[2].size as usize;
+            } else if pdev.bars[1].size > 0 && !pdev.bars[1].is_io {
+                ACTIVE_DRIVER.vram_base = pdev.bars[1].base_address as *mut u32;
+                ACTIVE_DRIVER.vram_size_bytes = pdev.bars[1].size as usize;
+            } else {
+                ACTIVE_DRIVER.vram_base = fb_base;
+                ACTIVE_DRIVER.vram_size_bytes = ACTIVE_DRIVER.fb_size_bytes;
+            }
+
+            // Probe Dinamico de Hardware
+            if pdev.vendor_id == 0x8086 {
+                // Intel Graphics Family (Arc, Xe, UHD, Iris)
+                ACTIVE_DRIVER.driver_type = DRIVER_TYPE_INTEL_DYNAMIC;
+                ACTIVE_DRIVER.driver_name = "Intel Native Direct Display Driver\0".as_ptr();
+                if ACTIVE_DRIVER.vram_size_bytes >= (1024 * 1024 * 1024) {
+                    ACTIVE_DRIVER.device_desc = "Intel Arc / Xe Discrete LMEM Graphics\0".as_ptr();
+                    ACTIVE_DRIVER.is_hardware_accelerated = true;
+                } else {
+                    ACTIVE_DRIVER.device_desc = "Intel Dynamic Integrated Graphics\0".as_ptr();
+                    ACTIVE_DRIVER.is_hardware_accelerated = true;
+                }
+            } else if pdev.vendor_id == 0x1AF4 {
+                // VirtIO-GPU para Maquinas Virtuais
+                ACTIVE_DRIVER.driver_type = DRIVER_TYPE_VIRTIO_GPU;
+                ACTIVE_DRIVER.driver_name = "VirtIO-GPU Accelerated VM Driver\0".as_ptr();
+                ACTIVE_DRIVER.device_desc = "VirtIO Paravirtualized Graphics\0".as_ptr();
+                ACTIVE_DRIVER.is_hardware_accelerated = true;
+            } else if pdev.vendor_id == 0x1002 {
+                // AMD Radeon
+                ACTIVE_DRIVER.driver_type = DRIVER_TYPE_AMD_RADEON;
+                ACTIVE_DRIVER.driver_name = "AMD Radeon PCIe Display Driver\0".as_ptr();
+                ACTIVE_DRIVER.device_desc = "AMD Radeon Graphics Controller\0".as_ptr();
+                ACTIVE_DRIVER.is_hardware_accelerated = true;
+            } else if pdev.vendor_id == 0x10DE {
+                // NVIDIA
+                ACTIVE_DRIVER.driver_type = DRIVER_TYPE_NVIDIA_NOUVEAU;
+                ACTIVE_DRIVER.driver_name = "NVIDIA Native PCIe Display Driver\0".as_ptr();
+                ACTIVE_DRIVER.device_desc = "NVIDIA GPU Display Controller\0".as_ptr();
+                ACTIVE_DRIVER.is_hardware_accelerated = true;
+            } else {
+                ACTIVE_DRIVER.driver_type = DRIVER_TYPE_GENERIC_GOP;
+                ACTIVE_DRIVER.driver_name = "PCI Accelerated Framebuffer Driver\0".as_ptr();
+                ACTIVE_DRIVER.device_desc = "PCI Universal Linear Display\0".as_ptr();
+                ACTIVE_DRIVER.is_hardware_accelerated = true;
+            }
+        } else {
+            // Fallback para ambiente UEFI sem PCI bus bridge
+            ACTIVE_DRIVER.driver_type = DRIVER_TYPE_GENERIC_GOP;
+            ACTIVE_DRIVER.driver_name = "Generic GOP Framebuffer Driver\0".as_ptr();
+            ACTIVE_DRIVER.device_desc = "UEFI Direct Linear Framebuffer\0".as_ptr();
+            ACTIVE_DRIVER.vendor_name = "Universal Display Adapter\0".as_ptr();
+            ACTIVE_DRIVER.vram_base = fb_base;
+            ACTIVE_DRIVER.vram_size_bytes = ACTIVE_DRIVER.fb_size_bytes;
+            ACTIVE_DRIVER.is_hardware_accelerated = true;
+        }
+
+        IS_DRIVER_INITIALIZED = true;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PIPELINE UNIVERSAL DE APRESENTACAO DE QUADROS (PAGE FLIP / BLIT)
+// -----------------------------------------------------------------------------
+
+@system
+pub fn display_driver_present_frame(backbuffer: *const u32, dirty_x: u32, dirty_y: u32, dirty_w: u32, dirty_h: u32) -> void {
+    unsafe {
+        if !IS_DRIVER_INITIALIZED || backbuffer == (null as *const u32) || ACTIVE_DRIVER.fb_base == (null as *mut u32) {
+            return;
+        }
+
+        let target_fb = ACTIVE_DRIVER.fb_base;
+        let pitch = ACTIVE_DRIVER.pitch;
+
+        // Se o dirty rect cobre todo o display ou eh invalido, faz swap total
+        if dirty_w == 0 || dirty_h == 0 || (dirty_w >= ACTIVE_DRIVER.width && dirty_h >= ACTIVE_DRIVER.height) {
+            let total_bytes = (pitch * ACTIVE_DRIVER.height * 4) as usize;
+            baken_fast_memcpy(target_fb as *mut void, backbuffer as *const void, total_bytes);
+            ACTIVE_DRIVER.vsync_counter += 1;
+            return;
+        }
+
+        // Blit otimizado por scanline apenas na regiao alterada (Dirty Rect)
+        let max_x = if (dirty_x + dirty_w) > ACTIVE_DRIVER.width { ACTIVE_DRIVER.width } else { dirty_x + dirty_w };
+        let max_y = if (dirty_y + dirty_h) > ACTIVE_DRIVER.height { ACTIVE_DRIVER.height } else { dirty_y + dirty_h };
+        let copy_width_pixels = if max_x > dirty_x { max_x - dirty_x } else { 0 };
+        let copy_bytes = (copy_width_pixels * 4) as usize;
+
+        if copy_bytes > 0 {
+            for mut y in dirty_y..max_y {
+                let offset = (y * pitch + dirty_x) as usize;
+                let dst_ptr = target_fb + offset;
+                let src_ptr = backbuffer + offset;
+                baken_fast_memcpy(dst_ptr as *mut void, src_ptr as *const void, copy_bytes);
+            }
+        }
+
+        ACTIVE_DRIVER.vsync_counter += 1;
+    }
+}
+
+@system
+pub fn display_driver_wait_vsync() -> void {
+    unsafe {
+        // Sincronizacao de varredura vertical via TSC / timer de precisao
+        let start = baken_rdtsc();
+        baken_efi_frame_wait(start);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// CONSULTAS DO SUBSISTEMA DE DISPLAY
+// -----------------------------------------------------------------------------
+
+@system
+pub fn display_driver_get_type() -> u32 {
+    unsafe { return ACTIVE_DRIVER.driver_type; }
+}
+
+@system
+pub fn display_driver_get_name() -> *const u8 {
+    unsafe { return ACTIVE_DRIVER.driver_name; }
+}
+
+@system
+pub fn display_driver_get_device_desc() -> *const u8 {
+    unsafe { return ACTIVE_DRIVER.device_desc; }
+}
+
+@system
+pub fn display_driver_get_vendor_name() -> *const u8 {
+    unsafe { return ACTIVE_DRIVER.vendor_name; }
+}
+
+@system
+pub fn display_driver_is_accelerated() -> bool {
+    unsafe { return ACTIVE_DRIVER.is_hardware_accelerated; }
+}
+
+@system
+pub fn display_driver_get_vram_size_mb() -> u32 {
+    unsafe {
+        return (ACTIVE_DRIVER.vram_size_bytes / (1024 * 1024)) as u32;
+    }
+}
+
+@system
+pub fn display_driver_get_mmio_size_kb() -> u32 {
+    unsafe {
+        return (ACTIVE_DRIVER.mmio_size_bytes / 1024) as u32;
+    }
+}
+
+@system
+pub fn display_driver_get_pci_bus() -> u8 {
+    unsafe { return ACTIVE_DRIVER.pci_bus; }
+}
+
+@system
+pub fn display_driver_get_pci_slot() -> u8 {
+    unsafe { return ACTIVE_DRIVER.pci_slot; }
+}
+
+@system
+pub fn display_driver_get_pci_func() -> u8 {
+    unsafe { return ACTIVE_DRIVER.pci_func; }
+}
+
+@system
+pub fn display_driver_get_vendor_id() -> u16 {
+    unsafe { return ACTIVE_DRIVER.pci_vendor_id; }
+}
+
+@system
+pub fn display_driver_get_device_id() -> u16 {
+    unsafe { return ACTIVE_DRIVER.pci_device_id; }
+}

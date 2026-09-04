@@ -33,6 +33,9 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/sotlas_ui.sotlas",
         "kernel/src/bakenfx.sotlas",
         "kernel/src/baken_design.sotlas",
+        "kernel/src/drivers/display_driver.sotlas",
+        "kernel/src/drivers/pci_bus.sotlas",
+        "kernel/src/drivers/ps2_mouse.sotlas",
     }
 
     def test_sotlas_tree_contains_only_the_canonical_desktop_route(self):

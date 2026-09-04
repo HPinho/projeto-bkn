@@ -803,6 +803,19 @@ def assignable(actual: Type, expected: Type) -> bool:
 BUILTIN_FUNCTIONS: dict[str, Function] = {
     "__outb": Function("__outb", [("port", Type("u16")), ("val", Type("u8"))], Type("void"), [], public=True, attributes=["@system"]),
     "__inb": Function("__inb", [("port", Type("u16"))], Type("u8"), [], public=True, attributes=["@system"]),
+    "__outw": Function("__outw", [("port", Type("u16")), ("val", Type("u16"))], Type("void"), [], public=True, attributes=["@system"]),
+    "__inw": Function("__inw", [("port", Type("u16"))], Type("u16"), [], public=True, attributes=["@system"]),
+    "__outl": Function("__outl", [("port", Type("u16")), ("val", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
+    "__inl": Function("__inl", [("port", Type("u16"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_pci_out32": Function("baken_pci_out32", [("port", Type("u16")), ("val", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_pci_in32": Function("baken_pci_in32", [("port", Type("u16"))], Type("u32"), [], public=True, attributes=["@system"]),
+    "baken_pci_out16": Function("baken_pci_out16", [("port", Type("u16")), ("val", Type("u16"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_pci_in16": Function("baken_pci_in16", [("port", Type("u16"))], Type("u16"), [], public=True, attributes=["@system"]),
+    "baken_pci_out8": Function("baken_pci_out8", [("port", Type("u16")), ("val", Type("u8"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_pci_in8": Function("baken_pci_in8", [("port", Type("u16"))], Type("u8"), [], public=True, attributes=["@system"]),
+    "__rdmsr": Function("__rdmsr", [("msr", Type("u32"))], Type("u64"), [], public=True, attributes=["@system"]),
+    "__wrmsr": Function("__wrmsr", [("msr", Type("u32")), ("val", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+    "baken_io_wait": Function("baken_io_wait", [], Type("void"), [], public=True, attributes=["@system"]),
     "__cli": Function("__cli", [], Type("void"), [], public=True, attributes=["@system"]),
     "__sti": Function("__sti", [], Type("void"), [], public=True, attributes=["@system"]),
     "__hlt": Function("__hlt", [], Type("void"), [], public=True, attributes=["@system"]),
@@ -1121,6 +1134,75 @@ static inline uint8_t __inb(uint16_t port) {
     return ret;
 #else
     (void)port; return 0;
+#endif
+}
+
+static inline void __outw(uint16_t port, uint16_t val) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile ("outw %0, %1" : : "a"(val), "Nd"(port));
+#else
+    (void)port; (void)val;
+#endif
+}
+
+static inline uint16_t __inw(uint16_t port) {
+#if defined(__x86_64__) || defined(__i386__)
+    uint16_t ret;
+    __asm__ volatile ("inw %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+#else
+    (void)port; return 0;
+#endif
+}
+
+static inline void __outl(uint16_t port, uint32_t val) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile ("outl %0, %1" : : "a"(val), "Nd"(port));
+#else
+    (void)port; (void)val;
+#endif
+}
+
+static inline uint32_t __inl(uint16_t port) {
+#if defined(__x86_64__) || defined(__i386__)
+    uint32_t ret;
+    __asm__ volatile ("inl %1, %0" : "=a"(ret) : "Nd"(port));
+    return ret;
+#else
+    (void)port; return 0;
+#endif
+}
+
+static inline void baken_pci_out32(uint16_t port, uint32_t val) { __outl(port, val); }
+static inline uint32_t baken_pci_in32(uint16_t port) { return __inl(port); }
+static inline void baken_pci_out16(uint16_t port, uint16_t val) { __outw(port, val); }
+static inline uint16_t baken_pci_in16(uint16_t port) { return __inw(port); }
+static inline void baken_pci_out8(uint16_t port, uint8_t val) { __outb(port, val); }
+static inline uint8_t baken_pci_in8(uint16_t port) { return __inb(port); }
+
+static inline uint64_t __rdmsr(uint32_t msr) {
+#if defined(__x86_64__) || defined(__i386__)
+    uint32_t low, high;
+    __asm__ volatile ("rdmsr" : "=a"(low), "=d"(high) : "c"(msr));
+    return ((uint64_t)high << 32) | low;
+#else
+    (void)msr; return 0;
+#endif
+}
+
+static inline void __wrmsr(uint32_t msr, uint64_t val) {
+#if defined(__x86_64__) || defined(__i386__)
+    uint32_t low = (uint32_t)val;
+    uint32_t high = (uint32_t)(val >> 32);
+    __asm__ volatile ("wrmsr" : : "a"(low), "d"(high), "c"(msr));
+#else
+    (void)msr; (void)val;
+#endif
+}
+
+static inline void baken_io_wait(void) {
+#if defined(__x86_64__) || defined(__i386__)
+    __asm__ volatile ("outb %%al, $0x80" : : "a"(0));
 #endif
 }
 

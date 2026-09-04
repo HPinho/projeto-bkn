@@ -1,5 +1,5 @@
-// Modulo de Materiais Fluent & macOS Liquid Glass do Baken OS
-// Fornece superficies em vidro translúcido acrilico, reflexo especular de 1px,
+// Modulo de Materiais Fluent & macOS Liquid Glass do Baken OS (Tema Claro)
+// Fornece superficies em vidro translúcido acrilico claro, reflexo especular de 1px,
 // sombras fisicas multicamadas, botoes em capsula e controles de semaforo macOS.
 
 module kernel::baken_materials;
@@ -7,32 +7,35 @@ module kernel::baken_materials;
 import kernel::sotlas_graphics::*;
 import kernel::baken_design::*;
 import kernel::bakenfx::*;
-import kernel::baken_rasterizer::*;
 
 @system
 pub fn material_draw_traffic_lights(x: u32, y: u32) -> void {
     let r: u32 = 6;
     // Fechar (Vermelho Ruby)
     bakenfx_draw_circle(x, y, r, MACOS_TRAFFIC_RED, 255);
-    bakenfx_draw_circle(x, y, r - 1, 0x00FF7B72, 100);
+    bakenfx_draw_circle(x, y, r - 1, 0x00FF7B72, 120);
     // Minimizar (Amarelo Âmbar)
     bakenfx_draw_circle(x + 18, y, r, MACOS_TRAFFIC_YELLOW, 255);
-    bakenfx_draw_circle(x + 18, y, r - 1, 0x00FDE047, 100);
+    bakenfx_draw_circle(x + 18, y, r - 1, 0x00FDE047, 120);
     // Maximizar (Verde Esmeralda)
     bakenfx_draw_circle(x + 36, y, r, MACOS_TRAFFIC_GREEN, 255);
-    bakenfx_draw_circle(x + 36, y, r - 1, 0x0086EFAC, 100);
+    bakenfx_draw_circle(x + 36, y, r - 1, 0x0086EFAC, 120);
 }
 
 @system
 pub fn material_draw_close_button(x: u32, y: u32) -> void {
-    let r: u32 = 7;
-    // Borda escura sutil de contenção perimetral
-    raster_draw_circle_alpha(x, y, r + 1, 0x00991B1B, 220);
-    // Miolo vermelho rubi vibrante macOS (#FF5F56)
-    raster_draw_circle_alpha(x, y, r, 0x00FF5F56, 255);
-    // Reflexo especular zenital interno
-    raster_draw_circle_alpha(x, y - 1, 3, 0x00FFA39E, 150);
-    raster_draw_circle_alpha(x - 2, y - 2, 1, 0x00FFFFFF, 190);
+    // Cápsula de energia estilo macOS Light
+    let bx = x - 20;
+    let bounds = rect_make(bx as i32, y as i32 - 11, 44, 22);
+    bakenfx_draw_material(
+        sotlas_get_default_canvas(), bounds, BAKENFX_MATERIAL_SOLID,
+        bakenfx_color(0x00FFFFFF, 230), bakenfx_color(0x00CBD5E1, 200), 1,
+        11, bakenfx_color(0x000F172A, 30), 4, 1, true
+    );
+    bakenfx_draw_circle(x - 7, y, 6, 0x000284C7, 255);
+    bakenfx_draw_circle(x - 7, y, 3, 0x00FFFFFF, 255);
+    bakenfx_draw_rect(x - 8, y - 7, 2, 7, 0x000284C7, 255);
+    bakenfx_draw_text_alpha(x + 4, y - 6, "Sair".as_ptr(), 0x00334155, 1, 255);
 }
 
 @system
@@ -73,10 +76,15 @@ pub fn material_draw_macos_button(x: u32, y: u32, w: u32, h: u32, text: *const u
         1,
         radius,
         token.shadow,
-        if is_primary { 8 } else { 4 },
-        if is_primary { 3 } else { 1 },
+        if is_primary { 6 } else { 3 },
+        if is_primary { 2 } else { 1 },
         true
     );
+
+    if is_primary && is_hover && w > 4 && h > 4 {
+        bakenfx_draw_rect(x - 1, y - 1, w + 2, 1, 0x0038BDF8, 80);
+        bakenfx_draw_rect(x - 1, y + h, w + 2, 1, 0x000284C7, 60);
+    }
 
     if text != (null as *const u8) {
         let tw = bakenfx_measure_text(text);
@@ -91,7 +99,7 @@ pub fn material_draw_macos_button(x: u32, y: u32, w: u32, h: u32, text: *const u
 pub fn material_draw_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha: u8, border: u32, radius: u32) -> void {
     let bounds = rect_make(x as i32, y as i32, w, h);
     let fill_c = bakenfx_color(bg, alpha);
-    let border_c = if border != 0 { bakenfx_color(border, 110) } else { color_rgba(255, 255, 255, 35) };
+    let border_c = if border != 0 { bakenfx_color(border, 160) } else { color_rgba(255, 255, 255, 200) };
     bakenfx_draw_material(
         sotlas_get_default_canvas(),
         bounds,
@@ -100,11 +108,18 @@ pub fn material_draw_glass_panel(x: u32, y: u32, w: u32, h: u32, bg: u32, alpha:
         border_c,
         1,
         radius,
-        color_rgba(0, 0, 0, 80),
-        12,
-        6,
+        color_rgba(15, 23, 42, 28),
+        10,
+        4,
         true
     );
+
+    // Borda especular superior (specular rim highlight de 1px) para sensação de profundidade e vidro
+    if (w > (radius * 2) && h > 4) {
+        let rim_x = x + radius;
+        let rim_w = w - (radius * 2);
+        bakenfx_draw_rect(rim_x, y + 1, rim_w, 1, 0x00FFFFFF, 80);
+    }
 }
 
 @system

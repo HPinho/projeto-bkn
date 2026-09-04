@@ -4,8 +4,11 @@
 
 module kernel::graphics_engine;
 
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::display_driver::*;
+
 // O framebuffer de software cobre o painel 2880x1800 do equipamento de
-// referência e modos GOP até 3840x2400 (4K UHD). O pitch pode ser maior que a largura.
+// referencia e modos GOP ate 3840x2400 (4K UHD). O pitch pode ser maior que a largura.
 const DISPLAY_MAX_WIDTH: u32 = 3840;
 const DISPLAY_MAX_HEIGHT: u32 = 2400;
 const DISPLAY_MAX_PITCH: u32 = 4096;
@@ -39,7 +42,7 @@ static mut FB: FramebufferConfig = FramebufferConfig {
 };
 
 // -----------------------------------------------------------------------------
-// API CANÔNICA NATIVA DO DISPLAY (SOTLAS DISPLAY)
+// API CANONICA NATIVA DO DISPLAY (SOTLAS DISPLAY)
 // -----------------------------------------------------------------------------
 
 @system
@@ -54,7 +57,10 @@ pub fn display_init(base: *mut u32, width: u32, height: u32, pitch: u32) -> void
                                   (pitch as usize) * (height as usize) <= DISPLAY_BUFFER_PIXELS;
         FB.backbuffer = if FB.use_double_buffering { BACKBUFFER_STORAGE.as_ptr() } else { base };
 
-        // Ajuste adaptativo de escala da interface de acordo com a resolução nativa do painel
+        // Inicializa o subsistema de drivers de display desacoplado (DriverKit)
+        display_driver_init(base, width, height, pitch);
+
+        // Ajuste adaptativo de escala da interface de acordo com a resolucao nativa do painel
         if (width >= 3200 || height >= 2000) {
             UI_SCALE_MILLI = 2000; // Escala 200% para 4K UHD
         } else if (width >= 2560 || height >= 1440) {
@@ -94,8 +100,15 @@ pub fn display_get_height() -> u32 {
 pub fn display_swap_buffers() -> void {
     unsafe {
         if (!FB.use_double_buffering || FB.backbuffer == null as *mut u32 || FB.base == null as *mut u32) { return; }
-        let total_bytes = (FB.pitch * FB.height * 4) as usize;
-        baken_fast_memcpy(FB.base as *mut void, FB.backbuffer as *const void, total_bytes);
+        display_driver_present_frame(FB.backbuffer, 0, 0, FB.width, FB.height);
+    }
+}
+
+@system
+pub fn display_swap_buffers_rect(x: u32, y: u32, w: u32, h: u32) -> void {
+    unsafe {
+        if (!FB.use_double_buffering || FB.backbuffer == null as *mut u32 || FB.base == null as *mut u32) { return; }
+        display_driver_present_frame(FB.backbuffer, x, y, w, h);
     }
 }
 
@@ -136,6 +149,11 @@ pub fn display_get_wallpaper_storage() -> *mut u32 {
 @system
 pub fn display_get_composition_scratch() -> *mut u32 {
     unsafe { return WALLPAPER_STORAGE.as_ptr(); }
+}
+
+@system
+pub fn display_get_composition_intermediate() -> *mut u32 {
+    unsafe { return TRANSITION_SNAPSHOT.as_ptr(); }
 }
 
 @system

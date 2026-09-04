@@ -1,0 +1,342 @@
+// Baken OS - Subsistema de Varredura e Controle do Barramento PCI/PCIe (@system)
+// Descoberta 100% dinamica de hardware em portas I/O 0x0CF8 / 0x0CFC.
+// Zero dados estaticos fixos: interroga diretamente os registradores PCI de cada slot.
+
+module kernel::drivers::pci_bus;
+
+pub const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0CF8;
+pub const PCI_CONFIG_DATA_PORT: u16    = 0x0CFC;
+
+pub const PCI_MAX_BUSES: u16 = 256;
+pub const PCI_MAX_SLOTS: u8  = 32;
+pub const PCI_MAX_FUNCS: u8  = 8;
+
+pub const PCI_CLASS_DISPLAY: u8 = 0x03;
+
+pub const PCI_SUBCLASS_VGA: u8   = 0x00;
+pub const PCI_SUBCLASS_XGA: u8   = 0x01;
+pub const PCI_SUBCLASS_3D: u8    = 0x02;
+pub const PCI_SUBCLASS_OTHER: u8 = 0x80;
+
+pub const PCI_MAX_DISCOVERED: usize = 32;
+
+// -----------------------------------------------------------------------------
+// ESTRUTURAS DO BARRAMENTO PCI
+// -----------------------------------------------------------------------------
+
+pub struct PciBar {
+    pub base_address: u64;
+    pub size: u64;
+    pub is_io: bool;
+    pub is_64bit: bool;
+    pub is_prefetchable: bool;
+}
+
+pub struct PciDevice {
+    pub bus: u8;
+    pub slot: u8;
+    pub func: u8;
+    pub vendor_id: u16;
+    pub device_id: u16;
+    pub class_code: u8;
+    pub subclass: u8;
+    pub prog_if: u8;
+    pub revision_id: u8;
+    pub subsystem_vendor: u16;
+    pub subsystem_id: u16;
+    pub header_type: u8;
+    pub bars: [PciBar; 6];
+}
+
+static mut PCI_DEVICES: [PciDevice; PCI_MAX_DISCOVERED] = [
+    PciDevice {
+        bus: 0, slot: 0, func: 0, vendor_id: 0, device_id: 0,
+        class_code: 0, subclass: 0, prog_if: 0, revision_id: 0,
+        subsystem_vendor: 0, subsystem_id: 0, header_type: 0,
+        bars: [
+            PciBar { base_address: 0, size: 0, is_io: false, is_64bit: false, is_prefetchable: false },
+            PciBar { base_address: 0, size: 0, is_io: false, is_64bit: false, is_prefetchable: false },
+            PciBar { base_address: 0, size: 0, is_io: false, is_64bit: false, is_prefetchable: false },
+            PciBar { base_address: 0, size: 0, is_io: false, is_64bit: false, is_prefetchable: false },
+            PciBar { base_address: 0, size: 0, is_io: false, is_64bit: false, is_prefetchable: false },
+            PciBar { base_address: 0, size: 0, is_io: false, is_64bit: false, is_prefetchable: false }
+        ]
+    }; PCI_MAX_DISCOVERED
+];
+
+static mut PCI_DEVICE_COUNT: u32 = 0;
+static mut PCI_DISPLAY_DEVICE_INDEX: i32 = -1;
+
+// -----------------------------------------------------------------------------
+// OPERACOES DE CONFIGURACAO PCI
+// -----------------------------------------------------------------------------
+
+@system
+pub fn pci_read_config32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
+    let address: u32 = 0x80000000 |
+        ((bus as u32) << 16) |
+        (((slot & 0x1F) as u32) << 11) |
+        (((func & 0x07) as u32) << 8) |
+        ((offset & 0xFC) as u32);
+
+    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
+    return baken_pci_in32(PCI_CONFIG_DATA_PORT);
+}
+
+@system
+pub fn pci_write_config32(bus: u8, slot: u8, func: u8, offset: u8, val: u32) -> void {
+    let address: u32 = 0x80000000 |
+        ((bus as u32) << 16) |
+        (((slot & 0x1F) as u32) << 11) |
+        (((func & 0x07) as u32) << 8) |
+        ((offset & 0xFC) as u32);
+
+    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
+    baken_pci_out32(PCI_CONFIG_DATA_PORT, val);
+}
+
+@system
+pub fn pci_read_config16(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
+    let dword: u32 = pci_read_config32(bus, slot, func, offset);
+    let shift: u32 = ((offset & 2) as u32) * 8;
+    return ((dword >> shift) & 0xFFFF) as u16;
+}
+
+@system
+pub fn pci_read_config8(bus: u8, slot: u8, func: u8, offset: u8) -> u8 {
+    let dword: u32 = pci_read_config32(bus, slot, func, offset);
+    let shift: u32 = ((offset & 3) as u32) * 8;
+    return ((dword >> shift) & 0xFF) as u8;
+}
+
+@system
+pub fn pci_enable_device(bus: u8, slot: u8, func: u8) -> void {
+    // Habilita Memory Space (bit 1), I/O Space (bit 0) e Bus Master (bit 2)
+    let command: u32 = pci_read_config32(bus, slot, func, 0x04);
+    let updated: u32 = command | 0x0007;
+    pci_write_config32(bus, slot, func, 0x04, updated);
+}
+
+// -----------------------------------------------------------------------------
+// DIMENSIONAMENTO DINAMICO DE BARs (BASE ADDRESS REGISTERS)
+// -----------------------------------------------------------------------------
+
+@system
+pub fn pci_probe_bar(bus: u8, slot: u8, func: u8, bar_index: u8, out_bar: *mut PciBar) -> u8 {
+    if out_bar == (null as *mut PciBar) || bar_index >= 6 {
+        return 1;
+    }
+
+    let bar_offset: u8 = 0x10 + (bar_index * 4);
+    let original: u32 = pci_read_config32(bus, slot, func, bar_offset);
+
+    // Escreve mascara 0xFFFFFFFF para interrogar o tamanho requisitado pelo hardware
+    pci_write_config32(bus, slot, func, bar_offset, 0xFFFFFFFF);
+    let mask: u32 = pci_read_config32(bus, slot, func, bar_offset);
+    // Restaura o valor original
+    pci_write_config32(bus, slot, func, bar_offset, original);
+
+    if mask == 0 || mask == 0xFFFFFFFF {
+        unsafe {
+            (*out_bar).base_address = 0;
+            (*out_bar).size = 0;
+            (*out_bar).is_io = false;
+            (*out_bar).is_64bit = false;
+            (*out_bar).is_prefetchable = false;
+        }
+        return 1;
+    }
+
+    let is_io: bool = (original & 0x01) != 0;
+
+    if is_io {
+        let size_mask: u32 = mask & 0xFFFFFFFC;
+        let bar_size: u64 = ((!size_mask) + 1) as u64;
+        let base: u64 = (original & 0xFFFFFFFC) as u64;
+
+        unsafe {
+            (*out_bar).base_address = base;
+            (*out_bar).size = bar_size;
+            (*out_bar).is_io = true;
+            (*out_bar).is_64bit = false;
+            (*out_bar).is_prefetchable = false;
+        }
+        return 1;
+    }
+
+    // BAR de Memoria (MMIO / VRAM)
+    let bar_type: u32 = (original >> 1) & 0x03;
+    let is_64bit: bool = (bar_type == 2);
+    let is_prefetchable: bool = ((original & 0x08) != 0);
+
+    let low_mask: u32 = mask & 0xFFFFFFF0;
+    let mut low_base: u64 = (original & 0xFFFFFFF0) as u64;
+    let mut total_size: u64 = ((!low_mask) + 1) as u64;
+
+    if is_64bit && bar_index < 5 {
+        let high_offset: u8 = bar_offset + 4;
+        let orig_high: u32 = pci_read_config32(bus, slot, func, high_offset);
+        pci_write_config32(bus, slot, func, high_offset, 0xFFFFFFFF);
+        let mask_high: u32 = pci_read_config32(bus, slot, func, high_offset);
+        pci_write_config32(bus, slot, func, high_offset, orig_high);
+
+        let high_base: u64 = (orig_high as u64) << 32;
+        low_base = low_base | high_base;
+
+        let high_size_calc: u64 = ((!mask_high) as u64) << 32;
+        if mask_high != 0xFFFFFFFF {
+            total_size = total_size | high_size_calc;
+        }
+
+        unsafe {
+            (*out_bar).base_address = low_base;
+            (*out_bar).size = total_size;
+            (*out_bar).is_io = false;
+            (*out_bar).is_64bit = true;
+            (*out_bar).is_prefetchable = is_prefetchable;
+        }
+        return 2; // Avanca 2 BARs para 64-bit
+    }
+
+    unsafe {
+        (*out_bar).base_address = low_base;
+        (*out_bar).size = total_size;
+        (*out_bar).is_io = false;
+        (*out_bar).is_64bit = false;
+        (*out_bar).is_prefetchable = is_prefetchable;
+    }
+    return 1;
+}
+
+// -----------------------------------------------------------------------------
+// VARREDURA COMPLETA DO BARRAMENTO PCI
+// -----------------------------------------------------------------------------
+
+@system
+pub fn pci_scan_all() -> u32 {
+    unsafe {
+        PCI_DEVICE_COUNT = 0;
+        PCI_DISPLAY_DEVICE_INDEX = -1;
+
+        for mut bus in 0..256 {
+            for mut slot in 0..32 {
+                let vendor_id: u16 = pci_read_config16(bus as u8, slot as u8, 0, 0x00);
+                if vendor_id == 0xFFFF || vendor_id == 0x0000 {
+                    continue;
+                }
+
+                let header_type: u8 = pci_read_config8(bus as u8, slot as u8, 0, 0x0E);
+                let num_funcs: u8 = if (header_type & 0x80) != 0 { 8 } else { 1 };
+
+                for mut func in 0..num_funcs {
+                    let v_id: u16 = pci_read_config16(bus as u8, slot as u8, func as u8, 0x00);
+                    if v_id == 0xFFFF || v_id == 0x0000 {
+                        continue;
+                    }
+
+                    let d_id: u16 = pci_read_config16(bus as u8, slot as u8, func as u8, 0x02);
+                    let class_word: u32 = pci_read_config32(bus as u8, slot as u8, func as u8, 0x08);
+                    let revision: u8 = (class_word & 0xFF) as u8;
+                    let prog_if: u8 = ((class_word >> 8) & 0xFF) as u8;
+                    let subclass: u8 = ((class_word >> 16) & 0xFF) as u8;
+                    let class_code: u8 = ((class_word >> 24) & 0xFF) as u8;
+
+                    let sub_info: u32 = pci_read_config32(bus as u8, slot as u8, func as u8, 0x2C);
+                    let sub_vendor: u16 = (sub_info & 0xFFFF) as u16;
+                    let sub_id: u16 = ((sub_info >> 16) & 0xFFFF) as u16;
+
+                    if PCI_DEVICE_COUNT < (PCI_MAX_DISCOVERED as u32) {
+                        let idx: usize = PCI_DEVICE_COUNT as usize;
+                        PCI_DEVICES[idx].bus = bus as u8;
+                        PCI_DEVICES[idx].slot = slot as u8;
+                        PCI_DEVICES[idx].func = func as u8;
+                        PCI_DEVICES[idx].vendor_id = v_id;
+                        PCI_DEVICES[idx].device_id = d_id;
+                        PCI_DEVICES[idx].class_code = class_code;
+                        PCI_DEVICES[idx].subclass = subclass;
+                        PCI_DEVICES[idx].prog_if = prog_if;
+                        PCI_DEVICES[idx].revision_id = revision;
+                        PCI_DEVICES[idx].subsystem_vendor = sub_vendor;
+                        PCI_DEVICES[idx].subsystem_id = sub_id;
+                        PCI_DEVICES[idx].header_type = header_type & 0x7F;
+
+                        // Habilita imediatamente operacoes de DMA e Memoria
+                        pci_enable_device(bus as u8, slot as u8, func as u8);
+
+                        // Dimensiona dinamicamente todos os 6 BARs
+                        let mut bar_idx: u8 = 0;
+                        while bar_idx < 6 {
+                            let step: u8 = pci_probe_bar(bus as u8, slot as u8, func as u8, bar_idx, &mut PCI_DEVICES[idx].bars[bar_idx as usize]);
+                            if step > 1 {
+                                bar_idx += step;
+                            } else {
+                                bar_idx += 1;
+                            }
+                        }
+
+                        // Identifica o dispositivo primario de video (Class 0x03)
+                        if class_code == PCI_CLASS_DISPLAY && PCI_DISPLAY_DEVICE_INDEX == -1 {
+                            PCI_DISPLAY_DEVICE_INDEX = idx as i32;
+                        }
+
+                        PCI_DEVICE_COUNT += 1;
+                    }
+                }
+            }
+        }
+
+        return PCI_DEVICE_COUNT;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// CONSULTAS PUBLICAS
+// -----------------------------------------------------------------------------
+
+@system
+pub fn pci_get_device_count() -> u32 {
+    unsafe { return PCI_DEVICE_COUNT; }
+}
+
+@system
+pub fn pci_get_device(index: u32) -> *const PciDevice {
+    unsafe {
+        if index < PCI_DEVICE_COUNT {
+            return &PCI_DEVICES[index as usize];
+        }
+        return null as *const PciDevice;
+    }
+}
+
+@system
+pub fn pci_find_display_device() -> *const PciDevice {
+    unsafe {
+        if PCI_DISPLAY_DEVICE_INDEX >= 0 && (PCI_DISPLAY_DEVICE_INDEX as u32) < PCI_DEVICE_COUNT {
+            return &PCI_DEVICES[PCI_DISPLAY_DEVICE_INDEX as usize];
+        }
+        return null as *const PciDevice;
+    }
+}
+
+@system
+pub fn pci_get_vendor_name(vendor_id: u16) -> *const u8 {
+    if vendor_id == 0x8086 {
+        return "Intel Corporation\0".as_ptr();
+    }
+    if vendor_id == 0x1002 {
+        return "AMD / ATI Technologies\0".as_ptr();
+    }
+    if vendor_id == 0x10DE {
+        return "NVIDIA Corporation\0".as_ptr();
+    }
+    if vendor_id == 0x1AF4 {
+        return "Red Hat / VirtIO Virtual GPU\0".as_ptr();
+    }
+    if vendor_id == 0x15AD {
+        return "VMware SVGA II Adapter\0".as_ptr();
+    }
+    if vendor_id == 0x1234 || vendor_id == 0x80EE {
+        return "VirtualBox / QEMU VBE Display\0".as_ptr();
+    }
+    return "Generic PCI Display Adapter\0".as_ptr();
+}
