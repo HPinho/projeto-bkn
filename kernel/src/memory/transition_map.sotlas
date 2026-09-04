@@ -2,8 +2,8 @@
 //
 // A imagem PE/COFF carregada pelo firmware e a stack de transição precisam
 // continuar acessíveis no MESMO endereço virtual imediatamente após CR3 mudar.
-// Este módulo materializa somente esse alias identidade temporário, usando
-// páginas de 4 KiB para aceitar bases/tamanhos arbitrários.
+// Este módulo aceita PA e VA separados e usa páginas de 4 KiB para suportar
+// ranges pequenos e bases arbitrárias sem presumir que firmware usa identidade.
 //
 // O caller escolhe permissões: a imagem pode permanecer executável durante o
 // corte; a stack deve ser RW+NX. O módulo não toca CR3, TLB, UEFI ou PMM.
@@ -32,34 +32,46 @@ pub fn transition_map_stats_invalid() -> TransitionMapStats {
 }
 
 @system
-pub fn transition_map_identity_range(arena: *mut PageTableArena,
-                                     root: PageTablePage,
-                                     address: u64,
-                                     size: u64,
-                                     flags: u64) -> TransitionMapStats {
+pub fn transition_map_range(arena: *mut PageTableArena,
+                            root: PageTablePage,
+                            virtual_address: u64,
+                            physical_address: u64,
+                            size: u64,
+                            flags: u64) -> TransitionMapStats {
     if arena == (null as *mut PageTableArena) { return transition_map_stats_invalid(); }
-    if !root.valid || address == 0 || size == 0 { return transition_map_stats_invalid(); }
+    if !root.valid || virtual_address == 0 || physical_address == 0 || size == 0 {
+        return transition_map_stats_invalid();
+    }
 
-    let last_byte = address + size - 1;
-    if last_byte < address { return transition_map_stats_invalid(); }
+    // As duas bases precisam ter o mesmo offset dentro da página. Caso
+    // contrário, um único mapping 4 KiB não preservaria o endereço inicial.
+    if (virtual_address % X86_PAGE_SIZE) != (physical_address % X86_PAGE_SIZE) {
+        return transition_map_stats_invalid();
+    }
 
-    let mapped_start = x86_page_align_down(address);
+    let last_byte = virtual_address + size - 1;
+    if last_byte < virtual_address { return transition_map_stats_invalid(); }
+
+    let mapped_start = x86_page_align_down(virtual_address);
     let mapped_end = x86_page_align_up(last_byte + 1);
-    if mapped_start == 0 || mapped_end == 0 || mapped_end <= mapped_start {
+    let physical_start = x86_page_align_down(physical_address);
+    if mapped_start == 0 || mapped_end == 0 || physical_start == 0 || mapped_end <= mapped_start {
         return transition_map_stats_invalid();
     }
 
     // Huge-page nunca é aceita aqui: imagem e stack de transição são ranges
     // pequenos e podem ter bordas não alinhadas a 2 MiB.
     let clean_flags = (flags | X86_PTE_PRESENT) & ~X86_PTE_HUGE;
-    let mut cursor = mapped_start;
+    let mut virtual_cursor = mapped_start;
+    let mut physical_cursor = physical_start;
     let mut mapped_page_count: u64 = 0;
 
-    while cursor < mapped_end {
-        if !page_table_map_4k(arena, root, cursor, cursor, clean_flags) {
+    while virtual_cursor < mapped_end {
+        if !page_table_map_4k(arena, root, virtual_cursor, physical_cursor, clean_flags) {
             return transition_map_stats_invalid();
         }
-        cursor += X86_PAGE_SIZE;
+        virtual_cursor += X86_PAGE_SIZE;
+        physical_cursor += X86_PAGE_SIZE;
         mapped_page_count += 1;
     }
 
@@ -69,4 +81,13 @@ pub fn transition_map_identity_range(arena: *mut PageTableArena,
         mapped_end: mapped_end,
         valid: mapped_page_count > 0
     };
+}
+
+@system
+pub fn transition_map_identity_range(arena: *mut PageTableArena,
+                                     root: PageTablePage,
+                                     address: u64,
+                                     size: u64,
+                                     flags: u64) -> TransitionMapStats {
+    return transition_map_range(arena, root, address, address, size, flags);
 }
