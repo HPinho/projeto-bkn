@@ -22,6 +22,7 @@ class PostCutoverEntryTests(unittest.TestCase):
         main_body = main.split("pub fn baken_kernel_main", 1)[1]
         self.assertNotIn("sotlas_x86_post_cutover_entry(", main_body)
         self.assertNotIn("post_cutover_activate_cpu(", main_body)
+        self.assertNotIn("post_cutover_activate_pmm(", main_body)
 
     def test_handoff_pointers_are_translated_through_direct_map(self):
         text = POST.read_text(encoding="utf-8")
@@ -49,6 +50,22 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertLess(body.index("idt_prepare_exceptions()"), body.index("x86_lidt_table_raw(idt_address, idt_limit())"))
         self.assertIn("tss_is_prepared()", body)
         self.assertIn("idt_exceptions_ready()", body)
+
+    def test_pmm_uses_final_direct_mapped_memory_map_after_cpu_tables(self):
+        text = POST.read_text(encoding="utf-8")
+        self.assertIn("import kernel::memory::pmm::*;", text)
+        self.assertIn("import kernel::memory::pmm_allocator::*;", text)
+        body = text.split("pub fn post_cutover_activate_pmm", 1)[1].split("pub fn post_cutover_pmm_active", 1)[0]
+        self.assertIn("if !post_cutover_cpu_tables_active()", body)
+        self.assertIn("let memory_map = post_cutover_memory_map_virtual(context);", body)
+        self.assertIn("pmm_inventory_init(", body)
+        self.assertIn("pmm_allocator_activate_after_exit_boot_services()", body)
+        self.assertIn("pmm_allocator_is_active()", body)
+
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        cpu_pos = entry.index("post_cutover_activate_cpu(context)")
+        pmm_pos = entry.index("post_cutover_activate_pmm(context)")
+        self.assertLess(cpu_pos, pmm_pos)
 
     def test_interrupts_remain_disabled_in_this_phase(self):
         code = code_without_comments(POST.read_text(encoding="utf-8"))
