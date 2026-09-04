@@ -20,16 +20,17 @@ class TransitionPageTableTests(unittest.TestCase):
         self.assertIn("let root = page_table_arena_alloc(arena);", body)
         self.assertIn("if !page_table_zero(root)", body)
 
-    def test_composer_requires_direct_map_image_and_guarded_stack(self):
+    def test_composer_requires_direct_map_wx_image_and_guarded_stack(self):
         body = self.text.split("pub fn transition_page_tables_build", 1)[1]
         direct_pos = body.index("direct_map_build_from_uefi_ranges(")
-        image_pos = body.index("transition_image_map(arena, root, image)")
+        image_pos = body.index("transition_image_map_wx(arena, root, image, image_base)")
         stack_pos = body.index("transition_stack_map(arena, root, stack)")
         self.assertLess(direct_pos, image_pos)
         self.assertLess(image_pos, stack_pos)
         self.assertIn("if !direct.valid", body)
         self.assertIn("if !image_map.valid", body)
         self.assertIn("if !stack_map.valid", body)
+        self.assertNotIn("transition_image_map(arena, root, image)", body)
 
     def test_result_exposes_root_physical_without_activating_it(self):
         self.assertIn("root_physical: root.physical_address", self.text)
@@ -45,7 +46,7 @@ class TransitionPageTableTests(unittest.TestCase):
     def test_main_registers_composer_without_executing_it(self):
         self.assertIn("import kernel::memory::transition_page_tables::*;", self.main)
         self.assertNotIn("transition_page_tables_build(", self.main)
-        self.assertNotIn("x86_write_cr3(", self.main)
+        self.assertNotIn("x86_mmu_activate_root(", self.main)
 
 
 if __name__ == "__main__":
