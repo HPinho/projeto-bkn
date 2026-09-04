@@ -1,176 +1,300 @@
 # Arquitetura canônica do Baken OS
 
-## Regra principal
+## Objetivo
 
-Há **uma única rota executável de interface**. O firmware UEFI só prepara o
-hardware; nenhuma camada de boot desenha janelas, dock ou widgets.
-
-```text
-boot/uefi_bootloader.sotlas
-    -> Sotlas Compile: kernel/src/main.sotlas + módulos Sotlas
-    -> framebuffer GOP
-    -> desktop Baken OS
-```
-
-`tools/build_uefi_desktop.ps1` chama o Sotlas Compile, que resolve a entrada Sotlas,
-gera uma unidade C por módulo e vincula o EFI aceito pelos launchers
-`run_baken.ps1`, `run_baken_iso.ps1` e `run_baken_vbox.ps1`.
-
-O contrato `BakenBootInfo` é único em
-`kernel/include/baken_boot_info.h` e é incluído pelo bootloader e pelo kernel;
-asserções de layout protegem o handoff UEFI x86_64 contra divergência.
-
-Os antigos launchers paralelos `test_in_virtualbox.ps1`,
-`tools/test_fat16_boot.py` e `tools/scripts/run_qemu.py` foram removidos: eles
-tinham mídia/boot próprios e podiam operar uma VM pessoal `BakenOS`.
-
-Também não há bridge Electron/Antigravity/Wayland na rota oficial. Aplicativos
-futuros devem usar serviços próprios do Baken, sempre por compositor e gerente
-de janelas canônicos.
-
-O diretório `bknc/` também não participa do boot nem da cadeia Sotlas modular.
-Seu código remanescente é um protótipo de ferramenta hospedeira que só emite
-LLVM IR textual preliminar; ele não assina, empacota nem instala executáveis.
-O emissor legado, que preenchia uma assinatura fictícia, foi removido para que
-artefatos de teste não sejam apresentados como seguros.
-
-O gerador de disco instalado grava um layout BakenFS mínimo no volume
-`Baken Data`. A montagem e escrita desse volume pelo kernel ainda exigem um
-serviço de armazenamento Sotlas separado; a UI não simula essa persistência.
-
-## Mídia de instalação virtual
-
-`tools/scripts/create_installed_disk.py` cria exclusivamente em `build/` uma
-mídia virtual GPT com uma ESP FAT32 bootável e uma partição `Baken Data`.
-Ela é a referência de layout para o instalador gráfico: nunca recebe caminho de
-disco físico e não deve ser usada como ferramenta de particionamento do host.
-O bootloader já entrega ao assistente UEFI um segundo disco bruto, gravável e
-distinto da mídia de boot. A tela detecta esse alvo de forma explícita; a
-subetapa seguinte é gravar o layout GPT/FAT32 nele a partir do pacote de
-instalação, sem permitir que a mídia de origem seja formatada.
-
-Não há compatibilidade POSIX, Win32, WASM ou LibC ativa nesta versão. Esses
-subsystems só poderão retornar depois de um carregador e isolamento verificáveis.
-
-Antes de qualquer geração de binário, valide o grafo Sotlas com:
-
-```powershell
-python tools/sotlas_compile/compiler.py check kernel/src/main.sotlas --manifest build/sotlas-main.manifest.json
-```
-
-Esse comando resolve a entrada e audita todos os módulos Sotlas conhecidos: detecta
-módulos duplicados, imports ausentes, auto-imports e dependências circulares,
-gravando uma ordem de compilação reproduzível para a rota ativa.
-
-## Teste de boot em VM
-
-Após gerar `build/baken_disk.img`, execute:
-
-```powershell
-python tools/test_qemu_desktop.py
-```
-
-O teste inicializa o disco em QEMU sem abrir janela e captura o framebuffer em
-`build/qemu-desktop.ppm`. Ele valida o caminho firmware UEFI -> GOP -> kernel
--> desktop; não substitui testes de particionamento ou instalação real.
-
-Para iniciar a própria ISO óptica El Torito, em vez do disco gravável de
-teste, execute:
-
-```powershell
-python tools/test_qemu_desktop.py --iso
-```
-
-Para validar a instalação virtual persistente:
-
-```powershell
-python tools/test_qemu_desktop.py --installed --create-files
-python tools/test_qemu_desktop.py --installed --save-theme
-python tools/test_qemu_desktop.py --installed --save-note q
-```
-
-O assistente só opera sobre Block I/O de mídia presente, gravável e distinta da
-origem. Preferências, notas, arquivos e diretórios são gravados no BakenFS da
-partição Baken Data.
-
-## VirtualBox
-
-A imagem crua não é anexada diretamente pelo VirtualBox. Para testar, converta
-uma cópia com `VBoxManage convertfromraw build/baken_disk.img <arquivo>.vdi`,
-anexe-a a uma VM EFI isolada e capture a tela com `controlvm screenshotpng`.
-Use somente a VM de teste `BakenOS-MVP-Test`; o launcher usa esse nome por
-padrão e não procura, desliga ou reutiliza uma VM pessoal chamada `BakenOS`.
-O boot nessa VM é uma validação obrigatória antes de classificar uma ISO como
-testável.
-
-## Migração para Sotlas modular
-
-O destino é manter uma única árvore em Sotlas:
+O Baken OS deve ser um sistema operacional x86-64 bare-metal próprio. Python é ferramenta de compilação/build/teste; UEFI é apenas bootstrap; Sotlas é compilado para código nativo; depois do handoff o kernel Baken assume memória, interrupções, barramentos, entrada, armazenamento e gráficos.
 
 ```text
-kernel::main
-    -> graphics_engine
-    -> desktop_compositor
-    -> desktop_shell
-    -> window_manager
-    -> aplicações e widgets
+Sotlas source
+    -> Sotlas compiler
+    -> x86-64 machine code
+    -> Baken kernel / drivers / services
+    -> hardware
 ```
 
-Os quinze módulos Sotlas canônicos fazem parte do EFI: o Sotlas Compile valida o grafo,
-emite um objeto por módulo, gera interfaces e executa o link. A entrada pública
-é `kernel::main`; não há runtime C de desktop na rota oficial. O pequeno
-`baken_runtime.c` traduz entrada/tempo do firmware e liga os atlas, sem desenhar UI.
+A regra central é:
 
-`kernel::desktop_compositor` é a fachada gráfica canônica e é a única função
-de composição chamada por `kernel::main`. Ela inicializa o desktop shell, que
-inicializa o `window_manager` canônico. A rota Sotlas validada contém oito módulos:
-renderização, animação/UI, gerenciador de janelas, shell, compositor e entrada.
-O `window_manager` não abre aplicativos de demonstração e não importa terminal,
-rede ou armazenamento; aplicativos só entram quando tiverem serviços reais.
+> O compilador não desenha o sistema operacional. Ele apenas permite que o sistema operacional exista.
 
-As pilhas paralelas `bakenfx`, `baken_ui`, `baken_compositor`, seus efeitos e
-o `shell_cli` legado foram removidos. `graphics_engine` + `baken_rasterizer` +
-`baken_ui_oop` são as únicas camadas visuais na rota Sotlas inicial.
+## Fronteiras obrigatórias
 
-Também foram removidas telas isoladas de central de controle, documentação,
-busca, splash, menus, temas e widgets alternativos. Elas não eram abertas pelo
-shell e não podem ser tratadas como aplicativos enquanto não houver lançador,
-serviços e persistência reais.
+### Python
 
-## Limites claros de cada camada
+`tools/sotlas_compile/` pertence ao host. Pode implementar lexer, parser, AST, análise semântica, IR, lowering, ABI, backend x86-64, linker orchestration e intrínsecos de baixo nível.
 
-- **Bootloader**: GOP, mouse/teclado UEFI e handoff. Sem interface de desktop.
-- **Formato de vídeo**: GOP BGR de 32 bits; outros formatos ficam
-  bloqueados até o compositor ter conversão de pixel testada.
-- **Orçamento de vídeo**: o boot seleciona o maior modo BGRX de até 1920×1200.
-  Esse teto mantém o backbuffer ativo e evita desenho parcial visível em modos
-  4K que o compositor por software ainda não consegue sustentar.
-- **Cadência**: o TSC é calibrado com o timer UEFI, o compositor recebe `dt`
-  real limitado e o loop é cadenciado a aproximadamente 60 Hz quando o custo
-  do quadro permite. Esperas ocupadas dependentes da CPU não fazem parte da
-  rota.
-- **Canvas e efeitos**: o wallpaper é armazenado por resolução/tema; blurs usam
-  passagens separáveis com janela deslizante. O frame só chega ao GOP depois da
-  composição completa no backbuffer.
-- **Kernel/renderizador**: memória de vídeo, composição de quadros e entrada.
-- **Desktop shell**: topbar, papel de parede, dock e encaminhamento de janelas.
-- **Window manager**: estado e interação de janelas; não inicializa outro
-  renderizador.
-- **Apps**: desenham somente no contexto recebido do compositor; não escrevem
-  diretamente no framebuffer.
+Não pode implementar wallpaper, dock, cursor, janelas, installer, OOBE, shimmer, compositor, drivers ou lógica específica de dispositivos.
 
-## Ponte monolítica removida
+### UEFI
 
-`baken_kernel_all.c` foi removido. O build Sotlas atende aos critérios estruturais
-de substituição:
+`BOOTX64.EFI` deve ter somente responsabilidades de bootstrap:
 
-1. resolver importações transitivas;
-2. gerar objetos separados por módulo;
-3. detectar símbolos duplicados no link;
-4. vincular `kernel::main` como a única entrada do kernel;
-5. produzir `BOOTX64.EFI` com o toolchain PE/COFF do projeto.
+1. localizar/carregar o kernel;
+2. obter GOP e registrar endereço físico, tamanho, pitch e formato do framebuffer;
+3. obter `GetMemoryMap`;
+4. localizar ACPI RSDP;
+5. opcionalmente coletar SMBIOS e outros descritores passivos;
+6. construir `BakenBootInfo` somente com dados estáveis após o handoff;
+7. executar `ExitBootServices()` com retry correto se o map key mudar;
+8. transferir controle para `baken_kernel_main`.
 
-Os quatro primeiros itens são cobertos pela suíte e pelo link estrutural sem
-símbolos indefinidos. O quinto exige o toolchain UEFI e continua seguido de boot
-em QEMU/VirtualBox antes de uma imagem ser publicada. O histórico permanece no
-Git; nenhum teste ou alvo de build lê a antiga ponte.
+Depois de `ExitBootServices()`, o kernel não deve depender de `EFI_SIMPLE_POINTER_PROTOCOL`, `EFI_ABSOLUTE_POINTER_PROTOCOL`, `EFI_BLOCK_IO_PROTOCOL`, timers UEFI, eventos UEFI ou outras interfaces de Boot Services.
+
+O framebuffer descoberto pelo GOP pode continuar sendo usado porque seu endereço físico é conhecido, mas seu mapeamento e política de cache passam a ser responsabilidade do VMM/PAT do Baken.
+
+### Kernel
+
+O kernel é responsável por:
+
+- GDT, IDT, TSS e exceções;
+- PMM, VMM, heap e DMA;
+- PAT e atributos de cache;
+- ACPI, APIC, IOAPIC e timers;
+- PCI/PCIe;
+- scheduler;
+- input HAL e drivers;
+- block device API e storage;
+- Graphics API, compositor e backends.
+
+### UI
+
+Installer, OOBE, desktop, dock, janelas, animações e widgets devem existir em Sotlas e consumir APIs do Baken. Eles não acessam GOP, MSR, PCI ou MMIO diretamente.
+
+## Estado transitório atual
+
+A árvore atual ainda possui dívida de migração no bootloader. Em particular, o bootloader atual localiza Pointer Protocol e Block I/O e os entrega pelo `BakenBootInfo`; também chama o kernel sem uma fronteira final baseada em `GetMemoryMap` + `ExitBootServices`.
+
+Essas pontes são consideradas **legado transitório**, não arquitetura final. Nenhuma nova funcionalidade pode depender delas.
+
+A remoção deve ocorrer em ordem segura:
+
+1. implementar entrada nativa suficiente para substituir pointer UEFI;
+2. implementar block device nativo suficiente para substituir Block I/O UEFI;
+3. completar PMM/VMM e preservar o mapa de memória;
+4. mudar `BakenBootInfo` para conter apenas dados estáveis pós-ExitBootServices;
+5. executar `ExitBootServices()` antes de `baken_kernel_main`;
+6. remover os campos e caminhos de runtime UEFI restantes.
+
+Até esse corte, a branch principal deve continuar bootável; a migração deve ser feita por commits pequenos e testáveis.
+
+## BootInfo alvo
+
+O contrato alvo é conceitualmente:
+
+```text
+BakenBootInfo
+├── version
+├── framebuffer
+│   ├── physical_base
+│   ├── byte_size
+│   ├── width
+│   ├── height
+│   ├── pixels_per_scanline
+│   └── pixel_format
+├── memory_map
+│   ├── physical/virtual address
+│   ├── size
+│   ├── descriptor_size
+│   └── descriptor_version
+├── acpi_rsdp
+├── kernel image metadata
+└── initrd/system image metadata (quando aplicável)
+```
+
+Não fazem parte do BootInfo final:
+
+```text
+EFI_SYSTEM_TABLE*
+EFI_SIMPLE_POINTER_PROTOCOL*
+EFI_ABSOLUTE_POINTER_PROTOCOL*
+EFI_BLOCK_IO_PROTOCOL*
+EFI_BOOT_SERVICES*
+```
+
+## Fundação x86-64
+
+A ordem de inicialização do kernel deve ser:
+
+```text
+kernel_entry
+    -> early serial/debug
+    -> GDT/TSS
+    -> IDT/exceptions
+    -> PMM
+    -> VMM/page tables próprias
+    -> PAT/cache policy
+    -> ACPI
+    -> LAPIC/IOAPIC
+    -> timers
+    -> scheduler
+    -> PCI/PCIe
+    -> DMA
+    -> drivers
+    -> compositor
+    -> desktop shell
+```
+
+UEFI já entrega a CPU x86-64 em long mode em uma inicialização UEFI normal; o trabalho do Baken é assumir o controle desse ambiente e estabelecer suas próprias tabelas, descritores e políticas.
+
+## Memória e PAT
+
+O framebuffer deve ser mapeado como Write-Combining quando suportado. Não basta escrever `IA32_PAT`: a entrada PAT correta deve ser selecionada pelos bits PAT/PCD/PWT das page tables que cobrem a região.
+
+Política inicial:
+
+```text
+normal RAM / backbuffer = WB
+framebuffer GOP         = WC
+MMIO                     = UC, salvo exigência explícita do dispositivo
+```
+
+O código deve ler o PAT existente, verificar suporte via CPUID e alterar o mínimo necessário, com invalidação/coerência apropriada dos mappings.
+
+## ACPI e interrupções
+
+ACPI deve fornecer pelo menos RSDP/XSDT, MADT, MCFG e FADT, expandindo depois para DSDT/SSDT e AML.
+
+O IOAPIC não deve assumir mapeamento fixo de IRQ legado. O fluxo é:
+
+```text
+MADT
+ -> Interrupt Source Override
+ -> GSI
+ -> IOAPIC redirection entry
+ -> vetor IDT
+```
+
+## Input
+
+Arquitetura canônica:
+
+```text
+i8042/PS2 ----\
+USB HID -------+-> Input HAL -> Event Normalizer -> Ring Buffer -> Window Manager
+I2C-HID -------/
+```
+
+Eventos normalizados incluem `PointerMove`, `PointerDown`, `PointerUp`, `Scroll`, `KeyDown`, `KeyUp`, `TouchBegin`, `TouchMove` e `TouchEnd`.
+
+PS/2 é um backend, não garantia universal de touchpad. Notebooks modernos podem exigir ACPI + controlador I2C + HID-over-I2C.
+
+## Graphics Architecture
+
+```text
+Desktop / Apps
+    -> Baken Graphics API
+    -> Compositor / Rasterizer
+    -> Graphics Device HAL
+       -> software framebuffer backend
+       -> VirtIO-GPU
+       -> driver Intel nativo posterior
+```
+
+O backend universal inicial usa:
+
+```text
+UI
+ -> rasterização em backbuffer WB
+ -> DamageRegion (múltiplos retângulos)
+ -> cópia otimizada das regiões alteradas
+ -> framebuffer WC
+```
+
+Não usar um único bounding rectangle global quando regiões distantes mudarem. O compositor deve manter uma coleção de damage rectangles e fazer merge somente quando isso reduzir custo.
+
+`movntdq`/streaming stores não são regra universal; `memops` deve escolher estratégia conforme tamanho, alinhamento e capacidades CPUID (REP MOVSB/ERMS/FSRM/SIMD quando apropriado).
+
+## GPU
+
+PCI discovery e BAR mapping apenas descobrem a GPU. Não constituem aceleração gráfica por si sós.
+
+Aceleração real exige driver específico capaz de lidar, conforme a família, com MMIO, memória da GPU, page tables/contextos, filas/rings, command buffers, sincronização/fences, interrupções e scanout/present.
+
+A ordem preferencial é:
+
+1. software framebuffer backend;
+2. VirtIO-GPU em VM;
+3. uma família Intel específica;
+4. outros fabricantes somente depois da HAL estabilizar.
+
+## Storage
+
+A pilha é:
+
+```text
+NVMe/AHCI
+ -> Block Device API
+ -> GPT
+ -> filesystem
+ -> installer
+```
+
+O installer não escreve registradores NVMe/AHCI nem LBAs diretamente a partir da UI.
+
+GPT deve calcular dinamicamente o tamanho da partition-entry array a partir do logical block size; não assumir permanentemente LBAs 2-33. Protective MBR, primary/backup headers, arrays e CRC32 devem ser gerados e validados.
+
+FAT32 deve calcular BPB/FAT/root/FSInfo/backup boot sector a partir do volume real.
+
+## Scheduler e DMA
+
+xHCI, NVMe, VirtIO e GPUs dependem de DMA. Deve existir uma API central de alocação DMA que exponha endereço virtual, endereço físico, tamanho e alinhamento.
+
+O kernel não deve manter input, storage, compositor e USB em um único polling loop. A evolução mínima inclui kernel threads, ready queue, sleep queue, timer e context switch.
+
+## Ordem de implementação
+
+```text
+0. Sotlas compiler/backend e intrínsecos confiáveis
+1. BootInfo v2 + GetMemoryMap + handoff preparado
+2. GDT/IDT/TSS/exceptions
+3. PMM/VMM/heap/PAT
+4. ACPI/APIC/IOAPIC/timers
+5. scheduler + PCI/PCIe + DMA
+6. framebuffer/backbuffer/DamageRegion/compositor
+7. i8042 + Input HAL
+8. xHCI + USB HID
+9. AHCI/NVMe + Block API
+10. GPT/FAT32 + installer real
+11. AML + I2C-HID
+12. VirtIO-GPU
+13. Intel GPU nativa
+14. remoção final das pontes UEFI e `ExitBootServices()` obrigatório antes do kernel normal
+```
+
+As fases 1-13 podem possuir marcos intermediários, mas nenhum novo módulo pode aumentar a dependência do kernel em Boot Services.
+
+## Testes arquiteturais
+
+A suíte deve continuar garantindo que `compiler.py`/`bootstrap.py` não contenham UI específica e que a antiga ponte monolítica não retorne.
+
+Devem ser adicionados gradualmente testes para:
+
+- layout/versionamento de `BakenBootInfo`;
+- ausência de ponteiros UEFI no BootInfo v2;
+- serialização e interpretação do Memory Map;
+- PAT/PTE encoding;
+- PMM/VMM;
+- ACPI checksums e MADT/MCFG;
+- DamageRegion;
+- ring buffers;
+- PCI enumeration;
+- GPT/CRC32;
+- FAT32;
+- block drivers em QEMU;
+- boot após `ExitBootServices()`.
+
+## Critério de conclusão da migração bare-metal
+
+A migração só pode ser considerada concluída quando o caminho normal de boot for:
+
+```text
+Firmware UEFI
+ -> BOOTX64.EFI
+ -> GOP + Memory Map + ACPI + kernel load
+ -> ExitBootServices()
+ -> Baken kernel
+ -> Baken drivers
+ -> Baken compositor
+ -> Desktop Shell
+```
+
+sem dependência de serviços UEFI para input, storage, temporização ou lógica de desktop.
