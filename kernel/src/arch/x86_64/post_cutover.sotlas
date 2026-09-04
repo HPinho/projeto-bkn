@@ -1,7 +1,7 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
-// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs mascarados.
-// STI continua proibido até timer e fontes de IRQ serem validados e desmascarados.
+// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs -> timer mascarado.
+// STI continua proibido até fontes de IRQ serem explicitamente desmascaradas.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -21,6 +21,7 @@ import kernel::acpi::madt::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::irq::*;
+import kernel::interrupts::lapic_timer::*;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -48,6 +49,7 @@ static mut POST_CUTOVER_VMM_ACTIVE: bool = false;
 static mut POST_CUTOVER_ACPI_READY: bool = false;
 static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
 static mut POST_CUTOVER_IRQS_READY: bool = false;
+static mut POST_CUTOVER_TIMER_READY: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -191,6 +193,17 @@ pub fn post_cutover_prepare_irqs() -> bool {
 pub fn post_cutover_irqs_ready() -> bool { unsafe { return POST_CUTOVER_IRQS_READY; } }
 
 @system
+pub fn post_cutover_prepare_timer() -> bool {
+    if !post_cutover_irqs_ready() { return false; }
+    if !lapic_timer_calibrate_masked_from_pm() || !lapic_timer_is_ready() { return false; }
+    unsafe { POST_CUTOVER_TIMER_READY = true; }
+    return true;
+}
+
+@system
+pub fn post_cutover_timer_ready() -> bool { unsafe { return POST_CUTOVER_TIMER_READY; } }
+
+@system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = argument as *const PostCutoverContext;
@@ -200,8 +213,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_activate_acpi(context) { loop {} }
     if !post_cutover_activate_interrupt_controllers() { loop {} }
     if !post_cutover_prepare_irqs() { loop {} }
+    if !post_cutover_prepare_timer() { loop {} }
 
-    // Próximo marco: calibrar/programar timer e só depois decidir quais fontes
-    // podem ser desmascaradas. STI continua proibido nesta fase.
+    // Timer e rotas existem, mas continuam mascarados. Próxima fase decide
+    // quais fontes podem ser abertas e só então executa STI.
     loop {}
 }
