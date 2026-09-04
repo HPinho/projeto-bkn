@@ -1,0 +1,70 @@
+// Baken OS — writer seguro para páginas de page table bootstrap.
+//
+// A escrita ocorre SOMENTE pelo virtual_address explicitamente fornecido pela
+// PageTableArena. physical_address nunca é convertido em ponteiro aqui.
+// O módulo não ativa CR3, não invalida TLB e não aloca páginas.
+
+module kernel::memory::page_table_writer;
+
+import kernel::memory::page_table_arena::*;
+import kernel::arch::x86_64::paging::*;
+
+pub const X86_PAGE_TABLE_ENTRY_COUNT: u16 = 512;
+
+@system
+pub fn page_table_page_writable(page: *const PageTablePage) -> bool {
+    if page == (null as *const PageTablePage) { return false; }
+    unsafe {
+        return (*page).valid &&
+            (*page).physical_address != 0 &&
+            (*page).virtual_address != 0 &&
+            x86_page_aligned((*page).physical_address) &&
+            x86_page_aligned((*page).virtual_address);
+    }
+}
+
+@system
+pub fn page_table_zero(page: *const PageTablePage) -> bool {
+    if !page_table_page_writable(page) { return false; }
+
+    unsafe {
+        let entries = (*page).virtual_address as *mut u64;
+        let mut index: u16 = 0;
+        while index < X86_PAGE_TABLE_ENTRY_COUNT {
+            let slot = (entries as usize) + ((index as usize) * 8);
+            let entry = slot as *mut u64;
+            *entry = 0;
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn page_table_write_entry(page: *const PageTablePage,
+                              index: u16,
+                              value: u64) -> bool {
+    if !page_table_page_writable(page) { return false; }
+    if index >= X86_PAGE_TABLE_ENTRY_COUNT { return false; }
+
+    unsafe {
+        let base = (*page).virtual_address as usize;
+        let slot = base + ((index as usize) * 8);
+        let entry = slot as *mut u64;
+        *entry = value;
+    }
+    return true;
+}
+
+@system
+pub fn page_table_read_entry(page: *const PageTablePage, index: u16) -> u64 {
+    if !page_table_page_writable(page) { return 0; }
+    if index >= X86_PAGE_TABLE_ENTRY_COUNT { return 0; }
+
+    unsafe {
+        let base = (*page).virtual_address as usize;
+        let slot = base + ((index as usize) * 8);
+        let entry = slot as *const u64;
+        return *entry;
+    }
+}
