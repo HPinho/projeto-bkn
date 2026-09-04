@@ -1,0 +1,131 @@
+// Baken OS — contrato fail-closed do Virtual Memory Manager.
+//
+// Esta fase representa mappings e valida alinhamento/overflow/flags, mas NÃO
+// escreve page tables e NÃO troca CR3. Isso evita assumir incorretamente que um
+// endereço físico do PMM já é dereferenciável no endereço virtual atual.
+
+module kernel::memory::vmm;
+
+import kernel::arch::x86_64::paging::*;
+
+pub const VMM_STATE_OFFLINE: u32 = 0;
+pub const VMM_STATE_TABLES_READY: u32 = 1;
+pub const VMM_STATE_ACTIVE: u32 = 2;
+
+pub const VMM_CACHE_WRITE_BACK: u32 = 0;
+pub const VMM_CACHE_WRITE_COMBINING: u32 = 1;
+pub const VMM_CACHE_UNCACHED: u32 = 2;
+
+pub struct VmmMapping {
+    pub virtual_base: u64;
+    pub physical_base: u64;
+    pub page_count: u64;
+    pub flags: u64;
+    pub cache_policy: u32;
+    pub valid: bool;
+}
+
+pub struct VmmState {
+    pub state: u32;
+    pub root_table_physical: u64;
+    pub direct_map_base: u64;
+    pub mapping_count: u64;
+}
+
+static mut VMM: VmmState = VmmState {
+    state: VMM_STATE_OFFLINE,
+    root_table_physical: 0,
+    direct_map_base: 0,
+    mapping_count: 0
+};
+
+@system
+pub fn vmm_is_active() -> bool {
+    unsafe { return VMM.state == VMM_STATE_ACTIVE; }
+}
+
+@system
+pub fn vmm_state() -> u32 {
+    unsafe { return VMM.state; }
+}
+
+@system
+pub fn vmm_invalid_mapping() -> VmmMapping {
+    return VmmMapping {
+        virtual_base: 0,
+        physical_base: 0,
+        page_count: 0,
+        flags: 0,
+        cache_policy: VMM_CACHE_WRITE_BACK,
+        valid: false
+    };
+}
+
+@system
+pub fn vmm_mapping_make(virtual_base: u64,
+                        physical_base: u64,
+                        page_count: u64,
+                        flags: u64,
+                        cache_policy: u32) -> VmmMapping {
+    if virtual_base == 0 || physical_base == 0 { return vmm_invalid_mapping(); }
+    if !x86_page_aligned(virtual_base) || !x86_page_aligned(physical_base) {
+        return vmm_invalid_mapping();
+    }
+    if page_count == 0 { return vmm_invalid_mapping(); }
+    if cache_policy > VMM_CACHE_UNCACHED { return vmm_invalid_mapping(); }
+
+    let bytes = page_count * X86_PAGE_SIZE;
+    if (bytes / X86_PAGE_SIZE) != page_count { return vmm_invalid_mapping(); }
+    let virtual_end = virtual_base + bytes;
+    let physical_end = physical_base + bytes;
+    if virtual_end <= virtual_base || physical_end <= physical_base {
+        return vmm_invalid_mapping();
+    }
+
+    return VmmMapping {
+        virtual_base: virtual_base,
+        physical_base: physical_base,
+        page_count: page_count,
+        flags: flags,
+        cache_policy: cache_policy,
+        valid: true
+    };
+}
+
+@system
+pub fn vmm_mapping_valid(mapping: *const VmmMapping) -> bool {
+    if mapping == (null as *const VmmMapping) { return false; }
+    unsafe {
+        return (*mapping).valid &&
+            (*mapping).page_count != 0 &&
+            x86_page_aligned((*mapping).virtual_base) &&
+            x86_page_aligned((*mapping).physical_base);
+    }
+}
+
+// Apenas registra metadados depois que um futuro construtor de page tables tiver
+// materializado uma PML4 real. Esta função NÃO ativa CR3.
+@system
+pub fn vmm_mark_tables_ready(root_table_physical: u64, direct_map_base: u64) -> bool {
+    if root_table_physical == 0 || !x86_page_aligned(root_table_physical) { return false; }
+    if direct_map_base == 0 || !x86_page_aligned(direct_map_base) { return false; }
+
+    unsafe {
+        if VMM.state != VMM_STATE_OFFLINE { return false; }
+        VMM.root_table_physical = root_table_physical;
+        VMM.direct_map_base = direct_map_base;
+        VMM.mapping_count = 0;
+        VMM.state = VMM_STATE_TABLES_READY;
+    }
+    return true;
+}
+
+@system
+pub fn vmm_root_table_physical() -> u64 {
+    unsafe { return VMM.root_table_physical; }
+}
+
+@system
+pub fn vmm_direct_map_base() -> u64 {
+    unsafe { return VMM.direct_map_base; }
+}
