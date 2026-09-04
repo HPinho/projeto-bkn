@@ -7,6 +7,8 @@
 
 module kernel::storage::gpt;
 
+import kernel::storage::crc32::*;
+
 pub const GPT_HEADER_MIN_SIZE: u32 = 92;
 pub const GPT_DEFAULT_ENTRY_SIZE: u32 = 128;
 pub const GPT_DEFAULT_ENTRY_COUNT: u32 = 128;
@@ -90,6 +92,11 @@ pub fn gpt_plan_layout(block_size: u32, last_lba: u64, entry_count: u32, entry_s
 @system
 pub fn gpt_plan_default(block_size: u32, last_lba: u64) -> GptLayout {
     return gpt_plan_layout(block_size, last_lba, GPT_DEFAULT_ENTRY_COUNT, GPT_DEFAULT_ENTRY_SIZE);
+}
+
+@system
+pub fn gpt_crc32(data: *const u8, length: usize) -> u32 {
+    return crc32_ieee(data, length);
 }
 
 // Protective MBR usa um campo de 32 bits para número de setores. Discos cujo
