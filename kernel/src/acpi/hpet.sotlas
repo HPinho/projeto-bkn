@@ -1,0 +1,146 @@
+// Baken OS — inventário read-only da ACPI HPET.
+//
+// Interpreta somente a tabela HPET validada pela camada ACPI. Não mapeia MMIO,
+// não inicia contador, não configura comparadores e não habilita interrupções.
+
+module kernel::acpi::hpet;
+
+import kernel::acpi::tables::*;
+
+pub const HPET_TABLE_MIN_LENGTH: usize = 56;
+pub const ACPI_ADDRESS_SPACE_SYSTEM_MEMORY: u8 = 0;
+
+pub struct HpetInventory {
+    pub hardware_rev_id: u8;
+    pub comparator_count: u8;
+    pub counter_size_64: bool;
+    pub legacy_replacement: bool;
+    pub pci_vendor_id: u16;
+    pub address_space_id: u8;
+    pub register_bit_width: u8;
+    pub register_bit_offset: u8;
+    pub access_size: u8;
+    pub base_address: u64;
+    pub hpet_number: u8;
+    pub minimum_tick: u16;
+    pub page_protection: u8;
+    pub valid: bool;
+}
+
+static mut HPET_INFO: HpetInventory = HpetInventory {
+    hardware_rev_id: 0,
+    comparator_count: 0,
+    counter_size_64: false,
+    legacy_replacement: false,
+    pci_vendor_id: 0,
+    address_space_id: 0,
+    register_bit_width: 0,
+    register_bit_offset: 0,
+    access_size: 0,
+    base_address: 0,
+    hpet_number: 0,
+    minimum_tick: 0,
+    page_protection: 0,
+    valid: false
+};
+
+@system
+fn hpet_read_u16(base: *const u8, offset: usize) -> u16 {
+    unsafe {
+        return (base[offset] as u16) | ((base[offset + 1] as u16) << 8);
+    }
+}
+
+@system
+fn hpet_read_u32(base: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn hpet_read_u64(base: *const u8, offset: usize) -> u64 {
+    return (hpet_read_u32(base, offset) as u64) |
+        ((hpet_read_u32(base, offset + 4) as u64) << 32);
+}
+
+@system
+pub fn hpet_init() -> bool {
+    unsafe { HPET_INFO.valid = false; }
+
+    let table = acpi_hpet();
+    if table == (null as *const u8) { return false; }
+
+    let length = hpet_read_u32(table, 4) as usize;
+    if length < HPET_TABLE_MIN_LENGTH || length > ACPI_MAX_SDT_LENGTH { return false; }
+
+    let event_timer_block_id = hpet_read_u32(table, 36);
+    let address_space_id: u8;
+    let register_bit_width: u8;
+    let register_bit_offset: u8;
+    let access_size: u8;
+    let hpet_number: u8;
+    let page_protection: u8;
+    unsafe {
+        address_space_id = table[40];
+        register_bit_width = table[41];
+        register_bit_offset = table[42];
+        access_size = table[43];
+        hpet_number = table[52];
+        page_protection = table[55];
+    }
+
+    let base_address = hpet_read_u64(table, 44);
+    let minimum_tick = hpet_read_u16(table, 53);
+
+    // O backend inicial suportará somente HPET em System Memory. System I/O
+    // ou outros Address Spaces permanecem detectados, mas não são promovidos.
+    if address_space_id != ACPI_ADDRESS_SPACE_SYSTEM_MEMORY || base_address == 0 {
+        return false;
+    }
+
+    unsafe {
+        HPET_INFO.hardware_rev_id = (event_timer_block_id & 0xFF) as u8;
+        HPET_INFO.comparator_count = (((event_timer_block_id >> 8) & 0x1F) + 1) as u8;
+        HPET_INFO.counter_size_64 = ((event_timer_block_id >> 13) & 1) != 0;
+        HPET_INFO.legacy_replacement = ((event_timer_block_id >> 15) & 1) != 0;
+        HPET_INFO.pci_vendor_id = ((event_timer_block_id >> 16) & 0xFFFF) as u16;
+        HPET_INFO.address_space_id = address_space_id;
+        HPET_INFO.register_bit_width = register_bit_width;
+        HPET_INFO.register_bit_offset = register_bit_offset;
+        HPET_INFO.access_size = access_size;
+        HPET_INFO.base_address = base_address;
+        HPET_INFO.hpet_number = hpet_number;
+        HPET_INFO.minimum_tick = minimum_tick;
+        HPET_INFO.page_protection = page_protection;
+        HPET_INFO.valid = true;
+        return true;
+    }
+}
+
+@system
+pub fn hpet_is_ready() -> bool { unsafe { return HPET_INFO.valid; } }
+
+@system
+pub fn hpet_base_address() -> u64 {
+    unsafe {
+        if !HPET_INFO.valid { return 0; }
+        return HPET_INFO.base_address;
+    }
+}
+
+@system
+pub fn hpet_minimum_tick() -> u16 {
+    unsafe {
+        if !HPET_INFO.valid { return 0; }
+        return HPET_INFO.minimum_tick;
+    }
+}
+
+@system
+pub fn hpet_counter_is_64bit() -> bool {
+    unsafe { return HPET_INFO.valid && HPET_INFO.counter_size_64; }
+}
