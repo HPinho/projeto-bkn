@@ -29,6 +29,45 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, section)
 
+    def test_bootinfo_v2_has_versioned_bare_metal_metadata(self):
+        header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
+        self.assertIn("BAKEN_BOOT_INFO_VERSION 2U", header)
+        self.assertIn("struct_size", header)
+        self.assertIn("memory_descriptor_size", header)
+        self.assertIn("memory_descriptor_version", header)
+        self.assertIn("pixel_format", header)
+        self.assertIn("acpi_rsdp", header)
+        self.assertIn("BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID", header)
+        self.assertIn("BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID", header)
+
+    def test_bootinfo_v2_preserves_legacy_offsets_during_transition(self):
+        header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
+        required_assertions = [
+            "offsetof(BakenBootInfo, framebuffer_base) == 0",
+            "offsetof(BakenBootInfo, memory_map_base) == 32",
+            "offsetof(BakenBootInfo, system_table) == 48",
+            "offsetof(BakenBootInfo, install_target_block_io_protocol) == 72",
+            "offsetof(BakenBootInfo, version) == 80",
+            "sizeof(BakenBootInfo) == 120",
+        ]
+        for assertion in required_assertions:
+            with self.subTest(assertion=assertion):
+                self.assertIn(assertion, header)
+
+    def test_sotlas_entry_mirrors_bootinfo_v2_extension(self):
+        main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
+        for field in (
+            "version: u32",
+            "struct_size: u32",
+            "flags: u64",
+            "memory_descriptor_size: u64",
+            "memory_descriptor_version: u32",
+            "pixel_format: u32",
+            "acpi_rsdp: *const u8",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(field, main)
+
     def test_compiler_remains_host_tool_not_ui_runtime(self):
         compiler = (ROOT / "tools/sotlas_compile/compiler.py").read_text(encoding="utf-8")
         forbidden = {
