@@ -37,6 +37,11 @@ class PmTimerCalibrationTests(unittest.TestCase):
         self.assertNotIn("BootServices", text)
         self.assertNotIn("baken_efi", text)
 
+    def test_calibration_rounds_instead_of_truncating(self):
+        text = TIMER.read_text(encoding="utf-8")
+        self.assertIn("let numerator = tsc_delta * frequency", text)
+        self.assertIn("(numerator + (denominator / 2)) / denominator", text)
+
     def test_calibration_has_bounded_failure_path(self):
         text = TIMER.read_text(encoding="utf-8")
         self.assertIn("while spins < TSC_PM_CALIBRATION_MAX_SPINS", text)
