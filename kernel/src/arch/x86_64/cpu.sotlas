@@ -59,3 +59,8 @@ pub fn x86_mmio_write32(address: u64, value: u32) -> void { __mmio_write32(addre
 pub fn x86_exception_stub_address(vector: u16) -> u64 {
     return __exception_stub_address(vector);
 }
+
+@system
+pub fn x86_irq_stub_address(vector: u16) -> u64 {
+    return __irq_stub_address(vector);
+}
