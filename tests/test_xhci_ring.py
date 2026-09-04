@@ -8,6 +8,13 @@ ROOT = Path(__file__).resolve().parents[1]
 RING = ROOT / "kernel/src/drivers/xhci_ring.sotlas"
 
 
+def code_without_comments(path: Path) -> str:
+    lines = []
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        lines.append(raw.split("//", 1)[0])
+    return "\n".join(lines)
+
+
 class XhciRingTests(unittest.TestCase):
     def test_trb_layout_contract_is_16_bytes_by_fields(self):
         text = RING.read_text(encoding="utf-8")
@@ -26,13 +33,13 @@ class XhciRingTests(unittest.TestCase):
         self.assertIn("buffer.physical_address & (XHCI_RING_ALIGNMENT - 1)", text)
 
     def test_ring_contract_has_no_mmio_or_doorbell_side_effects(self):
-        text = RING.read_text(encoding="utf-8").lower()
+        code = code_without_comments(RING).lower()
         for token in (
             "mmio_read", "mmio_write", "doorbell", "pci_write",
             "pci_enable", "bus_master", "__out", "dma_alloc(",
             "virtual_base[", "*(*ring).virtual_base",
         ):
-            self.assertNotIn(token, text, token)
+            self.assertNotIn(token, code, token)
 
     def test_ring_state_starts_at_cycle_one(self):
         text = RING.read_text(encoding="utf-8")
