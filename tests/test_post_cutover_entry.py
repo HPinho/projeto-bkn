@@ -26,7 +26,7 @@ class PostCutoverEntryTests(unittest.TestCase):
     def test_cpu_activation_order_is_cr3_gdt_ltr_lidt(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_activate_cpu", 1)[1].split("pub fn post_cutover_cpu_tables_active", 1)[0]
-        cr3 = body.index("x86_mmu_activate(context.root_physical)")
+        cr3 = body.index("x86_mmu_activate_root(context.root_physical)")
         gdt = body.index("x86_gdt_activate_segments_raw(")
         ltr = body.index("x86_ltr_raw(GDT_TSS_SELECTOR)")
         lidt = body.index("x86_lidt_table_raw(idt_address, idt_limit())")
