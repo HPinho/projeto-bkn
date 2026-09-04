@@ -46,14 +46,25 @@ class DmaContractTests(unittest.TestCase):
         self.assertIn("pub fn dma_release(buffer: *mut DmaBuffer) -> bool", text)
         self.assertIn("pmm_free_pages_lifo((*buffer).physical_address, page_count)", text)
 
-    def test_dma_ownership_requires_a_matching_completion_fence(self):
+    def test_dma_ownership_supports_exclusive_and_shared_modes(self):
         text = DMA.read_text(encoding="utf-8")
         self.assertIn("DMA_OWNER_CPU", text)
         self.assertIn("DMA_OWNER_DEVICE", text)
         self.assertIn("DMA_OWNER_COMPLETED", text)
+        self.assertIn("DMA_OWNER_SHARED", text)
         self.assertIn("if (*buffer).fence != fence { return false; }", text)
+        self.assertIn("pub fn dma_share_with_device", text)
+        self.assertIn("pub fn dma_unshare_from_device", text)
+        self.assertIn("pub fn dma_buffer_cpu_accessible", text)
+        self.assertIn("pub fn dma_buffer_device_accessible", text)
         self.assertIn("if !dma_buffer_cpu_owned(buffer as *const DmaBuffer)", text)
         self.assertIn("if !dma_buffer_device_owned(buffer as *const DmaBuffer)", text)
+
+    def test_shared_mode_has_no_transfer_fence(self):
+        text = DMA.read_text(encoding="utf-8")
+        self.assertIn("if (*buffer).owner == DMA_OWNER_SHARED && (*buffer).fence != 0 { return false; }", text)
+        self.assertIn("(*buffer).owner = DMA_OWNER_SHARED", text)
+        self.assertIn("(*buffer).fence = 0", text)
 
     def test_dma_does_not_fabricate_memory_or_call_uefi(self):
         code = code_without_comments(DMA).lower()
