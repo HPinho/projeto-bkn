@@ -11,6 +11,9 @@ import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
 import kernel::memory::pmm::*;
 import kernel::drivers::pci_bus::*;
+import kernel::arch::x86_64::gdt::*;
+import kernel::arch::x86_64::tss::*;
+import kernel::arch::x86_64::idt::*;
 
 // Envelope de transição BakenBootInfo v2.
 // Os primeiros campos preservam o ABI legado enquanto input/storage/timing
@@ -57,6 +60,14 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     if (!baken_bootinfo_v2_valid(boot_info)) {
         loop {}
     }
+
+    // Prepara estruturas x86-64 concretas em memória antes das demais camadas.
+    // Elas ainda NAO sao carregadas na CPU: LGDT/LIDT/LTR so serao chamados
+    // quando o backend Sotlas possuir intrinsecos privilegiados canonicos.
+    tss_prepare(0, 0, 0, 0);
+    gdt_prepare();
+    gdt_set_tss_descriptor(tss_base(), tss_limit());
+    idt_prepare_empty();
 
     // O bit 1 indica que o bootloader entregou um snapshot real do UEFI
     // Memory Map. Por enquanto o PMM apenas inventaria/classifica as regiões:
