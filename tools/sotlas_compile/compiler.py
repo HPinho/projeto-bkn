@@ -506,7 +506,7 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
             "baken_pci_out32", "baken_pci_in32", "baken_pci_out16", "baken_pci_in16", "baken_pci_out8", "baken_pci_in8",
             "__rdmsr", "__wrmsr", "baken_io_wait",
             "__cli", "__sti", "__hlt",
-            "__lgdt", "__lidt", "__ltr", "__read_cr2", "__invlpg",
+            "__lgdt", "__lidt", "__ltr", "__read_cr2", "__invlpg", "__exception_stub_address",
             "baken_runtime_init_assets", "baken_runtime_run",
             "baken_efi_init", "baken_efi_poll_key", "baken_efi_poll_mouse_rel", "baken_efi_poll_mouse_abs",
             "baken_fast_memcpy",
