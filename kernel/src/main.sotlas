@@ -14,6 +14,7 @@ import kernel::drivers::pci_bus::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
+import kernel::arch::x86_64::cpu::*;
 
 // Envelope de transição BakenBootInfo v2.
 // Os primeiros campos preservam o ABI legado enquanto input/storage/timing
@@ -62,8 +63,8 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     }
 
     // Prepara estruturas x86-64 concretas em memória antes das demais camadas.
-    // Elas ainda NAO sao carregadas na CPU: LGDT/LIDT/LTR so serao chamados
-    // quando o backend Sotlas possuir intrinsecos privilegiados canonicos.
+    // O backend já sabe emitir LGDT/LIDT/LTR, mas NAO carregamos essas tabelas
+    // enquanto Boot Services ainda é usado e a IDT ainda não possui stubs.
     tss_prepare(0, 0, 0, 0);
     gdt_prepare();
     gdt_set_tss_descriptor(tss_base(), tss_limit());
