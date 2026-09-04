@@ -34,6 +34,7 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertIn("kernel::graphics_engine", manifest["compile_order"])
         self.assertIn("kernel::window_manager", manifest["compile_order"])
         self.assertIn("kernel::memory::pmm", manifest["compile_order"])
+        self.assertIn("kernel::memory::cutover_plan", manifest["compile_order"])
         self.assertIn("kernel::drivers::pci_bus", manifest["compile_order"])
         self.assertEqual(manifest["unreachable_modules"], [])
         self.assertEqual(manifest["orphan_roots"], [])
@@ -53,9 +54,6 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertIn("kernel::main::baken_kernel_main", manifest["exports"])
 
     def test_build_modular_compiles_kernel_objects(self):
-        # O número de objetos segue o grafo canônico: um objeto por módulo
-        # Sotlas alcançável + o objeto do bootloader UEFI. Isso permite evoluir
-        # a arquitetura sem congelar a suíte em um contador mágico.
         manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
         result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas")
         module_count = len(manifest["compile_order"])
@@ -105,6 +103,7 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertIn("kernel::graphics_engine", ast.imports)
         self.assertIn("kernel::desktop_compositor", ast.imports)
         self.assertIn("kernel::memory::pmm", ast.imports)
+        self.assertIn("kernel::memory::cutover_plan", ast.imports)
         self.assertIn("kernel::drivers::pci_bus", ast.imports)
 
         boot_info_struct = next((s for s in ast.structs if s.name == "BakenBootInfo"), None)
@@ -120,6 +119,9 @@ class SotlasResolverTests(unittest.TestCase):
                 "memory_descriptor_version", "pixel_format", "acpi_rsdp",
                 "page_table_arena_physical_base", "page_table_arena_virtual_base",
                 "page_table_arena_page_count",
+                "loaded_image_physical_base", "loaded_image_virtual_base", "loaded_image_size",
+                "transition_stack_physical_base", "transition_stack_virtual_base",
+                "transition_stack_page_count",
             ],
         )
 
