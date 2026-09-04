@@ -37,8 +37,12 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "memory_descriptor_version",
             "pixel_format",
             "acpi_rsdp",
+            "page_table_arena_physical_base",
+            "page_table_arena_virtual_base",
+            "page_table_arena_page_count",
             "BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID",
             "BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID",
+            "BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, header)
@@ -51,7 +55,11 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "offsetof(BakenBootInfo, system_table) == 48",
             "offsetof(BakenBootInfo, install_target_block_io_protocol) == 72",
             "offsetof(BakenBootInfo, version) == 80",
-            "sizeof(BakenBootInfo) == 120",
+            "offsetof(BakenBootInfo, acpi_rsdp) == 112",
+            "offsetof(BakenBootInfo, page_table_arena_physical_base) == 120",
+            "offsetof(BakenBootInfo, page_table_arena_virtual_base) == 128",
+            "offsetof(BakenBootInfo, page_table_arena_page_count) == 136",
+            "sizeof(BakenBootInfo) == 144",
         ):
             with self.subTest(assertion=assertion):
                 self.assertIn(assertion, header)
@@ -66,12 +74,17 @@ class BareMetalBoundaryTests(unittest.TestCase):
             "memory_descriptor_version: u32",
             "pixel_format: u32",
             "acpi_rsdp: *const u8",
+            "page_table_arena_physical_base: u64",
+            "page_table_arena_virtual_base: *mut u8",
+            "page_table_arena_page_count: u64",
         ):
             with self.subTest(field=field):
                 self.assertIn(field, main)
         self.assertIn("baken_bootinfo_v2_valid", main)
         self.assertIn("boot_info.version != 2", main)
         self.assertIn("boot_info.struct_size < 120", main)
+        self.assertIn("boot_info.struct_size < 144", main)
+        self.assertIn("BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID", main)
         self.assertIn("import kernel::memory::pmm::*;", main)
         self.assertIn("pmm_inventory_init", main)
 
@@ -96,10 +109,8 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertIn("framebuffer_wc_active: false", display)
         self.assertIn("display_driver_promote_hardware_backend", display)
         self.assertIn("Vendor ID isolado nao basta", display)
-        # PAT não pode ser sobrescrito cegamente pelo driver de display.
         self.assertNotIn("__wrmsr(0x0277", display)
         self.assertNotIn("0x0007010600070106", display)
-        # Encontrar uma GPU não deve promover o backend automaticamente.
         self.assertNotIn("pci_scan_all();", display)
         self.assertNotRegex(display, r"vendor_id\s*==\s*0x(?:8086|1002|10DE|1AF4).*is_hardware_accelerated\s*=\s*true")
 
