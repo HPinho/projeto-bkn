@@ -6,6 +6,7 @@
 
 module kernel::drivers::xhci_address;
 
+import kernel::arch::x86_64::cpu::*;
 import kernel::memory::direct_map::*;
 import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_context::*;
