@@ -31,6 +31,7 @@ import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::pat::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
 
@@ -109,9 +110,10 @@ pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
     // função seria reutilizar memória física antes do firmware liberar ownership.
     pmm_allocator_is_active();
 
-    // Paging/VMM já são compilados como contratos fail-closed. Nenhum mapping
-    // é materializado e CR3 permanece do ambiente atual durante a fase híbrida.
+    // Paging/VMM/PAT já são compilados como contratos fail-closed. Nenhum mapping
+    // é materializado, IA32_PAT não é reprogramado e CR3 permanece inalterado.
     x86_page_aligned(X86_PAGE_SIZE);
+    x86_pat_index_valid(0);
     vmm_is_active();
 
     // Os contratos DMA/xHCI ring/TRB/event/ERST/event-ring já fazem parte do
