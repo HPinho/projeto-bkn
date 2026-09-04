@@ -93,7 +93,7 @@ fn xhci_hid_context_ceil_log2(value: u32) -> u8 {
     let mut power: u32 = 1;
     let mut exponent: u8 = 0;
     while power < value && exponent < 15 {
-        power <<= 1;
+        power = power << 1;
         exponent += 1;
     }
     return exponent;
