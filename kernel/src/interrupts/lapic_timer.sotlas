@@ -1,0 +1,121 @@
+// Baken OS — calibração do Local APIC timer sem habilitar IRQs.
+//
+// Usa o ACPI PM Timer (System I/O) como referência nativa. A calibração e a
+// programação periódica permanecem mascaradas; desmascarar é uma etapa separada.
+
+module kernel::interrupts::lapic_timer;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::acpi::fadt::*;
+import kernel::acpi::pm_timer::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::irq::*;
+
+pub const LAPIC_TIMER_REG_INITIAL_COUNT: u64 = 0x380;
+pub const LAPIC_TIMER_REG_CURRENT_COUNT: u64 = 0x390;
+pub const LAPIC_TIMER_REG_DIVIDE: u64 = 0x3E0;
+pub const LAPIC_TIMER_DIVIDE_BY_16: u32 = 0x3;
+pub const LAPIC_TIMER_PERIODIC: u32 = 1 << 17;
+pub const LAPIC_TIMER_MASKED: u32 = 1 << 16;
+pub const LAPIC_TIMER_CALIBRATION_DIVISOR: u64 = 100;
+pub const LAPIC_TIMER_MAX_SPINS: u64 = 20000000;
+
+static mut LAPIC_TIMER_READY: bool = false;
+static mut LAPIC_TIMER_TICKS_PER_MS: u32 = 0;
+
+@system
+fn lapic_timer_read(offset: u64) -> u32 {
+    if !lapic_is_ready() || lapic_base() == 0 { return 0; }
+    return x86_mmio_read32(lapic_base() + offset);
+}
+
+@system
+fn lapic_timer_write(offset: u64, value: u32) -> void {
+    if !lapic_is_ready() || lapic_base() == 0 { return; }
+    x86_mmio_write32(lapic_base() + offset, value);
+}
+
+@system
+pub fn lapic_timer_calibrate_masked_from_pm() -> bool {
+    unsafe {
+        LAPIC_TIMER_READY = false;
+        LAPIC_TIMER_TICKS_PER_MS = 0;
+    }
+    if !lapic_is_ready() { return false; }
+    if !fadt_pm_timer_is_ready() && !fadt_pm_timer_init() { return false; }
+    if !acpi_pm_timer_port_ready() { return false; }
+
+    let pm_frequency = acpi_pm_timer_frequency_hz();
+    let target_pm_ticks = pm_frequency / LAPIC_TIMER_CALIBRATION_DIVISOR;
+    if target_pm_ticks == 0 { return false; }
+
+    lapic_timer_write(LAPIC_TIMER_REG_DIVIDE, LAPIC_TIMER_DIVIDE_BY_16);
+    lapic_timer_write(
+        LAPIC_REG_LVT_TIMER,
+        LAPIC_TIMER_MASKED | (IRQ_VECTOR_TIMER as u32)
+    );
+
+    let pm_start = acpi_pm_timer_read_counter();
+    lapic_timer_write(LAPIC_TIMER_REG_INITIAL_COUNT, 0xFFFFFFFF);
+
+    let mut elapsed_pm: u32 = 0;
+    let mut spins: u64 = 0;
+    while spins < LAPIC_TIMER_MAX_SPINS {
+        let now = acpi_pm_timer_read_counter();
+        elapsed_pm = acpi_pm_timer_elapsed_ticks(pm_start, now);
+        if (elapsed_pm as u64) >= target_pm_ticks { break; }
+        spins += 1;
+    }
+
+    let current_count = lapic_timer_read(LAPIC_TIMER_REG_CURRENT_COUNT);
+    lapic_timer_write(LAPIC_TIMER_REG_INITIAL_COUNT, 0);
+    if (elapsed_pm as u64) < target_pm_ticks { return false; }
+    if current_count >= 0xFFFFFFFF { return false; }
+
+    let elapsed_apic = 0xFFFFFFFF - current_count;
+    if elapsed_apic == 0 { return false; }
+
+    let numerator = (elapsed_apic as u64) * pm_frequency;
+    let apic_frequency = numerator / (elapsed_pm as u64);
+    if apic_frequency < 1000 { return false; }
+    let ticks_per_ms = (apic_frequency + 500) / 1000;
+    if ticks_per_ms == 0 || ticks_per_ms > 0xFFFFFFFF { return false; }
+
+    lapic_timer_write(LAPIC_TIMER_REG_DIVIDE, LAPIC_TIMER_DIVIDE_BY_16);
+    lapic_timer_write(
+        LAPIC_REG_LVT_TIMER,
+        LAPIC_TIMER_MASKED | LAPIC_TIMER_PERIODIC | (IRQ_VECTOR_TIMER as u32)
+    );
+    lapic_timer_write(LAPIC_TIMER_REG_INITIAL_COUNT, ticks_per_ms as u32);
+
+    unsafe {
+        LAPIC_TIMER_TICKS_PER_MS = ticks_per_ms as u32;
+        LAPIC_TIMER_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn lapic_timer_is_ready() -> bool { unsafe { return LAPIC_TIMER_READY; } }
+
+@system
+pub fn lapic_timer_ticks_per_ms() -> u32 { unsafe { return LAPIC_TIMER_TICKS_PER_MS; } }
+
+@system
+pub fn lapic_timer_unmask_periodic() -> bool {
+    if !lapic_timer_is_ready() { return false; }
+    lapic_timer_write(
+        LAPIC_REG_LVT_TIMER,
+        LAPIC_TIMER_PERIODIC | (IRQ_VECTOR_TIMER as u32)
+    );
+    return true;
+}
+
+@system
+pub fn lapic_timer_mask() -> void {
+    if !lapic_is_ready() { return; }
+    lapic_timer_write(
+        LAPIC_REG_LVT_TIMER,
+        LAPIC_TIMER_MASKED | LAPIC_TIMER_PERIODIC | (IRQ_VECTOR_TIMER as u32)
+    );
+}
