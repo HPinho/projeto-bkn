@@ -1,8 +1,8 @@
 // Baken OS - wrappers x86-64 privilegiados do backend Sotlas.
 //
 // Estes wrappers existem no grafo canônico para que o build produza e valide
-// as instruções reais. Carregar GDT/IDT/TSS ou substituir CR3 continua proibido
-// enquanto o kernel depender de UEFI Boot Services.
+// as instruções reais. Carregar GDT/IDT/TSS, substituir CR3 ou tocar MMIO só é
+// permitido pelo caminho pós-ExitBootServices que possui os mappings corretos.
 
 module kernel::arch::x86_64::cpu;
 
@@ -16,8 +16,6 @@ pub fn x86_lidt_raw(descriptor_address: u64) -> void {
     __lidt(descriptor_address);
 }
 
-// Ativação completa da GDT em long mode: LGDT + DS/ES/SS + recarga far de CS.
-// Deve ser chamada somente após ExitBootServices, numa stack própria válida.
 @system
 pub fn x86_gdt_activate_segments_raw(base: u64,
                                      limit: u16,
@@ -61,8 +59,16 @@ pub fn x86_invlpg(address: u64) -> void {
     __invlpg(address);
 }
 
-// Mecanismo genérico de arquitetura. A política de qual vetor usar e como
-// configurar o gate pertence à IDT do kernel, não ao backend Python.
+@system
+pub fn x86_mmio_read32(address: u64) -> u32 {
+    return __mmio_read32(address);
+}
+
+@system
+pub fn x86_mmio_write32(address: u64, value: u32) -> void {
+    __mmio_write32(address, value);
+}
+
 @system
 pub fn x86_exception_stub_address(vector: u16) -> u64 {
     return __exception_stub_address(vector);
