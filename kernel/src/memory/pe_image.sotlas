@@ -1,0 +1,194 @@
+// Baken OS — parser read-only da imagem PE32+ carregada pelo UEFI.
+//
+// O objetivo é permitir que as page tables de transição deixem de tratar a
+// imagem inteira como RWX. Este módulo somente valida headers e expõe as
+// características das seções; não altera a imagem, page tables, CR3 ou firmware.
+
+module kernel::memory::pe_image;
+
+pub const PE_DOS_MAGIC: u16 = 0x5A4D;
+pub const PE_SIGNATURE: u32 = 0x00004550;
+pub const PE_MACHINE_AMD64: u16 = 0x8664;
+pub const PE32_PLUS_MAGIC: u16 = 0x020B;
+pub const PE_SECTION_HEADER_SIZE: u64 = 40;
+pub const PE_MAX_SECTION_COUNT: u16 = 96;
+
+pub const PE_SCN_MEM_EXECUTE: u32 = 0x20000000;
+pub const PE_SCN_MEM_READ: u32 = 0x40000000;
+pub const PE_SCN_MEM_WRITE: u32 = 0x80000000;
+
+pub struct PeImageInfo {
+    pub image_base: u64;
+    pub loaded_size: u64;
+    pub section_table_offset: u64;
+    pub section_count: u16;
+    pub size_of_image: u32;
+    pub size_of_headers: u32;
+    pub valid: bool;
+}
+
+pub struct PeSectionInfo {
+    pub virtual_address: u32;
+    pub virtual_size: u32;
+    pub raw_size: u32;
+    pub characteristics: u32;
+    pub readable: bool;
+    pub writable: bool;
+    pub executable: bool;
+    pub valid: bool;
+}
+
+@system
+fn pe_range_valid(size: u64, offset: u64, width: u64) -> bool {
+    if width == 0 || offset > size { return false; }
+    let end = offset + width;
+    if end < offset || end > size { return false; }
+    return true;
+}
+
+@system
+fn pe_read_u16(base: *const u8, size: u64, offset: u64) -> u16 {
+    if base == (null as *const u8) || !pe_range_valid(size, offset, 2) { return 0; }
+    unsafe {
+        let address = (base as usize) + (offset as usize);
+        if address < (base as usize) { return 0; }
+        let p0 = address as *const u8;
+        let p1 = (address + 1) as *const u8;
+        return (*p0 as u16) | ((*p1 as u16) << 8);
+    }
+}
+
+@system
+fn pe_read_u32(base: *const u8, size: u64, offset: u64) -> u32 {
+    if base == (null as *const u8) || !pe_range_valid(size, offset, 4) { return 0; }
+    unsafe {
+        let address = (base as usize) + (offset as usize);
+        if address < (base as usize) { return 0; }
+        let p0 = address as *const u8;
+        let p1 = (address + 1) as *const u8;
+        let p2 = (address + 2) as *const u8;
+        let p3 = (address + 3) as *const u8;
+        return (*p0 as u32) |
+            ((*p1 as u32) << 8) |
+            ((*p2 as u32) << 16) |
+            ((*p3 as u32) << 24);
+    }
+}
+
+@system
+pub fn pe_image_invalid() -> PeImageInfo {
+    return PeImageInfo {
+        image_base: 0,
+        loaded_size: 0,
+        section_table_offset: 0,
+        section_count: 0,
+        size_of_image: 0,
+        size_of_headers: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn pe_section_invalid() -> PeSectionInfo {
+    return PeSectionInfo {
+        virtual_address: 0,
+        virtual_size: 0,
+        raw_size: 0,
+        characteristics: 0,
+        readable: false,
+        writable: false,
+        executable: false,
+        valid: false
+    };
+}
+
+@system
+pub fn pe_image_parse(base: *const u8, loaded_size: u64) -> PeImageInfo {
+    if base == (null as *const u8) || loaded_size < 64 { return pe_image_invalid(); }
+    if pe_read_u16(base, loaded_size, 0) != PE_DOS_MAGIC { return pe_image_invalid(); }
+
+    let pe_offset = pe_read_u32(base, loaded_size, 0x3C) as u64;
+    if !pe_range_valid(loaded_size, pe_offset, 24) { return pe_image_invalid(); }
+    if pe_read_u32(base, loaded_size, pe_offset) != PE_SIGNATURE { return pe_image_invalid(); }
+    if pe_read_u16(base, loaded_size, pe_offset + 4) != PE_MACHINE_AMD64 {
+        return pe_image_invalid();
+    }
+
+    let section_count = pe_read_u16(base, loaded_size, pe_offset + 6);
+    if section_count == 0 || section_count > PE_MAX_SECTION_COUNT { return pe_image_invalid(); }
+
+    let optional_size = pe_read_u16(base, loaded_size, pe_offset + 20) as u64;
+    let optional_offset = pe_offset + 24;
+    if optional_offset < pe_offset || optional_size < 64 {
+        return pe_image_invalid();
+    }
+    if !pe_range_valid(loaded_size, optional_offset, optional_size) {
+        return pe_image_invalid();
+    }
+    if pe_read_u16(base, loaded_size, optional_offset) != PE32_PLUS_MAGIC {
+        return pe_image_invalid();
+    }
+
+    let size_of_image = pe_read_u32(base, loaded_size, optional_offset + 56);
+    let size_of_headers = pe_read_u32(base, loaded_size, optional_offset + 60);
+    if size_of_image == 0 || size_of_headers == 0 { return pe_image_invalid(); }
+    if (size_of_image as u64) > loaded_size { return pe_image_invalid(); }
+    if size_of_headers > size_of_image { return pe_image_invalid(); }
+
+    let section_table_offset = optional_offset + optional_size;
+    if section_table_offset < optional_offset { return pe_image_invalid(); }
+    let section_bytes = (section_count as u64) * PE_SECTION_HEADER_SIZE;
+    if (section_bytes / PE_SECTION_HEADER_SIZE) != (section_count as u64) {
+        return pe_image_invalid();
+    }
+    if !pe_range_valid(loaded_size, section_table_offset, section_bytes) {
+        return pe_image_invalid();
+    }
+
+    return PeImageInfo {
+        image_base: base as u64,
+        loaded_size: loaded_size,
+        section_table_offset: section_table_offset,
+        section_count: section_count,
+        size_of_image: size_of_image,
+        size_of_headers: size_of_headers,
+        valid: true
+    };
+}
+
+@system
+pub fn pe_image_section(base: *const u8,
+                        image: PeImageInfo,
+                        index: u16) -> PeSectionInfo {
+    if base == (null as *const u8) || !image.valid || index >= image.section_count {
+        return pe_section_invalid();
+    }
+
+    let offset = image.section_table_offset + ((index as u64) * PE_SECTION_HEADER_SIZE);
+    if offset < image.section_table_offset || !pe_range_valid(image.loaded_size, offset, PE_SECTION_HEADER_SIZE) {
+        return pe_section_invalid();
+    }
+
+    let virtual_size = pe_read_u32(base, image.loaded_size, offset + 8);
+    let virtual_address = pe_read_u32(base, image.loaded_size, offset + 12);
+    let raw_size = pe_read_u32(base, image.loaded_size, offset + 16);
+    let characteristics = pe_read_u32(base, image.loaded_size, offset + 36);
+    let mapped_size = if virtual_size > raw_size { virtual_size } else { raw_size };
+    if mapped_size == 0 { return pe_section_invalid(); }
+
+    let section_end = (virtual_address as u64) + (mapped_size as u64);
+    if section_end <= (virtual_address as u64) || section_end > (image.size_of_image as u64) {
+        return pe_section_invalid();
+    }
+
+    return PeSectionInfo {
+        virtual_address: virtual_address,
+        virtual_size: virtual_size,
+        raw_size: raw_size,
+        characteristics: characteristics,
+        readable: (characteristics & PE_SCN_MEM_READ) != 0,
+        writable: (characteristics & PE_SCN_MEM_WRITE) != 0,
+        executable: (characteristics & PE_SCN_MEM_EXECUTE) != 0,
+        valid: true
+    };
+}
