@@ -21,6 +21,8 @@
 #define BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID          (1ULL << 1)
 #define BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID           (1ULL << 2)
 #define BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID    (1ULL << 3)
+#define BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID        (1ULL << 4)
+#define BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID    (1ULL << 5)
 
 typedef struct {
     /* ABI legado congelado (offsets 0..79). */
@@ -45,12 +47,22 @@ typedef struct {
     uint32_t pixel_format;
     void *acpi_rsdp;
 
-    /* Reserva bootstrap page-aligned para page tables próprias. O endereço
-     * físico será gravado nas entries/CR3; o alias virtual é válido somente
-     * sob o address space herdado durante a transição e nunca é inferido do PA. */
+    /* Reserva bootstrap page-aligned para page tables próprias. */
     uint64_t page_table_arena_physical_base;
     void *page_table_arena_virtual_base;
     uint64_t page_table_arena_page_count;
+
+    /* Endereço real da imagem PE/COFF entregue pelo Loaded Image Protocol.
+     * Mantemos PA e alias temporário separados mesmo enquanto seus valores
+     * coincidem no address space de bootstrap. */
+    uint64_t loaded_image_physical_base;
+    void *loaded_image_virtual_base;
+    uint64_t loaded_image_size;
+
+    /* Stack pertencente ao Baken e reservada antes do Memory Map final. */
+    uint64_t transition_stack_physical_base;
+    void *transition_stack_virtual_base;
+    uint64_t transition_stack_page_count;
 } BakenBootInfo;
 
 _Static_assert(offsetof(BakenBootInfo, framebuffer_base) == 0, "handoff framebuffer deslocado");
@@ -66,6 +78,12 @@ _Static_assert(offsetof(BakenBootInfo, acpi_rsdp) == 112, "ACPI RSDP deslocada")
 _Static_assert(offsetof(BakenBootInfo, page_table_arena_physical_base) == 120, "PA da arena deslocado");
 _Static_assert(offsetof(BakenBootInfo, page_table_arena_virtual_base) == 128, "VA da arena deslocado");
 _Static_assert(offsetof(BakenBootInfo, page_table_arena_page_count) == 136, "contagem da arena deslocada");
-_Static_assert(sizeof(BakenBootInfo) == 144, "handoff BakenBootInfo v2 x86_64 inválido");
+_Static_assert(offsetof(BakenBootInfo, loaded_image_physical_base) == 144, "PA da imagem deslocado");
+_Static_assert(offsetof(BakenBootInfo, loaded_image_virtual_base) == 152, "VA da imagem deslocado");
+_Static_assert(offsetof(BakenBootInfo, loaded_image_size) == 160, "tamanho da imagem deslocado");
+_Static_assert(offsetof(BakenBootInfo, transition_stack_physical_base) == 168, "PA da stack deslocado");
+_Static_assert(offsetof(BakenBootInfo, transition_stack_virtual_base) == 176, "VA da stack deslocado");
+_Static_assert(offsetof(BakenBootInfo, transition_stack_page_count) == 184, "contagem da stack deslocada");
+_Static_assert(sizeof(BakenBootInfo) == 192, "handoff BakenBootInfo v2 x86_64 inválido");
 
 #endif
