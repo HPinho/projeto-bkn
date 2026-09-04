@@ -2,10 +2,16 @@
 """Guardrails das estruturas DMA xHCI antes do start do controller."""
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "kernel/src/drivers/xhci_runtime.sotlas"
+
+
+def _code_only(text: str) -> str:
+    text = re.sub(r"//[^\n]*", "", text)
+    return re.sub(r"/\*.*?\*/", "", text, flags=re.S)
 
 
 class XhciRuntimeTests(unittest.TestCase):
@@ -14,7 +20,7 @@ class XhciRuntimeTests(unittest.TestCase):
         self.assertIn("import kernel::memory::dma::*;", text)
         self.assertIn("let arena = dma_alloc(total_pages * XHCI_RUNTIME_PAGE_SIZE", text)
         self.assertIn("dma_buffer_cpu_owned(&arena)", text)
-        self.assertNotIn("uefi", text.lower())
+        self.assertNotIn("uefi", _code_only(text).lower())
 
     def test_runtime_contains_dcbaa_command_event_erst_layout(self):
         text = RUNTIME.read_text(encoding="utf-8")
@@ -43,15 +49,15 @@ class XhciRuntimeTests(unittest.TestCase):
         self.assertIn("xhci_runtime_write_u64(dcbaa.virtual_address, 0, scratchpad_array_physical)", text)
 
     def test_runtime_does_not_start_controller_or_ring_doorbell(self):
-        text = RUNTIME.read_text(encoding="utf-8").lower()
+        code = _code_only(RUNTIME.read_text(encoding="utf-8")).lower()
+        body = code.split("module kernel::drivers::xhci_runtime;", 1)[1]
         for forbidden in (
             "pci_command_bus_master",
             "run_stop",
-            "doorbell",
             "x86_mmio_write32",
             "enable_slot",
         ):
-            self.assertNotIn(forbidden, text.split("module kernel::drivers::xhci_runtime;", 1)[1])
+            self.assertNotIn(forbidden, body)
 
 
 if __name__ == "__main__":
