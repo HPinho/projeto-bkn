@@ -11,18 +11,22 @@ import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::memory::mmu_activate::*;
+import kernel::memory::direct_map::*;
 import kernel::arch::x86_64::paging::*;
 
 @repr(C)
 pub struct PostCutoverContext {
     pub root_physical: u64;
     pub stack_top: u64;
+    // Framebuffer permanece identidade-mapeado explicitamente durante o primeiro cutover.
     pub framebuffer_base: u64;
     pub framebuffer_size: u64;
     pub screen_width: u32;
     pub screen_height: u32;
     pub pixels_per_scanline: u32;
     pub reserved0: u32;
+    // Estes dois campos são endereços físicos de handoff. Após CR3, consumidores
+    // devem usar os aliases altos abaixo, nunca dereferenciar os valores crus.
     pub memory_map_base: u64;
     pub memory_map_size: u64;
     pub memory_descriptor_size: u64;
@@ -31,6 +35,26 @@ pub struct PostCutoverContext {
 }
 
 static mut POST_CUTOVER_CPU_TABLES_ACTIVE: bool = false;
+
+@system
+pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
+    if context == (null as *const PostCutoverContext) || context.memory_map_base == 0 {
+        return null as *const u8;
+    }
+    let virtual_address = direct_map_virtual_address(context.memory_map_base);
+    if virtual_address == 0 { return null as *const u8; }
+    return virtual_address as *const u8;
+}
+
+@system
+pub fn post_cutover_acpi_rsdp_virtual(context: *const PostCutoverContext) -> *const u8 {
+    if context == (null as *const PostCutoverContext) || context.acpi_rsdp == 0 {
+        return null as *const u8;
+    }
+    let virtual_address = direct_map_virtual_address(context.acpi_rsdp);
+    if virtual_address == 0 { return null as *const u8; }
+    return virtual_address as *const u8;
+}
 
 @system
 pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
@@ -43,6 +67,8 @@ pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
     if context.pixels_per_scanline < context.screen_width { return false; }
     if context.memory_map_base == 0 || context.memory_map_size == 0 { return false; }
     if context.memory_descriptor_size < 40 { return false; }
+    if post_cutover_memory_map_virtual(context) == (null as *const u8) { return false; }
+    if context.acpi_rsdp != 0 && post_cutover_acpi_rsdp_virtual(context) == (null as *const u8) { return false; }
     return true;
 }
 
