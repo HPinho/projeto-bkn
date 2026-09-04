@@ -10,15 +10,15 @@ CPU = ROOT / "kernel" / "src" / "arch" / "x86_64" / "cpu.sotlas"
 
 
 class PreExitCpuSafetyTests(unittest.TestCase):
-    def test_kernel_entry_does_not_activate_descriptor_tables_yet(self):
+    def test_kernel_entry_does_not_activate_descriptor_tables_or_cr3_yet(self):
         text = MAIN.read_text(encoding="utf-8")
         body = text.split("pub fn baken_kernel_main", 1)[1]
-        self.assertNotIn("x86_lgdt_raw(", body)
-        self.assertNotIn("x86_lidt_raw(", body)
-        self.assertNotIn("x86_ltr_raw(", body)
-        self.assertNotIn("__lgdt(", body)
-        self.assertNotIn("__lidt(", body)
-        self.assertNotIn("__ltr(", body)
+        for token in (
+            "x86_lgdt_raw(", "x86_lidt_raw(", "x86_ltr_raw(",
+            "x86_write_cr3_raw(", "__lgdt(", "__lidt(", "__ltr(", "__write_cr3(",
+        ):
+            with self.subTest(token=token):
+                self.assertNotIn(token, body)
 
     def test_raw_privileged_wrappers_are_isolated_in_arch_module(self):
         text = CPU.read_text(encoding="utf-8")
@@ -26,6 +26,8 @@ class PreExitCpuSafetyTests(unittest.TestCase):
         self.assertIn("__lidt(descriptor_address)", text)
         self.assertIn("__ltr(selector)", text)
         self.assertIn("return __read_cr2()", text)
+        self.assertIn("return __read_cr3()", text)
+        self.assertIn("__write_cr3(root_physical)", text)
         self.assertIn("__invlpg(address)", text)
 
 
