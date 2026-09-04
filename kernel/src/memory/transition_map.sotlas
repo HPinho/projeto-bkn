@@ -1,0 +1,72 @@
+// Baken OS — mappings mínimos para sobreviver à futura troca de CR3.
+//
+// A imagem PE/COFF carregada pelo firmware e a stack de transição precisam
+// continuar acessíveis no MESMO endereço virtual imediatamente após CR3 mudar.
+// Este módulo materializa somente esse alias identidade temporário, usando
+// páginas de 4 KiB para aceitar bases/tamanhos arbitrários.
+//
+// O caller escolhe permissões: a imagem pode permanecer executável durante o
+// corte; a stack deve ser RW+NX. O módulo não toca CR3, TLB, UEFI ou PMM.
+
+module kernel::memory::transition_map;
+
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_mapper::*;
+import kernel::arch::x86_64::paging::*;
+
+pub struct TransitionMapStats {
+    pub mapped_page_count: u64;
+    pub mapped_start: u64;
+    pub mapped_end: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn transition_map_stats_invalid() -> TransitionMapStats {
+    return TransitionMapStats {
+        mapped_page_count: 0,
+        mapped_start: 0,
+        mapped_end: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn transition_map_identity_range(arena: *mut PageTableArena,
+                                     root: PageTablePage,
+                                     address: u64,
+                                     size: u64,
+                                     flags: u64) -> TransitionMapStats {
+    if arena == (null as *mut PageTableArena) { return transition_map_stats_invalid(); }
+    if !root.valid || address == 0 || size == 0 { return transition_map_stats_invalid(); }
+
+    let last_byte = address + size - 1;
+    if last_byte < address { return transition_map_stats_invalid(); }
+
+    let mapped_start = x86_page_align_down(address);
+    let mapped_end = x86_page_align_up(last_byte + 1);
+    if mapped_start == 0 || mapped_end == 0 || mapped_end <= mapped_start {
+        return transition_map_stats_invalid();
+    }
+
+    // Huge-page nunca é aceita aqui: imagem e stack de transição são ranges
+    // pequenos e podem ter bordas não alinhadas a 2 MiB.
+    let clean_flags = (flags | X86_PTE_PRESENT) & ~X86_PTE_HUGE;
+    let mut cursor = mapped_start;
+    let mut mapped_page_count: u64 = 0;
+
+    while cursor < mapped_end {
+        if !page_table_map_4k(arena, root, cursor, cursor, clean_flags) {
+            return transition_map_stats_invalid();
+        }
+        cursor += X86_PAGE_SIZE;
+        mapped_page_count += 1;
+    }
+
+    return TransitionMapStats {
+        mapped_page_count: mapped_page_count,
+        mapped_start: mapped_start,
+        mapped_end: mapped_end,
+        valid: mapped_page_count > 0
+    };
+}
