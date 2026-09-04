@@ -74,11 +74,14 @@ class InterruptEnableGateTests(unittest.TestCase):
         self.assertIn("interrupt_route_keyboard(IRQ_VECTOR_KEYBOARD)", body)
         self.assertLess(body.index("x86_cli_raw()"), body.index("i8042_initialize_polling()"))
 
-    def test_keyboard_route_is_changed_under_cli_and_only_irq1_is_unmasked(self):
+    def test_keyboard_gate_enables_irq1_only_at_controller_and_ioapic(self):
         text = GATE.read_text(encoding="utf-8")
         body = text.split("pub fn interrupt_enable_keyboard_after_timer()", 1)[1].split(
             "pub fn keyboard_interrupt_enabled()", 1
         )[0]
+        self.assertIn("i8042_enable_keyboard_irq_only()", body)
+        self.assertIn("i8042_keyboard_irq_enabled()", body)
+        self.assertIn("i8042_aux_irq_enabled()", body)
         self.assertLess(body.index("x86_cli_raw()"), body.index("ioapic_program_route_unmasked"))
         self.assertLess(body.index("ioapic_program_route_unmasked"), body.rindex("x86_sti_raw()"))
         self.assertNotIn("interrupt_route_ps2_mouse", body)
