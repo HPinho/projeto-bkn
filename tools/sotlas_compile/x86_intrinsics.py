@@ -56,6 +56,30 @@ static inline void __cpu_pause(void) {
 }
 
 /*
+ * ABI terminal de troca de stack pós-cutover (Windows x64 / PE32+):
+ *   RCX = novo topo da stack
+ *   RDX = argumento entregue em RCX à continuação Sotlas
+ *
+ * O trampoline descarta a stack antiga, realinha RSP, reserva os 32 bytes de
+ * shadow space exigidos pelo ABI e chama um callback genérico do frontend.
+ * A continuação não deve retornar; se retornar, a CPU entra em HLT terminal.
+ */
+extern void sotlas_x86_post_cutover_entry(uint64_t argument);
+__attribute__((naked, noreturn, unused)) static void
+__stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
+    __asm__(
+        "movq %rcx, %rsp\n\t"
+        "andq $-16, %rsp\n\t"
+        "movq %rdx, %rcx\n\t"
+        "subq $32, %rsp\n\t"
+        "call sotlas_x86_post_cutover_entry\n\t"
+        "cli\n\t"
+        "1: hlt\n\t"
+        "jmp 1b\n\t"
+    );
+}
+
+/*
  * Exception entry ABI (fase inicial, terminal):
  *
  *   rsp + 0  = vector
@@ -207,6 +231,11 @@ def install(bootstrap) -> None:
         "__write_cr3": Function(
             "__write_cr3", [("value", Type("u64"))], Type("void"), [],
             public=True, attributes=["@system"],
+        ),
+        "__stack_switch_to_post_cutover": Function(
+            "__stack_switch_to_post_cutover",
+            [("stack_top", Type("u64")), ("argument", Type("u64"))],
+            Type("void"), [], public=True, attributes=["@system"],
         ),
         "__invlpg": Function(
             "__invlpg", [("address", Type("u64"))], Type("void"), [],
