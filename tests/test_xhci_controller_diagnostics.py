@@ -18,6 +18,21 @@ class XhciControllerDiagnosticTests(unittest.TestCase):
         ]:
             self.assertIn(f"xhci_controller_checkpoint({stage}, {marker} as u8)", text)
 
+    def test_capability_parameter_subcheckpoints_are_ordered(self):
+        text = CONTROLLER.read_text(encoding="utf-8")
+        sequence = [
+            "xhci_controller_checkpoint(50, 'g' as u8)",
+            "xhci_controller_checkpoint(51, 'r' as u8)",
+            "xhci_controller_checkpoint(52, 's' as u8)",
+            "xhci_controller_checkpoint(53, 'p' as u8)",
+            "xhci_controller_checkpoint(54, 'h' as u8)",
+            "xhci_controller_checkpoint(55, 'j' as u8)",
+        ]
+        offsets = [text.index(item) for item in sequence]
+        self.assertEqual(offsets, sorted(offsets))
+        self.assertLess(text.index("if max_slots == 0"), offsets[2])
+        self.assertLess(text.index("if max_ports == 0"), offsets[3])
+
     def test_reset_checkpoint_is_after_handoff_and_pagesize(self):
         text = CONTROLLER.read_text(encoding="utf-8")
         handoff = text.index("xhci_legacy_handoff(mmio, hccparams1)")
