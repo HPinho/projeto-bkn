@@ -164,7 +164,7 @@ pub fn xhci_hid_context_prepare() -> bool {
 
     // Add Context flag bit n seleciona o Device Context Index n.
     let add_flags_offset: u64 = 4;
-    let add_flag = 1u32 << (dci as u32);
+    let add_flag = 1 << (dci as u32);
     unsafe {
         let current = *(((input as usize) + (add_flags_offset as usize)) as *const u32);
         if !xhci_hid_context_write32(input, add_flags_offset, current | add_flag) { return false; }
@@ -175,7 +175,7 @@ pub fn xhci_hid_context_prepare() -> bool {
     unsafe {
         let slot_dw0_ptr = ((input as usize) + (slot_offset as usize)) as *const u32;
         let slot_dw0 = *slot_dw0_ptr;
-        let cleared = slot_dw0 & ~(0x1Fu32 << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
+        let cleared = slot_dw0 & ~(0x1F << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
         if !xhci_hid_context_write32(
             input,
             slot_offset,
