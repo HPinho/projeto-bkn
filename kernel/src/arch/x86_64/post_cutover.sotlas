@@ -1,7 +1,7 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
-// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs -> timer live.
-// Só o LAPIC timer é desmascarado antes do STI; teclado/mouse continuam mascarados.
+// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
+// -> LAPIC timer live -> IRQ1 teclado live. Mouse/IRQ12 permanece mascarado.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -26,6 +26,7 @@ import kernel::interrupts::lapic_timer::*;
 import kernel::interrupts::interrupt_enable::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
+pub const POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS: u64 = 10000;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -55,6 +56,7 @@ static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
 static mut POST_CUTOVER_IRQS_READY: bool = false;
 static mut POST_CUTOVER_TIMER_READY: bool = false;
 static mut POST_CUTOVER_TIMER_LIVE: bool = false;
+static mut POST_CUTOVER_KEYBOARD_LIVE: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -209,6 +211,7 @@ pub fn post_cutover_prepare_timer() -> bool {
     unsafe {
         POST_CUTOVER_TIMER_READY = true;
         POST_CUTOVER_TIMER_LIVE = false;
+        POST_CUTOVER_KEYBOARD_LIVE = false;
     }
     return true;
 }
@@ -218,6 +221,9 @@ pub fn post_cutover_timer_ready() -> bool { unsafe { return POST_CUTOVER_TIMER_R
 
 @system
 pub fn post_cutover_timer_live() -> bool { unsafe { return POST_CUTOVER_TIMER_LIVE; } }
+
+@system
+pub fn post_cutover_keyboard_live() -> bool { unsafe { return POST_CUTOVER_KEYBOARD_LIVE; } }
 
 // Abre apenas a fonte local do LAPIC timer e exige prova de uma IRQ entregue
 // pelo dispatcher. Se o contador não avançar, fecha novamente STI/LVT e falha.
@@ -241,6 +247,33 @@ pub fn post_cutover_enable_timer_interrupts() -> bool {
 
     interrupt_disable_all();
     return false;
+}
+
+// IRQ1 só é considerada live quando o dispatcher realmente receber ao menos
+// um vetor 0x41. O próprio LAPIC timer fornece o timeout, evitando espera cega.
+@system
+pub fn post_cutover_enable_keyboard_interrupts() -> bool {
+    unsafe { POST_CUTOVER_KEYBOARD_LIVE = false; }
+    if !post_cutover_timer_live() || !external_interrupts_enabled() { return false; }
+
+    let keyboard_before = irq_keyboard_count();
+    let timer_start = irq_timer_count();
+    if !interrupt_enable_keyboard_after_timer() || !keyboard_interrupt_enabled() {
+        return false;
+    }
+
+    loop {
+        if irq_keyboard_count() != keyboard_before {
+            unsafe { POST_CUTOVER_KEYBOARD_LIVE = true; }
+            return true;
+        }
+
+        let timer_now = irq_timer_count();
+        if timer_now < timer_start || (timer_now - timer_start) >= POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS {
+            interrupt_disable_all();
+            return false;
+        }
+    }
 }
 
 @system
@@ -271,10 +304,14 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_prepare_timer() { loop {} }
     if serial_ready { x86_serial_write_timer_ready_marker(); }
 
-    // Primeiro marco com interrupções realmente live. O marcador T só aparece
-    // depois que o vetor 0x40 foi entregue, o contador avançou e o ISR enviou EOI.
+    // T só aparece depois de uma interrupção LAPIC real + EOI.
     if !post_cutover_enable_timer_interrupts() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('T' as u8); }
+
+    // K só aparece depois de uma IRQ1 real, drenada pelo i8042 e reconhecida
+    // pelo dispatcher. IRQ12 continua mascarada no IOAPIC nesta etapa.
+    if !post_cutover_enable_keyboard_interrupts() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('K' as u8); }
 
     loop {}
 }
