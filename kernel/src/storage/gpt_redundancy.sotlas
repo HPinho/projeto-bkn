@@ -1,0 +1,249 @@
+// Baken OS — validação nativa da redundância GPT primary/backup.
+//
+// Este gate é somente leitura. Ele relê o backup Header já provado, valida o
+// primary Header no LBA1, compara a geometria/GUID/CRC publicados pelos dois
+// headers e percorre o primary Partition Entry Array pelo Block Device API.
+// Nenhuma UEFI Block I/O ou escrita de armazenamento participa deste caminho.
+
+module kernel::storage::gpt_redundancy;
+
+import kernel::arch::x86_64::serial::*;
+import kernel::storage::crc32::*;
+import kernel::storage::block_device::*;
+import kernel::memory::dma::*;
+
+pub const GPT_REDUNDANCY_HEADER_MIN_SIZE: u32 = 92;
+pub const GPT_REDUNDANCY_REVISION_1_0: u32 = 0x00010000;
+pub const GPT_REDUNDANCY_BLOCK_SIZE: u32 = 512;
+pub const GPT_REDUNDANCY_BUFFER_SIZE: u64 = 4096;
+pub const GPT_PRIMARY_HEADER_LBA: u64 = 1;
+pub const GPT_PRIMARY_ENTRIES_MIN_LBA: u64 = 2;
+
+static mut GPT_REDUNDANCY_READY: bool = false;
+static mut GPT_PRIMARY_ENTRIES_LBA: u64 = 0;
+static mut GPT_PRIMARY_ENTRIES_CRC32_COMPUTED: u32 = 0;
+static mut GPT_REDUNDANCY_SECTOR: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+
+@system
+fn gpt_redundancy_read_u32(base: *const u8, offset: usize) -> u32 {
+    if base == (null as *const u8) { return 0; }
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn gpt_redundancy_read_u64(base: *const u8, offset: usize) -> u64 {
+    if base == (null as *const u8) { return 0; }
+    let low = gpt_redundancy_read_u32(base, offset) as u64;
+    let high = gpt_redundancy_read_u32(base, offset + 4) as u64;
+    return low | (high << 32);
+}
+
+@system
+fn gpt_redundancy_div_ceil(value: u64, divisor: u64) -> u64 {
+    if divisor == 0 { return 0; }
+    return (value + divisor - 1) / divisor;
+}
+
+@system
+fn gpt_redundancy_sector_buffer() -> *mut u8 {
+    unsafe {
+        if dma_buffer_cpu_owned(&GPT_REDUNDANCY_SECTOR) {
+            return GPT_REDUNDANCY_SECTOR.virtual_address;
+        }
+    }
+    let buffer = dma_alloc(GPT_REDUNDANCY_BUFFER_SIZE, DMA_DEFAULT_ALIGNMENT);
+    if !dma_buffer_cpu_owned(&buffer) { return null as *mut u8; }
+    unsafe {
+        GPT_REDUNDANCY_SECTOR = buffer;
+        return GPT_REDUNDANCY_SECTOR.virtual_address;
+    }
+}
+
+@system
+fn gpt_redundancy_signature_valid(base: *const u8) -> bool {
+    if base == (null as *const u8) { return false; }
+    unsafe {
+        return *base == ('E' as u8) &&
+            *(((base as usize) + 1) as *const u8) == ('F' as u8) &&
+            *(((base as usize) + 2) as *const u8) == ('I' as u8) &&
+            *(((base as usize) + 3) as *const u8) == (' ' as u8) &&
+            *(((base as usize) + 4) as *const u8) == ('P' as u8) &&
+            *(((base as usize) + 5) as *const u8) == ('A' as u8) &&
+            *(((base as usize) + 6) as *const u8) == ('R' as u8) &&
+            *(((base as usize) + 7) as *const u8) == ('T' as u8);
+    }
+}
+
+@system
+fn gpt_redundancy_header_crc_valid(sector: *mut u8) -> bool {
+    if sector == (null as *mut u8) || !gpt_redundancy_signature_valid(sector as *const u8) {
+        return false;
+    }
+    let base = sector as *const u8;
+    let revision = gpt_redundancy_read_u32(base, 8);
+    let header_size = gpt_redundancy_read_u32(base, 12);
+    let expected_crc = gpt_redundancy_read_u32(base, 16);
+    let reserved = gpt_redundancy_read_u32(base, 20);
+    if revision != GPT_REDUNDANCY_REVISION_1_0 ||
+       header_size < GPT_REDUNDANCY_HEADER_MIN_SIZE ||
+       header_size > GPT_REDUNDANCY_BLOCK_SIZE || expected_crc == 0 || reserved != 0 {
+        return false;
+    }
+
+    unsafe {
+        let crc0 = ((sector as usize) + 16) as *mut u8;
+        let crc1 = ((sector as usize) + 17) as *mut u8;
+        let crc2 = ((sector as usize) + 18) as *mut u8;
+        let crc3 = ((sector as usize) + 19) as *mut u8;
+        let saved0 = *crc0;
+        let saved1 = *crc1;
+        let saved2 = *crc2;
+        let saved3 = *crc3;
+        *crc0 = 0;
+        *crc1 = 0;
+        *crc2 = 0;
+        *crc3 = 0;
+        let computed = crc32_ieee(base, header_size as usize);
+        *crc0 = saved0;
+        *crc1 = saved1;
+        *crc2 = saved2;
+        *crc3 = saved3;
+        return computed == expected_crc;
+    }
+}
+
+// Executado somente depois que o backup Header e o backup Entry Array já
+// passaram seus próprios gates. O STEP=n só aparece após os dois headers e os
+// dois arrays serem coerentes entre si no disco real visto pelo driver.
+@system
+pub fn gpt_probe_primary_backup_redundancy(
+    expected_last_lba: u64,
+    expected_first_usable: u64,
+    expected_last_usable: u64,
+    expected_backup_entries_lba: u64,
+    expected_entry_count: u32,
+    expected_entry_size: u32,
+    expected_entries_crc32: u32
+) -> bool {
+    unsafe {
+        GPT_REDUNDANCY_READY = false;
+        GPT_PRIMARY_ENTRIES_LBA = 0;
+        GPT_PRIMARY_ENTRIES_CRC32_COMPUTED = 0;
+    }
+
+    if !block_device_has_native_target() || block_device_block_size() != GPT_REDUNDANCY_BLOCK_SIZE {
+        return false;
+    }
+    if expected_last_lba < 16 || block_device_last_lba() != expected_last_lba ||
+       expected_first_usable < GPT_PRIMARY_ENTRIES_MIN_LBA ||
+       expected_first_usable > expected_last_usable ||
+       expected_entry_count == 0 || expected_entry_size < 128 ||
+       (expected_entry_size % 8) != 0 { return false; }
+
+    let sector = gpt_redundancy_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+
+    // Backup Header: reler e capturar os campos que devem ser espelhados.
+    if !block_device_read_sector(expected_last_lba, sector) ||
+       !gpt_redundancy_header_crc_valid(sector) { return false; }
+    let backup = sector as *const u8;
+    let backup_current = gpt_redundancy_read_u64(backup, 24);
+    let backup_peer = gpt_redundancy_read_u64(backup, 32);
+    let backup_first = gpt_redundancy_read_u64(backup, 40);
+    let backup_last = gpt_redundancy_read_u64(backup, 48);
+    let backup_guid0 = gpt_redundancy_read_u32(backup, 56);
+    let backup_guid1 = gpt_redundancy_read_u32(backup, 60);
+    let backup_guid2 = gpt_redundancy_read_u32(backup, 64);
+    let backup_guid3 = gpt_redundancy_read_u32(backup, 68);
+    let backup_entries_lba = gpt_redundancy_read_u64(backup, 72);
+    let backup_entry_count = gpt_redundancy_read_u32(backup, 80);
+    let backup_entry_size = gpt_redundancy_read_u32(backup, 84);
+    let backup_entries_crc = gpt_redundancy_read_u32(backup, 88);
+
+    if backup_current != expected_last_lba || backup_peer != GPT_PRIMARY_HEADER_LBA ||
+       backup_first != expected_first_usable || backup_last != expected_last_usable ||
+       backup_entries_lba != expected_backup_entries_lba ||
+       backup_entry_count != expected_entry_count || backup_entry_size != expected_entry_size ||
+       backup_entries_crc != expected_entries_crc32 { return false; }
+
+    // Primary Header: current/backup são invertidos; GUID, usable range e
+    // descrição do Partition Entry Array devem concordar com o backup.
+    if !block_device_read_sector(GPT_PRIMARY_HEADER_LBA, sector) ||
+       !gpt_redundancy_header_crc_valid(sector) { return false; }
+    let primary = sector as *const u8;
+    let primary_current = gpt_redundancy_read_u64(primary, 24);
+    let primary_peer = gpt_redundancy_read_u64(primary, 32);
+    let primary_first = gpt_redundancy_read_u64(primary, 40);
+    let primary_last = gpt_redundancy_read_u64(primary, 48);
+    let primary_entries_lba = gpt_redundancy_read_u64(primary, 72);
+    let primary_entry_count = gpt_redundancy_read_u32(primary, 80);
+    let primary_entry_size = gpt_redundancy_read_u32(primary, 84);
+    let primary_entries_crc = gpt_redundancy_read_u32(primary, 88);
+
+    if primary_current != GPT_PRIMARY_HEADER_LBA || primary_peer != expected_last_lba ||
+       primary_first != backup_first || primary_last != backup_last ||
+       gpt_redundancy_read_u32(primary, 56) != backup_guid0 ||
+       gpt_redundancy_read_u32(primary, 60) != backup_guid1 ||
+       gpt_redundancy_read_u32(primary, 64) != backup_guid2 ||
+       gpt_redundancy_read_u32(primary, 68) != backup_guid3 ||
+       primary_entry_count != backup_entry_count ||
+       primary_entry_size != backup_entry_size ||
+       primary_entries_crc != backup_entries_crc { return false; }
+
+    let entries_bytes = (primary_entry_count as u64) * (primary_entry_size as u64);
+    let entries_blocks = gpt_redundancy_div_ceil(entries_bytes, GPT_REDUNDANCY_BLOCK_SIZE as u64);
+    if entries_bytes == 0 || entries_blocks == 0 ||
+       primary_entries_lba < GPT_PRIMARY_ENTRIES_MIN_LBA ||
+       primary_entries_lba >= primary_first ||
+       primary_entries_lba + entries_blocks > primary_first { return false; }
+
+    // Primary PEA: CRC calculado sobre os bytes exatos, não sobre padding.
+    let mut crc = crc32_ieee_begin();
+    let mut remaining = entries_bytes;
+    let mut block: u64 = 0;
+    while block < entries_blocks {
+        let lba = primary_entries_lba + block;
+        if lba >= primary_first || !block_device_read_sector(lba, sector) { return false; }
+        let bytes_this_sector = if remaining > (GPT_REDUNDANCY_BLOCK_SIZE as u64) {
+            GPT_REDUNDANCY_BLOCK_SIZE as u64
+        } else {
+            remaining
+        };
+        crc = crc32_ieee_update(crc, sector as *const u8, bytes_this_sector as usize);
+        remaining -= bytes_this_sector;
+        block += 1;
+    }
+    if remaining != 0 { return false; }
+    let computed = crc32_ieee_finish(crc);
+    if computed != primary_entries_crc || computed != expected_entries_crc32 { return false; }
+
+    unsafe {
+        GPT_PRIMARY_ENTRIES_LBA = primary_entries_lba;
+        GPT_PRIMARY_ENTRIES_CRC32_COMPUTED = computed;
+        GPT_REDUNDANCY_READY = true;
+    }
+    x86_serial_write_stage_marker('n' as u8);
+    return true;
+}
+
+@system
+pub fn gpt_redundancy_is_ready() -> bool { unsafe { return GPT_REDUNDANCY_READY; } }
+@system
+pub fn gpt_primary_entries_lba() -> u64 { unsafe { return GPT_PRIMARY_ENTRIES_LBA; } }
+@system
+pub fn gpt_primary_entries_crc32_computed() -> u32 {
+    unsafe { return GPT_PRIMARY_ENTRIES_CRC32_COMPUTED; }
+}
