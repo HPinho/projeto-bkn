@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 STAGE = ROOT / "kernel/src/drivers/xhci_configure_endpoint.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 
 
 class XhciConfigureEndpointTests(unittest.TestCase):
@@ -37,6 +38,25 @@ class XhciConfigureEndpointTests(unittest.TestCase):
         self.assertNotIn("set_configuration", text)
         self.assertNotIn("doorbell", text)
         self.assertNotIn("xhci_transfer_wait", text)
+
+    def test_post_cutover_activates_context_then_configure_endpoint_after_parser(self):
+        text = POST.read_text(encoding="utf-8")
+        helper = text.split("pub fn post_cutover_configure_first_usb_hid_endpoint()", 1)[1]
+        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        self.assertIn("xhci_configuration_is_ready()", helper)
+        self.assertIn("xhci_hid_context_prepare()", helper)
+        self.assertIn("xhci_hid_context_is_ready()", helper)
+        self.assertIn("xhci_configure_first_hid_endpoint()", helper)
+        self.assertIn("xhci_configure_endpoint_is_ready()", helper)
+        self.assertIn("xhci_configure_endpoint_dci() != dci", helper)
+
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        parser_pos = entry.index("post_cutover_parse_first_usb_hid_interface()")
+        configure_pos = entry.index("post_cutover_configure_first_usb_hid_endpoint()")
+        marker_pos = entry.index("x86_serial_write_stage_marker('L' as u8)")
+        self.assertLess(parser_pos, configure_pos)
+        self.assertLess(configure_pos, marker_pos)
+        self.assertNotIn("xhci_set_first_configuration()", entry)
 
     def test_main_registers_configure_endpoint_stage(self):
         text = MAIN.read_text(encoding="utf-8")
