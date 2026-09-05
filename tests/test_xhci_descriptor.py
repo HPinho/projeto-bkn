@@ -62,10 +62,26 @@ class XhciDescriptorTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
-    def test_full_descriptor_is_not_activated_before_probe_gate(self):
+    def test_full_descriptor_is_activated_only_after_ep0_reconciliation(self):
+        text = POST.read_text(encoding="utf-8")
+        self.assertIn("pub fn post_cutover_read_full_usb_device_descriptor()", text)
+        full = text.split("pub fn post_cutover_read_full_usb_device_descriptor()", 1)[1]
+        full = full.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        self.assertIn("xhci_evaluate_context_last_ep0_max_packet() != target", full)
+        self.assertIn("xhci_get_first_device_descriptor()", full)
+        self.assertIn("xhci_device_descriptor_is_ready()", full)
+        self.assertIn("xhci_device_usb_version() == 0", full)
+        self.assertIn("xhci_device_max_packet0() != raw_max_packet0", full)
+
+    def test_runtime_orders_probe_reconcile_then_full_descriptor(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
-        self.assertNotIn("xhci_get_first_device_descriptor()", body)
+        probe = body.index("post_cutover_probe_first_usb_descriptor()")
+        reconcile = body.index("post_cutover_reconcile_first_usb_ep0()")
+        full = body.index("post_cutover_read_full_usb_device_descriptor()")
+        self.assertLess(probe, reconcile)
+        self.assertLess(reconcile, full)
+        self.assertIn("x86_serial_write_stage_marker('F' as u8)", body)
 
     def test_stage_does_not_cross_into_configuration_or_hid(self):
         text = DESC.read_text(encoding="utf-8").lower()
