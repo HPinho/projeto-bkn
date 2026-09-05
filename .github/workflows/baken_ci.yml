@@ -59,8 +59,47 @@ jobs:
           truncate -s 64M build/storage-test.img
           printf 'BAKENR01' | dd of=build/storage-test.img bs=1 seek=0 conv=notrunc status=none
           printf 'BAKENOLD' | dd of=build/storage-test.img bs=1 seek=512 conv=notrunc status=none
+          python3 - <<'PY'
+          from pathlib import Path
+          import struct
+          import zlib
+
+          path = Path("build/storage-test.img")
+          block_size = 512
+          size = path.stat().st_size
+          assert size % block_size == 0
+          last_lba = size // block_size - 1
+          entry_count = 128
+          entry_size = 128
+          entries = bytes(entry_count * entry_size)
+          assert len(entries) % block_size == 0
+          entry_blocks = len(entries) // block_size
+          entries_lba = last_lba - entry_blocks
+          first_usable = 2048
+          last_usable = entries_lba - 1
+          entries_crc = zlib.crc32(entries) & 0xFFFFFFFF
+
+          header = bytearray(block_size)
+          struct.pack_into(
+              "<8sIIIIQQQQ16sQIII", header, 0,
+              b"EFI PART", 0x00010000, 92, 0, 0,
+              last_lba, 1, first_usable, last_usable,
+              bytes.fromhex("00112233445566778899aabbccddeeff"),
+              entries_lba, entry_count, entry_size, entries_crc,
+          )
+          header_crc = zlib.crc32(header[:92]) & 0xFFFFFFFF
+          struct.pack_into("<I", header, 16, header_crc)
+
+          with path.open("r+b") as image:
+              image.seek(entries_lba * block_size)
+              image.write(entries)
+              image.seek(last_lba * block_size)
+              image.write(header)
+          PY
+          storage_last_lba=$(( $(stat -c%s build/storage-test.img) / 512 - 1 ))
           test "$(head -c 8 build/storage-test.img)" = "BAKENR01"
           test "$(dd if=build/storage-test.img bs=1 skip=512 count=8 status=none)" = "BAKENOLD"
+          test "$(dd if=build/storage-test.img bs=512 skip="$storage_last_lba" count=1 status=none | head -c 8)" = "EFI PART"
           test -s build/storage-test.img
           rm -f build/qemu-serial.log
           rm -f build/qemu-monitor.sock
@@ -103,7 +142,8 @@ jobs:
           test "$injection_failed" -eq 0
           test "$status" -eq 124
           test "$(dd if=build/storage-test.img bs=1 skip=512 count=8 status=none)" = "BAKENW01"
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=J; do
+          test "$(dd if=build/storage-test.img bs=512 skip="$storage_last_lba" count=1 status=none | head -c 8)" = "EFI PART"
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
