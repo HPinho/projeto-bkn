@@ -158,15 +158,27 @@ class StorageDiscoveryTests(unittest.TestCase):
     def test_identify_capacity_uses_lba48_then_lba28_fallback(self):
         text = AHCI_READ.read_text(encoding="utf-8")
         body = text.split("pub fn ahci_parse_identify_capacity", 1)[1]
-        body = body.split("fn ahci_read_magic_matches", 1)[0]
+        body = body.split("fn ahci_read_prepare_buffer", 1)[0]
         for token in (
-            "AHCI_IDENTIFY_WORD_LBA_SUPPORT", "AHCI_IDENTIFY_WORD_LBA28_LO",
-            "AHCI_IDENTIFY_WORD_LBA48_FEATURES", "AHCI_IDENTIFY_WORD_LBA48_LO",
-            "word83_valid", "w100", "w101", "w102", "w103", "total48",
-            "w60", "w61", "total28", "AHCI_TOTAL_SECTORS",
+            "ahci_identify_data_physical", "AHCI_IDENTIFY_WORD_LBA_SUPPORT",
+            "AHCI_IDENTIFY_WORD_LBA28_LO", "AHCI_IDENTIFY_WORD_LBA48_FEATURES",
+            "AHCI_IDENTIFY_WORD_LBA48_LO", "word83_valid", "w100", "w101",
+            "w102", "w103", "total48", "w60", "w61", "total28",
+            "AHCI_TOTAL_SECTORS",
         ):
             self.assertIn(token, body)
         self.assertLess(body.index("total48"), body.index("total28"))
+
+    def test_read_uses_dedicated_shared_dma_buffer_and_preserves_identify(self):
+        text = AHCI_READ.read_text(encoding="utf-8")
+        prep = text.split("fn ahci_read_prepare_buffer", 1)[1]
+        prep = prep.split("fn ahci_read_magic_matches", 1)[0]
+        for token in ("dma_alloc(", "dma_buffer_cpu_owned", "dma_share_with_device", "AHCI_READ_BUFFER"):
+            self.assertIn(token, prep)
+        body = text.split("pub fn ahci_read_probe_sector0", 1)[1]
+        self.assertIn("AHCI_READ_BUFFER.physical_address", body)
+        self.assertIn("AHCI_READ_BUFFER.virtual_address", body)
+        self.assertNotIn("ahci_identify_data_physical", body)
 
     def test_first_sector_read_is_real_dma_and_validates_fixture_magic(self):
         text = AHCI_READ.read_text(encoding="utf-8")
@@ -176,8 +188,8 @@ class StorageDiscoveryTests(unittest.TestCase):
             "AHCI_ATA_READ_DMA: u8 = 0xC8",
             "AHCI_FIS_TYPE_REG_H2D", "AHCI_PX_TFD", "AHCI_PX_IS", "AHCI_PX_CI",
             "AHCI_PXIS_TFES", "AHCI_TFD_BSY", "AHCI_TFD_DRQ", "AHCI_TFD_ERR",
-            "ahci_runtime_command_list_physical", "ahci_runtime_command_table_physical",
-            "ahci_identify_data_physical", "direct_map_virtual_address",
+            "ahci_read_prepare_buffer", "ahci_runtime_command_list_physical",
+            "ahci_runtime_command_table_physical", "direct_map_virtual_address",
             "x86_mmio_write32(port_base + AHCI_PX_CI, 1)",
             "prdbc != (AHCI_READ_SECTOR_SIZE as u32)",
             "ahci_read_magic_matches", "AHCI_READ_READY = true",
