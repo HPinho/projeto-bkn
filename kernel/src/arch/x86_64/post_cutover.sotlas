@@ -3,7 +3,7 @@
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
 // -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada
-// -> Enable Slot -> contexts -> Address Device -> primeiro GET_DESCRIPTOR(8).
+// -> Enable Slot -> contexts -> Address Device -> GET_DESCRIPTOR(8) -> EP0 MPS reconciliado.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -37,6 +37,7 @@ import kernel::drivers::xhci_context::*;
 import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_descriptor::*;
+import kernel::drivers::xhci_evaluate_context::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -395,8 +396,7 @@ pub fn post_cutover_address_first_usb_device() -> bool {
 }
 
 // Q prova o primeiro Control Transfer real no EP0. Solicita somente os oito
-// bytes iniciais do Device Descriptor e captura bMaxPacketSize0. A leitura de
-// 18 bytes e Evaluate Context permanecem fora deste gate.
+// bytes iniciais do Device Descriptor e captura bMaxPacketSize0.
 @system
 pub fn post_cutover_probe_first_usb_descriptor() -> bool {
     if !xhci_address_is_ready() || xhci_address_slot_id() == 0 { return false; }
@@ -404,6 +404,21 @@ pub fn post_cutover_probe_first_usb_descriptor() -> bool {
     if !xhci_probe_first_device_descriptor_8() ||
        !xhci_device_descriptor_probe_is_ready() { return false; }
     if xhci_device_descriptor_probe_max_packet0() == 0 { return false; }
+    return true;
+}
+
+// E prova que o Max Packet Size do EP0 está coerente com o Device Descriptor.
+// Quando o Context inicial já está correto, não envia comando redundante; quando
+// diverge, a correção passa por Evaluate Context e seu Command Completion real.
+@system
+pub fn post_cutover_reconcile_first_usb_ep0() -> bool {
+    if !xhci_device_descriptor_probe_is_ready() { return false; }
+    let target = xhci_descriptor_ep0_max_packet_bytes(
+        xhci_device_descriptor_probe_max_packet0()
+    );
+    if target == 0 { return false; }
+    if !xhci_reconcile_ep0_from_descriptor_probe() { return false; }
+    if xhci_evaluate_context_last_ep0_max_packet() != target { return false; }
     return true;
 }
 
@@ -464,6 +479,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
 
     if !post_cutover_probe_first_usb_descriptor() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Q' as u8); }
+
+    if !post_cutover_reconcile_first_usb_ep0() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('E' as u8); }
 
     loop {}
 }
