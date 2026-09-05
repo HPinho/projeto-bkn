@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do discovery PCI, probe MMIO, reset e fundação DMA AHCI."""
+"""Guardrails do discovery PCI, probe MMIO, reset, DMA e IDENTIFY AHCI."""
 
 from pathlib import Path
 import unittest
@@ -76,39 +76,71 @@ class StorageDiscoveryTests(unittest.TestCase):
 
     def test_ahci_dma_runtime_uses_real_pmm_dma_and_programs_port_tables(self):
         text = AHCI_RUNTIME.read_text(encoding="utf-8")
+        body = text.split("pub fn ahci_runtime_prepare_dma", 1)[1]
+        body = body.split("pub fn ahci_runtime_identify_device", 1)[0]
         for token in (
             "dma_alloc(", "dma_share_with_device", "PCI_COMMAND_BUS_MASTER",
             "AHCI_PX_CLB", "AHCI_PX_FB", "AHCI_PX_CMD", "AHCI_PX_CI",
             "AHCI_COMMAND_LIST_PAGE", "AHCI_RECEIVED_FIS_PAGE", "AHCI_COMMAND_TABLE_PAGE",
             "ahci_runtime_write64_pair", "x86_serial_write_stage_marker('c' as u8)",
         ):
-            self.assertIn(token, text)
-        self.assertIn("*header = 5", text)
-        self.assertIn("ctba_low", text)
-        self.assertIn("ctba_high", text)
+            self.assertIn(token, body)
+        self.assertIn("*header = 5", body)
+        self.assertIn("ctba_low", body)
+        self.assertIn("ctba_high", body)
 
     def test_ahci_dma_gate_keeps_command_engine_stopped_and_submits_no_ata(self):
         text = AHCI_RUNTIME.read_text(encoding="utf-8")
-        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        body = text.split("pub fn ahci_runtime_prepare_dma", 1)[1]
+        body = body.split("pub fn ahci_runtime_identify_device", 1)[0]
+        code = "\n".join(line.split("//", 1)[0] for line in body.splitlines())
         self.assertIn("AHCI_PXCMD_ST", code)
         self.assertIn("AHCI_PXCMD_FRE", code)
         self.assertIn("AHCI_PXCMD_CR", code)
         self.assertIn("AHCI_PXCMD_FR", code)
-        self.assertIn("if ci_verify != 0", code)
-        for forbidden in (
-            "ATA_CMD_IDENTIFY", "ATA_CMD_READ", "ATA_CMD_WRITE",
-            "block_device_register_native", "AHCI_PX_CI, 1",
-        ):
-            self.assertNotIn(forbidden, code)
+        self.assertIn("if ci_verify == 0xFFFFFFFF || ci_verify != 0", code)
+        self.assertNotIn("AHCI_ATA_IDENTIFY_DEVICE", code)
+        self.assertNotIn("x86_mmio_write32(port_base + AHCI_PX_CI, 1)", code)
 
-    def test_scan_orders_probe_reset_then_dma(self):
+    def test_identify_uses_real_h2d_fis_prdt_and_completion_poll(self):
+        text = AHCI_RUNTIME.read_text(encoding="utf-8")
+        body = text.split("pub fn ahci_runtime_identify_device", 1)[1]
+        for token in (
+            "AHCI_ATA_IDENTIFY_DEVICE: u8 = 0xEC",
+            "AHCI_FIS_TYPE_REG_H2D: u8 = 0x27",
+            "AHCI_IDENTIFY_DATA_PAGE",
+            "AHCI_PX_TFD", "AHCI_PX_IS", "AHCI_PX_CI",
+            "AHCI_PXIS_TFES", "AHCI_TFD_BSY", "AHCI_TFD_DRQ", "AHCI_TFD_ERR",
+            "x86_mmio_write32(port_base + AHCI_PX_CI, 1)",
+            "AHCI_IDENTIFY_READY = true",
+            "x86_serial_write_stage_marker('d' as u8)",
+        ):
+            self.assertIn(token, text if token.startswith("AHCI_") and ":" in token else body)
+        self.assertIn("(511 as u32) | (1 << 31)", body)
+        self.assertIn("if word0 == 0 || word0 == 0xFFFF", body)
+        self.assertNotIn("ATA_CMD_WRITE", body)
+        self.assertNotIn("block_device_register_native", body)
+
+    def test_runtime_selects_connected_ata_port_not_atapi_cdrom(self):
+        text = AHCI_RUNTIME.read_text(encoding="utf-8")
+        body = text.split("fn ahci_runtime_first_ata_port", 1)[1]
+        body = body.split("fn ahci_runtime_stop_port", 1)[0]
+        for token in (
+            "AHCI_PX_SSTS", "AHCI_PX_SIG", "AHCI_SIG_ATA",
+            "AHCI_SSTS_DET_PRESENT", "AHCI_SSTS_IPM_ACTIVE",
+        ):
+            self.assertIn(token, body)
+
+    def test_scan_orders_probe_reset_dma_then_identify(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("pub fn storage_discovery_scan()", 1)[1]
         probe = body.index("storage_probe_mmio_after_cutover()")
         reset = body.index("storage_reset_ahci_after_probe()")
         dma = body.index("storage_prepare_ahci_dma_after_reset()")
+        identify = body.index("storage_identify_ahci_after_dma()")
         self.assertLess(probe, reset)
         self.assertLess(reset, dma)
+        self.assertLess(dma, identify)
 
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
