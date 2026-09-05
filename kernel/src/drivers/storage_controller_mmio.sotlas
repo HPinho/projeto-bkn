@@ -1,0 +1,134 @@
+// Baken OS — primeiro takeover MMIO real de storage pós-cutover.
+//
+// Este estágio é deliberadamente conservador: usa o candidato AHCI/NVMe já
+// descoberto, habilita apenas PCI Memory Space, mapeia o BAR MMIO como UC pela
+// tabela de páginas ativa e lê registradores estruturais reais. Bus Master,
+// reset de controller, filas DMA, MSI/MSI-X e I/O de blocos permanecem fora.
+
+module kernel::drivers::storage_controller_mmio;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::storage_discovery::*;
+
+pub const AHCI_REG_CAP: u64 = 0x00;
+pub const AHCI_REG_GHC: u64 = 0x04;
+pub const AHCI_REG_PI: u64 = 0x0C;
+pub const AHCI_REG_VS: u64 = 0x10;
+
+pub const NVME_REG_CAP_LO: u64 = 0x00;
+pub const NVME_REG_CAP_HI: u64 = 0x04;
+pub const NVME_REG_VS: u64 = 0x08;
+pub const NVME_REG_CSTS: u64 = 0x1C;
+
+static mut STORAGE_MMIO_READY: bool = false;
+static mut STORAGE_MMIO_KIND: u32 = STORAGE_CONTROLLER_NONE;
+static mut STORAGE_MMIO_BASE: u64 = 0;
+static mut STORAGE_MMIO_REG0: u32 = 0;
+static mut STORAGE_MMIO_REG1: u32 = 0;
+static mut STORAGE_MMIO_REG2: u32 = 0;
+static mut STORAGE_MMIO_REG3: u32 = 0;
+
+@system
+fn storage_mmio_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn storage_mmio_map(address: u64) -> bool {
+    if address == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(storage_mmio_page_base(address));
+}
+
+@system
+fn storage_mmio_structural_probe(kind: u32, base: u64) -> bool {
+    if base == 0 { return false; }
+    if !storage_mmio_map(base) { return false; }
+
+    if kind == STORAGE_CONTROLLER_AHCI {
+        let cap = x86_mmio_read32(base + AHCI_REG_CAP);
+        let ghc = x86_mmio_read32(base + AHCI_REG_GHC);
+        let pi = x86_mmio_read32(base + AHCI_REG_PI);
+        let version = x86_mmio_read32(base + AHCI_REG_VS);
+        if cap == 0xFFFFFFFF || version == 0 || version == 0xFFFFFFFF { return false; }
+        if pi == 0 || pi == 0xFFFFFFFF { return false; }
+        unsafe {
+            STORAGE_MMIO_REG0 = cap;
+            STORAGE_MMIO_REG1 = ghc;
+            STORAGE_MMIO_REG2 = pi;
+            STORAGE_MMIO_REG3 = version;
+        }
+        return true;
+    }
+
+    if kind == STORAGE_CONTROLLER_NVME {
+        let cap_lo = x86_mmio_read32(base + NVME_REG_CAP_LO);
+        let cap_hi = x86_mmio_read32(base + NVME_REG_CAP_HI);
+        let version = x86_mmio_read32(base + NVME_REG_VS);
+        let csts = x86_mmio_read32(base + NVME_REG_CSTS);
+        if (cap_lo == 0 && cap_hi == 0) ||
+           (cap_lo == 0xFFFFFFFF && cap_hi == 0xFFFFFFFF) { return false; }
+        if version == 0 || version == 0xFFFFFFFF { return false; }
+        unsafe {
+            STORAGE_MMIO_REG0 = cap_lo;
+            STORAGE_MMIO_REG1 = cap_hi;
+            STORAGE_MMIO_REG2 = version;
+            STORAGE_MMIO_REG3 = csts;
+        }
+        return true;
+    }
+
+    return false;
+}
+
+@system
+pub fn storage_controller_prepare_mmio() -> bool {
+    unsafe {
+        STORAGE_MMIO_READY = false;
+        STORAGE_MMIO_KIND = STORAGE_CONTROLLER_NONE;
+        STORAGE_MMIO_BASE = 0;
+        STORAGE_MMIO_REG0 = 0;
+        STORAGE_MMIO_REG1 = 0;
+        STORAGE_MMIO_REG2 = 0;
+        STORAGE_MMIO_REG3 = 0;
+    }
+
+    if !active_page_tables_is_ready() { return false; }
+    let candidate = storage_discovery_candidate();
+    if candidate == (null as *const StorageControllerCandidate) { return false; }
+
+    unsafe {
+        let kind = (*candidate).kind;
+        let base = (*candidate).abar_or_mmio_base;
+        if kind != STORAGE_CONTROLLER_AHCI && kind != STORAGE_CONTROLLER_NVME { return false; }
+        if base == 0 { return false; }
+
+        let command_before = pci_read_config16((*candidate).bus, (*candidate).slot, (*candidate).func, 0x04);
+        pci_enable_command_bits((*candidate).bus, (*candidate).slot, (*candidate).func, PCI_COMMAND_MEMORY_SPACE);
+        let command_after = pci_read_config16((*candidate).bus, (*candidate).slot, (*candidate).func, 0x04);
+        if (command_after & PCI_COMMAND_MEMORY_SPACE) == 0 { return false; }
+        if (command_after & PCI_COMMAND_BUS_MASTER) != (command_before & PCI_COMMAND_BUS_MASTER) { return false; }
+
+        if !storage_mmio_structural_probe(kind, base) { return false; }
+        STORAGE_MMIO_KIND = kind;
+        STORAGE_MMIO_BASE = base;
+        STORAGE_MMIO_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn storage_controller_mmio_is_ready() -> bool { unsafe { return STORAGE_MMIO_READY; } }
+@system
+pub fn storage_controller_mmio_kind() -> u32 { unsafe { return STORAGE_MMIO_KIND; } }
+@system
+pub fn storage_controller_mmio_base() -> u64 { unsafe { return STORAGE_MMIO_BASE; } }
+@system
+pub fn storage_controller_mmio_reg0() -> u32 { unsafe { return STORAGE_MMIO_REG0; } }
+@system
+pub fn storage_controller_mmio_reg1() -> u32 { unsafe { return STORAGE_MMIO_REG1; } }
+@system
+pub fn storage_controller_mmio_reg2() -> u32 { unsafe { return STORAGE_MMIO_REG2; } }
+@system
+pub fn storage_controller_mmio_reg3() -> u32 { unsafe { return STORAGE_MMIO_REG3; } }
