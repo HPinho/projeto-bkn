@@ -91,11 +91,36 @@ class XhciConfigurationTests(unittest.TestCase):
         self.assertNotIn("xhci_command_submit", text)
         self.assertNotIn("x86_mmio_write32", text)
 
-    def test_post_cutover_keeps_hid_parser_after_full_descriptor_gate(self):
+    def test_post_cutover_activates_hid_parser_only_after_full_descriptor(self):
         text = POST.read_text(encoding="utf-8")
-        body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
-        self.assertIn("post_cutover_probe_first_usb_configuration_header()", body)
-        self.assertNotIn("xhci_get_first_hid_configuration()", body)
+        helper = text.split("pub fn post_cutover_parse_first_usb_hid_interface()", 1)[1]
+        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        self.assertIn("xhci_configuration_full_is_ready()", helper)
+        self.assertIn("xhci_get_first_hid_configuration()", helper)
+        self.assertIn("xhci_configuration_is_ready()", helper)
+        self.assertIn("USB_HID_PROTOCOL_KEYBOARD", helper)
+        self.assertIn("USB_HID_PROTOCOL_MOUSE", helper)
+        self.assertIn("USB_ENDPOINT_DIRECTION_IN", helper)
+        self.assertIn("xhci_hid_endpoint_max_packet() == 0", helper)
+        self.assertIn("xhci_hid_endpoint_interval() == 0", helper)
+        self.assertIn("xhci_hid_report_descriptor_length() == 0", helper)
+
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        full = entry.index("post_cutover_read_full_usb_configuration_descriptor()")
+        parsed = entry.index("post_cutover_parse_first_usb_hid_interface()")
+        marker_h = entry.index("x86_serial_write_stage_marker('H' as u8)")
+        marker_m = entry.index("x86_serial_write_stage_marker('M' as u8)")
+        self.assertLess(full, marker_h)
+        self.assertLess(marker_h, parsed)
+        self.assertLess(parsed, marker_m)
+
+    def test_parser_gate_still_does_not_configure_endpoint_or_device(self):
+        text = code_only(POST.read_text(encoding="utf-8")).lower()
+        helper = text.split("pub fn post_cutover_parse_first_usb_hid_interface()", 1)[1]
+        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        self.assertNotIn("configure_endpoint", helper)
+        self.assertNotIn("set_configuration", helper)
+        self.assertNotIn("xhci_command_submit", helper)
 
     def test_main_registers_configuration_module(self):
         text = MAIN.read_text(encoding="utf-8")
