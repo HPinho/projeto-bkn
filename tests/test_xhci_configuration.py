@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 CONF = ROOT / "kernel/src/drivers/xhci_configuration.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 
 
 def code_only(text: str) -> str:
@@ -14,6 +15,27 @@ def code_only(text: str) -> str:
 
 
 class XhciConfigurationTests(unittest.TestCase):
+    def test_configuration_header_probe_is_separate_from_full_parse(self):
+        text = CONF.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_probe_first_configuration_header()", 1)[1]
+        body = body.split("pub fn xhci_configuration_header_is_ready()", 1)[0]
+        self.assertIn("USB_CONFIGURATION_HEADER_LENGTH", body)
+        self.assertIn("xhci_configuration_fetch(&mut buffer, USB_CONFIGURATION_HEADER_LENGTH)", body)
+        self.assertIn("xhci_configuration_read16(base, 2)", body)
+        self.assertIn("xhci_configuration_read8(base, 5)", body)
+        self.assertNotIn("xhci_configuration_parse", body)
+        self.assertNotIn("xhci_get_first_hid_configuration", body)
+
+    def test_configuration_header_validates_identity_and_bounds(self):
+        text = CONF.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_probe_first_configuration_header()", 1)[1]
+        body = body.split("pub fn xhci_configuration_header_is_ready()", 1)[0]
+        self.assertIn("descriptor_type != USB_DESCRIPTOR_TYPE_CONFIGURATION", body)
+        self.assertIn("total_length < USB_CONFIGURATION_HEADER_LENGTH", body)
+        self.assertIn("(total_length as u64) > XHCI_CONFIGURATION_DMA_SIZE", body)
+        self.assertIn("configuration_value == 0", body)
+        self.assertIn("XHCI_CONFIGURATION_HEADER_READY = true", body)
+
     def test_configuration_fetches_header_then_total_length(self):
         text = CONF.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_get_first_hid_configuration()", 1)[1]
@@ -56,6 +78,11 @@ class XhciConfigurationTests(unittest.TestCase):
         self.assertNotIn("set_configuration", text)
         self.assertNotIn("xhci_command_submit", text)
         self.assertNotIn("x86_mmio_write32", text)
+
+    def test_post_cutover_does_not_activate_full_configuration_before_header_gate(self):
+        text = POST.read_text(encoding="utf-8")
+        body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        self.assertNotIn("xhci_get_first_hid_configuration()", body)
 
     def test_main_registers_configuration_module(self):
         text = MAIN.read_text(encoding="utf-8")
