@@ -2,9 +2,9 @@
 //
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
-// -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada
-// -> Enable Slot -> contexts -> Address Device -> GET_DESCRIPTOR(8) -> EP0 MPS
-// reconciliado -> GET_DESCRIPTOR(Device, 18 bytes) -> Configuration Header(9).
+// -> No-op DMA -> USB port/reset -> Enable Slot -> contexts -> Address Device
+// -> Device Descriptor 8B -> EP0 MPS -> Device Descriptor 18B
+// -> Configuration Header 9B -> Configuration Descriptor completo.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -99,8 +99,7 @@ pub fn post_cutover_acpi_rsdp_virtual(context: *const PostCutoverContext) -> *co
 
 @system
 pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
-    if context == (null as *const PostCutoverContext) { return false; }
-    if !context.valid { return false; }
+    if context == (null as *const PostCutoverContext) || !context.valid { return false; }
     if context.root_physical == 0 || !x86_page_aligned(context.root_physical) { return false; }
     if context.stack_top == 0 || (context.stack_top & 15) != 0 { return false; }
     if context.framebuffer_base == 0 || context.framebuffer_size == 0 { return false; }
@@ -123,7 +122,6 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     x86_serial_write_stage_marker('0' as u8);
     if !x86_mmu_activate_root(context.root_physical) { return false; }
     x86_serial_write_stage_marker('1' as u8);
-
     tss_prepare_default_stacks();
     if !tss_is_prepared() { return false; }
     gdt_prepare();
@@ -131,11 +129,9 @@ pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !gdt_is_prepared() { return false; }
     if !idt_prepare_exceptions() || !idt_exceptions_ready() { return false; }
     x86_serial_write_stage_marker('2' as u8);
-
     let gdt_address = gdt_base() as u64;
     let idt_address = idt_base() as u64;
     if gdt_address == 0 || idt_address == 0 { return false; }
-
     x86_gdt_activate_segments_raw(gdt_address, gdt_limit(), GDT_KERNEL_CODE_SELECTOR, GDT_KERNEL_DATA_SELECTOR);
     x86_ltr_raw(GDT_TSS_SELECTOR);
     x86_lidt_table_raw(idt_address, idt_limit());
@@ -154,7 +150,7 @@ pub fn post_cutover_activate_pmm(context: *const PostCutoverContext) -> bool {
     if memory_map == (null as *const u8) { return false; }
     if !pmm_inventory_init(memory_map, context.memory_map_size as usize, context.memory_descriptor_size as usize) { return false; }
     if !pmm_allocator_activate_after_exit_boot_services() || !pmm_allocator_is_active() ||
-        !pmm_allocator_bitmap_is_active() { return false; }
+       !pmm_allocator_bitmap_is_active() { return false; }
     unsafe { POST_CUTOVER_PMM_ACTIVE = true; }
     return true;
 }
@@ -241,34 +237,25 @@ pub fn post_cutover_prepare_timer() -> bool {
 
 @system
 pub fn post_cutover_timer_ready() -> bool { unsafe { return POST_CUTOVER_TIMER_READY; } }
-
 @system
 pub fn post_cutover_timer_live() -> bool { unsafe { return POST_CUTOVER_TIMER_LIVE; } }
-
 @system
 pub fn post_cutover_keyboard_live() -> bool { unsafe { return POST_CUTOVER_KEYBOARD_LIVE; } }
-
 @system
 pub fn post_cutover_xhci_ready() -> bool { unsafe { return POST_CUTOVER_XHCI_READY; } }
-
 @system
 pub fn post_cutover_xhci_dma_ready() -> bool { unsafe { return POST_CUTOVER_XHCI_DMA_READY; } }
-
 @system
 pub fn post_cutover_xhci_noop_live() -> bool { unsafe { return POST_CUTOVER_XHCI_NOOP_LIVE; } }
-
 @system
 pub fn post_cutover_usb_port_ready() -> bool { unsafe { return POST_CUTOVER_USB_PORT_READY; } }
 
 @system
 pub fn post_cutover_enable_timer_interrupts() -> bool {
     unsafe { POST_CUTOVER_TIMER_LIVE = false; }
-    if !post_cutover_timer_ready() { return false; }
-    if external_interrupts_enabled() { return false; }
-
+    if !post_cutover_timer_ready() || external_interrupts_enabled() { return false; }
     let before = irq_timer_count();
     if !interrupt_enable_timer_only() { return false; }
-
     let mut spins: u64 = 0;
     while spins < POST_CUTOVER_FIRST_TICK_SPIN_LIMIT {
         if irq_timer_count() != before {
@@ -277,7 +264,6 @@ pub fn post_cutover_enable_timer_interrupts() -> bool {
         }
         spins += 1;
     }
-
     interrupt_disable_all();
     return false;
 }
@@ -286,13 +272,7 @@ pub fn post_cutover_enable_timer_interrupts() -> bool {
 pub fn post_cutover_enable_keyboard_interrupts() -> bool {
     unsafe { POST_CUTOVER_KEYBOARD_LIVE = false; }
     if !post_cutover_timer_live() || !external_interrupts_enabled() { return false; }
-
-    if !interrupt_enable_keyboard_after_timer() || !keyboard_interrupt_enabled() {
-        return false;
-    }
-    // O boot não pode depender de uma tecla humana ou de um evento de HID.
-    // K prova que IRQ1 está configurada e desmascarada; a primeira interrupção
-    // observada é contabilizada pela ISR e validada por testes de entrada.
+    if !interrupt_enable_keyboard_after_timer() || !keyboard_interrupt_enabled() { return false; }
     unsafe { POST_CUTOVER_KEYBOARD_LIVE = true; }
     return true;
 }
@@ -312,8 +292,6 @@ pub fn post_cutover_prepare_xhci_controller() -> bool {
     return true;
 }
 
-// Prepara e programa as estruturas DMA com o xHC ainda parado. Nenhum Bus
-// Master, Run/Stop ou Doorbell é permitido nesta etapa.
 @system
 pub fn post_cutover_prepare_xhci_dma_tables() -> bool {
     unsafe {
@@ -330,8 +308,6 @@ pub fn post_cutover_prepare_xhci_dma_tables() -> bool {
     return true;
 }
 
-// N só é considerado live quando o xHC sai de HCHalted, consome um No-op TRB
-// via DMA e produz um Command Completion Event de sucesso no Event Ring.
 @system
 pub fn post_cutover_start_xhci_and_prove_noop() -> bool {
     unsafe {
@@ -339,14 +315,11 @@ pub fn post_cutover_start_xhci_and_prove_noop() -> bool {
         POST_CUTOVER_USB_PORT_READY = false;
     }
     if !post_cutover_xhci_dma_ready() || !xhci_program_is_ready() { return false; }
-    if !xhci_start_and_prove_noop() || !xhci_start_is_ready() ||
-       !xhci_start_noop_completed() { return false; }
+    if !xhci_start_and_prove_noop() || !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
     unsafe { POST_CUTOVER_XHCI_NOOP_LIVE = true; }
     return true;
 }
 
-// U prova que um dispositivo real está conectado a uma porta administrada pelo
-// xHC, que Supported Protocol foi resolvido e que o reset concluiu com CCS/PED.
 @system
 pub fn post_cutover_prepare_first_usb_port() -> bool {
     unsafe { POST_CUTOVER_USB_PORT_READY = false; }
@@ -357,103 +330,79 @@ pub fn post_cutover_prepare_first_usb_port() -> bool {
     return true;
 }
 
-// S prova Enable Slot real pelo Command Ring compartilhado.
 @system
 pub fn post_cutover_enable_first_usb_slot() -> bool {
     if !post_cutover_usb_port_ready() || !xhci_port_stage_is_ready() { return false; }
     if !xhci_slot_enable_first_port() || !xhci_slot_is_ready() { return false; }
-    if xhci_slot_id() == 0 || xhci_slot_port_id() != xhci_port_stage_port_id() {
-        return false;
-    }
+    if xhci_slot_id() == 0 || xhci_slot_port_id() != xhci_port_stage_port_id() { return false; }
     return true;
 }
 
-// Y prova Device Context, Input Context, EP0 Transfer Ring e DCBAA[slot].
 @system
 pub fn post_cutover_prepare_first_usb_context() -> bool {
     if !xhci_slot_is_ready() || xhci_slot_id() == 0 { return false; }
-    if !xhci_context_prepare_for_enabled_slot() || !xhci_context_is_ready() {
-        return false;
-    }
+    if !xhci_context_prepare_for_enabled_slot() || !xhci_context_is_ready() { return false; }
     if xhci_context_slot_id() != xhci_slot_id() ||
-       xhci_context_device_physical() == 0 ||
-       xhci_context_input_physical() == 0 ||
-       xhci_context_ep0_ring_physical() == 0 ||
-       xhci_context_ep0_max_packet() == 0 {
-        return false;
-    }
+       xhci_context_device_physical() == 0 || xhci_context_input_physical() == 0 ||
+       xhci_context_ep0_ring_physical() == 0 || xhci_context_ep0_max_packet() == 0 { return false; }
     return true;
 }
 
-// Z prova Address Device real e Output Device Context em estado Addressed.
 @system
 pub fn post_cutover_address_first_usb_device() -> bool {
     if !xhci_context_is_ready() || xhci_context_slot_id() == 0 { return false; }
     if !xhci_address_first_slot() || !xhci_address_is_ready() { return false; }
-    if xhci_address_slot_id() != xhci_context_slot_id() ||
-       xhci_address_device_address() == 0 {
-        return false;
-    }
+    if xhci_address_slot_id() != xhci_context_slot_id() || xhci_address_device_address() == 0 { return false; }
     return true;
 }
 
-// Q prova o primeiro Control Transfer real no EP0. Solicita somente os oito
-// bytes iniciais do Device Descriptor e captura bMaxPacketSize0.
 @system
 pub fn post_cutover_probe_first_usb_descriptor() -> bool {
     if !xhci_address_is_ready() || xhci_address_slot_id() == 0 { return false; }
     if !xhci_ep0_prepare_after_address() || !xhci_ep0_is_ready() { return false; }
-    if !xhci_probe_first_device_descriptor_8() ||
-       !xhci_device_descriptor_probe_is_ready() { return false; }
-    if xhci_device_descriptor_probe_max_packet0() == 0 { return false; }
-    return true;
+    if !xhci_probe_first_device_descriptor_8() || !xhci_device_descriptor_probe_is_ready() { return false; }
+    return xhci_device_descriptor_probe_max_packet0() != 0;
 }
 
-// E prova que o Max Packet Size do EP0 está coerente com o Device Descriptor.
-// Quando o Context inicial já está correto, não envia comando redundante; quando
-// diverge, a correção passa por Evaluate Context e seu Command Completion real.
 @system
 pub fn post_cutover_reconcile_first_usb_ep0() -> bool {
     if !xhci_device_descriptor_probe_is_ready() { return false; }
-    let target = xhci_descriptor_ep0_max_packet_bytes(
-        xhci_device_descriptor_probe_max_packet0()
-    );
+    let target = xhci_descriptor_ep0_max_packet_bytes(xhci_device_descriptor_probe_max_packet0());
     if target == 0 { return false; }
     if !xhci_reconcile_ep0_from_descriptor_probe() { return false; }
-    if xhci_evaluate_context_last_ep0_max_packet() != target { return false; }
-    return true;
+    return xhci_evaluate_context_last_ep0_max_packet() == target;
 }
 
-// F prova a leitura integral do Device Descriptor somente após o EP0 estar
-// reconciliado. Ainda não lê Configuration Descriptor nem configura HID.
 @system
 pub fn post_cutover_read_full_usb_device_descriptor() -> bool {
     if !xhci_device_descriptor_probe_is_ready() || !xhci_ep0_is_ready() { return false; }
     let raw_max_packet0 = xhci_device_descriptor_probe_max_packet0();
     let target = xhci_descriptor_ep0_max_packet_bytes(raw_max_packet0);
     if target == 0 || xhci_evaluate_context_last_ep0_max_packet() != target { return false; }
-    if !xhci_get_first_device_descriptor() || !xhci_device_descriptor_is_ready() {
-        return false;
-    }
-    if xhci_device_usb_version() == 0 ||
-       xhci_device_max_packet0() != raw_max_packet0 {
-        return false;
-    }
+    if !xhci_get_first_device_descriptor() || !xhci_device_descriptor_is_ready() { return false; }
+    if xhci_device_usb_version() == 0 || xhci_device_max_packet0() != raw_max_packet0 { return false; }
     return true;
 }
 
-// G prova o primeiro GET_DESCRIPTOR(Configuration) com exatamente 9 bytes.
-// Apenas valida o header, wTotalLength e bConfigurationValue; parsing completo
-// de interfaces/HID permanece fora deste gate.
 @system
 pub fn post_cutover_probe_first_usb_configuration_header() -> bool {
     if !xhci_device_descriptor_is_ready() || !xhci_ep0_is_ready() { return false; }
-    if !xhci_probe_first_configuration_header() ||
-       !xhci_configuration_header_is_ready() { return false; }
+    if !xhci_probe_first_configuration_header() || !xhci_configuration_header_is_ready() { return false; }
     if xhci_configuration_header_total_length() < USB_CONFIGURATION_HEADER_LENGTH ||
-       xhci_configuration_header_value() == 0 {
-        return false;
-    }
+       xhci_configuration_header_value() == 0 { return false; }
+    return true;
+}
+
+// H prova o segundo Control Transfer de Configuration Descriptor usando o
+// wTotalLength real descoberto em G. Ainda não interpreta HID/Endpoint.
+@system
+pub fn post_cutover_read_full_usb_configuration_descriptor() -> bool {
+    if !xhci_configuration_header_is_ready() { return false; }
+    let total_length = xhci_configuration_header_total_length();
+    let configuration_value = xhci_configuration_header_value();
+    if !xhci_read_first_configuration_full() || !xhci_configuration_full_is_ready() { return false; }
+    if xhci_configuration_full_total_length() != total_length ||
+       xhci_configuration_full_value() != configuration_value { return false; }
     return true;
 }
 
@@ -463,66 +412,47 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = argument as *const PostCutoverContext;
     let serial_ready = x86_serial_init();
     if serial_ready { x86_serial_write_stage_marker('B' as u8); }
-
     if !post_cutover_activate_cpu(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('C' as u8); }
-
     if !post_cutover_activate_pmm(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('P' as u8); }
-
     if !post_cutover_activate_vmm(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('V' as u8); }
-
     if !post_cutover_activate_acpi(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('A' as u8); }
-
     if !post_cutover_activate_interrupt_controllers() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('I' as u8); }
-
     if !post_cutover_prepare_irqs() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('R' as u8); }
-
     if !post_cutover_prepare_timer() { loop {} }
     if serial_ready { x86_serial_write_timer_ready_marker(); }
-
     if !post_cutover_enable_timer_interrupts() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('T' as u8); }
-
     if !post_cutover_enable_keyboard_interrupts() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('K' as u8); }
-
     if !post_cutover_prepare_xhci_controller() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('X' as u8); }
-
     if !post_cutover_prepare_xhci_dma_tables() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('D' as u8); }
-
     if !post_cutover_start_xhci_and_prove_noop() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('N' as u8); }
-
     if !post_cutover_prepare_first_usb_port() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('U' as u8); }
-
     if !post_cutover_enable_first_usb_slot() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('S' as u8); }
-
     if !post_cutover_prepare_first_usb_context() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Y' as u8); }
-
     if !post_cutover_address_first_usb_device() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Z' as u8); }
-
     if !post_cutover_probe_first_usb_descriptor() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Q' as u8); }
-
     if !post_cutover_reconcile_first_usb_ep0() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('E' as u8); }
-
     if !post_cutover_read_full_usb_device_descriptor() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('F' as u8); }
-
     if !post_cutover_probe_first_usb_configuration_header() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('G' as u8); }
-
+    if !post_cutover_read_full_usb_configuration_descriptor() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('H' as u8); }
     loop {}
 }
