@@ -32,7 +32,6 @@ import kernel::drivers::xhci_program::*;
 import kernel::drivers::xhci_start::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
-pub const POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS: u64 = 10000;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -273,24 +272,14 @@ pub fn post_cutover_enable_keyboard_interrupts() -> bool {
     unsafe { POST_CUTOVER_KEYBOARD_LIVE = false; }
     if !post_cutover_timer_live() || !external_interrupts_enabled() { return false; }
 
-    let keyboard_before = irq_keyboard_count();
-    let timer_start = irq_timer_count();
     if !interrupt_enable_keyboard_after_timer() || !keyboard_interrupt_enabled() {
         return false;
     }
-
-    loop {
-        if irq_keyboard_count() != keyboard_before {
-            unsafe { POST_CUTOVER_KEYBOARD_LIVE = true; }
-            return true;
-        }
-
-        let timer_now = irq_timer_count();
-        if timer_now < timer_start || (timer_now - timer_start) >= POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS {
-            interrupt_disable_all();
-            return false;
-        }
-    }
+    // O boot não pode depender de uma tecla humana ou de um evento de HID.
+    // K prova que IRQ1 está configurada e desmascarada; a primeira interrupção
+    // observada é contabilizada pela ISR e validada por testes de entrada.
+    unsafe { POST_CUTOVER_KEYBOARD_LIVE = true; }
+    return true;
 }
 
 @system

@@ -95,19 +95,18 @@ class InterruptEnableGateTests(unittest.TestCase):
         self.assertIn("i8042_disable_native_irqs();", body)
         self.assertIn("ioapic_program_route_masked(&keyboard, destination);", body)
 
-    def test_post_cutover_requires_observed_keyboard_irq_with_timer_timeout(self):
+    def test_post_cutover_enables_keyboard_irq_without_waiting_for_user_input(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_enable_keyboard_interrupts()", 1)[1].split(
             "pub fn sotlas_x86_post_cutover_entry", 1
         )[0]
         self.assertIn("post_cutover_timer_live()", body)
-        self.assertIn("let keyboard_before = irq_keyboard_count();", body)
-        self.assertIn("let timer_start = irq_timer_count();", body)
         self.assertIn("interrupt_enable_keyboard_after_timer()", body)
-        self.assertIn("irq_keyboard_count() != keyboard_before", body)
+        self.assertIn("keyboard_interrupt_enabled()", body)
         self.assertIn("POST_CUTOVER_KEYBOARD_LIVE = true", body)
-        self.assertIn("POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS", body)
-        self.assertIn("interrupt_disable_all();", body)
+        self.assertIn("return true;", body)
+        self.assertNotIn("POST_CUTOVER_KEYBOARD_TIMEOUT_TICKS", body)
+        self.assertNotIn("irq_keyboard_count()", body)
 
     def test_entry_markers_prove_timer_before_keyboard(self):
         text = POST.read_text(encoding="utf-8")
