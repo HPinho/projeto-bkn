@@ -143,6 +143,28 @@ class StorageDiscoveryTests(unittest.TestCase):
         self.assertLess(reset, dma)
         self.assertLess(dma, identify)
 
+    def test_signature_requires_bound_receive_engine_after_reset(self):
+        text = AHCI_RUNTIME.read_text(encoding="utf-8")
+        body = text.split("fn ahci_runtime_first_ata_port", 1)[1]
+        body = body.split("fn ahci_runtime_wait_ata_port", 1)[0]
+        self.assertLess(body.index("ahci_runtime_bind_dma_port(port)"),
+                        body.index("cmd | AHCI_PXCMD_FRE"))
+        self.assertLess(body.index("cmd | AHCI_PXCMD_FRE"),
+                        body.index("base + AHCI_PX_SIG"))
+        self.assertIn("ahci_runtime_stop_port(base)", body)
+        wait = text.split("fn ahci_runtime_wait_ata_port", 1)[1]
+        wait = wait.split("fn ahci_runtime_stop_port", 1)[0]
+        self.assertNotIn("while", wait)
+
+    def test_shared_arena_stops_previous_port_before_rebinding(self):
+        text = AHCI_RUNTIME.read_text(encoding="utf-8")
+        body = text.split("fn ahci_runtime_bind_dma_port", 1)[1]
+        body = body.split("pub fn ahci_runtime_prepare_dma", 1)[0]
+        self.assertLess(body.index("port != AHCI_RUNTIME_PORT"),
+                        body.index("ahci_runtime_write64_pair"))
+        self.assertLess(body.index("ahci_runtime_stop_port"),
+                        body.index("ahci_runtime_write64_pair"))
+
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
         self.assertIn("storage_discovery_scan()", text)

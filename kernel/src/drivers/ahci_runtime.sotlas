@@ -105,10 +105,24 @@ fn ahci_runtime_first_ata_port(hba: u64, pi: u32) -> u32 {
         if (pi & (1 << port)) != 0 {
             let base = ahci_runtime_port_base(hba, port);
             let ssts = x86_mmio_read32(base + AHCI_PX_SSTS);
-            let sig = x86_mmio_read32(base + AHCI_PX_SIG);
             if (ssts & AHCI_SSTS_DET_MASK) == AHCI_SSTS_DET_PRESENT &&
-               (ssts & AHCI_SSTS_IPM_MASK) == AHCI_SSTS_IPM_ACTIVE &&
-               sig == AHCI_SIG_ATA { return port; }
+               (ssts & AHCI_SSTS_IPM_MASK) == AHCI_SSTS_IPM_ACTIVE {
+                // PxSIG is published by the initial D2H FIS after reset.
+                // Bind valid DMA memory and enable reception BEFORE reading it.
+                if !ahci_runtime_bind_dma_port(port) { return 32; }
+                let cmd = x86_mmio_read32(base + AHCI_PX_CMD);
+                if cmd == 0xFFFFFFFF { return 32; }
+                x86_mmio_write32(base + AHCI_PX_CMD, cmd | AHCI_PXCMD_FRE);
+                let mut spins: u64 = 0;
+                while spins < AHCI_IDENTIFY_SPIN_LIMIT {
+                    let sig = x86_mmio_read32(base + AHCI_PX_SIG);
+                    if sig == AHCI_SIG_ATA { return port; }
+                    if sig != 0xFFFFFFFF && sig != 0 { break; }
+                    spins += 1;
+                }
+                // ATAPI/unknown ports must release the shared receive arena.
+                if !ahci_runtime_stop_port(base) { return 32; }
+            }
         }
         port += 1;
     }
@@ -117,13 +131,8 @@ fn ahci_runtime_first_ata_port(hba: u64, pi: u32) -> u32 {
 
 @system
 fn ahci_runtime_wait_ata_port(hba: u64, pi: u32) -> u32 {
-    let mut spins: u64 = 0;
-    while spins < AHCI_IDENTIFY_SPIN_LIMIT {
-        let port = ahci_runtime_first_ata_port(hba, pi);
-        if port < 32 { return port; }
-        spins += 1;
-    }
-    return 32;
+    // Signature polling is bounded per connected port; do not nest 20M scans.
+    return ahci_runtime_first_ata_port(hba, pi);
 }
 
 @system
@@ -167,6 +176,11 @@ fn ahci_runtime_write64_pair(base: u64, low_offset: u64, high_offset: u64, value
 fn ahci_runtime_bind_dma_port(port: u32) -> bool {
     unsafe {
         if port >= 32 || AHCI_RUNTIME_HBA == 0 { return false; }
+        // A single DMA arena is reused: quiesce its previous owner first.
+        if port != AHCI_RUNTIME_PORT {
+            if !ahci_runtime_stop_port(ahci_runtime_port_base(AHCI_RUNTIME_HBA,
+                                                            AHCI_RUNTIME_PORT)) { return false; }
+        }
         let port_base = ahci_runtime_port_base(AHCI_RUNTIME_HBA, port);
         if !ahci_runtime_stop_port(port_base) { return false; }
         if !ahci_runtime_write64_pair(port_base, AHCI_PX_CLB, AHCI_PX_CLBU,
