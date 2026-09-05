@@ -2,7 +2,8 @@
 //
 // Consome o IDENTIFY já concluído pelo runtime AHCI, extrai a capacidade LBA,
 // lê o LBA 0 em um buffer DMA dedicado e, somente no disco descartável de prova,
-// escreve o LBA 1 e confirma o conteúdo com um segundo READ DMA real.
+// escreve o LBA 1024 (fora dos headers/arrays GPT) e confirma o conteúdo com
+// um segundo READ DMA real.
 
 module kernel::drivers::ahci_block_read;
 
@@ -18,7 +19,7 @@ pub const AHCI_ATA_WRITE_DMA_EXT: u8 = 0x35;
 pub const AHCI_ATA_WRITE_DMA: u8 = 0xCA;
 pub const AHCI_READ_SECTOR_SIZE: u64 = 512;
 pub const AHCI_READ_MAGIC_SIZE: u64 = 8;
-pub const AHCI_WRITE_TEST_LBA: u64 = 1;
+pub const AHCI_WRITE_TEST_LBA: u64 = 1024;
 pub const AHCI_IDENTIFY_WORD_LBA_SUPPORT: u64 = 49;
 pub const AHCI_IDENTIFY_WORD_LBA28_LO: u64 = 60;
 pub const AHCI_IDENTIFY_WORD_LBA48_FEATURES: u64 = 83;
