@@ -94,7 +94,7 @@ class XhciConfigurationTests(unittest.TestCase):
     def test_post_cutover_activates_hid_parser_only_after_full_descriptor(self):
         text = POST.read_text(encoding="utf-8")
         helper = text.split("pub fn post_cutover_parse_first_usb_hid_interface()", 1)[1]
-        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        helper = helper.split("pub fn post_cutover_configure_first_usb_hid_endpoint()", 1)[0]
         self.assertIn("xhci_configuration_full_is_ready()", helper)
         self.assertIn("xhci_get_first_hid_configuration()", helper)
         self.assertIn("xhci_configuration_is_ready()", helper)
@@ -117,7 +117,7 @@ class XhciConfigurationTests(unittest.TestCase):
     def test_parser_gate_still_does_not_configure_endpoint_or_device(self):
         text = code_only(POST.read_text(encoding="utf-8")).lower()
         helper = text.split("pub fn post_cutover_parse_first_usb_hid_interface()", 1)[1]
-        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        helper = helper.split("pub fn post_cutover_configure_first_usb_hid_endpoint()", 1)[0]
         self.assertNotIn("configure_endpoint", helper)
         self.assertNotIn("set_configuration", helper)
         self.assertNotIn("xhci_command_submit", helper)
