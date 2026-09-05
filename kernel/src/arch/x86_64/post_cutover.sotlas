@@ -34,6 +34,7 @@ import kernel::drivers::xhci_start::*;
 import kernel::drivers::xhci_port_stage::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_address::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -384,6 +385,20 @@ pub fn post_cutover_prepare_first_usb_context() -> bool {
     return true;
 }
 
+// Z prova Address Device real. O command usa o Input Context já publicado,
+// espera seu Command Completion e só fecha o gate quando o Device Context
+// escrito pelo xHC está em Slot State Addressed com endereço USB não-zero.
+@system
+pub fn post_cutover_address_first_usb_device() -> bool {
+    if !xhci_context_is_ready() || xhci_context_slot_id() == 0 { return false; }
+    if !xhci_address_first_slot() || !xhci_address_is_ready() { return false; }
+    if xhci_address_slot_id() != xhci_context_slot_id() ||
+       xhci_address_device_address() == 0 {
+        return false;
+    }
+    return true;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -441,6 +456,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     // Y prova contexts + EP0 ring + DCBAA[slot], sem Address Device.
     if !post_cutover_prepare_first_usb_context() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Y' as u8); }
+
+    // Z prova Address Device + Output Device Context em estado Addressed.
+    if !post_cutover_address_first_usb_device() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('Z' as u8); }
 
     loop {}
 }
