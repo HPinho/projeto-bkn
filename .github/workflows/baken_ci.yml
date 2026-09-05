@@ -212,8 +212,15 @@ jobs:
           assert primary_entries == entries
           assert zlib.crc32(entries) & 0xFFFFFFFF == expected_crc
           assert zlib.crc32(primary_entries) & 0xFFFFFFFF == expected_crc
+          esp_type_guid = bytes.fromhex("28732ac11ff8d211ba4b00a0c93ec93b")
+          esp_unique_guid = bytes.fromhex("78563412341278569abcdef012345678")
+          assert primary_entries[:16] == esp_type_guid
+          assert primary_entries[16:32] == esp_unique_guid
+          assert struct.unpack_from("<Q", primary_entries, 32)[0] == 2048
+          assert struct.unpack_from("<Q", primary_entries, 40)[0] == 4095
+          assert struct.unpack_from("<Q", primary_entries, 48)[0] == 0
           PY
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=m STEP=J; do
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=m STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
