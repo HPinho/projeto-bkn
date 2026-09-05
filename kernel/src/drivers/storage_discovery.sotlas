@@ -3,7 +3,8 @@
 // A enumeração começa read-only. Pós-cutover, AHCI/NVMe habilitam Memory Space
 // para o probe estrutural. Para AHCI, o HBA é resetado com IE=0, a arena DMA é
 // programada, IDENTIFY é executado, LBA 0 é lido e LBA 1 é escrito/lido de volta
-// somente no disco descartável usado pelo gate de runtime.
+// somente no disco descartável usado pelo gate de runtime. Só depois dessa prova
+// o caminho AHCI é publicado na Block Device API nativa.
 
 module kernel::drivers::storage_discovery;
 
@@ -13,6 +14,7 @@ import kernel::memory::active_page_tables::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::ahci_runtime::*;
 import kernel::drivers::ahci_block_read::*;
+import kernel::storage::block_device::*;
 
 pub const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
 pub const PCI_SUBCLASS_SATA: u8 = 0x06;
@@ -66,6 +68,7 @@ static mut STORAGE_AHCI_RESET_READY: bool = false;
 static mut STORAGE_AHCI_DMA_READY: bool = false;
 static mut STORAGE_AHCI_IDENTIFY_READY: bool = false;
 static mut STORAGE_AHCI_READ_READY: bool = false;
+static mut STORAGE_BLOCK_DEVICE_READY: bool = false;
 static mut STORAGE_MMIO_REG0: u32 = 0;
 static mut STORAGE_MMIO_REG1: u32 = 0;
 static mut STORAGE_MMIO_REG2: u32 = 0;
@@ -99,6 +102,7 @@ fn storage_probe_mmio_after_cutover() -> bool {
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
         STORAGE_AHCI_READ_READY = false;
+        STORAGE_BLOCK_DEVICE_READY = false;
         STORAGE_MMIO_REG0 = 0;
         STORAGE_MMIO_REG1 = 0;
         STORAGE_MMIO_REG2 = 0;
@@ -162,6 +166,7 @@ fn storage_reset_ahci_after_probe() -> bool {
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
         STORAGE_AHCI_READ_READY = false;
+        STORAGE_BLOCK_DEVICE_READY = false;
         if !STORAGE_MMIO_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI { return false; }
         let base = STORAGE_CANDIDATE.abar_or_mmio_base;
         if base == 0 { return false; }
@@ -196,6 +201,7 @@ fn storage_prepare_ahci_dma_after_reset() -> bool {
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
         STORAGE_AHCI_READ_READY = false;
+        STORAGE_BLOCK_DEVICE_READY = false;
         if !STORAGE_AHCI_RESET_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
             return false;
         }
@@ -213,6 +219,7 @@ fn storage_identify_ahci_after_dma() -> bool {
     unsafe {
         STORAGE_AHCI_IDENTIFY_READY = false;
         STORAGE_AHCI_READ_READY = false;
+        STORAGE_BLOCK_DEVICE_READY = false;
         if !STORAGE_AHCI_DMA_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
             return false;
         }
@@ -226,6 +233,7 @@ fn storage_identify_ahci_after_dma() -> bool {
 fn storage_read_ahci_after_identify() -> bool {
     unsafe {
         STORAGE_AHCI_READ_READY = false;
+        STORAGE_BLOCK_DEVICE_READY = false;
         if !STORAGE_AHCI_IDENTIFY_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
             return false;
         }
@@ -233,6 +241,34 @@ fn storage_read_ahci_after_identify() -> bool {
         if !ahci_read_probe_sector0(STORAGE_CANDIDATE.abar_or_mmio_base) ||
            !ahci_read_is_ready() { return false; }
         STORAGE_AHCI_READ_READY = true;
+        return true;
+    }
+}
+
+@system
+fn storage_register_ahci_block_device() -> bool {
+    unsafe {
+        STORAGE_BLOCK_DEVICE_READY = false;
+        if !STORAGE_AHCI_READ_READY || !ahci_write_is_ready() ||
+           STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI { return false; }
+
+        let total_sectors = ahci_total_sectors();
+        if total_sectors == 0 { return false; }
+        let last_lba = total_sectors - 1;
+        if !block_device_register_native(BLOCK_DEVICE_AHCI, STORAGE_CANDIDATE.pci_index,
+            AHCI_READ_SECTOR_SIZE as u32, last_lba, true, true) { return false; }
+
+        if !block_device_has_native_target() || !block_device_has_writable_native_target() ||
+           block_device_kind() != BLOCK_DEVICE_AHCI ||
+           block_device_index() != STORAGE_CANDIDATE.pci_index ||
+           block_device_block_size() != (AHCI_READ_SECTOR_SIZE as u32) ||
+           block_device_last_lba() != last_lba {
+            block_device_reset_registry();
+            return false;
+        }
+
+        STORAGE_BLOCK_DEVICE_READY = true;
+        x86_serial_write_stage_marker('k' as u8);
         return true;
     }
 }
@@ -247,6 +283,8 @@ pub fn storage_discovery_scan() -> u32 {
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
         STORAGE_AHCI_READ_READY = false;
+        STORAGE_BLOCK_DEVICE_READY = false;
+        block_device_reset_registry();
 
         let count = pci_get_device_count();
         for mut index in 0..count {
@@ -279,6 +317,7 @@ pub fn storage_discovery_scan() -> u32 {
                 if !storage_read_ahci_after_identify() { return STORAGE_CONTROLLER_NONE; }
                 if !ahci_write_probe_sector1(STORAGE_CANDIDATE.abar_or_mmio_base) ||
                    !ahci_write_is_ready() { return STORAGE_CONTROLLER_NONE; }
+                if !storage_register_ahci_block_device() { return STORAGE_CONTROLLER_NONE; }
             }
             return kind;
         }
@@ -309,6 +348,8 @@ pub fn storage_ahci_dma_is_ready() -> bool { unsafe { return STORAGE_AHCI_DMA_RE
 pub fn storage_ahci_identify_is_ready() -> bool { unsafe { return STORAGE_AHCI_IDENTIFY_READY; } }
 @system
 pub fn storage_ahci_read_is_ready() -> bool { unsafe { return STORAGE_AHCI_READ_READY; } }
+@system
+pub fn storage_block_device_is_ready() -> bool { unsafe { return STORAGE_BLOCK_DEVICE_READY; } }
 @system
 pub fn storage_ahci_total_sectors() -> u64 { return ahci_total_sectors(); }
 @system
