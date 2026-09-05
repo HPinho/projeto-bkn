@@ -8,6 +8,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 STAGE = ROOT / "kernel/src/drivers/xhci_port_stage.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
+WORKFLOW = ROOT / ".github/workflows/baken_ci.yml"
 
 
 def _code_only(text: str) -> str:
@@ -54,6 +56,25 @@ class XhciPortStageTests(unittest.TestCase):
     def test_stage_is_in_canonical_graph(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::xhci_port_stage::*;", text)
+
+    def test_post_cutover_activates_port_stage_only_after_noop(self):
+        text = POST.read_text(encoding="utf-8")
+        body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        self.assertIn("import kernel::drivers::xhci_port_stage::*;", text)
+        self.assertIn("post_cutover_prepare_first_usb_port()", text)
+        self.assertIn("xhci_port_stage_prepare_first()", text)
+        self.assertLess(
+            body.index("x86_serial_write_stage_marker('N' as u8)"),
+            body.index("post_cutover_prepare_first_usb_port()"),
+        )
+        self.assertLess(
+            body.index("post_cutover_prepare_first_usb_port()"),
+            body.index("x86_serial_write_stage_marker('U' as u8)"),
+        )
+
+    def test_qemu_requires_usb_port_runtime_marker(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("STEP=N STEP=U", workflow)
 
 
 if __name__ == "__main__":
