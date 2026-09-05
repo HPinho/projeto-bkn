@@ -1,10 +1,11 @@
 // Baken OS — Block Device API nativa.
 //
-// Esta camada não implementa AHCI/NVMe por si só. Ela mantém somente o
-// contrato de ownership/capacidade de um dispositivo de bloco que já tenha
-// sido inicializado por um driver nativo real.
+// Mantém o contrato de ownership/capacidade do dispositivo publicado e fornece
+// o primeiro dispatch genérico de READ/WRITE de um setor para o driver nativo.
 
 module kernel::storage::block_device;
+
+import kernel::drivers::ahci_block_io::*;
 
 pub const BLOCK_DEVICE_NONE: u32 = 0;
 pub const BLOCK_DEVICE_AHCI: u32 = 1;
@@ -16,6 +17,7 @@ static mut BLOCK_SIZE: u32 = 0;
 static mut BLOCK_LAST_LBA: u64 = 0;
 static mut BLOCK_WRITABLE: bool = false;
 static mut BLOCK_NATIVE_IO_READY: bool = false;
+static mut BLOCK_DRIVER_CONTEXT: u64 = 0;
 
 @system
 pub fn block_device_reset_registry() -> void {
@@ -26,6 +28,7 @@ pub fn block_device_reset_registry() -> void {
         BLOCK_LAST_LBA = 0;
         BLOCK_WRITABLE = false;
         BLOCK_NATIVE_IO_READY = false;
+        BLOCK_DRIVER_CONTEXT = 0;
     }
 }
 
@@ -42,7 +45,42 @@ pub fn block_device_register_native(kind: u32, index: u32, block_size: u32, last
         BLOCK_LAST_LBA = last_lba;
         BLOCK_WRITABLE = writable;
         BLOCK_NATIVE_IO_READY = true;
+        BLOCK_DRIVER_CONTEXT = 0;
         return true;
+    }
+}
+
+@system
+pub fn block_device_bind_driver_context(context: u64) -> bool {
+    unsafe {
+        if !BLOCK_NATIVE_IO_READY || BLOCK_KIND == BLOCK_DEVICE_NONE || context == 0 { return false; }
+        BLOCK_DRIVER_CONTEXT = context;
+        return true;
+    }
+}
+
+@system
+pub fn block_device_read_sector(lba: u64, output: *mut u8) -> bool {
+    unsafe {
+        if !BLOCK_NATIVE_IO_READY || BLOCK_DRIVER_CONTEXT == 0 || output == (null as *mut u8) { return false; }
+        if BLOCK_SIZE != 512 || lba > BLOCK_LAST_LBA { return false; }
+        if BLOCK_KIND == BLOCK_DEVICE_AHCI {
+            return ahci_block_io_read_sector(BLOCK_DRIVER_CONTEXT, lba, output);
+        }
+        return false;
+    }
+}
+
+@system
+pub fn block_device_write_sector(lba: u64, input: *const u8) -> bool {
+    unsafe {
+        if !BLOCK_NATIVE_IO_READY || !BLOCK_WRITABLE || BLOCK_DRIVER_CONTEXT == 0 ||
+           input == (null as *const u8) { return false; }
+        if BLOCK_SIZE != 512 || lba > BLOCK_LAST_LBA { return false; }
+        if BLOCK_KIND == BLOCK_DEVICE_AHCI {
+            return ahci_block_io_write_sector(BLOCK_DRIVER_CONTEXT, lba, input);
+        }
+        return false;
     }
 }
 
@@ -67,3 +105,6 @@ pub fn block_device_block_size() -> u32 { unsafe { return BLOCK_SIZE; } }
 
 @system
 pub fn block_device_last_lba() -> u64 { unsafe { return BLOCK_LAST_LBA; } }
+
+@system
+pub fn block_device_driver_context() -> u64 { unsafe { return BLOCK_DRIVER_CONTEXT; } }
