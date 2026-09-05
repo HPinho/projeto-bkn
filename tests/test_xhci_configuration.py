@@ -36,13 +36,25 @@ class XhciConfigurationTests(unittest.TestCase):
         self.assertIn("configuration_value == 0", body)
         self.assertIn("XHCI_CONFIGURATION_HEADER_READY = true", body)
 
-    def test_configuration_fetches_header_then_total_length(self):
+    def test_full_configuration_uses_header_total_length_without_parsing(self):
+        text = CONF.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_read_first_configuration_full()", 1)[1]
+        body = body.split("pub fn xhci_configuration_full_is_ready()", 1)[0]
+        self.assertIn("xhci_configuration_header_is_ready()", body)
+        self.assertIn("xhci_configuration_header_total_length()", body)
+        self.assertIn("xhci_configuration_fetch(&mut buffer, total_length)", body)
+        self.assertIn("xhci_configuration_read16(base, 2) != total_length", body)
+        self.assertIn("XHCI_CONFIGURATION_FULL_READY = true", body)
+        self.assertNotIn("xhci_configuration_parse", body)
+        self.assertNotIn("xhci_get_first_hid_configuration", body)
+
+    def test_hid_parser_consumes_already_fetched_full_configuration(self):
         text = CONF.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_get_first_hid_configuration()", 1)[1]
-        self.assertIn("USB_CONFIGURATION_HEADER_LENGTH", body)
-        self.assertIn("xhci_configuration_read16(base, 2)", body)
-        self.assertIn("xhci_configuration_fetch(&mut buffer, total_length)", body)
-        self.assertIn("XHCI_CONFIGURATION_DMA_SIZE", body)
+        self.assertIn("xhci_configuration_full_is_ready()", body)
+        self.assertIn("XHCI_CONFIGURATION_BUFFER.virtual_address", body)
+        self.assertIn("xhci_configuration_parse(base, total_length)", body)
+        self.assertNotIn("xhci_configuration_fetch(&mut buffer", body)
 
     def test_parser_walks_variable_length_descriptors(self):
         text = CONF.read_text(encoding="utf-8")
@@ -79,9 +91,10 @@ class XhciConfigurationTests(unittest.TestCase):
         self.assertNotIn("xhci_command_submit", text)
         self.assertNotIn("x86_mmio_write32", text)
 
-    def test_post_cutover_does_not_activate_full_configuration_before_header_gate(self):
+    def test_post_cutover_keeps_hid_parser_after_full_descriptor_gate(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        self.assertIn("post_cutover_probe_first_usb_configuration_header()", body)
         self.assertNotIn("xhci_get_first_hid_configuration()", body)
 
     def test_main_registers_configuration_module(self):
