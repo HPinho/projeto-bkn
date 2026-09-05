@@ -25,6 +25,7 @@ pub const XHCI_ENDPOINT_CONTEXT_CERR_3: u32 = 3;
 pub const XHCI_ENDPOINT_CONTEXT_TYPE_SHIFT: u32 = 3;
 pub const XHCI_ENDPOINT_TYPE_INTERRUPT_IN: u32 = 7;
 pub const XHCI_ENDPOINT_CONTEXT_MAX_PACKET_SHIFT: u32 = 16;
+pub const XHCI_ENDPOINT_CONTEXT_MAX_ESIT_PAYLOAD_SHIFT: u32 = 16;
 pub const XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH: u32 = 8;
 pub const XHCI_HID_MAX_CONTEXT_INDEX: u8 = 31;
 
@@ -99,15 +100,18 @@ fn xhci_hid_context_ceil_log2(value: u32) -> u8 {
     return exponent;
 }
 
-// xHCI expressa Interval em unidades exponenciais de 125 us. Para LS/FS
-// interrupt endpoints, bInterval é dado em frames de 1 ms; convertemos para
-// microframes (x8) e arredondamos para cima. HS/SS já usa expoente USB.
+// xHCI codifica o período como 2^(Interval-1) * 125 us. Para LS/FS,
+// bInterval é expresso em frames de 1 ms; portanto convertemos para microframes
+// e somamos 1 ao expoente. HS/SS já fornece expoente USB e vira bInterval-1.
 @system
 fn xhci_hid_context_compute_interval(speed_id: u8, usb_interval: u8) -> u8 {
     if usb_interval == 0 { return 0; }
     if speed_id == 1 || speed_id == 2 {
         let microframes = (usb_interval as u32) * 8;
-        return xhci_hid_context_ceil_log2(microframes);
+        let exponent = xhci_hid_context_ceil_log2(microframes);
+        let encoded = exponent + 1;
+        if encoded > 15 { return 15; }
+        return encoded;
     }
     if speed_id >= 3 {
         let encoded = usb_interval - 1;
@@ -141,7 +145,7 @@ pub fn xhci_hid_context_prepare() -> bool {
     if snapshot == (null as *const XhciPortSnapshot) { return false; }
     let speed_id = unsafe { (*snapshot).speed_id };
     let interval = xhci_hid_context_compute_interval(speed_id, usb_interval);
-    if interval > 15 { return false; }
+    if interval == 0 || interval > 15 { return false; }
 
     let context_size = xhci_context_size();
     if context_size != 32 && context_size != 64 { return false; }
@@ -162,13 +166,15 @@ pub fn xhci_hid_context_prepare() -> bool {
         *link = xhci_trb_link(ring.physical_base, true, true);
     }
 
-    // Add Context flag bit n seleciona o Device Context Index n.
+    // O Input Control Context foi usado antes pelo Address Device. Para
+    // Configure Endpoint não devemos carregar o Add EP0 antigo: reescrevemos
+    // Drop=0 e Add={Slot, novo DCI} explicitamente.
+    let drop_flags_offset: u64 = 0;
     let add_flags_offset: u64 = 4;
     let add_flag = 1 << (dci as u32);
-    unsafe {
-        let current = *(((input as usize) + (add_flags_offset as usize)) as *const u32);
-        if !xhci_hid_context_write32(input, add_flags_offset, current | add_flag) { return false; }
-    }
+    if !xhci_hid_context_write32(input, drop_flags_offset, 0) ||
+       !xhci_hid_context_write32(input, add_flags_offset,
+           XHCI_INPUT_CONTROL_ADD_SLOT | add_flag) { return false; }
 
     // Slot Context precisa anunciar o maior Context Entry válido.
     let slot_offset = context_size as u64;
@@ -184,18 +190,21 @@ pub fn xhci_hid_context_prepare() -> bool {
     }
 
     // Input Context layout: Input Control é entrada 0; contexto DCI n começa em
-    // (n + 1) * ContextSize. DCI=1 é EP0, já preparado na fase Address Device.
+    // (n + 1) * ContextSize. Para endpoint periódico, Max ESIT Payload precisa
+    // refletir os bytes reservados por intervalo; para HID FS/LS sem burst isso
+    // corresponde ao Max Packet Size.
     let endpoint_offset = ((dci as u64) + 1) * (context_size as u64);
     let ep_dw0 = (interval as u32) << XHCI_ENDPOINT_CONTEXT_INTERVAL_SHIFT;
     let ep_dw1 = (XHCI_ENDPOINT_CONTEXT_CERR_3 << XHCI_ENDPOINT_CONTEXT_CERR_SHIFT) |
         (XHCI_ENDPOINT_TYPE_INTERRUPT_IN << XHCI_ENDPOINT_CONTEXT_TYPE_SHIFT) |
         ((max_packet as u32) << XHCI_ENDPOINT_CONTEXT_MAX_PACKET_SHIFT);
+    let ep_dw4 = XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH |
+        ((max_packet as u32) << XHCI_ENDPOINT_CONTEXT_MAX_ESIT_PAYLOAD_SHIFT);
     if !xhci_hid_context_write32(input, endpoint_offset, ep_dw0) ||
        !xhci_hid_context_write32(input, endpoint_offset + 4, ep_dw1) ||
        !xhci_hid_context_write64(input, endpoint_offset + 8,
            ring.physical_base | XHCI_TR_DEQUEUE_DCS) ||
-       !xhci_hid_context_write32(input, endpoint_offset + 16,
-           XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH) { return false; }
+       !xhci_hid_context_write32(input, endpoint_offset + 16, ep_dw4) { return false; }
 
     if x86_read_cr3_raw() == 0 { return false; }
     if !dma_share_with_device(&mut ring_buffer) { return false; }
