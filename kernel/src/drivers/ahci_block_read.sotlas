@@ -1,8 +1,8 @@
 // Baken OS — primeiro READ de setor real via AHCI.
 //
 // Consome o IDENTIFY já concluído pelo runtime AHCI, extrai a capacidade LBA
-// e reutiliza a arena DMA compartilhada para ler o LBA 0. O gate só publica
-// sucesso depois de validar uma assinatura realmente recebida do disco de teste.
+// e usa um buffer DMA dedicado para ler o LBA 0. O gate só publica sucesso
+// depois de validar uma assinatura realmente recebida do disco de teste.
 // Nenhuma escrita em mídia é realizada.
 
 module kernel::drivers::ahci_block_read;
@@ -10,6 +10,7 @@ module kernel::drivers::ahci_block_read;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::direct_map::*;
+import kernel::memory::dma::*;
 import kernel::drivers::ahci_runtime::*;
 
 pub const AHCI_ATA_READ_DMA_EXT: u8 = 0x25;
@@ -25,6 +26,15 @@ static mut AHCI_READ_READY: bool = false;
 static mut AHCI_CAPACITY_READY: bool = false;
 static mut AHCI_LBA48_READY: bool = false;
 static mut AHCI_TOTAL_SECTORS: u64 = 0;
+static mut AHCI_READ_BUFFER: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
 
 @system
 fn ahci_block_zero(base: *mut u8, size: u64) -> bool {
@@ -102,6 +112,22 @@ pub fn ahci_parse_identify_capacity() -> bool {
 }
 
 @system
+fn ahci_read_prepare_buffer() -> bool {
+    unsafe {
+        if dma_buffer_shared(&AHCI_READ_BUFFER) {
+            return ahci_block_zero(AHCI_READ_BUFFER.virtual_address, AHCI_READ_SECTOR_SIZE);
+        }
+    }
+
+    let mut buffer = dma_alloc(AHCI_RUNTIME_PAGE_SIZE, AHCI_RUNTIME_PAGE_SIZE);
+    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    if !ahci_block_zero(buffer.virtual_address, buffer.size) { return false; }
+    if !dma_share_with_device(&mut buffer) { return false; }
+    unsafe { AHCI_READ_BUFFER = buffer; }
+    return true;
+}
+
+@system
 fn ahci_read_magic_matches(buffer: *const u8) -> bool {
     if buffer == (null as *const u8) { return false; }
     unsafe {
@@ -121,6 +147,7 @@ pub fn ahci_read_probe_sector0(hba: u64) -> bool {
     unsafe { AHCI_READ_READY = false; }
     if hba == 0 || !ahci_identify_is_ready() { return false; }
     if !ahci_parse_identify_capacity() || ahci_total_sectors() == 0 { return false; }
+    if !ahci_read_prepare_buffer() { return false; }
 
     let port = ahci_runtime_port();
     if port >= 32 { return false; }
@@ -128,12 +155,12 @@ pub fn ahci_read_probe_sector0(hba: u64) -> bool {
 
     let command_list_physical = ahci_runtime_command_list_physical();
     let command_table_physical = ahci_runtime_command_table_physical();
-    let data_physical = ahci_identify_data_physical();
     let command_list = ahci_block_virtual(command_list_physical);
     let table = ahci_block_virtual(command_table_physical);
-    let data = ahci_block_virtual(data_physical);
+    let data_physical = unsafe { AHCI_READ_BUFFER.physical_address };
+    let data = unsafe { AHCI_READ_BUFFER.virtual_address };
     if command_list == (null as *mut u8) || table == (null as *mut u8) ||
-       data == (null as *mut u8) { return false; }
+       data == (null as *mut u8) || data_physical == 0 { return false; }
 
     if !ahci_block_zero(table, AHCI_RUNTIME_PAGE_SIZE) ||
        !ahci_block_zero(data, AHCI_READ_SECTOR_SIZE) { return false; }
@@ -220,5 +247,7 @@ pub fn ahci_capacity_is_ready() -> bool { unsafe { return AHCI_CAPACITY_READY; }
 pub fn ahci_lba48_is_ready() -> bool { unsafe { return AHCI_LBA48_READY; } }
 @system
 pub fn ahci_total_sectors() -> u64 { unsafe { return AHCI_TOTAL_SECTORS; } }
+@system
+pub fn ahci_read_buffer_physical() -> u64 { unsafe { return AHCI_READ_BUFFER.physical_address; } }
 @system
 pub fn ahci_read_is_ready() -> bool { unsafe { return AHCI_READ_READY; } }
