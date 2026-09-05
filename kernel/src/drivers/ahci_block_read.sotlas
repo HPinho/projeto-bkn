@@ -1,9 +1,8 @@
-// Baken OS — primeiro READ de setor real via AHCI.
+// Baken OS — primeiro READ e primeiro WRITE de setor reais via AHCI.
 //
-// Consome o IDENTIFY já concluído pelo runtime AHCI, extrai a capacidade LBA
-// e usa um buffer DMA dedicado para ler o LBA 0. O gate só publica sucesso
-// depois de validar uma assinatura realmente recebida do disco de teste.
-// Nenhuma escrita em mídia é realizada.
+// Consome o IDENTIFY já concluído pelo runtime AHCI, extrai a capacidade LBA,
+// lê o LBA 0 em um buffer DMA dedicado e, somente no disco descartável de prova,
+// escreve o LBA 1 e confirma o conteúdo com um segundo READ DMA real.
 
 module kernel::drivers::ahci_block_read;
 
@@ -15,18 +14,31 @@ import kernel::drivers::ahci_runtime::*;
 
 pub const AHCI_ATA_READ_DMA_EXT: u8 = 0x25;
 pub const AHCI_ATA_READ_DMA: u8 = 0xC8;
+pub const AHCI_ATA_WRITE_DMA_EXT: u8 = 0x35;
+pub const AHCI_ATA_WRITE_DMA: u8 = 0xCA;
 pub const AHCI_READ_SECTOR_SIZE: u64 = 512;
 pub const AHCI_READ_MAGIC_SIZE: u64 = 8;
+pub const AHCI_WRITE_TEST_LBA: u64 = 1;
 pub const AHCI_IDENTIFY_WORD_LBA_SUPPORT: u64 = 49;
 pub const AHCI_IDENTIFY_WORD_LBA28_LO: u64 = 60;
 pub const AHCI_IDENTIFY_WORD_LBA48_FEATURES: u64 = 83;
 pub const AHCI_IDENTIFY_WORD_LBA48_LO: u64 = 100;
 
 static mut AHCI_READ_READY: bool = false;
+static mut AHCI_WRITE_READY: bool = false;
 static mut AHCI_CAPACITY_READY: bool = false;
 static mut AHCI_LBA48_READY: bool = false;
 static mut AHCI_TOTAL_SECTORS: u64 = 0;
 static mut AHCI_READ_BUFFER: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
+static mut AHCI_WRITE_BUFFER: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
     size: 0,
@@ -242,6 +254,175 @@ pub fn ahci_read_probe_sector0(hba: u64) -> bool {
 }
 
 @system
+fn ahci_write_prepare_buffer() -> bool {
+    unsafe {
+        if dma_buffer_shared(&AHCI_WRITE_BUFFER) {
+            return ahci_block_zero(AHCI_WRITE_BUFFER.virtual_address, AHCI_READ_SECTOR_SIZE);
+        }
+    }
+
+    let mut buffer = dma_alloc(AHCI_RUNTIME_PAGE_SIZE, AHCI_RUNTIME_PAGE_SIZE);
+    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    if !ahci_block_zero(buffer.virtual_address, buffer.size) { return false; }
+    if !dma_share_with_device(&mut buffer) { return false; }
+    unsafe { AHCI_WRITE_BUFFER = buffer; }
+    return true;
+}
+
+@system
+fn ahci_write_fill_magic(buffer: *mut u8) -> bool {
+    if buffer == (null as *mut u8) { return false; }
+    if !ahci_block_zero(buffer, AHCI_READ_SECTOR_SIZE) { return false; }
+    unsafe {
+        *buffer = 'B' as u8;
+        *(((buffer as usize) + 1) as *mut u8) = 'A' as u8;
+        *(((buffer as usize) + 2) as *mut u8) = 'K' as u8;
+        *(((buffer as usize) + 3) as *mut u8) = 'E' as u8;
+        *(((buffer as usize) + 4) as *mut u8) = 'N' as u8;
+        *(((buffer as usize) + 5) as *mut u8) = 'W' as u8;
+        *(((buffer as usize) + 6) as *mut u8) = '0' as u8;
+        *(((buffer as usize) + 7) as *mut u8) = '1' as u8;
+    }
+    return true;
+}
+
+@system
+fn ahci_write_magic_matches(buffer: *const u8) -> bool {
+    if buffer == (null as *const u8) { return false; }
+    unsafe {
+        return *buffer == ('B' as u8) &&
+            *(((buffer as usize) + 1) as *const u8) == ('A' as u8) &&
+            *(((buffer as usize) + 2) as *const u8) == ('K' as u8) &&
+            *(((buffer as usize) + 3) as *const u8) == ('E' as u8) &&
+            *(((buffer as usize) + 4) as *const u8) == ('N' as u8) &&
+            *(((buffer as usize) + 5) as *const u8) == ('W' as u8) &&
+            *(((buffer as usize) + 6) as *const u8) == ('0' as u8) &&
+            *(((buffer as usize) + 7) as *const u8) == ('1' as u8);
+    }
+}
+
+@system
+fn ahci_write_issue_dma(hba: u64, command: u8, write_to_disk: bool) -> bool {
+    if hba == 0 { return false; }
+    let port = ahci_runtime_port();
+    if port >= 32 { return false; }
+    let port_base = hba + AHCI_PORT_BASE + ((port as u64) * AHCI_PORT_STRIDE);
+    let command_list_physical = ahci_runtime_command_list_physical();
+    let command_table_physical = ahci_runtime_command_table_physical();
+    let command_list = ahci_block_virtual(command_list_physical);
+    let table = ahci_block_virtual(command_table_physical);
+    let data_physical = unsafe { AHCI_WRITE_BUFFER.physical_address };
+    if command_list == (null as *mut u8) || table == (null as *mut u8) || data_physical == 0 {
+        return false;
+    }
+    if !ahci_block_zero(table, AHCI_RUNTIME_PAGE_SIZE) { return false; }
+
+    unsafe {
+        let mut header_flags: u32 = 5 | (1 << 16);
+        if write_to_disk { header_flags |= 1 << 6; }
+        *command_list = (header_flags & 0xFF) as u8;
+        *(((command_list as usize) + 1) as *mut u8) = ((header_flags >> 8) & 0xFF) as u8;
+        *(((command_list as usize) + 2) as *mut u8) = ((header_flags >> 16) & 0xFF) as u8;
+        *(((command_list as usize) + 3) as *mut u8) = ((header_flags >> 24) & 0xFF) as u8;
+        *(((command_list as usize) + 4) as *mut u32) = 0;
+        *(((command_list as usize) + 8) as *mut u32) =
+            (command_table_physical & 0xFFFFFFFF) as u32;
+        *(((command_list as usize) + 12) as *mut u32) =
+            ((command_table_physical >> 32) & 0xFFFFFFFF) as u32;
+
+        *table = AHCI_FIS_TYPE_REG_H2D;
+        *(((table as usize) + 1) as *mut u8) = 0x80;
+        *(((table as usize) + 2) as *mut u8) = command;
+        *(((table as usize) + 4) as *mut u8) = (AHCI_WRITE_TEST_LBA & 0xFF) as u8;
+        *(((table as usize) + 5) as *mut u8) = ((AHCI_WRITE_TEST_LBA >> 8) & 0xFF) as u8;
+        *(((table as usize) + 6) as *mut u8) = ((AHCI_WRITE_TEST_LBA >> 16) & 0xFF) as u8;
+        *(((table as usize) + 7) as *mut u8) = 0x40;
+        *(((table as usize) + 8) as *mut u8) = ((AHCI_WRITE_TEST_LBA >> 24) & 0xFF) as u8;
+        *(((table as usize) + 9) as *mut u8) = ((AHCI_WRITE_TEST_LBA >> 32) & 0xFF) as u8;
+        *(((table as usize) + 10) as *mut u8) = ((AHCI_WRITE_TEST_LBA >> 40) & 0xFF) as u8;
+        *(((table as usize) + 12) as *mut u8) = 1;
+        *(((table as usize) + 13) as *mut u8) = 0;
+
+        let prdt = ((table as usize) + 0x80) as *mut u32;
+        *prdt = (data_physical & 0xFFFFFFFF) as u32;
+        *(((prdt as usize) + 4) as *mut u32) = ((data_physical >> 32) & 0xFFFFFFFF) as u32;
+        *(((prdt as usize) + 8) as *mut u32) = 0;
+        *(((prdt as usize) + 12) as *mut u32) = (511 as u32) | (1 << 31);
+    }
+
+    x86_mmio_write32(port_base + AHCI_PX_IS, 0xFFFFFFFF);
+    let ci_before = x86_mmio_read32(port_base + AHCI_PX_CI);
+    if ci_before == 0xFFFFFFFF || (ci_before & 1) != 0 { return false; }
+
+    let mut cmd = x86_mmio_read32(port_base + AHCI_PX_CMD);
+    if cmd == 0xFFFFFFFF { return false; }
+    if (cmd & AHCI_PXCMD_FRE) == 0 {
+        cmd |= AHCI_PXCMD_FRE;
+        x86_mmio_write32(port_base + AHCI_PX_CMD, cmd);
+    }
+    if (cmd & AHCI_PXCMD_ST) == 0 {
+        cmd |= AHCI_PXCMD_ST;
+        x86_mmio_write32(port_base + AHCI_PX_CMD, cmd);
+    }
+
+    let mut spins: u64 = 0;
+    while spins < AHCI_IDENTIFY_SPIN_LIMIT {
+        let tfd = x86_mmio_read32(port_base + AHCI_PX_TFD);
+        if tfd == 0xFFFFFFFF { return false; }
+        if (tfd & (AHCI_TFD_BSY | AHCI_TFD_DRQ)) == 0 { break; }
+        spins += 1;
+    }
+    if spins >= AHCI_IDENTIFY_SPIN_LIMIT { return false; }
+
+    x86_mmio_write32(port_base + AHCI_PX_CI, 1);
+    spins = 0;
+    while spins < AHCI_IDENTIFY_SPIN_LIMIT {
+        let isr = x86_mmio_read32(port_base + AHCI_PX_IS);
+        let ci = x86_mmio_read32(port_base + AHCI_PX_CI);
+        if isr == 0xFFFFFFFF || ci == 0xFFFFFFFF { return false; }
+        if (isr & AHCI_PXIS_TFES) != 0 { return false; }
+        if (ci & 1) == 0 {
+            let tfd = x86_mmio_read32(port_base + AHCI_PX_TFD);
+            if tfd == 0xFFFFFFFF || (tfd & AHCI_TFD_ERR) != 0 { return false; }
+            unsafe {
+                let prdbc = *(((command_list as usize) + 4) as *const u32);
+                if prdbc != (AHCI_READ_SECTOR_SIZE as u32) { return false; }
+            }
+            return true;
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn ahci_write_probe_sector1(hba: u64) -> bool {
+    unsafe { AHCI_WRITE_READY = false; }
+    if hba == 0 || !ahci_read_is_ready() || !ahci_capacity_is_ready() { return false; }
+    if ahci_total_sectors() <= AHCI_WRITE_TEST_LBA { return false; }
+    if !ahci_write_prepare_buffer() { return false; }
+
+    let data = unsafe { AHCI_WRITE_BUFFER.virtual_address };
+    if data == (null as *mut u8) || !ahci_write_fill_magic(data) { return false; }
+
+    let mut write_command: u8 = AHCI_ATA_WRITE_DMA;
+    let mut read_command: u8 = AHCI_ATA_READ_DMA;
+    if ahci_lba48_is_ready() {
+        write_command = AHCI_ATA_WRITE_DMA_EXT;
+        read_command = AHCI_ATA_READ_DMA_EXT;
+    }
+
+    if !ahci_write_issue_dma(hba, write_command, true) { return false; }
+    if !ahci_block_zero(data, AHCI_READ_SECTOR_SIZE) { return false; }
+    if !ahci_write_issue_dma(hba, read_command, false) { return false; }
+    if !ahci_write_magic_matches(data as *const u8) { return false; }
+
+    unsafe { AHCI_WRITE_READY = true; }
+    x86_serial_write_stage_marker('f' as u8);
+    return true;
+}
+
+@system
 pub fn ahci_capacity_is_ready() -> bool { unsafe { return AHCI_CAPACITY_READY; } }
 @system
 pub fn ahci_lba48_is_ready() -> bool { unsafe { return AHCI_LBA48_READY; } }
@@ -250,4 +431,8 @@ pub fn ahci_total_sectors() -> u64 { unsafe { return AHCI_TOTAL_SECTORS; } }
 @system
 pub fn ahci_read_buffer_physical() -> u64 { unsafe { return AHCI_READ_BUFFER.physical_address; } }
 @system
+pub fn ahci_write_buffer_physical() -> u64 { unsafe { return AHCI_WRITE_BUFFER.physical_address; } }
+@system
 pub fn ahci_read_is_ready() -> bool { unsafe { return AHCI_READ_READY; } }
+@system
+pub fn ahci_write_is_ready() -> bool { unsafe { return AHCI_WRITE_READY; } }
