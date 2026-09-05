@@ -4,7 +4,8 @@
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
 // -> No-op DMA -> USB port/reset -> Enable Slot -> contexts -> Address Device
 // -> Device Descriptor 8B -> EP0 MPS -> Device Descriptor 18B
-// -> Configuration Header 9B -> Configuration Descriptor completo.
+// -> Configuration Header 9B -> Configuration Descriptor completo
+// -> parsing HID Boot + Interrupt IN.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -406,6 +407,29 @@ pub fn post_cutover_read_full_usb_configuration_descriptor() -> bool {
     return true;
 }
 
+// M prova somente o parsing do buffer já lido em H. Seleciona uma interface
+// HID Boot (teclado/mouse) e um endpoint Interrupt IN válido; ainda não envia
+// Configure Endpoint nem SET_CONFIGURATION.
+@system
+pub fn post_cutover_parse_first_usb_hid_interface() -> bool {
+    if !xhci_configuration_full_is_ready() { return false; }
+    let total_length = xhci_configuration_full_total_length();
+    let configuration_value = xhci_configuration_full_value();
+    if !xhci_get_first_hid_configuration() || !xhci_configuration_is_ready() { return false; }
+    if xhci_configuration_total_length() != total_length ||
+       xhci_configuration_value() != configuration_value { return false; }
+    let protocol = xhci_hid_protocol();
+    if protocol != USB_HID_PROTOCOL_KEYBOARD && protocol != USB_HID_PROTOCOL_MOUSE { return false; }
+    let endpoint = xhci_hid_endpoint_address();
+    if (endpoint & USB_ENDPOINT_DIRECTION_IN) == 0 ||
+       xhci_hid_endpoint_max_packet() == 0 ||
+       xhci_hid_endpoint_interval() == 0 ||
+       xhci_hid_report_descriptor_length() == 0 {
+        return false;
+    }
+    return true;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -454,5 +478,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('G' as u8); }
     if !post_cutover_read_full_usb_configuration_descriptor() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('H' as u8); }
+    if !post_cutover_parse_first_usb_hid_interface() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('M' as u8); }
     loop {}
 }
