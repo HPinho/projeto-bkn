@@ -1,9 +1,10 @@
 // Baken OS — primeira fundação DMA real do AHCI pós-cutover.
 //
-// Este estágio ainda não envia comandos ATA. Ele escolhe uma porta implementada,
-// para o command engine, aloca uma arena DMA física via PMM, publica Command List,
-// Received FIS e Command Table e só então habilita PCI Bus Master. A prova exige
-// read-back dos registradores programados; ST e FRE continuam desligados.
+// Este estágio ainda não envia comandos ATA. O caller já deve ter validado e
+// resetado o HBA. Aqui escolhemos uma porta implementada, paramos o command
+// engine, alocamos uma arena DMA física via PMM, publicamos Command List,
+// Received FIS e Command Table e só então habilitamos PCI Bus Master. A prova
+// exige read-back dos registradores programados; ST e FRE continuam desligados.
 
 module kernel::drivers::ahci_runtime;
 
@@ -11,7 +12,6 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::dma::*;
 import kernel::drivers::pci_bus::*;
-import kernel::drivers::storage_discovery::*;
 
 pub const AHCI_RUNTIME_PAGE_SIZE: u64 = 4096;
 pub const AHCI_RUNTIME_ARENA_PAGES: u64 = 3;
@@ -107,43 +107,34 @@ fn ahci_runtime_write64_pair(base: u64, low_offset: u64, high_offset: u64, value
 }
 
 @system
-pub fn ahci_runtime_prepare_dma() -> bool {
+pub fn ahci_runtime_prepare_dma(hba: u64, bus: u8, slot: u8, func: u8, pi: u32) -> bool {
     unsafe { AHCI_RUNTIME_READY = false; }
-    if !storage_ahci_reset_is_ready() || storage_discovery_kind() != STORAGE_CONTROLLER_AHCI {
+    if hba == 0 || pi == 0 || !dma_allocator_available() { return false; }
+
+    let port = ahci_runtime_first_implemented_port(pi);
+    if port >= 32 { return false; }
+    let port_base = ahci_runtime_port_base(hba, port);
+    if !ahci_runtime_stop_port(port_base) { return false; }
+
+    let mut arena = dma_alloc(AHCI_RUNTIME_ARENA_PAGES * AHCI_RUNTIME_PAGE_SIZE,
+                              AHCI_RUNTIME_PAGE_SIZE);
+    if !dma_buffer_cpu_owned(&arena) { return false; }
+    if !ahci_runtime_zero(arena.virtual_address, arena.size) { return false; }
+
+    let command_list = arena.physical_address + AHCI_COMMAND_LIST_PAGE * AHCI_RUNTIME_PAGE_SIZE;
+    let received_fis = arena.physical_address + AHCI_RECEIVED_FIS_PAGE * AHCI_RUNTIME_PAGE_SIZE;
+    let command_table = arena.physical_address + AHCI_COMMAND_TABLE_PAGE * AHCI_RUNTIME_PAGE_SIZE;
+    if (command_list & 0x3FF) != 0 || (received_fis & 0xFF) != 0 ||
+       (command_table & 0x7F) != 0 { return false; }
+
+    if !ahci_runtime_write64_pair(port_base, AHCI_PX_CLB, AHCI_PX_CLBU, command_list) {
         return false;
     }
-    if !dma_allocator_available() { return false; }
-
-    let candidate = storage_discovery_candidate();
-    if candidate == (null as *const StorageControllerCandidate) { return false; }
+    if !ahci_runtime_write64_pair(port_base, AHCI_PX_FB, AHCI_PX_FBU, received_fis) {
+        return false;
+    }
 
     unsafe {
-        let hba = (*candidate).abar_or_mmio_base;
-        if hba == 0 { return false; }
-        let pi = storage_mmio_reg2();
-        let port = ahci_runtime_first_implemented_port(pi);
-        if port >= 32 { return false; }
-        let port_base = ahci_runtime_port_base(hba, port);
-        if !ahci_runtime_stop_port(port_base) { return false; }
-
-        let mut arena = dma_alloc(AHCI_RUNTIME_ARENA_PAGES * AHCI_RUNTIME_PAGE_SIZE,
-                                  AHCI_RUNTIME_PAGE_SIZE);
-        if !dma_buffer_cpu_owned(&arena) { return false; }
-        if !ahci_runtime_zero(arena.virtual_address, arena.size) { return false; }
-
-        let command_list = arena.physical_address + AHCI_COMMAND_LIST_PAGE * AHCI_RUNTIME_PAGE_SIZE;
-        let received_fis = arena.physical_address + AHCI_RECEIVED_FIS_PAGE * AHCI_RUNTIME_PAGE_SIZE;
-        let command_table = arena.physical_address + AHCI_COMMAND_TABLE_PAGE * AHCI_RUNTIME_PAGE_SIZE;
-        if (command_list & 0x3FF) != 0 || (received_fis & 0xFF) != 0 ||
-           (command_table & 0x7F) != 0 { return false; }
-
-        if !ahci_runtime_write64_pair(port_base, AHCI_PX_CLB, AHCI_PX_CLBU, command_list) {
-            return false;
-        }
-        if !ahci_runtime_write64_pair(port_base, AHCI_PX_FB, AHCI_PX_FBU, received_fis) {
-            return false;
-        }
-
         // Header do slot 0: CFL=5 dwords, PRDTL=0 neste gate e CTBA real.
         let header = arena.virtual_address as *mut u32;
         *header = 5;
@@ -151,32 +142,33 @@ pub fn ahci_runtime_prepare_dma() -> bool {
         let ctba_high = ((arena.virtual_address as usize) + 12) as *mut u32;
         *ctba_low = (command_table & 0xFFFFFFFF) as u32;
         *ctba_high = ((command_table >> 32) & 0xFFFFFFFF) as u32;
+    }
 
-        if !dma_share_with_device(&mut arena) { return false; }
-        pci_enable_command_bits((*candidate).bus, (*candidate).slot, (*candidate).func,
-                                PCI_COMMAND_BUS_MASTER);
-        let command = pci_read_config16((*candidate).bus, (*candidate).slot, (*candidate).func, 0x04);
-        if (command & PCI_COMMAND_MEMORY_SPACE) == 0 || (command & PCI_COMMAND_BUS_MASTER) == 0 {
-            return false;
-        }
+    if !dma_share_with_device(&mut arena) { return false; }
+    pci_enable_command_bits(bus, slot, func, PCI_COMMAND_BUS_MASTER);
+    let command = pci_read_config16(bus, slot, func, 0x04);
+    if (command & PCI_COMMAND_MEMORY_SPACE) == 0 || (command & PCI_COMMAND_BUS_MASTER) == 0 {
+        return false;
+    }
 
-        let cmd_verify = x86_mmio_read32(port_base + AHCI_PX_CMD);
-        let ci_verify = x86_mmio_read32(port_base + AHCI_PX_CI);
-        if cmd_verify == 0xFFFFFFFF || ci_verify == 0xFFFFFFFF { return false; }
-        if (cmd_verify & (AHCI_PXCMD_ST | AHCI_PXCMD_FRE | AHCI_PXCMD_CR | AHCI_PXCMD_FR)) != 0 {
-            return false;
-        }
-        if ci_verify != 0 { return false; }
+    let cmd_verify = x86_mmio_read32(port_base + AHCI_PX_CMD);
+    let ci_verify = x86_mmio_read32(port_base + AHCI_PX_CI);
+    if cmd_verify == 0xFFFFFFFF || ci_verify == 0xFFFFFFFF { return false; }
+    if (cmd_verify & (AHCI_PXCMD_ST | AHCI_PXCMD_FRE | AHCI_PXCMD_CR | AHCI_PXCMD_FR)) != 0 {
+        return false;
+    }
+    if ci_verify != 0 { return false; }
 
+    unsafe {
         AHCI_RUNTIME_ARENA = arena;
         AHCI_RUNTIME_PORT = port;
         AHCI_COMMAND_LIST_PHYSICAL = command_list;
         AHCI_RECEIVED_FIS_PHYSICAL = received_fis;
         AHCI_COMMAND_TABLE_PHYSICAL = command_table;
         AHCI_RUNTIME_READY = true;
-        x86_serial_write_stage_marker('c' as u8);
-        return true;
     }
+    x86_serial_write_stage_marker('c' as u8);
+    return true;
 }
 
 @system
