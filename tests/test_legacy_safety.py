@@ -29,6 +29,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/interrupts/interrupt_enable.sotlas",
         "kernel/src/drivers/display_driver.sotlas",
         "kernel/src/drivers/pci_bus.sotlas", "kernel/src/drivers/storage_discovery.sotlas",
+        "kernel/src/drivers/ahci_runtime.sotlas",
         "kernel/src/drivers/xhci_discovery.sotlas", "kernel/src/drivers/xhci_controller.sotlas",
         "kernel/src/drivers/xhci_runtime.sotlas", "kernel/src/drivers/xhci_program.sotlas",
         "kernel/src/drivers/xhci_start.sotlas", "kernel/src/drivers/xhci_command.sotlas",
