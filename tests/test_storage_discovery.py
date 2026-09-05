@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do discovery PCI read-only para AHCI/NVMe."""
+"""Guardrails do discovery PCI e primeiro probe MMIO AHCI/NVMe."""
 
 from pathlib import Path
 import unittest
@@ -22,18 +22,55 @@ class StorageDiscoveryTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
-    def test_discovery_never_enables_device_or_writes_config(self):
-        text = DISCOVERY.read_text(encoding="utf-8")
-        self.assertNotIn("pci_enable_device", text)
-        self.assertNotIn("pci_enable_command_bits", text)
-        self.assertNotIn("pci_write_config", text)
-        self.assertNotIn("pci_write_command", text)
-        self.assertNotIn("block_device_register_native", text)
-
     def test_bar_choice_matches_controller_abi(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         self.assertIn("(*dev).bars[5].base_address", text)
         self.assertIn("(*dev).bars[0].base_address", text)
+
+    def test_mmio_probe_only_enables_memory_space_and_preserves_bus_master(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("fn storage_probe_mmio_after_cutover()", 1)[1]
+        body = body.split("pub fn storage_discovery_scan()", 1)[0]
+        self.assertIn("active_page_tables_is_ready()", body)
+        self.assertIn("PCI_COMMAND_MEMORY_SPACE", body)
+        self.assertIn("pci_enable_command_bits", body)
+        self.assertIn("PCI_COMMAND_BUS_MASTER", body)
+        self.assertIn("command_before", body)
+        self.assertIn("command_after", body)
+        self.assertNotIn("PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER", body)
+        self.assertNotIn("pci_enable_device", body)
+        self.assertNotIn("block_device_register_native", body)
+
+    def test_mmio_probe_maps_uc_identity_and_reads_structural_registers(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        self.assertIn("active_page_tables_map_mmio_identity_4k", text)
+        for token in (
+            "AHCI_REG_CAP",
+            "AHCI_REG_GHC",
+            "AHCI_REG_PI",
+            "AHCI_REG_VS",
+            "NVME_REG_CAP_LO",
+            "NVME_REG_CAP_HI",
+            "NVME_REG_VS",
+            "NVME_REG_CSTS",
+            "x86_mmio_read32",
+            "STORAGE_MMIO_READY = true",
+            "x86_serial_write_stage_marker('a' as u8)",
+        ):
+            self.assertIn(token, text)
+
+    def test_no_reset_dma_or_block_registration_in_mmio_stage(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        for forbidden in (
+            "block_device_register_native",
+            "dma_alloc",
+            "pmm_alloc",
+            "MSI",
+            "MSIX",
+            "AHCI_GHC_HR",
+            "NVME_CC_EN",
+        ):
+            self.assertNotIn(forbidden, text)
 
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
@@ -53,7 +90,7 @@ class StorageDiscoveryTests(unittest.TestCase):
         self.assertLess(marker_w, storage)
         self.assertLess(storage, marker_j)
 
-    def test_post_cutover_storage_gate_is_read_only_discovery(self):
+    def test_post_cutover_helper_does_not_directly_program_storage(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_discover_first_storage_controller()", 1)[1]
         body = body.split("@system\n@export", 1)[0]
