@@ -52,10 +52,11 @@ class XhciHidReportTests(unittest.TestCase):
 
     def test_post_cutover_gate_runs_only_after_set_configuration(self):
         text = POST.read_text(encoding="utf-8")
-        set_config = text.index("post_cutover_set_first_usb_configuration()")
-        report = text.index("post_cutover_prove_first_usb_hid_keyboard_report()")
-        marker_o = text.index("x86_serial_write_stage_marker('O' as u8)")
-        marker_w = text.index("x86_serial_write_stage_marker('W' as u8)")
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !", 1)[1]
+        set_config = entry.index("post_cutover_set_first_usb_configuration()")
+        marker_o = entry.index("x86_serial_write_stage_marker('O' as u8)")
+        report = entry.index("post_cutover_prove_first_usb_hid_keyboard_report()")
+        marker_w = entry.index("x86_serial_write_stage_marker('W' as u8)")
         self.assertLess(set_config, marker_o)
         self.assertLess(marker_o, report)
         self.assertLess(report, marker_w)
