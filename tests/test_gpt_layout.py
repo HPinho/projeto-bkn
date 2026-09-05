@@ -6,6 +6,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 GPT = ROOT / "kernel/src/storage/gpt.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
+WORKFLOW = ROOT / ".github/workflows/baken_ci.yml"
 
 
 class GptLayoutTests(unittest.TestCase):
@@ -47,9 +49,9 @@ class GptLayoutTests(unittest.TestCase):
             "let last_lba = block_device_last_lba()",
             "block_device_read_sector(last_lba, sector)",
             "gpt_runtime_sector_buffer()",
-            "dma_alloc(GPT_RUNTIME_BUFFER_SIZE, DMA_DEFAULT_ALIGNMENT)",
         ):
-            self.assertIn(token, text if token.startswith("dma_alloc") else body)
+            self.assertIn(token, body)
+        self.assertIn("dma_alloc(GPT_RUNTIME_BUFFER_SIZE, DMA_DEFAULT_ALIGNMENT)", text)
         self.assertNotIn("block_device_write", text)
         self.assertNotIn("WriteBlocks", text)
 
@@ -85,6 +87,37 @@ class GptLayoutTests(unittest.TestCase):
             "pub fn gpt_runtime_entry_size() -> u32",
         ):
             self.assertIn(token, text)
+
+    def test_post_cutover_runs_gpt_only_after_generic_block_io(self):
+        text = POST.read_text(encoding="utf-8")
+        self.assertIn("import kernel::storage::gpt::*;", text)
+        helper = text.split("pub fn post_cutover_probe_backup_gpt_header()", 1)[1]
+        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        self.assertIn("storage_generic_block_io_is_ready()", helper)
+        self.assertIn("gpt_probe_backup_header()", helper)
+        self.assertIn("gpt_runtime_is_ready()", helper)
+
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        storage = entry.index("post_cutover_discover_first_storage_controller()")
+        gpt = entry.index("post_cutover_probe_backup_gpt_header()")
+        marker_i = entry.index("x86_serial_write_stage_marker('i' as u8)")
+        marker_j = entry.index("x86_serial_write_stage_marker('J' as u8)")
+        self.assertLess(storage, gpt)
+        self.assertLess(gpt, marker_i)
+        self.assertLess(marker_i, marker_j)
+
+    def test_ci_seeds_backup_gpt_and_requires_runtime_marker(self):
+        text = WORKFLOW.read_text(encoding="utf-8")
+        for token in (
+            'b"EFI PART"',
+            'header_crc = zlib.crc32(header[:92]) & 0xFFFFFFFF',
+            'image.seek(last_lba * block_size)',
+            '= "EFI PART"',
+        ):
+            self.assertIn(token, text)
+        markers = text.split("for marker in ", 1)[1].split("; do", 1)[0]
+        self.assertLess(markers.index("STEP=v"), markers.index("STEP=i"))
+        self.assertLess(markers.index("STEP=i"), markers.index("STEP=J"))
 
     def test_planner_and_runtime_probe_do_not_write_storage(self):
         text = GPT.read_text(encoding="utf-8")
