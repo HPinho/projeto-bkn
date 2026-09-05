@@ -22,7 +22,7 @@ jobs:
       - name: Install System Dependencies & QEMU
         run: |
           sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
 
       - name: Run Complete Test Suite
         run: |
@@ -55,16 +55,13 @@ jobs:
           test -f "$OVMF_VARS"
           cp "$OVMF_VARS" build/OVMF_VARS.fd
           rm -f build/qemu-serial.log
+          rm -f build/qemu-monitor.sock
 
           set +e
-          {
-            sleep 4
-            for i in $(seq 1 8); do
-              echo "sendkey a"
-              sleep 1
-            done
-            sleep 20
-          } | timeout 15s qemu-system-x86_64 \
+          # O monitor não compartilha stdin com o timeout: quando ambos usam o
+          # mesmo pipe, comandos HMP podem ser concatenados e virar texto como
+          # "ssesendkey". Um socket Unix entrega uma linha HMP por conexão.
+          timeout --signal=TERM --kill-after=5s 60s qemu-system-x86_64 \
             -machine q35 -m 512M -no-reboot \
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
@@ -72,14 +69,34 @@ jobs:
             -device qemu-xhci,id=xhci \
             -device usb-kbd,bus=xhci.0 \
             -display none \
-            -monitor stdio \
-            -serial file:build/qemu-serial.log
-          status=${PIPESTATUS[1]}
+            -monitor unix:build/qemu-monitor.sock,server=on,wait=off \
+            -serial file:build/qemu-serial.log &
+          qemu_pid=$!
+
+          for i in $(seq 1 50); do
+            test -S build/qemu-monitor.sock && break
+            sleep 0.1
+          done
+          test -S build/qemu-monitor.sock
+
+          # A entrada só é injetada depois do monitor estar pronto. Repetimos
+          # durante o bring-up porque a rota i8042 é habilitada após o timer.
+          injection_failed=0
+          for i in $(seq 1 20); do
+            if ! printf 'sendkey a\n' | socat - UNIX-CONNECT:build/qemu-monitor.sock >/dev/null 2>&1; then
+              injection_failed=1
+              break
+            fi
+            sleep 2
+          done
+          wait "$qemu_pid"
+          status=$?
           set -e
 
           if test -f build/qemu-serial.log; then
             cat build/qemu-serial.log
           fi
+          test "$injection_failed" -eq 0
           test "$status" -eq 124
           grep -q "BAKEN:TIMER_READY" build/qemu-serial.log
           grep -q "BAKEN:STEP=T" build/qemu-serial.log

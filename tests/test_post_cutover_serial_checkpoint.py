@@ -62,6 +62,11 @@ class PostCutoverSerialCheckpointTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("-no-reboot", text)
         self.assertIn("-serial file:build/qemu-serial.log", text)
+        self.assertIn("socat", text)
+        self.assertIn("-monitor unix:build/qemu-monitor.sock,server=on,wait=off", text)
+        self.assertNotIn("-monitor stdio", text)
+        self.assertIn("timeout --signal=TERM --kill-after=5s 60s qemu-system-x86_64", text)
+        self.assertIn("printf 'sendkey a\\n' | socat - UNIX-CONNECT:build/qemu-monitor.sock", text)
         self.assertIn('grep -q "BAKEN:TIMER_READY" build/qemu-serial.log', text)
         self.assertIn('test "$status" -eq 124', text)
 
