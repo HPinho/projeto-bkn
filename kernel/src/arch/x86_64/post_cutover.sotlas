@@ -7,7 +7,7 @@
 // -> Configuration Header 9B -> Configuration Descriptor completo
 // -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint
 // -> SET_CONFIGURATION real via EP0 -> primeiro report HID Interrupt IN real
-// -> discovery PCI read-only do primeiro controlador AHCI/NVMe real.
+// -> storage AHCI real -> Block Device I/O genérico -> backup GPT Header real.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -32,6 +32,7 @@ import kernel::interrupts::lapic_timer::*;
 import kernel::interrupts::interrupt_enable::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::storage_discovery::*;
+import kernel::storage::gpt::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_runtime::*;
 import kernel::drivers::xhci_program::*;
@@ -479,9 +480,9 @@ pub fn post_cutover_prove_first_usb_hid_keyboard_report() -> bool {
     return false;
 }
 
-// J inicia a fundação de storage sem tomar posse do hardware ainda: reaproveita
-// a enumeração PCI já feita pós-cutover e exige um controlador AHCI ou NVMe real
-// com BAR MMIO válido. storage_discovery é estritamente read-only neste gate.
+// J executa o caminho de storage pós-cutover: enumeração, posse AHCI, DMA,
+// IDENTIFY, READ/WRITE e dispatch genérico. O marcador J continua sendo o fim
+// desta sequência, agora somente depois que o backup GPT Header também é lido.
 @system
 pub fn post_cutover_discover_first_storage_controller() -> bool {
     let kind = storage_discovery_scan();
@@ -493,6 +494,13 @@ pub fn post_cutover_discover_first_storage_controller() -> bool {
         if (*candidate).vendor_id == 0 || (*candidate).vendor_id == 0xFFFF { return false; }
         if (*candidate).abar_or_mmio_base == 0 { return false; }
     }
+    return true;
+}
+
+@system
+pub fn post_cutover_probe_backup_gpt_header() -> bool {
+    if !storage_generic_block_io_is_ready() { return false; }
+    if !gpt_probe_backup_header() || !gpt_runtime_is_ready() { return false; }
     return true;
 }
 
@@ -553,6 +561,8 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_prove_first_usb_hid_keyboard_report() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('W' as u8); }
     if !post_cutover_discover_first_storage_controller() { loop {} }
+    if !post_cutover_probe_backup_gpt_header() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('i' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
     loop {}
 }
