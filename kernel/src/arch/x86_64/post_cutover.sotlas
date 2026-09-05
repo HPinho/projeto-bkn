@@ -2,7 +2,8 @@
 //
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
-// -> primeiro No-op Command DMA concluído. Mouse/IRQ12 permanece mascarado.
+// -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada.
+// Mouse/IRQ12 permanece mascarado.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -30,6 +31,7 @@ import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_runtime::*;
 import kernel::drivers::xhci_program::*;
 import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_port_stage::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -65,6 +67,7 @@ static mut POST_CUTOVER_KEYBOARD_LIVE: bool = false;
 static mut POST_CUTOVER_XHCI_READY: bool = false;
 static mut POST_CUTOVER_XHCI_DMA_READY: bool = false;
 static mut POST_CUTOVER_XHCI_NOOP_LIVE: bool = false;
+static mut POST_CUTOVER_USB_PORT_READY: bool = false;
 
 @system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
@@ -223,6 +226,7 @@ pub fn post_cutover_prepare_timer() -> bool {
         POST_CUTOVER_XHCI_READY = false;
         POST_CUTOVER_XHCI_DMA_READY = false;
         POST_CUTOVER_XHCI_NOOP_LIVE = false;
+        POST_CUTOVER_USB_PORT_READY = false;
     }
     return true;
 }
@@ -244,6 +248,9 @@ pub fn post_cutover_xhci_dma_ready() -> bool { unsafe { return POST_CUTOVER_XHCI
 
 @system
 pub fn post_cutover_xhci_noop_live() -> bool { unsafe { return POST_CUTOVER_XHCI_NOOP_LIVE; } }
+
+@system
+pub fn post_cutover_usb_port_ready() -> bool { unsafe { return POST_CUTOVER_USB_PORT_READY; } }
 
 @system
 pub fn post_cutover_enable_timer_interrupts() -> bool {
@@ -288,6 +295,7 @@ pub fn post_cutover_prepare_xhci_controller() -> bool {
         POST_CUTOVER_XHCI_READY = false;
         POST_CUTOVER_XHCI_DMA_READY = false;
         POST_CUTOVER_XHCI_NOOP_LIVE = false;
+        POST_CUTOVER_USB_PORT_READY = false;
     }
     if !post_cutover_keyboard_live() || !active_page_tables_is_ready() { return false; }
     if pci_scan_all() == 0 { return false; }
@@ -303,6 +311,7 @@ pub fn post_cutover_prepare_xhci_dma_tables() -> bool {
     unsafe {
         POST_CUTOVER_XHCI_DMA_READY = false;
         POST_CUTOVER_XHCI_NOOP_LIVE = false;
+        POST_CUTOVER_USB_PORT_READY = false;
     }
     if !post_cutover_xhci_ready() || !xhci_controller_is_ready() { return false; }
     if !xhci_runtime_prepare() || !xhci_runtime_is_ready() { return false; }
@@ -317,11 +326,27 @@ pub fn post_cutover_prepare_xhci_dma_tables() -> bool {
 // via DMA e produz um Command Completion Event de sucesso no Event Ring.
 @system
 pub fn post_cutover_start_xhci_and_prove_noop() -> bool {
-    unsafe { POST_CUTOVER_XHCI_NOOP_LIVE = false; }
+    unsafe {
+        POST_CUTOVER_XHCI_NOOP_LIVE = false;
+        POST_CUTOVER_USB_PORT_READY = false;
+    }
     if !post_cutover_xhci_dma_ready() || !xhci_program_is_ready() { return false; }
     if !xhci_start_and_prove_noop() || !xhci_start_is_ready() ||
        !xhci_start_noop_completed() { return false; }
     unsafe { POST_CUTOVER_XHCI_NOOP_LIVE = true; }
+    return true;
+}
+
+// U prova que um dispositivo real está conectado a uma porta administrada pelo
+// xHC, que Supported Protocol foi resolvido e que o reset concluiu com CCS/PED.
+// O limite arquitetural permanece antes de Enable Slot.
+@system
+pub fn post_cutover_prepare_first_usb_port() -> bool {
+    unsafe { POST_CUTOVER_USB_PORT_READY = false; }
+    if !post_cutover_xhci_noop_live() { return false; }
+    if !xhci_port_stage_prepare_first() || !xhci_port_stage_is_ready() { return false; }
+    if xhci_port_stage_port_id() == 0 { return false; }
+    unsafe { POST_CUTOVER_USB_PORT_READY = true; }
     return true;
 }
 
@@ -370,6 +395,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     // N prova Bus Master + Run/Stop + Doorbell 0 + Command Completion real.
     if !post_cutover_start_xhci_and_prove_noop() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('N' as u8); }
+
+    // U prova Supported Protocol + porta conectada + reset real concluído.
+    if !post_cutover_prepare_first_usb_port() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('U' as u8); }
 
     loop {}
 }
