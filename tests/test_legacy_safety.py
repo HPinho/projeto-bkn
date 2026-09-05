@@ -49,6 +49,7 @@ class LegacySafetyTests(unittest.TestCase):
         "kernel/src/drivers/i8042.sotlas", "kernel/src/drivers/ps2_mouse.sotlas",
         "kernel/src/drivers/ps2_keyboard.sotlas",
         "kernel/src/storage/block_device.sotlas", "kernel/src/storage/gpt.sotlas",
+        "kernel/src/storage/gpt_redundancy.sotlas",
         "kernel/src/storage/fat32.sotlas", "kernel/src/storage/crc32.sotlas",
         "kernel/src/memory/pmm.sotlas", "kernel/src/memory/pmm_allocator.sotlas",
         "kernel/src/memory/pmm_bitmap.sotlas",
