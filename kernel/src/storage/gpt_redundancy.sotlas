@@ -22,8 +22,6 @@ pub const GPT_PRIMARY_HEADER_LBA: u64 = 1;
 pub const GPT_PRIMARY_ENTRIES_MIN_LBA: u64 = 2;
 pub const GPT_PARTITION_MANDATORY_BYTES: u64 = 56;
 
-// EFI System Partition type GUID C12A7328-F81F-11D2-BA4B-00A0C93EC93B,
-// comparada na representação little-endian realmente armazenada na GPT.
 pub const GPT_ESP_TYPE_GUID0: u32 = 0xC12A7328;
 pub const GPT_ESP_TYPE_GUID1: u32 = 0x11D2F81F;
 pub const GPT_ESP_TYPE_GUID2: u32 = 0xA0004BBA;
@@ -144,9 +142,6 @@ fn gpt_redundancy_header_crc_valid(sector: *mut u8) -> bool {
     }
 }
 
-// Executado somente depois que o backup Header e o backup Entry Array já
-// passaram seus próprios gates. O STEP=n só aparece após os dois headers e os
-// dois arrays serem coerentes entre si no disco real visto pelo driver.
 @system
 pub fn gpt_probe_primary_backup_redundancy(
     expected_last_lba: u64,
@@ -184,7 +179,6 @@ pub fn gpt_probe_primary_backup_redundancy(
     let sector = gpt_redundancy_sector_buffer();
     if sector == (null as *mut u8) { return false; }
 
-    // Backup Header: reler e capturar os campos que devem ser espelhados.
     if !block_device_read_sector(expected_last_lba, sector) ||
        !gpt_redundancy_header_crc_valid(sector) { return false; }
     let backup = sector as *const u8;
@@ -207,8 +201,6 @@ pub fn gpt_probe_primary_backup_redundancy(
        backup_entry_count != expected_entry_count || backup_entry_size != expected_entry_size ||
        backup_entries_crc != expected_entries_crc32 { return false; }
 
-    // Primary Header: current/backup são invertidos; GUID, usable range e
-    // descrição do Partition Entry Array devem concordar com o backup.
     if !block_device_read_sector(GPT_PRIMARY_HEADER_LBA, sector) ||
        !gpt_redundancy_header_crc_valid(sector) { return false; }
     let primary = sector as *const u8;
@@ -238,7 +230,6 @@ pub fn gpt_probe_primary_backup_redundancy(
        primary_entries_lba >= primary_first ||
        primary_entries_lba + entries_blocks > primary_first { return false; }
 
-    // Primary PEA: CRC calculado sobre os bytes exatos, não sobre padding.
     let mut crc = crc32_ieee_begin();
     let mut remaining = entries_bytes;
     let mut block: u64 = 0;
@@ -264,13 +255,15 @@ pub fn gpt_probe_primary_backup_redundancy(
         GPT_REDUNDANCY_READY = true;
     }
     x86_serial_write_stage_marker('n' as u8);
+    if !gpt_probe_first_esp_partition(
+        expected_first_usable,
+        expected_last_usable,
+        expected_entry_count,
+        expected_entry_size
+    ) || !gpt_partition_is_ready() { return false; }
     return true;
 }
 
-// Percorre as entradas GPT reais já cobertas pela prova de redundância e publica
-// a primeira EFI System Partition válida. A leitura é feita sobre o PEA primário
-// pelo Block Device API. Quando os 56 bytes obrigatórios cruzam um setor, o
-// setor seguinte é lido para a segunda metade da página de scratch.
 @system
 pub fn gpt_probe_first_esp_partition(
     first_usable_lba: u64,
