@@ -2,8 +2,8 @@
 //
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
-// -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada.
-// Mouse/IRQ12 permanece mascarado.
+// -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada
+// -> primeiro Enable Slot concluído. Mouse/IRQ12 permanece mascarado.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -32,6 +32,7 @@ import kernel::drivers::xhci_runtime::*;
 import kernel::drivers::xhci_program::*;
 import kernel::drivers::xhci_start::*;
 import kernel::drivers::xhci_port_stage::*;
+import kernel::drivers::xhci_slot::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -350,6 +351,19 @@ pub fn post_cutover_prepare_first_usb_port() -> bool {
     return true;
 }
 
+// S prova Enable Slot real pelo Command Ring compartilhado. O Slot ID precisa
+// vir do Command Completion Event e permanecer dentro de MaxSlots. Ainda não
+// há Device/Input Context, DCBAA[slot] ou Address Device neste estágio.
+@system
+pub fn post_cutover_enable_first_usb_slot() -> bool {
+    if !post_cutover_usb_port_ready() || !xhci_port_stage_is_ready() { return false; }
+    if !xhci_slot_enable_first_port() || !xhci_slot_is_ready() { return false; }
+    if xhci_slot_id() == 0 || xhci_slot_port_id() != xhci_port_stage_port_id() {
+        return false;
+    }
+    return true;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -399,6 +413,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     // U prova Supported Protocol + porta conectada + reset real concluído.
     if !post_cutover_prepare_first_usb_port() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('U' as u8); }
+
+    // S prova Enable Slot + Slot ID real retornado pelo Command Completion Event.
+    if !post_cutover_enable_first_usb_slot() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('S' as u8); }
 
     loop {}
 }
