@@ -65,7 +65,8 @@ class XhciControllerTests(unittest.TestCase):
     def test_ci_attaches_xhci_and_requires_reset_marker(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("qemu-xhci", text)
-        self.assertIn('grep -q "BAKEN:STEP=X"', text)
+        self.assertIn("for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N", text)
+        self.assertIn('grep -q "BAKEN:${marker}" build/qemu-serial.log', text)
 
 
 if __name__ == "__main__":

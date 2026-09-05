@@ -68,7 +68,8 @@ class XhciProgramTests(unittest.TestCase):
 
     def test_ci_requires_dma_tables_marker(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn('grep -q "BAKEN:STEP=D"', text)
+        self.assertIn("for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N", text)
+        self.assertIn('grep -q "BAKEN:${marker}" build/qemu-serial.log', text)
 
 
 if __name__ == "__main__":
