@@ -96,7 +96,7 @@ class BlockDeviceIoTests(unittest.TestCase):
         scan = text.split("pub fn storage_discovery_scan()", 1)[1]
         register = scan.index("storage_register_ahci_block_device()")
         generic = scan.index("storage_prove_generic_block_io()")
-        ret = scan.index("return kind;")
+        ret = scan.index("return kind;", generic)
         self.assertLess(register, generic)
         self.assertLess(generic, ret)
         self.assertIn("block_device_reset_registry();", scan[generic:ret])
