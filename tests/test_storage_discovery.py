@@ -98,7 +98,8 @@ class StorageDiscoveryTests(unittest.TestCase):
         self.assertIn("AHCI_PXCMD_FRE", code)
         self.assertIn("AHCI_PXCMD_CR", code)
         self.assertIn("AHCI_PXCMD_FR", code)
-        self.assertIn("if ci_verify == 0xFFFFFFFF || ci_verify != 0", code)
+        self.assertIn("ci_verify == 0xFFFFFFFF", code)
+        self.assertIn("ci_verify != 0", code)
         self.assertNotIn("AHCI_ATA_IDENTIFY_DEVICE", code)
         self.assertNotIn("x86_mmio_write32(port_base + AHCI_PX_CI, 1)", code)
 
