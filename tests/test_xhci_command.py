@@ -50,6 +50,20 @@ class XhciCommandTests(unittest.TestCase):
         self.assertNotIn("XHCI_EVENT_DEQUEUE_INDEX", text)
         self.assertNotIn("xhci_command_update_erdp", text)
 
+    def test_command_waiter_skips_only_port_status_change_events(self):
+        text = COMMAND.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
+        port = body.index("event_type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT")
+        validate_port = body.index("xhci_port_status_change_port_id(event) == 0", port)
+        consume = body.index("xhci_event_consumer_consume()", validate_port)
+        continue_wait = body.index("continue;", consume)
+        command = body.index("event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", continue_wait)
+        self.assertLess(port, validate_port)
+        self.assertLess(validate_port, consume)
+        self.assertLess(consume, continue_wait)
+        self.assertLess(continue_wait, command)
+        self.assertIn("return false;", body[command:])
+
     def test_slot_id_state_is_fail_closed_per_command(self):
         text = COMMAND.read_text(encoding="utf-8")
         submit = text.split("pub fn xhci_command_submit(command: XhciTrb)", 1)[1]
@@ -57,7 +71,7 @@ class XhciCommandTests(unittest.TestCase):
         wait = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
         self.assertIn("XHCI_COMMAND_LAST_SLOT_ID = 0", submit)
         self.assertIn("XHCI_COMMAND_LAST_SLOT_ID = xhci_event_slot_id(event)", wait)
-        consume = wait.index("xhci_event_consumer_consume()")
+        consume = wait.rindex("xhci_event_consumer_consume()")
         clear_after_consume_failure = wait.index("XHCI_COMMAND_LAST_SLOT_ID = 0", consume)
         self.assertGreater(clear_after_consume_failure, consume)
 
