@@ -31,6 +31,8 @@ class XhciHidContextTests(unittest.TestCase):
     def test_input_context_add_flag_and_context_entries_use_dci(self):
         text = HID.read_text(encoding="utf-8")
         self.assertIn("1 << (dci as u32)", text)
+        self.assertIn("XHCI_INPUT_CONTROL_ADD_SLOT | add_flag", text)
+        self.assertIn("xhci_hid_context_write32(input, drop_flags_offset, 0)", text)
         self.assertIn("XHCI_SLOT_CONTEXT_ENTRIES_SHIFT", text)
         self.assertIn("((dci as u64) + 1) * (context_size as u64)", text)
 
@@ -40,6 +42,20 @@ class XhciHidContextTests(unittest.TestCase):
         self.assertIn("XHCI_ENDPOINT_CONTEXT_MAX_PACKET_SHIFT", text)
         self.assertIn("ring.physical_base | XHCI_TR_DEQUEUE_DCS", text)
         self.assertIn("XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH", text)
+
+    def test_periodic_endpoint_sets_max_esit_payload(self):
+        text = HID.read_text(encoding="utf-8")
+        self.assertIn("XHCI_ENDPOINT_CONTEXT_MAX_ESIT_PAYLOAD_SHIFT", text)
+        self.assertIn("((max_packet as u32) << XHCI_ENDPOINT_CONTEXT_MAX_ESIT_PAYLOAD_SHIFT)", text)
+        self.assertIn("let ep_dw4", text)
+
+    def test_full_low_speed_interval_uses_xhci_exponent_encoding(self):
+        text = HID.read_text(encoding="utf-8")
+        body = text.split("fn xhci_hid_context_compute_interval", 1)[1]
+        body = body.split("pub fn xhci_hid_context_prepare", 1)[0]
+        self.assertIn("let microframes = (usb_interval as u32) * 8", body)
+        self.assertIn("let encoded = exponent + 1", body)
+        self.assertIn("let encoded = usb_interval - 1", body)
 
     def test_stage_has_no_command_or_doorbell_side_effects(self):
         text = code_only(HID.read_text(encoding="utf-8")).lower()
