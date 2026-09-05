@@ -1,8 +1,8 @@
 // Baken OS — runtime AHCI DMA e primeiro comando ATA real pós-cutover.
 //
 // O estágio de preparação publica Command List, Received FIS, Command Table e
-// habilita Bus Master em uma porta implementada. O estágio seguinte exige que
-// essa porta seja SATA ATA conectada e então emite IDENTIFY DEVICE (0xEC).
+// habilita Bus Master em uma porta implementada. O estágio seguinte espera o
+// link SATA estabilizar, localiza uma porta ATA real e então emite IDENTIFY.
 // Nenhuma escrita em mídia é realizada.
 
 module kernel::drivers::ahci_runtime;
@@ -21,6 +21,7 @@ pub const AHCI_IDENTIFY_DATA_PAGE: u64 = 3;
 
 pub const AHCI_PORT_BASE: u64 = 0x100;
 pub const AHCI_PORT_STRIDE: u64 = 0x80;
+pub const AHCI_REG_PI: u64 = 0x0C;
 pub const AHCI_PX_CLB: u64 = 0x00;
 pub const AHCI_PX_CLBU: u64 = 0x04;
 pub const AHCI_PX_FB: u64 = 0x08;
@@ -115,17 +116,39 @@ fn ahci_runtime_first_ata_port(hba: u64, pi: u32) -> u32 {
 }
 
 @system
+fn ahci_runtime_wait_ata_port(hba: u64, pi: u32) -> u32 {
+    let mut spins: u64 = 0;
+    while spins < AHCI_IDENTIFY_SPIN_LIMIT {
+        let port = ahci_runtime_first_ata_port(hba, pi);
+        if port < 32 { return port; }
+        spins += 1;
+    }
+    return 32;
+}
+
+@system
 fn ahci_runtime_stop_port(port_base: u64) -> bool {
     let cmd_before = x86_mmio_read32(port_base + AHCI_PX_CMD);
     if cmd_before == 0xFFFFFFFF { return false; }
-    x86_mmio_write32(port_base + AHCI_PX_CMD, cmd_before & !(AHCI_PXCMD_ST | AHCI_PXCMD_FRE));
+
+    x86_mmio_write32(port_base + AHCI_PX_CMD, cmd_before & !AHCI_PXCMD_ST);
     let mut spins: u64 = 0;
     while spins < AHCI_PORT_STOP_SPIN_LIMIT {
         let cmd = x86_mmio_read32(port_base + AHCI_PX_CMD);
         if cmd == 0xFFFFFFFF { return false; }
-        if (cmd & (AHCI_PXCMD_CR | AHCI_PXCMD_FR | AHCI_PXCMD_ST | AHCI_PXCMD_FRE)) == 0 {
-            return true;
-        }
+        if (cmd & (AHCI_PXCMD_CR | AHCI_PXCMD_ST)) == 0 { break; }
+        spins += 1;
+    }
+    if spins >= AHCI_PORT_STOP_SPIN_LIMIT { return false; }
+
+    let cmd_after_st = x86_mmio_read32(port_base + AHCI_PX_CMD);
+    if cmd_after_st == 0xFFFFFFFF { return false; }
+    x86_mmio_write32(port_base + AHCI_PX_CMD, cmd_after_st & !AHCI_PXCMD_FRE);
+    spins = 0;
+    while spins < AHCI_PORT_STOP_SPIN_LIMIT {
+        let cmd = x86_mmio_read32(port_base + AHCI_PX_CMD);
+        if cmd == 0xFFFFFFFF { return false; }
+        if (cmd & (AHCI_PXCMD_FR | AHCI_PXCMD_FRE)) == 0 { return true; }
         spins += 1;
     }
     return false;
@@ -138,6 +161,23 @@ fn ahci_runtime_write64_pair(base: u64, low_offset: u64, high_offset: u64, value
     let low = x86_mmio_read32(base + low_offset) as u64;
     let high = x86_mmio_read32(base + high_offset) as u64;
     return (low | (high << 32)) == value;
+}
+
+@system
+fn ahci_runtime_bind_dma_port(port: u32) -> bool {
+    unsafe {
+        if port >= 32 || AHCI_RUNTIME_HBA == 0 { return false; }
+        let port_base = ahci_runtime_port_base(AHCI_RUNTIME_HBA, port);
+        if !ahci_runtime_stop_port(port_base) { return false; }
+        if !ahci_runtime_write64_pair(port_base, AHCI_PX_CLB, AHCI_PX_CLBU,
+                                      AHCI_COMMAND_LIST_PHYSICAL) { return false; }
+        if !ahci_runtime_write64_pair(port_base, AHCI_PX_FB, AHCI_PX_FBU,
+                                      AHCI_RECEIVED_FIS_PHYSICAL) { return false; }
+        let ci = x86_mmio_read32(port_base + AHCI_PX_CI);
+        if ci == 0xFFFFFFFF || ci != 0 { return false; }
+        AHCI_RUNTIME_PORT = port;
+        return true;
+    }
 }
 
 @system
@@ -211,10 +251,14 @@ pub fn ahci_runtime_identify_device() -> bool {
     if !ahci_runtime_is_ready() { return false; }
 
     unsafe {
-        let port_mask = 1 << AHCI_RUNTIME_PORT;
-        if ahci_runtime_first_ata_port(AHCI_RUNTIME_HBA, port_mask) != AHCI_RUNTIME_PORT {
-            return false;
+        let pi = x86_mmio_read32(AHCI_RUNTIME_HBA + AHCI_REG_PI);
+        if pi == 0 || pi == 0xFFFFFFFF { return false; }
+        let ata_port = ahci_runtime_wait_ata_port(AHCI_RUNTIME_HBA, pi);
+        if ata_port >= 32 { return false; }
+        if ata_port != AHCI_RUNTIME_PORT {
+            if !ahci_runtime_bind_dma_port(ata_port) { return false; }
         }
+
         let port_base = ahci_runtime_port_base(AHCI_RUNTIME_HBA, AHCI_RUNTIME_PORT);
         let arena_base = AHCI_RUNTIME_ARENA.virtual_address;
         if arena_base == (null as *mut u8) { return false; }
