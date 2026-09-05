@@ -6,6 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 DISCOVERY = ROOT / "kernel/src/drivers/storage_discovery.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 ENGINE = ROOT / "kernel/src/install_engine.sotlas"
 
 
@@ -42,6 +43,33 @@ class StorageDiscoveryTests(unittest.TestCase):
             text.index("storage_discovery_scan()"),
             text.index("block_device_has_writable_native_target()"),
         )
+
+    def test_post_cutover_storage_gate_is_after_real_hid_report(self):
+        text = POST.read_text(encoding="utf-8")
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !", 1)[1]
+        marker_w = entry.index("x86_serial_write_stage_marker('W' as u8)")
+        storage = entry.index("post_cutover_discover_first_storage_controller()")
+        marker_j = entry.index("x86_serial_write_stage_marker('J' as u8)")
+        self.assertLess(marker_w, storage)
+        self.assertLess(storage, marker_j)
+
+    def test_post_cutover_storage_gate_is_read_only_discovery(self):
+        text = POST.read_text(encoding="utf-8")
+        body = text.split("pub fn post_cutover_discover_first_storage_controller()", 1)[1]
+        body = body.split("@system\n@export", 1)[0]
+        self.assertIn("storage_discovery_scan()", body)
+        self.assertIn("storage_discovery_candidate()", body)
+        self.assertIn("STORAGE_CONTROLLER_AHCI", body)
+        self.assertIn("STORAGE_CONTROLLER_NVME", body)
+        self.assertIn("abar_or_mmio_base", body)
+        for forbidden in (
+            "pci_enable_device",
+            "pci_enable_command_bits",
+            "pci_write_config",
+            "pci_write_command",
+            "block_device_register_native",
+        ):
+            self.assertNotIn(forbidden, body)
 
 
 if __name__ == "__main__":
