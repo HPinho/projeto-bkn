@@ -1,9 +1,9 @@
-// Baken OS — discovery PCI, probe MMIO, reset, DMA, IDENTIFY e primeiro READ AHCI.
+// Baken OS — discovery PCI, probe MMIO, reset, DMA, IDENTIFY e I/O AHCI real.
 //
 // A enumeração começa read-only. Pós-cutover, AHCI/NVMe habilitam Memory Space
 // para o probe estrutural. Para AHCI, o HBA é resetado com IE=0, a arena DMA é
-// programada, um IDENTIFY DEVICE real é executado e então o LBA 0 é lido por DMA.
-// Nenhuma escrita em mídia é realizada neste estágio.
+// programada, IDENTIFY é executado, LBA 0 é lido e LBA 1 é escrito/lido de volta
+// somente no disco descartável usado pelo gate de runtime.
 
 module kernel::drivers::storage_discovery;
 
@@ -277,6 +277,8 @@ pub fn storage_discovery_scan() -> u32 {
                 if !storage_prepare_ahci_dma_after_reset() { return STORAGE_CONTROLLER_NONE; }
                 if !storage_identify_ahci_after_dma() { return STORAGE_CONTROLLER_NONE; }
                 if !storage_read_ahci_after_identify() { return STORAGE_CONTROLLER_NONE; }
+                if !ahci_write_probe_sector1(STORAGE_CANDIDATE.abar_or_mmio_base) ||
+                   !ahci_write_is_ready() { return STORAGE_CONTROLLER_NONE; }
             }
             return kind;
         }
