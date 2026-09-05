@@ -5,7 +5,7 @@
 // -> No-op DMA -> USB port/reset -> Enable Slot -> contexts -> Address Device
 // -> Device Descriptor 8B -> EP0 MPS -> Device Descriptor 18B
 // -> Configuration Header 9B -> Configuration Descriptor completo
-// -> parsing HID Boot + Interrupt IN.
+// -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -41,6 +41,8 @@ import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_descriptor::*;
 import kernel::drivers::xhci_evaluate_context::*;
 import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_configure_endpoint::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -394,8 +396,6 @@ pub fn post_cutover_probe_first_usb_configuration_header() -> bool {
     return true;
 }
 
-// H prova o segundo Control Transfer de Configuration Descriptor usando o
-// wTotalLength real descoberto em G. Ainda não interpreta HID/Endpoint.
 @system
 pub fn post_cutover_read_full_usb_configuration_descriptor() -> bool {
     if !xhci_configuration_header_is_ready() { return false; }
@@ -407,9 +407,6 @@ pub fn post_cutover_read_full_usb_configuration_descriptor() -> bool {
     return true;
 }
 
-// M prova somente o parsing do buffer já lido em H. Seleciona uma interface
-// HID Boot (teclado/mouse) e um endpoint Interrupt IN válido; ainda não envia
-// Configure Endpoint nem SET_CONFIGURATION.
 @system
 pub fn post_cutover_parse_first_usb_hid_interface() -> bool {
     if !xhci_configuration_full_is_ready() { return false; }
@@ -424,9 +421,22 @@ pub fn post_cutover_parse_first_usb_hid_interface() -> bool {
     if (endpoint & USB_ENDPOINT_DIRECTION_IN) == 0 ||
        xhci_hid_endpoint_max_packet() == 0 ||
        xhci_hid_endpoint_interval() == 0 ||
-       xhci_hid_report_descriptor_length() == 0 {
-        return false;
-    }
+       xhci_hid_report_descriptor_length() == 0 { return false; }
+    return true;
+}
+
+// L prepara o Endpoint Context HID no Input Context e em seguida executa um
+// Configure Endpoint real pelo Command Ring compartilhado. SET_CONFIGURATION e
+// doorbell do endpoint continuam fora deste gate.
+@system
+pub fn post_cutover_configure_first_usb_hid_endpoint() -> bool {
+    if !xhci_configuration_is_ready() { return false; }
+    if !xhci_hid_context_prepare() || !xhci_hid_context_is_ready() { return false; }
+    let dci = xhci_hid_context_dci();
+    if dci <= 1 || xhci_hid_context_ring_physical() == 0 { return false; }
+    if !xhci_configure_first_hid_endpoint() || !xhci_configure_endpoint_is_ready() { return false; }
+    if xhci_configure_endpoint_slot_id() != xhci_context_slot_id() ||
+       xhci_configure_endpoint_dci() != dci { return false; }
     return true;
 }
 
@@ -480,5 +490,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('H' as u8); }
     if !post_cutover_parse_first_usb_hid_interface() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('M' as u8); }
+    if !post_cutover_configure_first_usb_hid_endpoint() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('L' as u8); }
     loop {}
 }
