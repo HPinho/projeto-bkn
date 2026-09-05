@@ -189,7 +189,7 @@ class StorageDiscoveryTests(unittest.TestCase):
             "AHCI_FIS_TYPE_REG_H2D", "AHCI_PX_TFD", "AHCI_PX_IS", "AHCI_PX_CI",
             "AHCI_PXIS_TFES", "AHCI_TFD_BSY", "AHCI_TFD_DRQ", "AHCI_TFD_ERR",
             "ahci_read_prepare_buffer", "ahci_runtime_command_list_physical",
-            "ahci_runtime_command_table_physical", "direct_map_virtual_address",
+            "ahci_runtime_command_table_physical", "ahci_block_virtual",
             "x86_mmio_write32(port_base + AHCI_PX_CI, 1)",
             "prdbc != (AHCI_READ_SECTOR_SIZE as u32)",
             "ahci_read_magic_matches", "AHCI_READ_READY = true",
