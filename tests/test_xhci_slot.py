@@ -8,6 +8,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SLOT = ROOT / "kernel/src/drivers/xhci_slot.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
+WORKFLOW = ROOT / ".github/workflows/baken_ci.yml"
 
 
 def _code_only(text: str) -> str:
@@ -47,6 +49,25 @@ class XhciSlotTests(unittest.TestCase):
     def test_slot_module_is_in_canonical_graph(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::xhci_slot::*;", text)
+
+    def test_post_cutover_enables_slot_only_after_usb_port_ready(self):
+        text = POST.read_text(encoding="utf-8")
+        body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        self.assertIn("post_cutover_enable_first_usb_slot()", text)
+        self.assertIn("xhci_slot_enable_first_port()", text)
+        self.assertIn("xhci_slot_id() == 0", text)
+        self.assertLess(
+            body.index("x86_serial_write_stage_marker('U' as u8)"),
+            body.index("post_cutover_enable_first_usb_slot()"),
+        )
+        self.assertLess(
+            body.index("post_cutover_enable_first_usb_slot()"),
+            body.index("x86_serial_write_stage_marker('S' as u8)"),
+        )
+
+    def test_ci_requires_enable_slot_runtime_marker(self):
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("STEP=U STEP=S", workflow)
 
 
 if __name__ == "__main__":
