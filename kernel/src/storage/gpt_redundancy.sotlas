@@ -3,6 +3,8 @@
 // Este gate é somente leitura. Ele relê o backup Header já provado, valida o
 // primary Header no LBA1, compara a geometria/GUID/CRC publicados pelos dois
 // headers e percorre o primary Partition Entry Array pelo Block Device API.
+// Depois da redundância, o mesmo array primário é usado para localizar uma ESP
+// real e publicar seus LBAs para a futura camada FAT32.
 // Nenhuma UEFI Block I/O ou escrita de armazenamento participa deste caminho.
 
 module kernel::storage::gpt_redundancy;
@@ -18,10 +20,27 @@ pub const GPT_REDUNDANCY_BLOCK_SIZE: u32 = 512;
 pub const GPT_REDUNDANCY_BUFFER_SIZE: u64 = 4096;
 pub const GPT_PRIMARY_HEADER_LBA: u64 = 1;
 pub const GPT_PRIMARY_ENTRIES_MIN_LBA: u64 = 2;
+pub const GPT_PARTITION_MANDATORY_BYTES: u64 = 56;
+
+// EFI System Partition type GUID C12A7328-F81F-11D2-BA4B-00A0C93EC93B,
+// comparada na representação little-endian realmente armazenada na GPT.
+pub const GPT_ESP_TYPE_GUID0: u32 = 0xC12A7328;
+pub const GPT_ESP_TYPE_GUID1: u32 = 0x11D2F81F;
+pub const GPT_ESP_TYPE_GUID2: u32 = 0xA0004BBA;
+pub const GPT_ESP_TYPE_GUID3: u32 = 0x3BC93EC9;
 
 static mut GPT_REDUNDANCY_READY: bool = false;
 static mut GPT_PRIMARY_ENTRIES_LBA: u64 = 0;
 static mut GPT_PRIMARY_ENTRIES_CRC32_COMPUTED: u32 = 0;
+static mut GPT_PARTITION_READY: bool = false;
+static mut GPT_PARTITION_INDEX: u32 = 0;
+static mut GPT_PARTITION_FIRST_LBA: u64 = 0;
+static mut GPT_PARTITION_LAST_LBA: u64 = 0;
+static mut GPT_PARTITION_ATTRIBUTES: u64 = 0;
+static mut GPT_PARTITION_UNIQUE_GUID0: u32 = 0;
+static mut GPT_PARTITION_UNIQUE_GUID1: u32 = 0;
+static mut GPT_PARTITION_UNIQUE_GUID2: u32 = 0;
+static mut GPT_PARTITION_UNIQUE_GUID3: u32 = 0;
 static mut GPT_REDUNDANCY_SECTOR: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -142,6 +161,15 @@ pub fn gpt_probe_primary_backup_redundancy(
         GPT_REDUNDANCY_READY = false;
         GPT_PRIMARY_ENTRIES_LBA = 0;
         GPT_PRIMARY_ENTRIES_CRC32_COMPUTED = 0;
+        GPT_PARTITION_READY = false;
+        GPT_PARTITION_INDEX = 0;
+        GPT_PARTITION_FIRST_LBA = 0;
+        GPT_PARTITION_LAST_LBA = 0;
+        GPT_PARTITION_ATTRIBUTES = 0;
+        GPT_PARTITION_UNIQUE_GUID0 = 0;
+        GPT_PARTITION_UNIQUE_GUID1 = 0;
+        GPT_PARTITION_UNIQUE_GUID2 = 0;
+        GPT_PARTITION_UNIQUE_GUID3 = 0;
     }
 
     if !block_device_has_native_target() || block_device_block_size() != GPT_REDUNDANCY_BLOCK_SIZE {
@@ -239,6 +267,104 @@ pub fn gpt_probe_primary_backup_redundancy(
     return true;
 }
 
+// Percorre as entradas GPT reais já cobertas pela prova de redundância e publica
+// a primeira EFI System Partition válida. A leitura é feita sobre o PEA primário
+// pelo Block Device API. Quando os 56 bytes obrigatórios cruzam um setor, o
+// setor seguinte é lido para a segunda metade da página de scratch.
+@system
+pub fn gpt_probe_first_esp_partition(
+    first_usable_lba: u64,
+    last_usable_lba: u64,
+    entry_count: u32,
+    entry_size: u32
+) -> bool {
+    unsafe {
+        GPT_PARTITION_READY = false;
+        GPT_PARTITION_INDEX = 0;
+        GPT_PARTITION_FIRST_LBA = 0;
+        GPT_PARTITION_LAST_LBA = 0;
+        GPT_PARTITION_ATTRIBUTES = 0;
+        GPT_PARTITION_UNIQUE_GUID0 = 0;
+        GPT_PARTITION_UNIQUE_GUID1 = 0;
+        GPT_PARTITION_UNIQUE_GUID2 = 0;
+        GPT_PARTITION_UNIQUE_GUID3 = 0;
+    }
+    if !gpt_redundancy_is_ready() || !block_device_has_native_target() ||
+       block_device_block_size() != GPT_REDUNDANCY_BLOCK_SIZE { return false; }
+    if first_usable_lba < GPT_PRIMARY_ENTRIES_MIN_LBA || first_usable_lba > last_usable_lba ||
+       entry_count == 0 || entry_size < 128 || (entry_size % 8) != 0 { return false; }
+
+    let entries_lba = gpt_primary_entries_lba();
+    if entries_lba < GPT_PRIMARY_ENTRIES_MIN_LBA || entries_lba >= first_usable_lba { return false; }
+    let entries_bytes = (entry_count as u64) * (entry_size as u64);
+    let entries_blocks = gpt_redundancy_div_ceil(entries_bytes, GPT_REDUNDANCY_BLOCK_SIZE as u64);
+    if entries_bytes == 0 || entries_blocks == 0 || entries_lba + entries_blocks > first_usable_lba {
+        return false;
+    }
+
+    let sector = gpt_redundancy_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+
+    let mut index: u32 = 0;
+    while index < entry_count {
+        let entry_offset = (index as u64) * (entry_size as u64);
+        let sector_lba = entries_lba + (entry_offset / (GPT_REDUNDANCY_BLOCK_SIZE as u64));
+        let sector_offset = entry_offset % (GPT_REDUNDANCY_BLOCK_SIZE as u64);
+        if sector_lba >= first_usable_lba || !block_device_read_sector(sector_lba, sector) {
+            return false;
+        }
+        if sector_offset + GPT_PARTITION_MANDATORY_BYTES > (GPT_REDUNDANCY_BLOCK_SIZE as u64) {
+            if sector_lba + 1 >= first_usable_lba ||
+               !block_device_read_sector(sector_lba + 1,
+                   ((sector as usize) + (GPT_REDUNDANCY_BLOCK_SIZE as usize)) as *mut u8) {
+                return false;
+            }
+        }
+
+        let entry = ((sector as usize) + (sector_offset as usize)) as *const u8;
+        let type0 = gpt_redundancy_read_u32(entry, 0);
+        let type1 = gpt_redundancy_read_u32(entry, 4);
+        let type2 = gpt_redundancy_read_u32(entry, 8);
+        let type3 = gpt_redundancy_read_u32(entry, 12);
+        if type0 == 0 && type1 == 0 && type2 == 0 && type3 == 0 {
+            index += 1;
+            continue;
+        }
+        if type0 != GPT_ESP_TYPE_GUID0 || type1 != GPT_ESP_TYPE_GUID1 ||
+           type2 != GPT_ESP_TYPE_GUID2 || type3 != GPT_ESP_TYPE_GUID3 {
+            index += 1;
+            continue;
+        }
+
+        let unique0 = gpt_redundancy_read_u32(entry, 16);
+        let unique1 = gpt_redundancy_read_u32(entry, 20);
+        let unique2 = gpt_redundancy_read_u32(entry, 24);
+        let unique3 = gpt_redundancy_read_u32(entry, 28);
+        if unique0 == 0 && unique1 == 0 && unique2 == 0 && unique3 == 0 { return false; }
+        let first_lba = gpt_redundancy_read_u64(entry, 32);
+        let last_lba = gpt_redundancy_read_u64(entry, 40);
+        let attributes = gpt_redundancy_read_u64(entry, 48);
+        if first_lba < first_usable_lba || first_lba > last_lba || last_lba > last_usable_lba {
+            return false;
+        }
+
+        unsafe {
+            GPT_PARTITION_INDEX = index;
+            GPT_PARTITION_FIRST_LBA = first_lba;
+            GPT_PARTITION_LAST_LBA = last_lba;
+            GPT_PARTITION_ATTRIBUTES = attributes;
+            GPT_PARTITION_UNIQUE_GUID0 = unique0;
+            GPT_PARTITION_UNIQUE_GUID1 = unique1;
+            GPT_PARTITION_UNIQUE_GUID2 = unique2;
+            GPT_PARTITION_UNIQUE_GUID3 = unique3;
+            GPT_PARTITION_READY = true;
+        }
+        x86_serial_write_stage_marker('t' as u8);
+        return true;
+    }
+    return false;
+}
+
 @system
 pub fn gpt_redundancy_is_ready() -> bool { unsafe { return GPT_REDUNDANCY_READY; } }
 @system
@@ -247,3 +373,21 @@ pub fn gpt_primary_entries_lba() -> u64 { unsafe { return GPT_PRIMARY_ENTRIES_LB
 pub fn gpt_primary_entries_crc32_computed() -> u32 {
     unsafe { return GPT_PRIMARY_ENTRIES_CRC32_COMPUTED; }
 }
+@system
+pub fn gpt_partition_is_ready() -> bool { unsafe { return GPT_PARTITION_READY; } }
+@system
+pub fn gpt_partition_index() -> u32 { unsafe { return GPT_PARTITION_INDEX; } }
+@system
+pub fn gpt_partition_first_lba() -> u64 { unsafe { return GPT_PARTITION_FIRST_LBA; } }
+@system
+pub fn gpt_partition_last_lba() -> u64 { unsafe { return GPT_PARTITION_LAST_LBA; } }
+@system
+pub fn gpt_partition_attributes() -> u64 { unsafe { return GPT_PARTITION_ATTRIBUTES; } }
+@system
+pub fn gpt_partition_unique_guid0() -> u32 { unsafe { return GPT_PARTITION_UNIQUE_GUID0; } }
+@system
+pub fn gpt_partition_unique_guid1() -> u32 { unsafe { return GPT_PARTITION_UNIQUE_GUID1; } }
+@system
+pub fn gpt_partition_unique_guid2() -> u32 { unsafe { return GPT_PARTITION_UNIQUE_GUID2; } }
+@system
+pub fn gpt_partition_unique_guid3() -> u32 { unsafe { return GPT_PARTITION_UNIQUE_GUID3; } }
