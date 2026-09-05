@@ -1,18 +1,29 @@
-// Baken OS — planejamento GPT nativo independente de firmware.
+// Baken OS — planejamento e leitura GPT nativos independentes de firmware.
 //
-// Esta camada calcula a geometria de uma GPT válida para qualquer logical
-// block size suportado pelo dispositivo. Ela ainda não escreve setores: o
-// commit físico ficará ligado ao Block Device API quando AHCI/NVMe expuserem
-// read/write reais.
+// A geometria continua pura e reutilizável. O gate de runtime abaixo lê apenas
+// o backup GPT Header pelo Block Device API já provado; não usa UEFI Block I/O
+// e não grava armazenamento.
 
 module kernel::storage::gpt;
 
 import kernel::storage::crc32::*;
+import kernel::storage::block_device::*;
 
 pub const GPT_HEADER_MIN_SIZE: u32 = 92;
 pub const GPT_DEFAULT_ENTRY_SIZE: u32 = 128;
 pub const GPT_DEFAULT_ENTRY_COUNT: u32 = 128;
 pub const GPT_MIN_USABLE_ALIGNMENT_BYTES: u64 = 1048576;
+pub const GPT_RUNTIME_BLOCK_SIZE: u32 = 512;
+pub const GPT_REVISION_1_0: u32 = 0x00010000;
+
+static mut GPT_RUNTIME_READY: bool = false;
+static mut GPT_RUNTIME_CURRENT_LBA: u64 = 0;
+static mut GPT_RUNTIME_BACKUP_LBA: u64 = 0;
+static mut GPT_RUNTIME_FIRST_USABLE_LBA: u64 = 0;
+static mut GPT_RUNTIME_LAST_USABLE_LBA: u64 = 0;
+static mut GPT_RUNTIME_ENTRIES_LBA: u64 = 0;
+static mut GPT_RUNTIME_ENTRY_COUNT: u32 = 0;
+static mut GPT_RUNTIME_ENTRY_SIZE: u32 = 0;
 
 pub struct GptLayout {
     pub valid: bool;
@@ -41,6 +52,25 @@ fn gpt_align_up_lba(lba: u64, block_size: u32, alignment_bytes: u64) -> u64 {
     let alignment_lbas = gpt_div_ceil_u64(alignment_bytes, block_size as u64);
     if alignment_lbas <= 1 { return lba; }
     return gpt_div_ceil_u64(lba, alignment_lbas) * alignment_lbas;
+}
+
+@system
+fn gpt_read_u32(base: *const u8, offset: usize) -> u32 {
+    if base == (null as *const u8) { return 0; }
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn gpt_read_u64(base: *const u8, offset: usize) -> u64 {
+    if base == (null as *const u8) { return 0; }
+    let low = gpt_read_u32(base, offset) as u64;
+    let high = gpt_read_u32(base, offset + 4) as u64;
+    return low | (high << 32);
 }
 
 @system
@@ -98,6 +128,106 @@ pub fn gpt_plan_default(block_size: u32, last_lba: u64) -> GptLayout {
 pub fn gpt_crc32(data: *const u8, length: usize) -> u32 {
     return crc32_ieee(data, length);
 }
+
+// Lê o backup header no último LBA através do dispatch genérico de bloco e
+// valida assinatura, revisão, geometria e Header CRC32. O array de entradas
+// continua para o próximo gate; aqui nenhuma escrita é permitida.
+@system
+pub fn gpt_probe_backup_header() -> bool {
+    unsafe {
+        GPT_RUNTIME_READY = false;
+        GPT_RUNTIME_CURRENT_LBA = 0;
+        GPT_RUNTIME_BACKUP_LBA = 0;
+        GPT_RUNTIME_FIRST_USABLE_LBA = 0;
+        GPT_RUNTIME_LAST_USABLE_LBA = 0;
+        GPT_RUNTIME_ENTRIES_LBA = 0;
+        GPT_RUNTIME_ENTRY_COUNT = 0;
+        GPT_RUNTIME_ENTRY_SIZE = 0;
+    }
+
+    if !block_device_has_native_target() || block_device_block_size() != GPT_RUNTIME_BLOCK_SIZE {
+        return false;
+    }
+    let last_lba = block_device_last_lba();
+    if last_lba < 16 { return false; }
+
+    let mut sector: [u8; 512] = [0; 512];
+    if !block_device_read_sector(last_lba, &mut sector[0]) { return false; }
+
+    if sector[0] != ('E' as u8) || sector[1] != ('F' as u8) ||
+       sector[2] != ('I' as u8) || sector[3] != (' ' as u8) ||
+       sector[4] != ('P' as u8) || sector[5] != ('A' as u8) ||
+       sector[6] != ('R' as u8) || sector[7] != ('T' as u8) { return false; }
+
+    let revision = gpt_read_u32(&sector[0], 8);
+    let header_size = gpt_read_u32(&sector[0], 12);
+    let expected_crc = gpt_read_u32(&sector[0], 16);
+    let reserved = gpt_read_u32(&sector[0], 20);
+    if revision != GPT_REVISION_1_0 || header_size < GPT_HEADER_MIN_SIZE ||
+       header_size > GPT_RUNTIME_BLOCK_SIZE || expected_crc == 0 || reserved != 0 { return false; }
+
+    let saved16 = sector[16];
+    let saved17 = sector[17];
+    let saved18 = sector[18];
+    let saved19 = sector[19];
+    sector[16] = 0;
+    sector[17] = 0;
+    sector[18] = 0;
+    sector[19] = 0;
+    let computed_crc = gpt_crc32(&sector[0], header_size as usize);
+    sector[16] = saved16;
+    sector[17] = saved17;
+    sector[18] = saved18;
+    sector[19] = saved19;
+    if computed_crc != expected_crc { return false; }
+
+    let current_lba = gpt_read_u64(&sector[0], 24);
+    let backup_lba = gpt_read_u64(&sector[0], 32);
+    let first_usable = gpt_read_u64(&sector[0], 40);
+    let last_usable = gpt_read_u64(&sector[0], 48);
+    let entries_lba = gpt_read_u64(&sector[0], 72);
+    let entry_count = gpt_read_u32(&sector[0], 80);
+    let entry_size = gpt_read_u32(&sector[0], 84);
+
+    if current_lba != last_lba || backup_lba != 1 { return false; }
+    if first_usable < 2 || first_usable > last_usable || last_usable >= current_lba { return false; }
+    if entries_lba <= last_usable || entries_lba >= current_lba { return false; }
+    if entry_count == 0 || entry_size < GPT_DEFAULT_ENTRY_SIZE || (entry_size % 8) != 0 { return false; }
+
+    let entries_bytes = (entry_count as u64) * (entry_size as u64);
+    let entries_blocks = gpt_div_ceil_u64(entries_bytes, GPT_RUNTIME_BLOCK_SIZE as u64);
+    if entries_blocks == 0 || entries_blocks > (current_lba - entries_lba) { return false; }
+    if entries_lba + entries_blocks != current_lba { return false; }
+
+    unsafe {
+        GPT_RUNTIME_CURRENT_LBA = current_lba;
+        GPT_RUNTIME_BACKUP_LBA = backup_lba;
+        GPT_RUNTIME_FIRST_USABLE_LBA = first_usable;
+        GPT_RUNTIME_LAST_USABLE_LBA = last_usable;
+        GPT_RUNTIME_ENTRIES_LBA = entries_lba;
+        GPT_RUNTIME_ENTRY_COUNT = entry_count;
+        GPT_RUNTIME_ENTRY_SIZE = entry_size;
+        GPT_RUNTIME_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn gpt_runtime_is_ready() -> bool { unsafe { return GPT_RUNTIME_READY; } }
+@system
+pub fn gpt_runtime_current_lba() -> u64 { unsafe { return GPT_RUNTIME_CURRENT_LBA; } }
+@system
+pub fn gpt_runtime_backup_lba() -> u64 { unsafe { return GPT_RUNTIME_BACKUP_LBA; } }
+@system
+pub fn gpt_runtime_first_usable_lba() -> u64 { unsafe { return GPT_RUNTIME_FIRST_USABLE_LBA; } }
+@system
+pub fn gpt_runtime_last_usable_lba() -> u64 { unsafe { return GPT_RUNTIME_LAST_USABLE_LBA; } }
+@system
+pub fn gpt_runtime_entries_lba() -> u64 { unsafe { return GPT_RUNTIME_ENTRIES_LBA; } }
+@system
+pub fn gpt_runtime_entry_count() -> u32 { unsafe { return GPT_RUNTIME_ENTRY_COUNT; } }
+@system
+pub fn gpt_runtime_entry_size() -> u32 { unsafe { return GPT_RUNTIME_ENTRY_SIZE; } }
 
 // Protective MBR usa um campo de 32 bits para número de setores. Discos cujo
 // último LBA excede o representável devem publicar 0xFFFFFFFF conforme GPT.
