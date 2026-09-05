@@ -7,7 +7,8 @@
 // -> Configuration Header 9B -> Configuration Descriptor completo
 // -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint
 // -> SET_CONFIGURATION real via EP0 -> primeiro report HID Interrupt IN real
-// -> storage AHCI real -> Block Device I/O genérico -> backup GPT Header real.
+// -> storage AHCI real -> Block Device I/O genérico -> backup GPT Header
+// -> backup GPT Partition Entry Array + CRC32 real.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -482,7 +483,7 @@ pub fn post_cutover_prove_first_usb_hid_keyboard_report() -> bool {
 
 // J executa o caminho de storage pós-cutover: enumeração, posse AHCI, DMA,
 // IDENTIFY, READ/WRITE e dispatch genérico. O marcador J continua sendo o fim
-// desta sequência, agora somente depois que o backup GPT Header também é lido.
+// desta sequência, agora somente após Header e Entry Array do backup GPT.
 @system
 pub fn post_cutover_discover_first_storage_controller() -> bool {
     let kind = storage_discovery_scan();
@@ -501,6 +502,14 @@ pub fn post_cutover_discover_first_storage_controller() -> bool {
 pub fn post_cutover_probe_backup_gpt_header() -> bool {
     if !storage_generic_block_io_is_ready() { return false; }
     if !gpt_probe_backup_header() || !gpt_runtime_is_ready() { return false; }
+    return true;
+}
+
+@system
+pub fn post_cutover_probe_backup_gpt_entries() -> bool {
+    if !gpt_runtime_is_ready() { return false; }
+    if !gpt_probe_backup_entries() || !gpt_runtime_entries_are_ready() { return false; }
+    if gpt_runtime_entries_crc32_computed() != gpt_runtime_entries_crc32() { return false; }
     return true;
 }
 
@@ -563,6 +572,8 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_discover_first_storage_controller() { loop {} }
     if !post_cutover_probe_backup_gpt_header() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('i' as u8); }
+    if !post_cutover_probe_backup_gpt_entries() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('m' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
     loop {}
 }
