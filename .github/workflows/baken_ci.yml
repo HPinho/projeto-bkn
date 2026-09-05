@@ -58,7 +58,7 @@ jobs:
           cp "$OVMF_VARS" build/OVMF_VARS.fd
           truncate -s 64M build/storage-test.img
           printf 'BAKENR01' | dd of=build/storage-test.img bs=1 seek=0 conv=notrunc status=none
-          printf 'BAKENOLD' | dd of=build/storage-test.img bs=1 seek=512 conv=notrunc status=none
+          printf 'BAKENOLD' | dd of=build/storage-test.img bs=512 seek=1024 conv=notrunc status=none
           python3 - <<'PY'
           from pathlib import Path
           import struct
@@ -74,6 +74,7 @@ jobs:
           entries = bytearray(entry_count * entry_size)
           type_guid = bytes.fromhex("28732ac11ff8d211ba4b00a0c93ec93b")
           unique_guid = bytes.fromhex("78563412341278569abcdef012345678")
+          disk_guid = bytes.fromhex("00112233445566778899aabbccddeeff")
           name = "BAKEN TEST".encode("utf-16le")
           name = name + bytes(72 - len(name))
           struct.pack_into(
@@ -82,31 +83,41 @@ jobs:
           )
           assert len(entries) % block_size == 0
           entry_blocks = len(entries) // block_size
+          primary_entries_lba = 2
           entries_lba = last_lba - entry_blocks
           first_usable = 2048
           last_usable = entries_lba - 1
           entries_crc = zlib.crc32(entries) & 0xFFFFFFFF
 
-          header = bytearray(block_size)
-          struct.pack_into(
-              "<8sIIIIQQQQ16sQIII", header, 0,
-              b"EFI PART", 0x00010000, 92, 0, 0,
-              last_lba, 1, first_usable, last_usable,
-              bytes.fromhex("00112233445566778899aabbccddeeff"),
-              entries_lba, entry_count, entry_size, entries_crc,
-          )
-          header_crc = zlib.crc32(header[:92]) & 0xFFFFFFFF
-          struct.pack_into("<I", header, 16, header_crc)
+          def make_header(current_lba, backup_lba, partition_entries_lba):
+              header = bytearray(block_size)
+              struct.pack_into(
+                  "<8sIIIIQQQQ16sQIII", header, 0,
+                  b"EFI PART", 0x00010000, 92, 0, 0,
+                  current_lba, backup_lba, first_usable, last_usable,
+                  disk_guid, partition_entries_lba, entry_count, entry_size, entries_crc,
+              )
+              header_crc = zlib.crc32(header[:92]) & 0xFFFFFFFF
+              struct.pack_into("<I", header, 16, header_crc)
+              return header
+
+          primary_header = make_header(1, last_lba, primary_entries_lba)
+          backup_header = make_header(last_lba, 1, entries_lba)
 
           with path.open("r+b") as image:
+              image.seek(primary_entries_lba * block_size)
+              image.write(entries)
+              image.seek(1 * block_size)
+              image.write(primary_header)
               image.seek(entries_lba * block_size)
               image.write(entries)
               image.seek(last_lba * block_size)
-              image.write(header)
+              image.write(backup_header)
           PY
           storage_last_lba=$(( $(stat -c%s build/storage-test.img) / 512 - 1 ))
           test "$(head -c 8 build/storage-test.img)" = "BAKENR01"
-          test "$(dd if=build/storage-test.img bs=1 skip=512 count=8 status=none)" = "BAKENOLD"
+          test "$(dd if=build/storage-test.img bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENOLD"
+          test "$(dd if=build/storage-test.img bs=512 skip=1 count=1 status=none | head -c 8)" = "EFI PART"
           test "$(dd if=build/storage-test.img bs=512 skip="$storage_last_lba" count=1 status=none | head -c 8)" = "EFI PART"
           test -s build/storage-test.img
           rm -f build/qemu-serial.log
@@ -149,7 +160,8 @@ jobs:
           fi
           test "$injection_failed" -eq 0
           test "$status" -eq 124
-          test "$(dd if=build/storage-test.img bs=1 skip=512 count=8 status=none)" = "BAKENW01"
+          test "$(dd if=build/storage-test.img bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENW01"
+          test "$(dd if=build/storage-test.img bs=512 skip=1 count=1 status=none | head -c 8)" = "EFI PART"
           test "$(dd if=build/storage-test.img bs=512 skip="$storage_last_lba" count=1 status=none | head -c 8)" = "EFI PART"
           python3 - <<'PY'
           from pathlib import Path
@@ -159,22 +171,49 @@ jobs:
           path = Path("build/storage-test.img")
           block_size = 512
           last_lba = path.stat().st_size // block_size - 1
-          with path.open("rb") as image:
-              image.seek(last_lba * block_size)
+
+          def read_header(image, lba):
+              image.seek(lba * block_size)
               header = image.read(block_size)
               assert header[:8] == b"EFI PART"
-              entries_lba = struct.unpack_from("<Q", header, 72)[0]
-              entry_count = struct.unpack_from("<I", header, 80)[0]
-              entry_size = struct.unpack_from("<I", header, 84)[0]
-              expected_crc = struct.unpack_from("<I", header, 88)[0]
+              expected_header_crc = struct.unpack_from("<I", header, 16)[0]
+              header_for_crc = bytearray(header)
+              struct.pack_into("<I", header_for_crc, 16, 0)
+              assert zlib.crc32(header_for_crc[:92]) & 0xFFFFFFFF == expected_header_crc
+              return header
+
+          with path.open("rb") as image:
+              primary = read_header(image, 1)
+              backup = read_header(image, last_lba)
+
+              assert struct.unpack_from("<Q", primary, 24)[0] == 1
+              assert struct.unpack_from("<Q", primary, 32)[0] == last_lba
+              assert struct.unpack_from("<Q", backup, 24)[0] == last_lba
+              assert struct.unpack_from("<Q", backup, 32)[0] == 1
+              assert primary[56:72] == backup[56:72]
+              assert primary[40:56] == backup[40:56]
+              assert primary[80:92] == backup[80:92]
+
+              primary_entries_lba = struct.unpack_from("<Q", primary, 72)[0]
+              entries_lba = struct.unpack_from("<Q", backup, 72)[0]
+              entry_count = struct.unpack_from("<I", backup, 80)[0]
+              entry_size = struct.unpack_from("<I", backup, 84)[0]
+              expected_crc = struct.unpack_from("<I", backup, 88)[0]
               entries_bytes = entry_count * entry_size
+
+              image.seek(primary_entries_lba * block_size)
+              primary_entries = image.read(entries_bytes)
               image.seek(entries_lba * block_size)
               entries = image.read(entries_bytes)
+
           assert len(entries) == entries_bytes
+          assert len(primary_entries) == entries_bytes
           assert entries[:16] != bytes(16)
+          assert primary_entries == entries
           assert zlib.crc32(entries) & 0xFFFFFFFF == expected_crc
+          assert zlib.crc32(primary_entries) & 0xFFFFFFFF == expected_crc
           PY
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=m STEP=J; do
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=m STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
