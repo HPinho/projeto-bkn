@@ -1,10 +1,9 @@
-// Baken OS — primeira fundação DMA real do AHCI pós-cutover.
+// Baken OS — runtime AHCI DMA e primeiro comando ATA real pós-cutover.
 //
-// Este estágio ainda não envia comandos ATA. O caller já deve ter validado e
-// resetado o HBA. Aqui escolhemos uma porta implementada, paramos o command
-// engine, alocamos uma arena DMA física via PMM, publicamos Command List,
-// Received FIS e Command Table e só então habilitamos PCI Bus Master. A prova
-// exige read-back dos registradores programados; ST e FRE continuam desligados.
+// O estágio de preparação publica Command List, Received FIS, Command Table e
+// habilita Bus Master. O estágio seguinte usa uma quarta página DMA para emitir
+// IDENTIFY DEVICE (0xEC) em uma porta SATA ATA conectada e só conclui após o HBA
+// limpar PxCI sem Task File Error. Nenhuma escrita em mídia é realizada.
 
 module kernel::drivers::ahci_runtime;
 
@@ -14,10 +13,11 @@ import kernel::memory::dma::*;
 import kernel::drivers::pci_bus::*;
 
 pub const AHCI_RUNTIME_PAGE_SIZE: u64 = 4096;
-pub const AHCI_RUNTIME_ARENA_PAGES: u64 = 3;
+pub const AHCI_RUNTIME_ARENA_PAGES: u64 = 4;
 pub const AHCI_COMMAND_LIST_PAGE: u64 = 0;
 pub const AHCI_RECEIVED_FIS_PAGE: u64 = 1;
 pub const AHCI_COMMAND_TABLE_PAGE: u64 = 2;
+pub const AHCI_IDENTIFY_DATA_PAGE: u64 = 3;
 
 pub const AHCI_PORT_BASE: u64 = 0x100;
 pub const AHCI_PORT_STRIDE: u64 = 0x80;
@@ -25,17 +25,35 @@ pub const AHCI_PX_CLB: u64 = 0x00;
 pub const AHCI_PX_CLBU: u64 = 0x04;
 pub const AHCI_PX_FB: u64 = 0x08;
 pub const AHCI_PX_FBU: u64 = 0x0C;
+pub const AHCI_PX_IS: u64 = 0x10;
 pub const AHCI_PX_CMD: u64 = 0x18;
+pub const AHCI_PX_TFD: u64 = 0x20;
+pub const AHCI_PX_SIG: u64 = 0x24;
+pub const AHCI_PX_SSTS: u64 = 0x28;
 pub const AHCI_PX_CI: u64 = 0x38;
 
 pub const AHCI_PXCMD_ST: u32 = 1;
 pub const AHCI_PXCMD_FRE: u32 = 1 << 4;
 pub const AHCI_PXCMD_FR: u32 = 1 << 14;
 pub const AHCI_PXCMD_CR: u32 = 1 << 15;
+pub const AHCI_PXIS_TFES: u32 = 1 << 30;
+pub const AHCI_TFD_ERR: u32 = 1;
+pub const AHCI_TFD_DRQ: u32 = 1 << 3;
+pub const AHCI_TFD_BSY: u32 = 1 << 7;
+pub const AHCI_SSTS_DET_MASK: u32 = 0x0F;
+pub const AHCI_SSTS_IPM_MASK: u32 = 0x0F00;
+pub const AHCI_SSTS_DET_PRESENT: u32 = 3;
+pub const AHCI_SSTS_IPM_ACTIVE: u32 = 0x0100;
+pub const AHCI_SIG_ATA: u32 = 0x00000101;
+pub const AHCI_ATA_IDENTIFY_DEVICE: u8 = 0xEC;
+pub const AHCI_FIS_TYPE_REG_H2D: u8 = 0x27;
 pub const AHCI_PORT_STOP_SPIN_LIMIT: u64 = 10000000;
+pub const AHCI_IDENTIFY_SPIN_LIMIT: u64 = 20000000;
 
 static mut AHCI_RUNTIME_READY: bool = false;
+static mut AHCI_IDENTIFY_READY: bool = false;
 static mut AHCI_RUNTIME_PORT: u32 = 0;
+static mut AHCI_RUNTIME_HBA: u64 = 0;
 static mut AHCI_RUNTIME_ARENA: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -48,6 +66,7 @@ static mut AHCI_RUNTIME_ARENA: DmaBuffer = DmaBuffer {
 static mut AHCI_COMMAND_LIST_PHYSICAL: u64 = 0;
 static mut AHCI_RECEIVED_FIS_PHYSICAL: u64 = 0;
 static mut AHCI_COMMAND_TABLE_PHYSICAL: u64 = 0;
+static mut AHCI_IDENTIFY_DATA_PHYSICAL: u64 = 0;
 
 @system
 fn ahci_runtime_zero(base: *mut u8, size: u64) -> bool {
@@ -55,8 +74,7 @@ fn ahci_runtime_zero(base: *mut u8, size: u64) -> bool {
     unsafe {
         let mut offset: u64 = 0;
         while offset < size {
-            let address = (base as usize) + (offset as usize);
-            let slot = address as *mut u8;
+            let slot = ((base as usize) + (offset as usize)) as *mut u8;
             *slot = 0;
             offset += 1;
         }
@@ -65,18 +83,25 @@ fn ahci_runtime_zero(base: *mut u8, size: u64) -> bool {
 }
 
 @system
-fn ahci_runtime_first_implemented_port(pi: u32) -> u32 {
-    let mut port: u32 = 0;
-    while port < 32 {
-        if (pi & (1 << port)) != 0 { return port; }
-        port += 1;
-    }
-    return 32;
+fn ahci_runtime_port_base(hba: u64, port: u32) -> u64 {
+    return hba + AHCI_PORT_BASE + ((port as u64) * AHCI_PORT_STRIDE);
 }
 
 @system
-fn ahci_runtime_port_base(hba: u64, port: u32) -> u64 {
-    return hba + AHCI_PORT_BASE + ((port as u64) * AHCI_PORT_STRIDE);
+fn ahci_runtime_first_ata_port(hba: u64, pi: u32) -> u32 {
+    let mut port: u32 = 0;
+    while port < 32 {
+        if (pi & (1 << port)) != 0 {
+            let base = ahci_runtime_port_base(hba, port);
+            let ssts = x86_mmio_read32(base + AHCI_PX_SSTS);
+            let sig = x86_mmio_read32(base + AHCI_PX_SIG);
+            if (ssts & AHCI_SSTS_DET_MASK) == AHCI_SSTS_DET_PRESENT &&
+               (ssts & AHCI_SSTS_IPM_MASK) == AHCI_SSTS_IPM_ACTIVE &&
+               sig == AHCI_SIG_ATA { return port; }
+        }
+        port += 1;
+    }
+    return 32;
 }
 
 @system
@@ -84,7 +109,6 @@ fn ahci_runtime_stop_port(port_base: u64) -> bool {
     let cmd_before = x86_mmio_read32(port_base + AHCI_PX_CMD);
     if cmd_before == 0xFFFFFFFF { return false; }
     x86_mmio_write32(port_base + AHCI_PX_CMD, cmd_before & !(AHCI_PXCMD_ST | AHCI_PXCMD_FRE));
-
     let mut spins: u64 = 0;
     while spins < AHCI_PORT_STOP_SPIN_LIMIT {
         let cmd = x86_mmio_read32(port_base + AHCI_PX_CMD);
@@ -108,10 +132,13 @@ fn ahci_runtime_write64_pair(base: u64, low_offset: u64, high_offset: u64, value
 
 @system
 pub fn ahci_runtime_prepare_dma(hba: u64, bus: u8, slot: u8, func: u8, pi: u32) -> bool {
-    unsafe { AHCI_RUNTIME_READY = false; }
+    unsafe {
+        AHCI_RUNTIME_READY = false;
+        AHCI_IDENTIFY_READY = false;
+    }
     if hba == 0 || pi == 0 || !dma_allocator_available() { return false; }
 
-    let port = ahci_runtime_first_implemented_port(pi);
+    let port = ahci_runtime_first_ata_port(hba, pi);
     if port >= 32 { return false; }
     let port_base = ahci_runtime_port_base(hba, port);
     if !ahci_runtime_stop_port(port_base) { return false; }
@@ -124,18 +151,14 @@ pub fn ahci_runtime_prepare_dma(hba: u64, bus: u8, slot: u8, func: u8, pi: u32) 
     let command_list = arena.physical_address + AHCI_COMMAND_LIST_PAGE * AHCI_RUNTIME_PAGE_SIZE;
     let received_fis = arena.physical_address + AHCI_RECEIVED_FIS_PAGE * AHCI_RUNTIME_PAGE_SIZE;
     let command_table = arena.physical_address + AHCI_COMMAND_TABLE_PAGE * AHCI_RUNTIME_PAGE_SIZE;
+    let identify_data = arena.physical_address + AHCI_IDENTIFY_DATA_PAGE * AHCI_RUNTIME_PAGE_SIZE;
     if (command_list & 0x3FF) != 0 || (received_fis & 0xFF) != 0 ||
-       (command_table & 0x7F) != 0 { return false; }
+       (command_table & 0x7F) != 0 || (identify_data & 0x1FF) != 0 { return false; }
 
-    if !ahci_runtime_write64_pair(port_base, AHCI_PX_CLB, AHCI_PX_CLBU, command_list) {
-        return false;
-    }
-    if !ahci_runtime_write64_pair(port_base, AHCI_PX_FB, AHCI_PX_FBU, received_fis) {
-        return false;
-    }
+    if !ahci_runtime_write64_pair(port_base, AHCI_PX_CLB, AHCI_PX_CLBU, command_list) { return false; }
+    if !ahci_runtime_write64_pair(port_base, AHCI_PX_FB, AHCI_PX_FBU, received_fis) { return false; }
 
     unsafe {
-        // Header do slot 0: CFL=5 dwords, PRDTL=0 neste gate e CTBA real.
         let header = arena.virtual_address as *mut u32;
         *header = 5;
         let ctba_low = ((arena.virtual_address as usize) + 8) as *mut u32;
@@ -153,18 +176,19 @@ pub fn ahci_runtime_prepare_dma(hba: u64, bus: u8, slot: u8, func: u8, pi: u32) 
 
     let cmd_verify = x86_mmio_read32(port_base + AHCI_PX_CMD);
     let ci_verify = x86_mmio_read32(port_base + AHCI_PX_CI);
-    if cmd_verify == 0xFFFFFFFF || ci_verify == 0xFFFFFFFF { return false; }
+    if cmd_verify == 0xFFFFFFFF || ci_verify == 0xFFFFFFFF || ci_verify != 0 { return false; }
     if (cmd_verify & (AHCI_PXCMD_ST | AHCI_PXCMD_FRE | AHCI_PXCMD_CR | AHCI_PXCMD_FR)) != 0 {
         return false;
     }
-    if ci_verify != 0 { return false; }
 
     unsafe {
         AHCI_RUNTIME_ARENA = arena;
         AHCI_RUNTIME_PORT = port;
+        AHCI_RUNTIME_HBA = hba;
         AHCI_COMMAND_LIST_PHYSICAL = command_list;
         AHCI_RECEIVED_FIS_PHYSICAL = received_fis;
         AHCI_COMMAND_TABLE_PHYSICAL = command_table;
+        AHCI_IDENTIFY_DATA_PHYSICAL = identify_data;
         AHCI_RUNTIME_READY = true;
     }
     x86_serial_write_stage_marker('c' as u8);
@@ -172,7 +196,84 @@ pub fn ahci_runtime_prepare_dma(hba: u64, bus: u8, slot: u8, func: u8, pi: u32) 
 }
 
 @system
+pub fn ahci_runtime_identify_device() -> bool {
+    unsafe { AHCI_IDENTIFY_READY = false; }
+    if !ahci_runtime_is_ready() { return false; }
+
+    unsafe {
+        let port_base = ahci_runtime_port_base(AHCI_RUNTIME_HBA, AHCI_RUNTIME_PORT);
+        let arena_base = AHCI_RUNTIME_ARENA.virtual_address;
+        if arena_base == (null as *mut u8) { return false; }
+
+        let table = ((arena_base as usize) +
+            ((AHCI_COMMAND_TABLE_PAGE * AHCI_RUNTIME_PAGE_SIZE) as usize)) as *mut u8;
+        let identify = ((arena_base as usize) +
+            ((AHCI_IDENTIFY_DATA_PAGE * AHCI_RUNTIME_PAGE_SIZE) as usize)) as *mut u8;
+        if !ahci_runtime_zero(table, AHCI_RUNTIME_PAGE_SIZE) ||
+           !ahci_runtime_zero(identify, 512) { return false; }
+
+        // Command Header slot 0: CFL=5 dwords, write=0, PRDTL=1, PRDBC=0.
+        let header0 = arena_base as *mut u32;
+        *header0 = 5 | (1 << 16);
+        let prdbc = ((arena_base as usize) + 4) as *mut u32;
+        *prdbc = 0;
+
+        // Register H2D FIS, Command bit=1 e ATA IDENTIFY DEVICE.
+        *table = AHCI_FIS_TYPE_REG_H2D;
+        *(((table as usize) + 1) as *mut u8) = 0x80;
+        *(((table as usize) + 2) as *mut u8) = AHCI_ATA_IDENTIFY_DEVICE;
+
+        // Primeiro PRDT em offset 0x80: 512 bytes, IOC=1.
+        let prdt = ((table as usize) + 0x80) as *mut u32;
+        *prdt = (AHCI_IDENTIFY_DATA_PHYSICAL & 0xFFFFFFFF) as u32;
+        *(((prdt as usize) + 4) as *mut u32) =
+            ((AHCI_IDENTIFY_DATA_PHYSICAL >> 32) & 0xFFFFFFFF) as u32;
+        *(((prdt as usize) + 8) as *mut u32) = 0;
+        *(((prdt as usize) + 12) as *mut u32) = (511 as u32) | (1 << 31);
+
+        x86_mmio_write32(port_base + AHCI_PX_IS, 0xFFFFFFFF);
+        let mut cmd = x86_mmio_read32(port_base + AHCI_PX_CMD);
+        if cmd == 0xFFFFFFFF { return false; }
+        cmd |= AHCI_PXCMD_FRE;
+        x86_mmio_write32(port_base + AHCI_PX_CMD, cmd);
+        cmd |= AHCI_PXCMD_ST;
+        x86_mmio_write32(port_base + AHCI_PX_CMD, cmd);
+
+        let mut spins: u64 = 0;
+        while spins < AHCI_IDENTIFY_SPIN_LIMIT {
+            let tfd = x86_mmio_read32(port_base + AHCI_PX_TFD);
+            if tfd == 0xFFFFFFFF { return false; }
+            if (tfd & (AHCI_TFD_BSY | AHCI_TFD_DRQ)) == 0 { break; }
+            spins += 1;
+        }
+        if spins >= AHCI_IDENTIFY_SPIN_LIMIT { return false; }
+
+        x86_mmio_write32(port_base + AHCI_PX_CI, 1);
+        spins = 0;
+        while spins < AHCI_IDENTIFY_SPIN_LIMIT {
+            let isr = x86_mmio_read32(port_base + AHCI_PX_IS);
+            let ci = x86_mmio_read32(port_base + AHCI_PX_CI);
+            if isr == 0xFFFFFFFF || ci == 0xFFFFFFFF { return false; }
+            if (isr & AHCI_PXIS_TFES) != 0 { return false; }
+            if (ci & 1) == 0 {
+                let tfd = x86_mmio_read32(port_base + AHCI_PX_TFD);
+                if (tfd & AHCI_TFD_ERR) != 0 { return false; }
+                let word0 = *(identify as *const u16);
+                if word0 == 0 || word0 == 0xFFFF { return false; }
+                AHCI_IDENTIFY_READY = true;
+                x86_serial_write_stage_marker('d' as u8);
+                return true;
+            }
+            spins += 1;
+        }
+    }
+    return false;
+}
+
+@system
 pub fn ahci_runtime_is_ready() -> bool { unsafe { return AHCI_RUNTIME_READY; } }
+@system
+pub fn ahci_identify_is_ready() -> bool { unsafe { return AHCI_IDENTIFY_READY; } }
 @system
 pub fn ahci_runtime_port() -> u32 { unsafe { return AHCI_RUNTIME_PORT; } }
 @system
@@ -181,3 +282,5 @@ pub fn ahci_runtime_command_list_physical() -> u64 { unsafe { return AHCI_COMMAN
 pub fn ahci_runtime_received_fis_physical() -> u64 { unsafe { return AHCI_RECEIVED_FIS_PHYSICAL; } }
 @system
 pub fn ahci_runtime_command_table_physical() -> u64 { unsafe { return AHCI_COMMAND_TABLE_PHYSICAL; } }
+@system
+pub fn ahci_identify_data_physical() -> u64 { unsafe { return AHCI_IDENTIFY_DATA_PHYSICAL; } }
