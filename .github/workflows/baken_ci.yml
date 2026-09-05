@@ -95,7 +95,7 @@ jobs:
           fi
           test "$injection_failed" -eq 0
           test "$status" -eq 124
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=J; do
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
