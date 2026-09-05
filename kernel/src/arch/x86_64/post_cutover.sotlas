@@ -33,6 +33,7 @@ import kernel::drivers::xhci_program::*;
 import kernel::drivers::xhci_start::*;
 import kernel::drivers::xhci_port_stage::*;
 import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_context::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -364,6 +365,25 @@ pub fn post_cutover_enable_first_usb_slot() -> bool {
     return true;
 }
 
+// Y prova somente a preparação de memória do slot: Device Context, Input
+// Context, EP0 Transfer Ring e publicação de DCBAA[slot]. Address Device
+// permanece deliberadamente fora deste gate para manter o diagnóstico isolado.
+@system
+pub fn post_cutover_prepare_first_usb_context() -> bool {
+    if !xhci_slot_is_ready() || xhci_slot_id() == 0 { return false; }
+    if !xhci_context_prepare_for_enabled_slot() || !xhci_context_is_ready() {
+        return false;
+    }
+    if xhci_context_slot_id() != xhci_slot_id() ||
+       xhci_context_device_physical() == 0 ||
+       xhci_context_input_physical() == 0 ||
+       xhci_context_ep0_ring_physical() == 0 ||
+       xhci_context_ep0_max_packet() == 0 {
+        return false;
+    }
+    return true;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -417,6 +437,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     // S prova Enable Slot + Slot ID real retornado pelo Command Completion Event.
     if !post_cutover_enable_first_usb_slot() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('S' as u8); }
+
+    // Y prova contexts + EP0 ring + DCBAA[slot], sem Address Device.
+    if !post_cutover_prepare_first_usb_context() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('Y' as u8); }
 
     loop {}
 }
