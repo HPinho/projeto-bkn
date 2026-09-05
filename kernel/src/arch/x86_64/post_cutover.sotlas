@@ -3,7 +3,7 @@
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
 // -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada
-// -> primeiro Enable Slot concluído. Mouse/IRQ12 permanece mascarado.
+// -> Enable Slot -> contexts -> Address Device -> primeiro GET_DESCRIPTOR(8).
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -35,6 +35,8 @@ import kernel::drivers::xhci_port_stage::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_context::*;
 import kernel::drivers::xhci_address::*;
+import kernel::drivers::xhci_ep0::*;
+import kernel::drivers::xhci_descriptor::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -342,7 +344,6 @@ pub fn post_cutover_start_xhci_and_prove_noop() -> bool {
 
 // U prova que um dispositivo real está conectado a uma porta administrada pelo
 // xHC, que Supported Protocol foi resolvido e que o reset concluiu com CCS/PED.
-// O limite arquitetural permanece antes de Enable Slot.
 @system
 pub fn post_cutover_prepare_first_usb_port() -> bool {
     unsafe { POST_CUTOVER_USB_PORT_READY = false; }
@@ -353,9 +354,7 @@ pub fn post_cutover_prepare_first_usb_port() -> bool {
     return true;
 }
 
-// S prova Enable Slot real pelo Command Ring compartilhado. O Slot ID precisa
-// vir do Command Completion Event e permanecer dentro de MaxSlots. Ainda não
-// há Device/Input Context, DCBAA[slot] ou Address Device neste estágio.
+// S prova Enable Slot real pelo Command Ring compartilhado.
 @system
 pub fn post_cutover_enable_first_usb_slot() -> bool {
     if !post_cutover_usb_port_ready() || !xhci_port_stage_is_ready() { return false; }
@@ -366,9 +365,7 @@ pub fn post_cutover_enable_first_usb_slot() -> bool {
     return true;
 }
 
-// Y prova somente a preparação de memória do slot: Device Context, Input
-// Context, EP0 Transfer Ring e publicação de DCBAA[slot]. Address Device
-// permanece deliberadamente fora deste gate para manter o diagnóstico isolado.
+// Y prova Device Context, Input Context, EP0 Transfer Ring e DCBAA[slot].
 @system
 pub fn post_cutover_prepare_first_usb_context() -> bool {
     if !xhci_slot_is_ready() || xhci_slot_id() == 0 { return false; }
@@ -385,9 +382,7 @@ pub fn post_cutover_prepare_first_usb_context() -> bool {
     return true;
 }
 
-// Z prova Address Device real. O command usa o Input Context já publicado,
-// espera seu Command Completion e só fecha o gate quando o Device Context
-// escrito pelo xHC está em Slot State Addressed com endereço USB não-zero.
+// Z prova Address Device real e Output Device Context em estado Addressed.
 @system
 pub fn post_cutover_address_first_usb_device() -> bool {
     if !xhci_context_is_ready() || xhci_context_slot_id() == 0 { return false; }
@@ -396,6 +391,19 @@ pub fn post_cutover_address_first_usb_device() -> bool {
        xhci_address_device_address() == 0 {
         return false;
     }
+    return true;
+}
+
+// Q prova o primeiro Control Transfer real no EP0. Solicita somente os oito
+// bytes iniciais do Device Descriptor e captura bMaxPacketSize0. A leitura de
+// 18 bytes e Evaluate Context permanecem fora deste gate.
+@system
+pub fn post_cutover_probe_first_usb_descriptor() -> bool {
+    if !xhci_address_is_ready() || xhci_address_slot_id() == 0 { return false; }
+    if !xhci_ep0_prepare_after_address() || !xhci_ep0_is_ready() { return false; }
+    if !xhci_probe_first_device_descriptor_8() ||
+       !xhci_device_descriptor_probe_is_ready() { return false; }
+    if xhci_device_descriptor_probe_max_packet0() == 0 { return false; }
     return true;
 }
 
@@ -433,33 +441,29 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_enable_keyboard_interrupts() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('K' as u8); }
 
-    // X prova discovery PCI pós-EBS + BAR MMIO UC + halt/HCRST/CNR do xHC.
     if !post_cutover_prepare_xhci_controller() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('X' as u8); }
 
-    // D prova arena DMA + DCBAAP/CRCR/ERST programados com readback e xHC parado.
     if !post_cutover_prepare_xhci_dma_tables() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('D' as u8); }
 
-    // N prova Bus Master + Run/Stop + Doorbell 0 + Command Completion real.
     if !post_cutover_start_xhci_and_prove_noop() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('N' as u8); }
 
-    // U prova Supported Protocol + porta conectada + reset real concluído.
     if !post_cutover_prepare_first_usb_port() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('U' as u8); }
 
-    // S prova Enable Slot + Slot ID real retornado pelo Command Completion Event.
     if !post_cutover_enable_first_usb_slot() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('S' as u8); }
 
-    // Y prova contexts + EP0 ring + DCBAA[slot], sem Address Device.
     if !post_cutover_prepare_first_usb_context() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Y' as u8); }
 
-    // Z prova Address Device + Output Device Context em estado Addressed.
     if !post_cutover_address_first_usb_device() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('Z' as u8); }
+
+    if !post_cutover_probe_first_usb_descriptor() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('Q' as u8); }
 
     loop {}
 }
