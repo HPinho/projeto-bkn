@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 STAGE = ROOT / "kernel/src/drivers/xhci_set_configuration.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 
 
 class XhciSetConfigurationTests(unittest.TestCase):
@@ -39,6 +40,25 @@ class XhciSetConfigurationTests(unittest.TestCase):
         self.assertNotIn("hid_report", text)
         self.assertNotIn("interrupt_in", text)
         self.assertNotIn("doorbell", text)
+
+    def test_post_cutover_runs_set_configuration_only_after_configure_endpoint(self):
+        text = POST.read_text(encoding="utf-8")
+        helper = text.split("pub fn post_cutover_set_first_usb_configuration()", 1)[1]
+        helper = helper.split("pub fn sotlas_x86_post_cutover_entry", 1)[0]
+        self.assertIn("xhci_configure_endpoint_is_ready()", helper)
+        self.assertIn("xhci_configuration_is_ready()", helper)
+        self.assertIn("xhci_set_first_configuration()", helper)
+        self.assertIn("xhci_set_configuration_is_ready()", helper)
+        self.assertIn("xhci_set_configuration_value() == configuration_value", helper)
+
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        configure = entry.index("post_cutover_configure_first_usb_hid_endpoint()")
+        marker_l = entry.index("x86_serial_write_stage_marker('L' as u8)")
+        set_configuration = entry.index("post_cutover_set_first_usb_configuration()")
+        marker_o = entry.index("x86_serial_write_stage_marker('O' as u8)")
+        self.assertLess(configure, marker_l)
+        self.assertLess(marker_l, set_configuration)
+        self.assertLess(set_configuration, marker_o)
 
     def test_main_registers_set_configuration(self):
         text = MAIN.read_text(encoding="utf-8")
