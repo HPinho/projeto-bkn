@@ -6,7 +6,7 @@
 // -> Device Descriptor 8B -> EP0 MPS -> Device Descriptor 18B
 // -> Configuration Header 9B -> Configuration Descriptor completo
 // -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint
-// -> SET_CONFIGURATION real via EP0.
+// -> SET_CONFIGURATION real via EP0 -> primeiro report HID Interrupt IN real.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -45,8 +45,11 @@ import kernel::drivers::xhci_configuration::*;
 import kernel::drivers::xhci_hid_context::*;
 import kernel::drivers::xhci_configure_endpoint::*;
 import kernel::drivers::xhci_set_configuration::*;
+import kernel::drivers::xhci_hid_report::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
+pub const POST_CUTOVER_HID_REPORT_ATTEMPTS: u32 = 8;
+pub const USB_HID_USAGE_KEYBOARD_A: u8 = 4;
 
 @repr(C)
 pub struct PostCutoverContext {
@@ -453,6 +456,27 @@ pub fn post_cutover_set_first_usb_configuration() -> bool {
     return xhci_set_configuration_value() == configuration_value;
 }
 
+// W publica Normal TRBs reais no endpoint Interrupt IN e exige observar a tecla
+// 'a' injetada pelo monitor do QEMU (usage HID 0x04). Cada tentativa só avança
+// após um Transfer Event real consumido pelo Event Ring global.
+@system
+pub fn post_cutover_prove_first_usb_hid_keyboard_report() -> bool {
+    if !xhci_set_configuration_is_ready() || xhci_hid_protocol() != USB_HID_PROTOCOL_KEYBOARD {
+        return false;
+    }
+    if !xhci_hid_report_prepare() || !xhci_hid_report_is_ready() { return false; }
+    let mut attempts: u32 = 0;
+    while attempts < POST_CUTOVER_HID_REPORT_ATTEMPTS {
+        if !xhci_hid_report_poll_once() { return false; }
+        if xhci_hid_report_last_length() >= XHCI_HID_BOOT_KEYBOARD_LENGTH &&
+           xhci_hid_keyboard_key0() == USB_HID_USAGE_KEYBOARD_A {
+            return true;
+        }
+        attempts += 1;
+    }
+    return false;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -507,5 +531,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('L' as u8); }
     if !post_cutover_set_first_usb_configuration() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('O' as u8); }
+    if !post_cutover_prove_first_usb_hid_keyboard_report() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('W' as u8); }
     loop {}
 }
