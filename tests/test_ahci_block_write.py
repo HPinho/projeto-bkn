@@ -15,6 +15,7 @@ class AhciBlockWriteTests(unittest.TestCase):
         text = AHCI.read_text(encoding="utf-8")
         self.assertIn("AHCI_ATA_WRITE_DMA_EXT: u8 = 0x35", text)
         self.assertIn("AHCI_ATA_WRITE_DMA: u8 = 0xCA", text)
+        self.assertIn("AHCI_WRITE_TEST_LBA: u64 = 1024", text)
         body = text.split("fn ahci_write_issue_dma", 1)[1]
         body = body.split("pub fn ahci_write_probe_sector1", 1)[0]
         for token in (
@@ -66,8 +67,8 @@ class AhciBlockWriteTests(unittest.TestCase):
 
     def test_ci_uses_disposable_sector_and_verifies_persisted_write(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        baseline = "printf 'BAKENOLD' | dd of=build/storage-test.img bs=1 seek=512"
-        verify = 'skip=512 count=8 status=none)" = "BAKENW01"'
+        baseline = "printf 'BAKENOLD' | dd of=build/storage-test.img bs=512 seek=1024"
+        verify = 'bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENW01"'
         self.assertIn(baseline, text)
         self.assertIn(verify, text)
 
