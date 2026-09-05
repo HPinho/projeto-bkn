@@ -8,12 +8,14 @@ module kernel::storage::gpt;
 
 import kernel::storage::crc32::*;
 import kernel::storage::block_device::*;
+import kernel::memory::dma::*;
 
 pub const GPT_HEADER_MIN_SIZE: u32 = 92;
 pub const GPT_DEFAULT_ENTRY_SIZE: u32 = 128;
 pub const GPT_DEFAULT_ENTRY_COUNT: u32 = 128;
 pub const GPT_MIN_USABLE_ALIGNMENT_BYTES: u64 = 1048576;
 pub const GPT_RUNTIME_BLOCK_SIZE: u32 = 512;
+pub const GPT_RUNTIME_BUFFER_SIZE: u64 = 4096;
 pub const GPT_REVISION_1_0: u32 = 0x00010000;
 
 static mut GPT_RUNTIME_READY: bool = false;
@@ -24,6 +26,15 @@ static mut GPT_RUNTIME_LAST_USABLE_LBA: u64 = 0;
 static mut GPT_RUNTIME_ENTRIES_LBA: u64 = 0;
 static mut GPT_RUNTIME_ENTRY_COUNT: u32 = 0;
 static mut GPT_RUNTIME_ENTRY_SIZE: u32 = 0;
+static mut GPT_RUNTIME_SECTOR: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
 
 pub struct GptLayout {
     pub valid: bool;
@@ -71,6 +82,21 @@ fn gpt_read_u64(base: *const u8, offset: usize) -> u64 {
     let low = gpt_read_u32(base, offset) as u64;
     let high = gpt_read_u32(base, offset + 4) as u64;
     return low | (high << 32);
+}
+
+@system
+fn gpt_runtime_sector_buffer() -> *mut u8 {
+    unsafe {
+        if dma_buffer_cpu_owned(&GPT_RUNTIME_SECTOR) {
+            return GPT_RUNTIME_SECTOR.virtual_address;
+        }
+    }
+    let buffer = dma_alloc(GPT_RUNTIME_BUFFER_SIZE, DMA_DEFAULT_ALIGNMENT);
+    if !dma_buffer_cpu_owned(&buffer) { return null as *mut u8; }
+    unsafe {
+        GPT_RUNTIME_SECTOR = buffer;
+        return GPT_RUNTIME_SECTOR.virtual_address;
+    }
 }
 
 @system
@@ -151,43 +177,57 @@ pub fn gpt_probe_backup_header() -> bool {
     let last_lba = block_device_last_lba();
     if last_lba < 16 { return false; }
 
-    let mut sector: [u8; 512] = [0; 512];
-    if !block_device_read_sector(last_lba, &mut sector[0]) { return false; }
+    let sector = gpt_runtime_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+    if !block_device_read_sector(last_lba, sector) { return false; }
 
-    if sector[0] != ('E' as u8) || sector[1] != ('F' as u8) ||
-       sector[2] != ('I' as u8) || sector[3] != (' ' as u8) ||
-       sector[4] != ('P' as u8) || sector[5] != ('A' as u8) ||
-       sector[6] != ('R' as u8) || sector[7] != ('T' as u8) { return false; }
+    unsafe {
+        if *sector != ('E' as u8) ||
+           *(((sector as usize) + 1) as *const u8) != ('F' as u8) ||
+           *(((sector as usize) + 2) as *const u8) != ('I' as u8) ||
+           *(((sector as usize) + 3) as *const u8) != (' ' as u8) ||
+           *(((sector as usize) + 4) as *const u8) != ('P' as u8) ||
+           *(((sector as usize) + 5) as *const u8) != ('A' as u8) ||
+           *(((sector as usize) + 6) as *const u8) != ('R' as u8) ||
+           *(((sector as usize) + 7) as *const u8) != ('T' as u8) { return false; }
+    }
 
-    let revision = gpt_read_u32(&sector[0], 8);
-    let header_size = gpt_read_u32(&sector[0], 12);
-    let expected_crc = gpt_read_u32(&sector[0], 16);
-    let reserved = gpt_read_u32(&sector[0], 20);
+    let base = sector as *const u8;
+    let revision = gpt_read_u32(base, 8);
+    let header_size = gpt_read_u32(base, 12);
+    let expected_crc = gpt_read_u32(base, 16);
+    let reserved = gpt_read_u32(base, 20);
     if revision != GPT_REVISION_1_0 || header_size < GPT_HEADER_MIN_SIZE ||
        header_size > GPT_RUNTIME_BLOCK_SIZE || expected_crc == 0 || reserved != 0 { return false; }
 
-    let saved16 = sector[16];
-    let saved17 = sector[17];
-    let saved18 = sector[18];
-    let saved19 = sector[19];
-    sector[16] = 0;
-    sector[17] = 0;
-    sector[18] = 0;
-    sector[19] = 0;
-    let computed_crc = gpt_crc32(&sector[0], header_size as usize);
-    sector[16] = saved16;
-    sector[17] = saved17;
-    sector[18] = saved18;
-    sector[19] = saved19;
-    if computed_crc != expected_crc { return false; }
+    unsafe {
+        let crc0 = ((sector as usize) + 16) as *mut u8;
+        let crc1 = ((sector as usize) + 17) as *mut u8;
+        let crc2 = ((sector as usize) + 18) as *mut u8;
+        let crc3 = ((sector as usize) + 19) as *mut u8;
+        let saved16 = *crc0;
+        let saved17 = *crc1;
+        let saved18 = *crc2;
+        let saved19 = *crc3;
+        *crc0 = 0;
+        *crc1 = 0;
+        *crc2 = 0;
+        *crc3 = 0;
+        let computed_crc = gpt_crc32(base, header_size as usize);
+        *crc0 = saved16;
+        *crc1 = saved17;
+        *crc2 = saved18;
+        *crc3 = saved19;
+        if computed_crc != expected_crc { return false; }
+    }
 
-    let current_lba = gpt_read_u64(&sector[0], 24);
-    let backup_lba = gpt_read_u64(&sector[0], 32);
-    let first_usable = gpt_read_u64(&sector[0], 40);
-    let last_usable = gpt_read_u64(&sector[0], 48);
-    let entries_lba = gpt_read_u64(&sector[0], 72);
-    let entry_count = gpt_read_u32(&sector[0], 80);
-    let entry_size = gpt_read_u32(&sector[0], 84);
+    let current_lba = gpt_read_u64(base, 24);
+    let backup_lba = gpt_read_u64(base, 32);
+    let first_usable = gpt_read_u64(base, 40);
+    let last_usable = gpt_read_u64(base, 48);
+    let entries_lba = gpt_read_u64(base, 72);
+    let entry_count = gpt_read_u32(base, 80);
+    let entry_size = gpt_read_u32(base, 84);
 
     if current_lba != last_lba || backup_lba != 1 { return false; }
     if first_usable < 2 || first_usable > last_usable || last_usable >= current_lba { return false; }
