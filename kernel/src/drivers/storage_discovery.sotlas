@@ -1,8 +1,8 @@
-// Baken OS — discovery PCI, probe MMIO, reset, DMA e primeiro IDENTIFY AHCI.
+// Baken OS — discovery PCI, probe MMIO, reset, DMA, IDENTIFY e primeiro READ AHCI.
 //
 // A enumeração começa read-only. Pós-cutover, AHCI/NVMe habilitam Memory Space
 // para o probe estrutural. Para AHCI, o HBA é resetado com IE=0, a arena DMA é
-// programada e então um IDENTIFY DEVICE real é executado em uma porta SATA ATA.
+// programada, um IDENTIFY DEVICE real é executado e então o LBA 0 é lido por DMA.
 // Nenhuma escrita em mídia é realizada neste estágio.
 
 module kernel::drivers::storage_discovery;
@@ -12,6 +12,7 @@ import kernel::arch::x86_64::serial::*;
 import kernel::memory::active_page_tables::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::ahci_runtime::*;
+import kernel::drivers::ahci_block_read::*;
 
 pub const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
 pub const PCI_SUBCLASS_SATA: u8 = 0x06;
@@ -64,6 +65,7 @@ static mut STORAGE_MMIO_READY: bool = false;
 static mut STORAGE_AHCI_RESET_READY: bool = false;
 static mut STORAGE_AHCI_DMA_READY: bool = false;
 static mut STORAGE_AHCI_IDENTIFY_READY: bool = false;
+static mut STORAGE_AHCI_READ_READY: bool = false;
 static mut STORAGE_MMIO_REG0: u32 = 0;
 static mut STORAGE_MMIO_REG1: u32 = 0;
 static mut STORAGE_MMIO_REG2: u32 = 0;
@@ -96,6 +98,7 @@ fn storage_probe_mmio_after_cutover() -> bool {
         STORAGE_AHCI_RESET_READY = false;
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
+        STORAGE_AHCI_READ_READY = false;
         STORAGE_MMIO_REG0 = 0;
         STORAGE_MMIO_REG1 = 0;
         STORAGE_MMIO_REG2 = 0;
@@ -158,6 +161,7 @@ fn storage_reset_ahci_after_probe() -> bool {
         STORAGE_AHCI_RESET_READY = false;
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
+        STORAGE_AHCI_READ_READY = false;
         if !STORAGE_MMIO_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI { return false; }
         let base = STORAGE_CANDIDATE.abar_or_mmio_base;
         if base == 0 { return false; }
@@ -191,6 +195,7 @@ fn storage_prepare_ahci_dma_after_reset() -> bool {
     unsafe {
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
+        STORAGE_AHCI_READ_READY = false;
         if !STORAGE_AHCI_RESET_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
             return false;
         }
@@ -207,11 +212,27 @@ fn storage_prepare_ahci_dma_after_reset() -> bool {
 fn storage_identify_ahci_after_dma() -> bool {
     unsafe {
         STORAGE_AHCI_IDENTIFY_READY = false;
+        STORAGE_AHCI_READ_READY = false;
         if !STORAGE_AHCI_DMA_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
             return false;
         }
         if !ahci_runtime_identify_device() || !ahci_identify_is_ready() { return false; }
         STORAGE_AHCI_IDENTIFY_READY = true;
+        return true;
+    }
+}
+
+@system
+fn storage_read_ahci_after_identify() -> bool {
+    unsafe {
+        STORAGE_AHCI_READ_READY = false;
+        if !STORAGE_AHCI_IDENTIFY_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
+            return false;
+        }
+        if !ahci_parse_identify_capacity() || !ahci_capacity_is_ready() { return false; }
+        if !ahci_read_probe_sector0(STORAGE_CANDIDATE.abar_or_mmio_base) ||
+           !ahci_read_is_ready() { return false; }
+        STORAGE_AHCI_READ_READY = true;
         return true;
     }
 }
@@ -225,6 +246,7 @@ pub fn storage_discovery_scan() -> u32 {
         STORAGE_AHCI_RESET_READY = false;
         STORAGE_AHCI_DMA_READY = false;
         STORAGE_AHCI_IDENTIFY_READY = false;
+        STORAGE_AHCI_READ_READY = false;
 
         let count = pci_get_device_count();
         for mut index in 0..count {
@@ -247,10 +269,14 @@ pub fn storage_discovery_scan() -> u32 {
                 STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address;
             }
             if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
+            // Pre-cutover discovery remains strictly read-only. The real MMIO/reset/DMA
+            // driver path is entered only after the active page tables are installed.
+            if !active_page_tables_is_ready() { return kind; }
             if kind == STORAGE_CONTROLLER_AHCI {
                 if !storage_reset_ahci_after_probe() { return STORAGE_CONTROLLER_NONE; }
                 if !storage_prepare_ahci_dma_after_reset() { return STORAGE_CONTROLLER_NONE; }
                 if !storage_identify_ahci_after_dma() { return STORAGE_CONTROLLER_NONE; }
+                if !storage_read_ahci_after_identify() { return STORAGE_CONTROLLER_NONE; }
             }
             return kind;
         }
@@ -279,6 +305,10 @@ pub fn storage_ahci_reset_is_ready() -> bool { unsafe { return STORAGE_AHCI_RESE
 pub fn storage_ahci_dma_is_ready() -> bool { unsafe { return STORAGE_AHCI_DMA_READY; } }
 @system
 pub fn storage_ahci_identify_is_ready() -> bool { unsafe { return STORAGE_AHCI_IDENTIFY_READY; } }
+@system
+pub fn storage_ahci_read_is_ready() -> bool { unsafe { return STORAGE_AHCI_READ_READY; } }
+@system
+pub fn storage_ahci_total_sectors() -> u64 { return ahci_total_sectors(); }
 @system
 pub fn storage_mmio_reg0() -> u32 { unsafe { return STORAGE_MMIO_REG0; } }
 @system
