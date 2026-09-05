@@ -3,7 +3,8 @@
 // Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
 // -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada
-// -> Enable Slot -> contexts -> Address Device -> GET_DESCRIPTOR(8) -> EP0 MPS reconciliado.
+// -> Enable Slot -> contexts -> Address Device -> GET_DESCRIPTOR(8) -> EP0 MPS
+// reconciliado -> GET_DESCRIPTOR(Device, 18 bytes).
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -422,6 +423,24 @@ pub fn post_cutover_reconcile_first_usb_ep0() -> bool {
     return true;
 }
 
+// F prova a leitura integral do Device Descriptor somente após o EP0 estar
+// reconciliado. Ainda não lê Configuration Descriptor nem configura HID.
+@system
+pub fn post_cutover_read_full_usb_device_descriptor() -> bool {
+    if !xhci_device_descriptor_probe_is_ready() || !xhci_ep0_is_ready() { return false; }
+    let raw_max_packet0 = xhci_device_descriptor_probe_max_packet0();
+    let target = xhci_descriptor_ep0_max_packet_bytes(raw_max_packet0);
+    if target == 0 || xhci_evaluate_context_last_ep0_max_packet() != target { return false; }
+    if !xhci_get_first_device_descriptor() || !xhci_device_descriptor_is_ready() {
+        return false;
+    }
+    if xhci_device_usb_version() == 0 ||
+       xhci_device_max_packet0() != raw_max_packet0 {
+        return false;
+    }
+    return true;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -482,6 +501,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
 
     if !post_cutover_reconcile_first_usb_ep0() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('E' as u8); }
+
+    if !post_cutover_read_full_usb_device_descriptor() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('F' as u8); }
 
     loop {}
 }
