@@ -4,7 +4,7 @@
 // -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
 // -> primeiro No-op Command DMA concluído -> primeira porta USB detectada/resetada
 // -> Enable Slot -> contexts -> Address Device -> GET_DESCRIPTOR(8) -> EP0 MPS
-// reconciliado -> GET_DESCRIPTOR(Device, 18 bytes).
+// reconciliado -> GET_DESCRIPTOR(Device, 18 bytes) -> Configuration Header(9).
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -39,6 +39,7 @@ import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_descriptor::*;
 import kernel::drivers::xhci_evaluate_context::*;
+import kernel::drivers::xhci_configuration::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -441,6 +442,21 @@ pub fn post_cutover_read_full_usb_device_descriptor() -> bool {
     return true;
 }
 
+// G prova o primeiro GET_DESCRIPTOR(Configuration) com exatamente 9 bytes.
+// Apenas valida o header, wTotalLength e bConfigurationValue; parsing completo
+// de interfaces/HID permanece fora deste gate.
+@system
+pub fn post_cutover_probe_first_usb_configuration_header() -> bool {
+    if !xhci_device_descriptor_is_ready() || !xhci_ep0_is_ready() { return false; }
+    if !xhci_probe_first_configuration_header() ||
+       !xhci_configuration_header_is_ready() { return false; }
+    if xhci_configuration_header_total_length() < USB_CONFIGURATION_HEADER_LENGTH ||
+       xhci_configuration_header_value() == 0 {
+        return false;
+    }
+    return true;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -504,6 +520,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
 
     if !post_cutover_read_full_usb_device_descriptor() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('F' as u8); }
+
+    if !post_cutover_probe_first_usb_configuration_header() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('G' as u8); }
 
     loop {}
 }
