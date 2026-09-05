@@ -1,8 +1,8 @@
 // Baken OS — decodificação pura de Event TRBs xHCI.
 //
-// Interpreta Transfer Event e Command Completion Event já presentes em memória.
-// Não configura Event Ring/ERST, não avança dequeue pointer, não acessa MMIO,
-// não habilita interrupções e não escreve doorbells.
+// Interpreta Transfer Event, Command Completion Event e Port Status Change Event
+// já presentes em memória. Não configura Event Ring/ERST, não avança dequeue
+// pointer, não acessa MMIO, não habilita interrupções e não escreve doorbells.
 
 module kernel::drivers::xhci_event;
 
@@ -10,6 +10,7 @@ import kernel::drivers::xhci_ring::*;
 
 pub const XHCI_TRB_TYPE_TRANSFER_EVENT: u32 = 32;
 pub const XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT: u32 = 33;
+pub const XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT: u32 = 34;
 pub const XHCI_COMPLETION_CODE_SUCCESS: u8 = 1;
 
 pub const XHCI_EVENT_TYPE_SHIFT: u32 = 10;
@@ -20,6 +21,7 @@ pub const XHCI_EVENT_CYCLE_BIT: u32 = 1;
 pub const XHCI_EVENT_ED_BIT: u32 = 1 << 2;
 pub const XHCI_EVENT_TRANSFER_LENGTH_MASK: u32 = 0x00FFFFFF;
 pub const XHCI_EVENT_COMMAND_PARAMETER_MASK: u32 = 0x00FFFFFF;
+pub const XHCI_EVENT_PORT_ID_SHIFT: u32 = 24;
 
 @system
 pub fn xhci_event_type(trb: *const XhciTrb) -> u32 {
@@ -48,6 +50,12 @@ pub fn xhci_event_success(trb: *const XhciTrb) -> bool {
 pub fn xhci_event_slot_id(trb: *const XhciTrb) -> u8 {
     if trb == (null as *const XhciTrb) { return 0; }
     unsafe { return (((*trb).control >> XHCI_EVENT_SLOT_ID_SHIFT) & 0xFF) as u8; }
+}
+
+@system
+pub fn xhci_port_status_change_port_id(trb: *const XhciTrb) -> u8 {
+    if xhci_event_type(trb) != XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT { return 0; }
+    unsafe { return (((*trb).parameter >> XHCI_EVENT_PORT_ID_SHIFT) & 0xFF) as u8; }
 }
 
 @system
