@@ -1,9 +1,10 @@
 // Baken OS — leitura e parsing do Configuration Descriptor USB.
 //
 // O primeiro gate desta camada lê somente os 9 bytes do cabeçalho para obter
-// wTotalLength e bConfigurationValue. A leitura completa e o parser HID ficam
-// em etapa separada. Nenhuma função daqui configura endpoint ou envia
-// SET_CONFIGURATION.
+// wTotalLength e bConfigurationValue. O segundo gate busca exatamente o
+// wTotalLength completo, mas ainda não interpreta Interface/HID/Endpoint.
+// O parser HID fica em etapa separada. Nenhuma função daqui configura endpoint
+// ou envia SET_CONFIGURATION.
 
 module kernel::drivers::xhci_configuration;
 
@@ -35,6 +36,9 @@ pub const XHCI_CONFIGURATION_DMA_SIZE: u64 = 4096;
 static mut XHCI_CONFIGURATION_HEADER_READY: bool = false;
 static mut XHCI_CONFIGURATION_HEADER_TOTAL_LENGTH: u16 = 0;
 static mut XHCI_CONFIGURATION_HEADER_VALUE: u8 = 0;
+static mut XHCI_CONFIGURATION_FULL_READY: bool = false;
+static mut XHCI_CONFIGURATION_FULL_TOTAL_LENGTH: u16 = 0;
+static mut XHCI_CONFIGURATION_FULL_VALUE: u8 = 0;
 static mut XHCI_CONFIGURATION_READY: bool = false;
 static mut XHCI_CONFIGURATION_VALUE: u8 = 0;
 static mut XHCI_CONFIGURATION_TOTAL_LENGTH: u16 = 0;
@@ -173,6 +177,64 @@ pub fn xhci_configuration_header_value() -> u8 {
     unsafe { return XHCI_CONFIGURATION_HEADER_VALUE; }
 }
 
+// Segundo gate: lê o Configuration Descriptor completo usando exatamente o
+// wTotalLength já provado pelo header. Não chama o parser HID.
+@system
+pub fn xhci_read_first_configuration_full() -> bool {
+    unsafe {
+        XHCI_CONFIGURATION_FULL_READY = false;
+        XHCI_CONFIGURATION_FULL_TOTAL_LENGTH = 0;
+        XHCI_CONFIGURATION_FULL_VALUE = 0;
+        XHCI_CONFIGURATION_BUFFER = dma_invalid_buffer();
+    }
+    if !xhci_configuration_header_is_ready() || !xhci_ep0_is_ready() { return false; }
+
+    let total_length = xhci_configuration_header_total_length();
+    let configuration_value = xhci_configuration_header_value();
+    if total_length < USB_CONFIGURATION_HEADER_LENGTH ||
+       (total_length as u64) > XHCI_CONFIGURATION_DMA_SIZE ||
+       configuration_value == 0 {
+        return false;
+    }
+
+    let mut buffer = dma_alloc(XHCI_CONFIGURATION_DMA_SIZE, XHCI_CONFIGURATION_DMA_SIZE);
+    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    if !xhci_configuration_zero(buffer.virtual_address, total_length as u64) { return false; }
+    if !dma_share_with_device(&mut buffer) { return false; }
+    if !xhci_configuration_fetch(&mut buffer, total_length) { return false; }
+
+    let base = buffer.virtual_address as *const u8;
+    if xhci_configuration_read8(base, 0) < (USB_CONFIGURATION_HEADER_LENGTH as u8) ||
+       xhci_configuration_read8(base, 1) != USB_DESCRIPTOR_TYPE_CONFIGURATION ||
+       xhci_configuration_read16(base, 2) != total_length ||
+       xhci_configuration_read8(base, 5) != configuration_value {
+        return false;
+    }
+
+    unsafe {
+        XHCI_CONFIGURATION_BUFFER = buffer;
+        XHCI_CONFIGURATION_FULL_TOTAL_LENGTH = total_length;
+        XHCI_CONFIGURATION_FULL_VALUE = configuration_value;
+        XHCI_CONFIGURATION_FULL_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_configuration_full_is_ready() -> bool {
+    unsafe { return XHCI_CONFIGURATION_FULL_READY; }
+}
+
+@system
+pub fn xhci_configuration_full_total_length() -> u16 {
+    unsafe { return XHCI_CONFIGURATION_FULL_TOTAL_LENGTH; }
+}
+
+@system
+pub fn xhci_configuration_full_value() -> u8 {
+    unsafe { return XHCI_CONFIGURATION_FULL_VALUE; }
+}
+
 @system
 fn xhci_configuration_parse(base: *const u8, total_length: u16) -> bool {
     if base == (null as *const u8) || total_length < USB_CONFIGURATION_HEADER_LENGTH {
@@ -258,32 +320,20 @@ pub fn xhci_get_first_hid_configuration() -> bool {
         XHCI_HID_ENDPOINT_MAX_PACKET = 0;
         XHCI_HID_ENDPOINT_INTERVAL = 0;
         XHCI_HID_REPORT_DESCRIPTOR_LENGTH = 0;
-        XHCI_CONFIGURATION_BUFFER = dma_invalid_buffer();
     }
-    if !xhci_device_descriptor_is_ready() || !xhci_ep0_is_ready() { return false; }
+    if !xhci_configuration_full_is_ready() { return false; }
 
-    let mut buffer = dma_alloc(XHCI_CONFIGURATION_DMA_SIZE, XHCI_CONFIGURATION_DMA_SIZE);
-    if !dma_buffer_cpu_owned(&buffer) { return false; }
-    if !xhci_configuration_zero(buffer.virtual_address, XHCI_CONFIGURATION_DMA_SIZE) { return false; }
-    if !dma_share_with_device(&mut buffer) { return false; }
-
-    if !xhci_configuration_fetch(&mut buffer, USB_CONFIGURATION_HEADER_LENGTH) { return false; }
-    let base = buffer.virtual_address as *const u8;
-    if xhci_configuration_read8(base, 1) != USB_DESCRIPTOR_TYPE_CONFIGURATION { return false; }
-    let total_length = xhci_configuration_read16(base, 2);
-    if total_length < USB_CONFIGURATION_HEADER_LENGTH ||
-       (total_length as u64) > XHCI_CONFIGURATION_DMA_SIZE { return false; }
-    let configuration_value = xhci_configuration_read8(base, 5);
-    if configuration_value == 0 { return false; }
-
-    if !xhci_configuration_zero(buffer.virtual_address, total_length as u64) { return false; }
-    if !xhci_configuration_fetch(&mut buffer, total_length) { return false; }
-    if !xhci_configuration_parse(base, total_length) { return false; }
-
+    let total_length = xhci_configuration_full_total_length();
+    let configuration_value = xhci_configuration_full_value();
     unsafe {
+        if !XHCI_CONFIGURATION_BUFFER.valid ||
+           XHCI_CONFIGURATION_BUFFER.virtual_address == (null as *mut u8) {
+            return false;
+        }
+        let base = XHCI_CONFIGURATION_BUFFER.virtual_address as *const u8;
+        if !xhci_configuration_parse(base, total_length) { return false; }
         XHCI_CONFIGURATION_VALUE = configuration_value;
         XHCI_CONFIGURATION_TOTAL_LENGTH = total_length;
-        XHCI_CONFIGURATION_BUFFER = buffer;
         XHCI_CONFIGURATION_READY = true;
     }
     return true;
