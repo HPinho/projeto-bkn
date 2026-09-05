@@ -157,7 +157,20 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
 
         let event = xhci_event_consumer_peek();
         if event != (null as *const XhciTrb) {
-            if xhci_event_type(event) != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT {
+            let event_type = xhci_event_type(event);
+
+            // Reset de porta e mudanças de link geram Port Status Change Events
+            // assíncronos. Eles podem preceder o Command Completion de Enable
+            // Slot no mesmo Event Ring. Consuma apenas esse tipo conhecido e
+            // continue esperando; Transfer Events pertencem ao waiter de I/O.
+            if event_type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
+                if xhci_port_status_change_port_id(event) == 0 { return false; }
+                if !xhci_event_consumer_consume() { return false; }
+                spins += 1;
+                continue;
+            }
+
+            if event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT {
                 return false;
             }
             if !xhci_event_success(event) { return false; }
