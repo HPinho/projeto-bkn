@@ -44,7 +44,7 @@ class GptRedundancyTests(unittest.TestCase):
     def test_primary_partition_entry_array_is_streamed_and_crc_checked(self):
         text = REDUNDANCY.read_text(encoding="utf-8")
         body = text.split("pub fn gpt_probe_primary_backup_redundancy", 1)[1]
-        body = body.split("pub fn gpt_probe_first_esp_partition", 1)[0]
+        body = body.split("@system\npub fn gpt_probe_first_esp_partition", 1)[0]
         for token in (
             "while block < entries_blocks",
             "block_device_read_sector(lba, sector)",
