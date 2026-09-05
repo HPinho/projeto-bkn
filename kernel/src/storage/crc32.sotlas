@@ -5,13 +5,20 @@ module kernel::storage::crc32;
 
 pub const CRC32_POLYNOMIAL: u32 = 0xEDB88320;
 
+// Estado incremental sem XOR final. Permite validar estruturas maiores que um
+// setor sem precisar fabricar um buffer contíguo para todos os bytes.
 @system
-pub fn crc32_ieee(data: *const u8, length: usize) -> u32 {
-    if data == (null as *const u8) && length != 0 { return 0; }
+pub fn crc32_ieee_begin() -> u32 {
+    return 0xFFFFFFFF;
+}
 
-    let mut crc: u32 = 0xFFFFFFFF;
+@system
+pub fn crc32_ieee_update(crc: u32, data: *const u8, length: usize) -> u32 {
+    if data == (null as *const u8) && length != 0 { return crc; }
+
+    let mut state = crc;
     for mut i in 0..length {
-        let mut current = crc ^ (data[i] as u32);
+        let mut current = state ^ (data[i] as u32);
         for mut bit in 0..8 {
             if (current & 1) != 0 {
                 current = (current >> 1) ^ CRC32_POLYNOMIAL;
@@ -19,7 +26,21 @@ pub fn crc32_ieee(data: *const u8, length: usize) -> u32 {
                 current = current >> 1;
             }
         }
-        crc = current;
+        state = current;
     }
+    return state;
+}
+
+@system
+pub fn crc32_ieee_finish(crc: u32) -> u32 {
     return crc ^ 0xFFFFFFFF;
+}
+
+@system
+pub fn crc32_ieee(data: *const u8, length: usize) -> u32 {
+    if data == (null as *const u8) && length != 0 { return 0; }
+
+    let mut crc: u32 = 0xFFFFFFFF;
+    crc = crc32_ieee_update(crc, data, length);
+    return crc32_ieee_finish(crc);
 }
