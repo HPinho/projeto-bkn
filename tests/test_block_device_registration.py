@@ -59,7 +59,11 @@ class BlockDeviceRegistrationTests(unittest.TestCase):
 
     def test_ci_requires_block_device_gate_after_write(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("STEP=e STEP=f STEP=k STEP=J", text)
+        markers = text.split("for marker in ", 1)[1].split("; do", 1)[0]
+        self.assertLess(markers.index("STEP=e"), markers.index("STEP=f"))
+        self.assertLess(markers.index("STEP=f"), markers.index("STEP=k"))
+        self.assertLess(markers.index("STEP=k"), markers.index("STEP=v"))
+        self.assertLess(markers.index("STEP=v"), markers.index("STEP=J"))
 
 
 if __name__ == "__main__":
