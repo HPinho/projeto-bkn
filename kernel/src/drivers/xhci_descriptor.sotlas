@@ -1,8 +1,8 @@
-// Baken OS — primeira transferência de controle USB real: GET_DESCRIPTOR(Device).
+// Baken OS — transferências de controle USB para Device Descriptor.
 //
-// Aloca um buffer DMA de 18 bytes (arena mínima de uma página), publica
-// Setup+Data+Status no EP0, espera Transfer Event pelo consumidor compartilhado
-// e valida os campos básicos do Device Descriptor. Não enumera Configuration/HID.
+// O primeiro gate lê somente os 8 bytes iniciais para descobrir bMaxPacketSize0.
+// A leitura completa de 18 bytes permanece separada e só deve ser usada depois
+// que o EP0 estiver com o Max Packet Size correto. Não enumera Configuration/HID.
 
 module kernel::drivers::xhci_descriptor;
 
@@ -16,10 +16,13 @@ import kernel::drivers::xhci_transfer::*;
 pub const USB_REQUEST_GET_DESCRIPTOR: u8 = 6;
 pub const USB_REQUEST_TYPE_DEVICE_TO_HOST_STANDARD_DEVICE: u8 = 0x80;
 pub const USB_DESCRIPTOR_TYPE_DEVICE: u8 = 1;
+pub const USB_DEVICE_DESCRIPTOR_PROBE_LENGTH: u16 = 8;
 pub const USB_DEVICE_DESCRIPTOR_LENGTH: u16 = 18;
 pub const USB_DEVICE_DESCRIPTOR_VALUE: u16 = 0x0100;
 pub const XHCI_DESCRIPTOR_DMA_SIZE: u64 = 4096;
 
+static mut XHCI_DEVICE_DESCRIPTOR_PROBE_READY: bool = false;
+static mut XHCI_DEVICE_DESCRIPTOR_PROBE_MAX_PACKET0: u8 = 0;
 static mut XHCI_DEVICE_DESCRIPTOR_READY: bool = false;
 static mut XHCI_DEVICE_USB_VERSION: u16 = 0;
 static mut XHCI_DEVICE_VENDOR_ID: u16 = 0;
@@ -63,6 +66,75 @@ fn xhci_descriptor_read16(base: *const u8, offset: u64) -> u16 {
     let lo = xhci_descriptor_read8(base, offset) as u16;
     let hi = xhci_descriptor_read8(base, offset + 1) as u16;
     return lo | (hi << 8);
+}
+
+// Primeiro GET_DESCRIPTOR(Device): solicita exatamente 8 bytes. O objetivo é
+// descobrir bMaxPacketSize0 sem antecipar a leitura completa do descriptor.
+@system
+pub fn xhci_probe_first_device_descriptor_8() -> bool {
+    unsafe {
+        XHCI_DEVICE_DESCRIPTOR_PROBE_READY = false;
+        XHCI_DEVICE_DESCRIPTOR_PROBE_MAX_PACKET0 = 0;
+    }
+    if !xhci_address_is_ready() || !xhci_ep0_is_ready() { return false; }
+    let slot_id = xhci_address_slot_id();
+    if slot_id == 0 || slot_id != xhci_context_slot_id() { return false; }
+
+    let mut buffer = dma_alloc(XHCI_DESCRIPTOR_DMA_SIZE, XHCI_DESCRIPTOR_DMA_SIZE);
+    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    if !xhci_descriptor_zero(buffer.virtual_address, USB_DEVICE_DESCRIPTOR_PROBE_LENGTH as u64) {
+        return false;
+    }
+    if !dma_share_with_device(&mut buffer) { return false; }
+
+    let setup = xhci_trb_setup_stage(
+        USB_REQUEST_TYPE_DEVICE_TO_HOST_STANDARD_DEVICE,
+        USB_REQUEST_GET_DESCRIPTOR,
+        USB_DEVICE_DESCRIPTOR_VALUE,
+        0,
+        USB_DEVICE_DESCRIPTOR_PROBE_LENGTH,
+        XHCI_SETUP_TRT_IN_DATA,
+        xhci_ep0_producer_cycle()
+    );
+    let data = xhci_trb_data_stage(
+        buffer.physical_address,
+        USB_DEVICE_DESCRIPTOR_PROBE_LENGTH as u32,
+        0,
+        true,
+        false,
+        xhci_ep0_producer_cycle()
+    );
+    let status = xhci_trb_status_stage(false, true, xhci_ep0_producer_cycle());
+
+    let status_physical = xhci_ep0_submit_control_td(setup, data, status, true);
+    if status_physical == 0 { return false; }
+    if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
+    if xhci_transfer_last_residual_length() != 0 { return false; }
+
+    let base = buffer.virtual_address as *const u8;
+    let length = xhci_descriptor_read8(base, 0);
+    let descriptor_type = xhci_descriptor_read8(base, 1);
+    let max_packet0 = xhci_descriptor_read8(base, 7);
+    if length != (USB_DEVICE_DESCRIPTOR_LENGTH as u8) ||
+       descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE || max_packet0 == 0 {
+        return false;
+    }
+
+    unsafe {
+        XHCI_DEVICE_DESCRIPTOR_PROBE_MAX_PACKET0 = max_packet0;
+        XHCI_DEVICE_DESCRIPTOR_PROBE_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_device_descriptor_probe_is_ready() -> bool {
+    unsafe { return XHCI_DEVICE_DESCRIPTOR_PROBE_READY; }
+}
+
+@system
+pub fn xhci_device_descriptor_probe_max_packet0() -> u8 {
+    unsafe { return XHCI_DEVICE_DESCRIPTOR_PROBE_MAX_PACKET0; }
 }
 
 @system
