@@ -8,6 +8,7 @@ module kernel::storage::gpt;
 
 import kernel::storage::crc32::*;
 import kernel::storage::block_device::*;
+import kernel::storage::gpt_redundancy::*;
 import kernel::memory::dma::*;
 
 pub const GPT_HEADER_MIN_SIZE: u32 = 92;
@@ -263,6 +264,7 @@ pub fn gpt_probe_backup_header() -> bool {
 // Lê todos os bytes do backup Partition Entry Array, setor por setor, usando
 // somente block_device_read_sector(). O CRC é incremental, portanto arrays
 // maiores que a página de scratch não exigem buffer sintético ou firmware.
+// Depois do CRC do backup, o gate n relê e compara o primary GPT completo.
 @system
 pub fn gpt_probe_backup_entries() -> bool {
     unsafe {
@@ -313,6 +315,16 @@ pub fn gpt_probe_backup_entries() -> bool {
         GPT_RUNTIME_ENTRIES_CRC32_COMPUTED = computed;
         GPT_RUNTIME_ENTRIES_READY = true;
     }
+
+    if !gpt_probe_primary_backup_redundancy(
+        current_lba,
+        gpt_runtime_first_usable_lba(),
+        gpt_runtime_last_usable_lba(),
+        entries_lba,
+        entry_count,
+        entry_size,
+        computed
+    ) || !gpt_redundancy_is_ready() { return false; }
     return true;
 }
 
