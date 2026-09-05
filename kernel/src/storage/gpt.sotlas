@@ -1,8 +1,8 @@
 // Baken OS — planejamento e leitura GPT nativos independentes de firmware.
 //
-// A geometria continua pura e reutilizável. O gate de runtime abaixo lê apenas
-// o backup GPT Header pelo Block Device API já provado; não usa UEFI Block I/O
-// e não grava armazenamento.
+// A geometria continua pura e reutilizável. O runtime lê o backup GPT Header e
+// o Partition Entry Array pelo Block Device API já provado; não usa UEFI Block
+// I/O e não grava armazenamento.
 
 module kernel::storage::gpt;
 
@@ -19,6 +19,7 @@ pub const GPT_RUNTIME_BUFFER_SIZE: u64 = 4096;
 pub const GPT_REVISION_1_0: u32 = 0x00010000;
 
 static mut GPT_RUNTIME_READY: bool = false;
+static mut GPT_RUNTIME_ENTRIES_READY: bool = false;
 static mut GPT_RUNTIME_CURRENT_LBA: u64 = 0;
 static mut GPT_RUNTIME_BACKUP_LBA: u64 = 0;
 static mut GPT_RUNTIME_FIRST_USABLE_LBA: u64 = 0;
@@ -26,6 +27,8 @@ static mut GPT_RUNTIME_LAST_USABLE_LBA: u64 = 0;
 static mut GPT_RUNTIME_ENTRIES_LBA: u64 = 0;
 static mut GPT_RUNTIME_ENTRY_COUNT: u32 = 0;
 static mut GPT_RUNTIME_ENTRY_SIZE: u32 = 0;
+static mut GPT_RUNTIME_ENTRIES_CRC32: u32 = 0;
+static mut GPT_RUNTIME_ENTRIES_CRC32_COMPUTED: u32 = 0;
 static mut GPT_RUNTIME_SECTOR: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -156,12 +159,13 @@ pub fn gpt_crc32(data: *const u8, length: usize) -> u32 {
 }
 
 // Lê o backup header no último LBA através do dispatch genérico de bloco e
-// valida assinatura, revisão, geometria e Header CRC32. O array de entradas
-// continua para o próximo gate; aqui nenhuma escrita é permitida.
+// valida assinatura, revisão, geometria e Header CRC32. O array de entradas é
+// validado separadamente para que cada gate tenha uma prova de hardware clara.
 @system
 pub fn gpt_probe_backup_header() -> bool {
     unsafe {
         GPT_RUNTIME_READY = false;
+        GPT_RUNTIME_ENTRIES_READY = false;
         GPT_RUNTIME_CURRENT_LBA = 0;
         GPT_RUNTIME_BACKUP_LBA = 0;
         GPT_RUNTIME_FIRST_USABLE_LBA = 0;
@@ -169,6 +173,8 @@ pub fn gpt_probe_backup_header() -> bool {
         GPT_RUNTIME_ENTRIES_LBA = 0;
         GPT_RUNTIME_ENTRY_COUNT = 0;
         GPT_RUNTIME_ENTRY_SIZE = 0;
+        GPT_RUNTIME_ENTRIES_CRC32 = 0;
+        GPT_RUNTIME_ENTRIES_CRC32_COMPUTED = 0;
     }
 
     if !block_device_has_native_target() || block_device_block_size() != GPT_RUNTIME_BLOCK_SIZE {
@@ -228,6 +234,7 @@ pub fn gpt_probe_backup_header() -> bool {
     let entries_lba = gpt_read_u64(base, 72);
     let entry_count = gpt_read_u32(base, 80);
     let entry_size = gpt_read_u32(base, 84);
+    let entries_crc32 = gpt_read_u32(base, 88);
 
     if current_lba != last_lba || backup_lba != 1 { return false; }
     if first_usable < 2 || first_usable > last_usable || last_usable >= current_lba { return false; }
@@ -247,13 +254,72 @@ pub fn gpt_probe_backup_header() -> bool {
         GPT_RUNTIME_ENTRIES_LBA = entries_lba;
         GPT_RUNTIME_ENTRY_COUNT = entry_count;
         GPT_RUNTIME_ENTRY_SIZE = entry_size;
+        GPT_RUNTIME_ENTRIES_CRC32 = entries_crc32;
         GPT_RUNTIME_READY = true;
+    }
+    return true;
+}
+
+// Lê todos os bytes do backup Partition Entry Array, setor por setor, usando
+// somente block_device_read_sector(). O CRC é incremental, portanto arrays
+// maiores que a página de scratch não exigem buffer sintético ou firmware.
+@system
+pub fn gpt_probe_backup_entries() -> bool {
+    unsafe {
+        GPT_RUNTIME_ENTRIES_READY = false;
+        GPT_RUNTIME_ENTRIES_CRC32_COMPUTED = 0;
+    }
+    if !gpt_runtime_is_ready() || !block_device_has_native_target() ||
+       block_device_block_size() != GPT_RUNTIME_BLOCK_SIZE { return false; }
+
+    let entries_lba = gpt_runtime_entries_lba();
+    let entry_count = gpt_runtime_entry_count();
+    let entry_size = gpt_runtime_entry_size();
+    let current_lba = gpt_runtime_current_lba();
+    if entries_lba == 0 || entry_count == 0 || entry_size == 0 || current_lba <= entries_lba {
+        return false;
+    }
+
+    let entries_bytes = (entry_count as u64) * (entry_size as u64);
+    if entries_bytes == 0 { return false; }
+    let entries_blocks = gpt_div_ceil_u64(entries_bytes, GPT_RUNTIME_BLOCK_SIZE as u64);
+    if entries_blocks == 0 || entries_lba + entries_blocks != current_lba { return false; }
+
+    let sector = gpt_runtime_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+
+    let mut crc = crc32_ieee_begin();
+    let mut remaining = entries_bytes;
+    let mut block: u64 = 0;
+    while block < entries_blocks {
+        let lba = entries_lba + block;
+        if lba >= current_lba || !block_device_read_sector(lba, sector) { return false; }
+        let bytes_this_sector = if remaining > (GPT_RUNTIME_BLOCK_SIZE as u64) {
+            GPT_RUNTIME_BLOCK_SIZE as u64
+        } else {
+            remaining
+        };
+        crc = crc32_ieee_update(crc, sector as *const u8, bytes_this_sector as usize);
+        remaining -= bytes_this_sector;
+        block += 1;
+    }
+    if remaining != 0 { return false; }
+
+    let computed = crc32_ieee_finish(crc);
+    let expected = unsafe { GPT_RUNTIME_ENTRIES_CRC32 };
+    if computed != expected { return false; }
+
+    unsafe {
+        GPT_RUNTIME_ENTRIES_CRC32_COMPUTED = computed;
+        GPT_RUNTIME_ENTRIES_READY = true;
     }
     return true;
 }
 
 @system
 pub fn gpt_runtime_is_ready() -> bool { unsafe { return GPT_RUNTIME_READY; } }
+@system
+pub fn gpt_runtime_entries_are_ready() -> bool { unsafe { return GPT_RUNTIME_ENTRIES_READY; } }
 @system
 pub fn gpt_runtime_current_lba() -> u64 { unsafe { return GPT_RUNTIME_CURRENT_LBA; } }
 @system
@@ -268,6 +334,10 @@ pub fn gpt_runtime_entries_lba() -> u64 { unsafe { return GPT_RUNTIME_ENTRIES_LB
 pub fn gpt_runtime_entry_count() -> u32 { unsafe { return GPT_RUNTIME_ENTRY_COUNT; } }
 @system
 pub fn gpt_runtime_entry_size() -> u32 { unsafe { return GPT_RUNTIME_ENTRY_SIZE; } }
+@system
+pub fn gpt_runtime_entries_crc32() -> u32 { unsafe { return GPT_RUNTIME_ENTRIES_CRC32; } }
+@system
+pub fn gpt_runtime_entries_crc32_computed() -> u32 { unsafe { return GPT_RUNTIME_ENTRIES_CRC32_COMPUTED; } }
 
 // Protective MBR usa um campo de 32 bits para número de setores. Discos cujo
 // último LBA excede o representável devem publicar 0xFFFFFFFF conforme GPT.
