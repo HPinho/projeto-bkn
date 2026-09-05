@@ -2,7 +2,8 @@
 //
 // Esta etapa altera somente Max Packet Size do Endpoint Context 0 no Input
 // Context já compartilhado e submete Evaluate Context pelo Command Ring.
-// Não busca descriptors e não toca outros endpoints.
+// O valor descoberto no primeiro GET_DESCRIPTOR(8) é normalizado aqui antes
+// da leitura completa do Device Descriptor. Não toca outros endpoints.
 
 module kernel::drivers::xhci_evaluate_context;
 
@@ -11,6 +12,7 @@ import kernel::memory::direct_map::*;
 import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_descriptor::*;
 import kernel::drivers::xhci_trb::*;
 
 pub const XHCI_EVALUATE_ADD_EP0: u32 = 1 << 1;
@@ -18,6 +20,7 @@ pub const XHCI_EVALUATE_EP0_MAX_PACKET_SHIFT: u32 = 16;
 pub const XHCI_EVALUATE_EP0_MAX_PACKET_MASK: u32 = 0xFFFF << XHCI_EVALUATE_EP0_MAX_PACKET_SHIFT;
 
 static mut XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET: u16 = 0;
+static mut XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED: bool = false;
 
 @system
 fn xhci_evaluate_context_valid_ep0_max_packet(max_packet: u16) -> bool {
@@ -25,9 +28,22 @@ fn xhci_evaluate_context_valid_ep0_max_packet(max_packet: u16) -> bool {
         max_packet == 64 || max_packet == 512;
 }
 
+// USB 2.x codifica bMaxPacketSize0 diretamente. SuperSpeed usa o expoente;
+// para EP0 o valor válido observado no Device Descriptor é 9 => 512 bytes.
+@system
+pub fn xhci_descriptor_ep0_max_packet_bytes(raw: u8) -> u16 {
+    if raw == 9 { return 512; }
+    let direct = raw as u16;
+    if xhci_evaluate_context_valid_ep0_max_packet(direct) { return direct; }
+    return 0;
+}
+
 @system
 pub fn xhci_evaluate_ep0_max_packet(max_packet: u16) -> bool {
-    unsafe { XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET = 0; }
+    unsafe {
+        XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET = 0;
+        XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED = false;
+    }
     if !xhci_evaluate_context_valid_ep0_max_packet(max_packet) { return false; }
     if !xhci_address_is_ready() || !xhci_context_is_ready() || !xhci_command_is_ready() {
         return false;
@@ -66,6 +82,7 @@ pub fn xhci_evaluate_ep0_max_packet(max_packet: u16) -> bool {
     );
     let command_physical = xhci_command_submit(command);
     if command_physical == 0 { return false; }
+    unsafe { XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED = true; }
     if !xhci_command_wait_completion(command_physical) { return false; }
     if xhci_command_last_slot_id() != slot_id { return false; }
 
@@ -73,7 +90,37 @@ pub fn xhci_evaluate_ep0_max_packet(max_packet: u16) -> bool {
     return true;
 }
 
+// Reconciliador pós-probe: se o Context já nasceu com o MPS correto, não envia
+// comando redundante. Se divergir, prova a correção por Evaluate Context real.
+@system
+pub fn xhci_reconcile_ep0_from_descriptor_probe() -> bool {
+    unsafe {
+        XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET = 0;
+        XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED = false;
+    }
+    if !xhci_device_descriptor_probe_is_ready() || !xhci_context_is_ready() {
+        return false;
+    }
+    let target = xhci_descriptor_ep0_max_packet_bytes(
+        xhci_device_descriptor_probe_max_packet0()
+    );
+    if target == 0 { return false; }
+
+    if xhci_context_ep0_max_packet() == target {
+        unsafe { XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET = target; }
+        return true;
+    }
+
+    if !xhci_evaluate_ep0_max_packet(target) { return false; }
+    return xhci_evaluate_context_last_ep0_max_packet() == target;
+}
+
 @system
 pub fn xhci_evaluate_context_last_ep0_max_packet() -> u16 {
     unsafe { return XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKET; }
+}
+
+@system
+pub fn xhci_evaluate_context_command_submitted() -> bool {
+    unsafe { return XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED; }
 }
