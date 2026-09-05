@@ -60,9 +60,6 @@ jobs:
           rm -f build/qemu-monitor.sock
 
           set +e
-          # O monitor não compartilha stdin com o timeout: quando ambos usam o
-          # mesmo pipe, comandos HMP podem ser concatenados e virar texto como
-          # "ssesendkey". Um socket Unix entrega uma linha HMP por conexão.
           timeout --signal=TERM --kill-after=5s 60s qemu-system-x86_64 \
             -machine q35 -m 512M -no-reboot \
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
@@ -81,8 +78,6 @@ jobs:
           done
           test -S build/qemu-monitor.sock
 
-          # A entrada só é injetada depois do monitor estar pronto. Repetimos
-          # durante o bring-up porque a rota i8042 é habilitada após o timer.
           injection_failed=0
           for i in $(seq 1 20); do
             if ! printf 'sendkey a\n' | socat - UNIX-CONNECT:build/qemu-monitor.sock >/dev/null 2>&1; then
@@ -100,7 +95,7 @@ jobs:
           fi
           test "$injection_failed" -eq 0
           test "$status" -eq 124
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M; do
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
