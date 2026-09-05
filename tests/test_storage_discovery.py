@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do discovery PCI e primeiro probe MMIO AHCI/NVMe."""
+"""Guardrails do discovery PCI, probe MMIO e primeiro reset AHCI real."""
 
 from pathlib import Path
 import unittest
@@ -30,7 +30,7 @@ class StorageDiscoveryTests(unittest.TestCase):
     def test_mmio_probe_only_enables_memory_space_and_preserves_bus_master(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("fn storage_probe_mmio_after_cutover()", 1)[1]
-        body = body.split("pub fn storage_discovery_scan()", 1)[0]
+        body = body.split("fn storage_reset_ahci_after_probe()", 1)[0]
         self.assertIn("active_page_tables_is_ready()", body)
         self.assertIn("PCI_COMMAND_MEMORY_SPACE", body)
         self.assertIn("pci_enable_command_bits", body)
@@ -61,10 +61,9 @@ class StorageDiscoveryTests(unittest.TestCase):
 
     def test_no_reset_dma_or_block_registration_in_mmio_stage(self):
         text = DISCOVERY.read_text(encoding="utf-8")
-        # Segurança é uma propriedade do código executável, não do texto dos
-        # comentários. Remova comentários Sotlas antes de procurar operações
-        # proibidas; assim "DMA, MSI/MSI-X ... desligados" não vira falso positivo.
-        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        body = text.split("fn storage_probe_mmio_after_cutover()", 1)[1]
+        body = body.split("fn storage_reset_ahci_after_probe()", 1)[0]
+        code = "\n".join(line.split("//", 1)[0] for line in body.splitlines())
         for forbidden in (
             "block_device_register_native",
             "dma_alloc",
@@ -75,6 +74,43 @@ class StorageDiscoveryTests(unittest.TestCase):
             "NVME_CC_EN",
         ):
             self.assertNotIn(forbidden, code)
+
+    def test_ahci_reset_is_global_real_masked_and_dma_free(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("fn storage_reset_ahci_after_probe()", 1)[1]
+        body = body.split("pub fn storage_discovery_scan()", 1)[0]
+        for token in (
+            "STORAGE_CONTROLLER_AHCI",
+            "AHCI_GHC_HR",
+            "AHCI_GHC_IE",
+            "AHCI_GHC_AE",
+            "AHCI_RESET_SPIN_LIMIT",
+            "x86_mmio_write32(base + AHCI_REG_GHC",
+            "x86_mmio_read32(base + AHCI_REG_GHC)",
+            "STORAGE_AHCI_RESET_READY = true",
+            "x86_serial_write_stage_marker('b' as u8)",
+        ):
+            self.assertIn(token, body)
+        self.assertIn("(verify & AHCI_GHC_HR) != 0", body)
+        self.assertIn("(verify & AHCI_GHC_AE) == 0", body)
+        self.assertIn("(verify & AHCI_GHC_IE) != 0", body)
+        for forbidden in (
+            "PCI_COMMAND_BUS_MASTER",
+            "dma_alloc",
+            "pmm_alloc",
+            "block_device_register_native",
+            "NVME_CC_EN",
+        ):
+            self.assertNotIn(forbidden, body)
+
+    def test_scan_resets_only_ahci_after_mmio_probe(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("pub fn storage_discovery_scan()", 1)[1]
+        probe = body.index("storage_probe_mmio_after_cutover()")
+        ahci_guard = body.index("kind == STORAGE_CONTROLLER_AHCI")
+        reset = body.index("storage_reset_ahci_after_probe()")
+        self.assertLess(probe, reset)
+        self.assertLess(ahci_guard, reset)
 
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
