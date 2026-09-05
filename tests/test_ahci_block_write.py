@@ -70,7 +70,15 @@ class AhciBlockWriteTests(unittest.TestCase):
         verify = 'skip=512 count=8 status=none)" = "BAKENW01"'
         self.assertIn(baseline, text)
         self.assertIn(verify, text)
-        self.assertIn("STEP=e STEP=f STEP=J", text)
+
+        marker_loop = text.split("for marker in", 1)[1].split("; do", 1)[0]
+        step_e = marker_loop.index("STEP=e")
+        step_f = marker_loop.index("STEP=f")
+        step_k = marker_loop.index("STEP=k")
+        step_j = marker_loop.index("STEP=J")
+        self.assertLess(step_e, step_f)
+        self.assertLess(step_f, step_k)
+        self.assertLess(step_k, step_j)
 
 
 if __name__ == "__main__":
