@@ -5,7 +5,8 @@
 // -> No-op DMA -> USB port/reset -> Enable Slot -> contexts -> Address Device
 // -> Device Descriptor 8B -> EP0 MPS -> Device Descriptor 18B
 // -> Configuration Header 9B -> Configuration Descriptor completo
-// -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint.
+// -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint
+// -> SET_CONFIGURATION real via EP0.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -43,6 +44,7 @@ import kernel::drivers::xhci_evaluate_context::*;
 import kernel::drivers::xhci_configuration::*;
 import kernel::drivers::xhci_hid_context::*;
 import kernel::drivers::xhci_configure_endpoint::*;
+import kernel::drivers::xhci_set_configuration::*;
 
 pub const POST_CUTOVER_FIRST_TICK_SPIN_LIMIT: u64 = 10000000;
 
@@ -440,6 +442,17 @@ pub fn post_cutover_configure_first_usb_hid_endpoint() -> bool {
     return true;
 }
 
+// O prova o request USB SET_CONFIGURATION real sobre EP0. O gate só conclui
+// depois do Transfer Event do Status Stage IN e não publica HID Interrupt IN.
+@system
+pub fn post_cutover_set_first_usb_configuration() -> bool {
+    if !xhci_configure_endpoint_is_ready() || !xhci_configuration_is_ready() { return false; }
+    let configuration_value = xhci_configuration_value();
+    if configuration_value == 0 { return false; }
+    if !xhci_set_first_configuration() || !xhci_set_configuration_is_ready() { return false; }
+    return xhci_set_configuration_value() == configuration_value;
+}
+
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
@@ -492,5 +505,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('M' as u8); }
     if !post_cutover_configure_first_usb_hid_endpoint() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('L' as u8); }
+    if !post_cutover_set_first_usb_configuration() { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('O' as u8); }
     loop {}
 }
