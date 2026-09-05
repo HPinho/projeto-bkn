@@ -1,9 +1,9 @@
 // Baken OS — runtime AHCI DMA e primeiro comando ATA real pós-cutover.
 //
 // O estágio de preparação publica Command List, Received FIS, Command Table e
-// habilita Bus Master. O estágio seguinte usa uma quarta página DMA para emitir
-// IDENTIFY DEVICE (0xEC) em uma porta SATA ATA conectada e só conclui após o HBA
-// limpar PxCI sem Task File Error. Nenhuma escrita em mídia é realizada.
+// habilita Bus Master em uma porta implementada. O estágio seguinte exige que
+// essa porta seja SATA ATA conectada e então emite IDENTIFY DEVICE (0xEC).
+// Nenhuma escrita em mídia é realizada.
 
 module kernel::drivers::ahci_runtime;
 
@@ -88,6 +88,16 @@ fn ahci_runtime_port_base(hba: u64, port: u32) -> u64 {
 }
 
 @system
+fn ahci_runtime_first_implemented_port(pi: u32) -> u32 {
+    let mut port: u32 = 0;
+    while port < 32 {
+        if (pi & (1 << port)) != 0 { return port; }
+        port += 1;
+    }
+    return 32;
+}
+
+@system
 fn ahci_runtime_first_ata_port(hba: u64, pi: u32) -> u32 {
     let mut port: u32 = 0;
     while port < 32 {
@@ -138,7 +148,7 @@ pub fn ahci_runtime_prepare_dma(hba: u64, bus: u8, slot: u8, func: u8, pi: u32) 
     }
     if hba == 0 || pi == 0 || !dma_allocator_available() { return false; }
 
-    let port = ahci_runtime_first_ata_port(hba, pi);
+    let port = ahci_runtime_first_implemented_port(pi);
     if port >= 32 { return false; }
     let port_base = ahci_runtime_port_base(hba, port);
     if !ahci_runtime_stop_port(port_base) { return false; }
@@ -201,6 +211,10 @@ pub fn ahci_runtime_identify_device() -> bool {
     if !ahci_runtime_is_ready() { return false; }
 
     unsafe {
+        let port_mask = 1 << AHCI_RUNTIME_PORT;
+        if ahci_runtime_first_ata_port(AHCI_RUNTIME_HBA, port_mask) != AHCI_RUNTIME_PORT {
+            return false;
+        }
         let port_base = ahci_runtime_port_base(AHCI_RUNTIME_HBA, AHCI_RUNTIME_PORT);
         let arena_base = AHCI_RUNTIME_ARENA.virtual_address;
         if arena_base == (null as *mut u8) { return false; }
@@ -212,18 +226,15 @@ pub fn ahci_runtime_identify_device() -> bool {
         if !ahci_runtime_zero(table, AHCI_RUNTIME_PAGE_SIZE) ||
            !ahci_runtime_zero(identify, 512) { return false; }
 
-        // Command Header slot 0: CFL=5 dwords, write=0, PRDTL=1, PRDBC=0.
         let header0 = arena_base as *mut u32;
         *header0 = 5 | (1 << 16);
         let prdbc = ((arena_base as usize) + 4) as *mut u32;
         *prdbc = 0;
 
-        // Register H2D FIS, Command bit=1 e ATA IDENTIFY DEVICE.
         *table = AHCI_FIS_TYPE_REG_H2D;
         *(((table as usize) + 1) as *mut u8) = 0x80;
         *(((table as usize) + 2) as *mut u8) = AHCI_ATA_IDENTIFY_DEVICE;
 
-        // Primeiro PRDT em offset 0x80: 512 bytes, IOC=1.
         let prdt = ((table as usize) + 0x80) as *mut u32;
         *prdt = (AHCI_IDENTIFY_DATA_PHYSICAL & 0xFFFFFFFF) as u32;
         *(((prdt as usize) + 4) as *mut u32) =
