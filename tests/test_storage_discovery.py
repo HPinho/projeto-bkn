@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do discovery PCI, probe MMIO, reset, DMA e IDENTIFY AHCI."""
+"""Guardrails do discovery PCI, probe MMIO, reset, DMA, IDENTIFY e READ AHCI."""
 
 from pathlib import Path
 import unittest
@@ -7,6 +7,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 DISCOVERY = ROOT / "kernel/src/drivers/storage_discovery.sotlas"
 AHCI_RUNTIME = ROOT / "kernel/src/drivers/ahci_runtime.sotlas"
+AHCI_READ = ROOT / "kernel/src/drivers/ahci_block_read.sotlas"
 POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 ENGINE = ROOT / "kernel/src/install_engine.sotlas"
 
@@ -132,17 +133,6 @@ class StorageDiscoveryTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
 
-    def test_scan_orders_probe_reset_dma_then_identify(self):
-        text = DISCOVERY.read_text(encoding="utf-8")
-        body = text.split("pub fn storage_discovery_scan()", 1)[1]
-        probe = body.index("storage_probe_mmio_after_cutover()")
-        reset = body.index("storage_reset_ahci_after_probe()")
-        dma = body.index("storage_prepare_ahci_dma_after_reset()")
-        identify = body.index("storage_identify_ahci_after_dma()")
-        self.assertLess(probe, reset)
-        self.assertLess(reset, dma)
-        self.assertLess(dma, identify)
-
     def test_signature_requires_bound_receive_engine_after_reset(self):
         text = AHCI_RUNTIME.read_text(encoding="utf-8")
         body = text.split("fn ahci_runtime_first_ata_port", 1)[1]
@@ -164,6 +154,70 @@ class StorageDiscoveryTests(unittest.TestCase):
                         body.index("ahci_runtime_write64_pair"))
         self.assertLess(body.index("ahci_runtime_stop_port"),
                         body.index("ahci_runtime_write64_pair"))
+
+    def test_identify_capacity_uses_lba48_then_lba28_fallback(self):
+        text = AHCI_READ.read_text(encoding="utf-8")
+        body = text.split("pub fn ahci_parse_identify_capacity", 1)[1]
+        body = body.split("fn ahci_read_magic_matches", 1)[0]
+        for token in (
+            "AHCI_IDENTIFY_WORD_LBA_SUPPORT", "AHCI_IDENTIFY_WORD_LBA28_LO",
+            "AHCI_IDENTIFY_WORD_LBA48_FEATURES", "AHCI_IDENTIFY_WORD_LBA48_LO",
+            "word83_valid", "w100", "w101", "w102", "w103", "total48",
+            "w60", "w61", "total28", "AHCI_TOTAL_SECTORS",
+        ):
+            self.assertIn(token, body)
+        self.assertLess(body.index("total48"), body.index("total28"))
+
+    def test_first_sector_read_is_real_dma_and_validates_fixture_magic(self):
+        text = AHCI_READ.read_text(encoding="utf-8")
+        body = text.split("pub fn ahci_read_probe_sector0", 1)[1]
+        for token in (
+            "AHCI_ATA_READ_DMA_EXT: u8 = 0x25",
+            "AHCI_ATA_READ_DMA: u8 = 0xC8",
+            "AHCI_FIS_TYPE_REG_H2D", "AHCI_PX_TFD", "AHCI_PX_IS", "AHCI_PX_CI",
+            "AHCI_PXIS_TFES", "AHCI_TFD_BSY", "AHCI_TFD_DRQ", "AHCI_TFD_ERR",
+            "ahci_runtime_command_list_physical", "ahci_runtime_command_table_physical",
+            "ahci_identify_data_physical", "direct_map_virtual_address",
+            "x86_mmio_write32(port_base + AHCI_PX_CI, 1)",
+            "prdbc != (AHCI_READ_SECTOR_SIZE as u32)",
+            "ahci_read_magic_matches", "AHCI_READ_READY = true",
+            "x86_serial_write_stage_marker('e' as u8)",
+        ):
+            self.assertIn(token, text if token.startswith("AHCI_ATA_") else body)
+        self.assertIn("(511 as u32) | (1 << 31)", body)
+        self.assertIn("*(((table as usize) + 12) as *mut u8) = 1", body)
+        self.assertNotIn("block_device_register_native", body)
+        self.assertNotIn("AHCI_ATA_WRITE", body)
+
+    def test_read_magic_is_not_synthesized_into_dma_buffer(self):
+        text = AHCI_READ.read_text(encoding="utf-8")
+        body = text.split("fn ahci_read_magic_matches", 1)[1]
+        body = body.split("pub fn ahci_read_probe_sector0", 1)[0]
+        self.assertIn("*buffer == ('B' as u8)", body)
+        self.assertNotIn("*buffer =", body)
+        self.assertNotIn("BAKENR01", text)
+
+    def test_scan_orders_probe_reset_dma_identify_then_read(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("pub fn storage_discovery_scan()", 1)[1]
+        probe = body.index("storage_probe_mmio_after_cutover()")
+        reset = body.index("storage_reset_ahci_after_probe()")
+        dma = body.index("storage_prepare_ahci_dma_after_reset()")
+        identify = body.index("storage_identify_ahci_after_dma()")
+        read = body.index("storage_read_ahci_after_identify()")
+        self.assertLess(probe, reset)
+        self.assertLess(reset, dma)
+        self.assertLess(dma, identify)
+        self.assertLess(identify, read)
+
+    def test_pre_cutover_discovery_returns_candidate_without_programming_driver(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("pub fn storage_discovery_scan()", 1)[1]
+        probe = body.index("storage_probe_mmio_after_cutover()")
+        early = body.index("if !active_page_tables_is_ready() { return kind; }")
+        reset = body.index("storage_reset_ahci_after_probe()")
+        self.assertLess(probe, early)
+        self.assertLess(early, reset)
 
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
