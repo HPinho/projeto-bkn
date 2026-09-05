@@ -206,7 +206,7 @@ class StorageDiscoveryTests(unittest.TestCase):
         body = text.split("fn ahci_read_magic_matches", 1)[1]
         body = body.split("pub fn ahci_read_probe_sector0", 1)[0]
         self.assertIn("*buffer == ('B' as u8)", body)
-        self.assertNotIn("*buffer =", body)
+        self.assertNotRegex(body, r"\*buffer\s*=(?!=)")
         self.assertNotIn("BAKENR01", text)
 
     def test_scan_orders_probe_reset_dma_identify_then_read(self):
