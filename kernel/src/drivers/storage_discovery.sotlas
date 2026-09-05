@@ -1,11 +1,15 @@
-// Baken OS — discovery PCI read-only de controladores de armazenamento.
+// Baken OS — discovery PCI e primeiro probe MMIO de storage.
 //
-// Identifica candidatos AHCI e NVMe já enumerados por pci_bus. Esta camada
-// NÃO habilita Memory Space, Bus Master, MSI/MSI-X e não escreve em BARs.
-// Encontrar um controlador não significa que existe um driver funcional.
+// A enumeração continua read-only enquanto as tabelas pós-cutover não estão
+// ativas. Na rota bare-metal, depois de encontrar AHCI/NVMe, este estágio
+// habilita SOMENTE PCI Memory Space, mapeia o BAR como MMIO UC e lê registros
+// estruturais reais. Bus Master, reset, DMA, MSI/MSI-X e I/O ficam desligados.
 
 module kernel::drivers::storage_discovery;
 
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::memory::active_page_tables::*;
 import kernel::drivers::pci_bus::*;
 
 pub const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
@@ -17,6 +21,15 @@ pub const PCI_PROGIF_NVME: u8 = 0x02;
 pub const STORAGE_CONTROLLER_NONE: u32 = 0;
 pub const STORAGE_CONTROLLER_AHCI: u32 = 1;
 pub const STORAGE_CONTROLLER_NVME: u32 = 2;
+
+pub const AHCI_REG_CAP: u64 = 0x00;
+pub const AHCI_REG_GHC: u64 = 0x04;
+pub const AHCI_REG_PI: u64 = 0x0C;
+pub const AHCI_REG_VS: u64 = 0x10;
+pub const NVME_REG_CAP_LO: u64 = 0x00;
+pub const NVME_REG_CAP_HI: u64 = 0x04;
+pub const NVME_REG_VS: u64 = 0x08;
+pub const NVME_REG_CSTS: u64 = 0x1C;
 
 pub struct StorageControllerCandidate {
     pub kind: u32;
@@ -42,6 +55,12 @@ static mut STORAGE_CANDIDATE: StorageControllerCandidate = StorageControllerCand
     command_before_driver: 0,
 };
 
+static mut STORAGE_MMIO_READY: bool = false;
+static mut STORAGE_MMIO_REG0: u32 = 0;
+static mut STORAGE_MMIO_REG1: u32 = 0;
+static mut STORAGE_MMIO_REG2: u32 = 0;
+static mut STORAGE_MMIO_REG3: u32 = 0;
+
 @system
 fn storage_candidate_kind(dev: *const PciDevice) -> u32 {
     unsafe {
@@ -59,10 +78,88 @@ fn storage_candidate_kind(dev: *const PciDevice) -> u32 {
 }
 
 @system
+fn storage_mmio_page_base(address: u64) -> u64 {
+    return address & 0xFFFFFFFFFFFFF000;
+}
+
+@system
+fn storage_probe_mmio_after_cutover() -> bool {
+    unsafe {
+        STORAGE_MMIO_READY = false;
+        STORAGE_MMIO_REG0 = 0;
+        STORAGE_MMIO_REG1 = 0;
+        STORAGE_MMIO_REG2 = 0;
+        STORAGE_MMIO_REG3 = 0;
+
+        if !active_page_tables_is_ready() { return true; }
+        if STORAGE_CANDIDATE.kind == STORAGE_CONTROLLER_NONE ||
+           STORAGE_CANDIDATE.abar_or_mmio_base == 0 { return false; }
+
+        let command_before = pci_read_config16(
+            STORAGE_CANDIDATE.bus,
+            STORAGE_CANDIDATE.slot,
+            STORAGE_CANDIDATE.func,
+            0x04
+        );
+        pci_enable_command_bits(
+            STORAGE_CANDIDATE.bus,
+            STORAGE_CANDIDATE.slot,
+            STORAGE_CANDIDATE.func,
+            PCI_COMMAND_MEMORY_SPACE
+        );
+        let command_after = pci_read_config16(
+            STORAGE_CANDIDATE.bus,
+            STORAGE_CANDIDATE.slot,
+            STORAGE_CANDIDATE.func,
+            0x04
+        );
+        if (command_after & PCI_COMMAND_MEMORY_SPACE) == 0 { return false; }
+        if (command_after & PCI_COMMAND_BUS_MASTER) != (command_before & PCI_COMMAND_BUS_MASTER) {
+            return false;
+        }
+
+        let base = STORAGE_CANDIDATE.abar_or_mmio_base;
+        if !active_page_tables_map_mmio_identity_4k(storage_mmio_page_base(base)) { return false; }
+
+        if STORAGE_CANDIDATE.kind == STORAGE_CONTROLLER_AHCI {
+            let cap = x86_mmio_read32(base + AHCI_REG_CAP);
+            let ghc = x86_mmio_read32(base + AHCI_REG_GHC);
+            let pi = x86_mmio_read32(base + AHCI_REG_PI);
+            let version = x86_mmio_read32(base + AHCI_REG_VS);
+            if cap == 0xFFFFFFFF || version == 0 || version == 0xFFFFFFFF { return false; }
+            if pi == 0 || pi == 0xFFFFFFFF { return false; }
+            STORAGE_MMIO_REG0 = cap;
+            STORAGE_MMIO_REG1 = ghc;
+            STORAGE_MMIO_REG2 = pi;
+            STORAGE_MMIO_REG3 = version;
+        } else if STORAGE_CANDIDATE.kind == STORAGE_CONTROLLER_NVME {
+            let cap_lo = x86_mmio_read32(base + NVME_REG_CAP_LO);
+            let cap_hi = x86_mmio_read32(base + NVME_REG_CAP_HI);
+            let version = x86_mmio_read32(base + NVME_REG_VS);
+            let csts = x86_mmio_read32(base + NVME_REG_CSTS);
+            if (cap_lo == 0 && cap_hi == 0) ||
+               (cap_lo == 0xFFFFFFFF && cap_hi == 0xFFFFFFFF) { return false; }
+            if version == 0 || version == 0xFFFFFFFF { return false; }
+            STORAGE_MMIO_REG0 = cap_lo;
+            STORAGE_MMIO_REG1 = cap_hi;
+            STORAGE_MMIO_REG2 = version;
+            STORAGE_MMIO_REG3 = csts;
+        } else {
+            return false;
+        }
+
+        STORAGE_MMIO_READY = true;
+        x86_serial_write_stage_marker('a' as u8);
+        return true;
+    }
+}
+
+@system
 pub fn storage_discovery_scan() -> u32 {
     unsafe {
         STORAGE_CANDIDATE.kind = STORAGE_CONTROLLER_NONE;
         STORAGE_CANDIDATE.abar_or_mmio_base = 0;
+        STORAGE_MMIO_READY = false;
 
         let count = pci_get_device_count();
         for mut index in 0..count {
@@ -79,12 +176,13 @@ pub fn storage_discovery_scan() -> u32 {
             STORAGE_CANDIDATE.device_id = (*dev).device_id;
             STORAGE_CANDIDATE.command_before_driver = (*dev).command;
 
-            // AHCI usa tipicamente BAR5 (ABAR); NVMe usa BAR0/1 MMIO.
+            // AHCI usa BAR5 (ABAR); NVMe usa BAR0/1 MMIO.
             if kind == STORAGE_CONTROLLER_AHCI {
                 STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[5].base_address;
             } else {
                 STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address;
             }
+            if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
             return kind;
         }
         return STORAGE_CONTROLLER_NONE;
@@ -105,3 +203,14 @@ pub fn storage_discovery_candidate() -> *const StorageControllerCandidate {
         return &STORAGE_CANDIDATE;
     }
 }
+
+@system
+pub fn storage_mmio_is_ready() -> bool { unsafe { return STORAGE_MMIO_READY; } }
+@system
+pub fn storage_mmio_reg0() -> u32 { unsafe { return STORAGE_MMIO_REG0; } }
+@system
+pub fn storage_mmio_reg1() -> u32 { unsafe { return STORAGE_MMIO_REG1; } }
+@system
+pub fn storage_mmio_reg2() -> u32 { unsafe { return STORAGE_MMIO_REG2; } }
+@system
+pub fn storage_mmio_reg3() -> u32 { unsafe { return STORAGE_MMIO_REG3; } }
