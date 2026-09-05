@@ -3,7 +3,9 @@
 // A enumeração continua read-only enquanto as tabelas pós-cutover não estão
 // ativas. Na rota bare-metal, depois de encontrar AHCI/NVMe, este estágio
 // habilita SOMENTE PCI Memory Space, mapeia o BAR como MMIO UC e lê registros
-// estruturais reais. Bus Master, reset, DMA, MSI/MSI-X e I/O ficam desligados.
+// estruturais reais. Para AHCI, o estágio seguinte executa reset global real
+// do HBA com interrupções mascaradas e volta a habilitar AHCI mode. Bus Master,
+// DMA, MSI/MSI-X, command lists e block devices continuam desligados.
 
 module kernel::drivers::storage_discovery;
 
@@ -26,6 +28,10 @@ pub const AHCI_REG_CAP: u64 = 0x00;
 pub const AHCI_REG_GHC: u64 = 0x04;
 pub const AHCI_REG_PI: u64 = 0x0C;
 pub const AHCI_REG_VS: u64 = 0x10;
+pub const AHCI_GHC_HR: u32 = 1;
+pub const AHCI_GHC_IE: u32 = 1 << 1;
+pub const AHCI_GHC_AE: u32 = 1 << 31;
+pub const AHCI_RESET_SPIN_LIMIT: u64 = 10000000;
 pub const NVME_REG_CAP_LO: u64 = 0x00;
 pub const NVME_REG_CAP_HI: u64 = 0x04;
 pub const NVME_REG_VS: u64 = 0x08;
@@ -56,6 +62,7 @@ static mut STORAGE_CANDIDATE: StorageControllerCandidate = StorageControllerCand
 };
 
 static mut STORAGE_MMIO_READY: bool = false;
+static mut STORAGE_AHCI_RESET_READY: bool = false;
 static mut STORAGE_MMIO_REG0: u32 = 0;
 static mut STORAGE_MMIO_REG1: u32 = 0;
 static mut STORAGE_MMIO_REG2: u32 = 0;
@@ -86,6 +93,7 @@ fn storage_mmio_page_base(address: u64) -> u64 {
 fn storage_probe_mmio_after_cutover() -> bool {
     unsafe {
         STORAGE_MMIO_READY = false;
+        STORAGE_AHCI_RESET_READY = false;
         STORAGE_MMIO_REG0 = 0;
         STORAGE_MMIO_REG1 = 0;
         STORAGE_MMIO_REG2 = 0;
@@ -155,11 +163,46 @@ fn storage_probe_mmio_after_cutover() -> bool {
 }
 
 @system
+fn storage_reset_ahci_after_probe() -> bool {
+    unsafe {
+        STORAGE_AHCI_RESET_READY = false;
+        if !STORAGE_MMIO_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI { return false; }
+        let base = STORAGE_CANDIDATE.abar_or_mmio_base;
+        if base == 0 { return false; }
+
+        let ghc_before = x86_mmio_read32(base + AHCI_REG_GHC);
+        if ghc_before == 0xFFFFFFFF { return false; }
+
+        // O reset global não precisa de DMA. Mantemos IE=0 durante todo o gate.
+        x86_mmio_write32(base + AHCI_REG_GHC, (ghc_before & !AHCI_GHC_IE) | AHCI_GHC_HR);
+        let mut spins: u64 = 0;
+        while spins < AHCI_RESET_SPIN_LIMIT {
+            let ghc = x86_mmio_read32(base + AHCI_REG_GHC);
+            if ghc == 0xFFFFFFFF { return false; }
+            if (ghc & AHCI_GHC_HR) == 0 {
+                let enabled = (ghc & !AHCI_GHC_IE) | AHCI_GHC_AE;
+                x86_mmio_write32(base + AHCI_REG_GHC, enabled);
+                let verify = x86_mmio_read32(base + AHCI_REG_GHC);
+                if (verify & AHCI_GHC_HR) != 0 ||
+                   (verify & AHCI_GHC_AE) == 0 ||
+                   (verify & AHCI_GHC_IE) != 0 { return false; }
+                STORAGE_AHCI_RESET_READY = true;
+                x86_serial_write_stage_marker('b' as u8);
+                return true;
+            }
+            spins += 1;
+        }
+        return false;
+    }
+}
+
+@system
 pub fn storage_discovery_scan() -> u32 {
     unsafe {
         STORAGE_CANDIDATE.kind = STORAGE_CONTROLLER_NONE;
         STORAGE_CANDIDATE.abar_or_mmio_base = 0;
         STORAGE_MMIO_READY = false;
+        STORAGE_AHCI_RESET_READY = false;
 
         let count = pci_get_device_count();
         for mut index in 0..count {
@@ -183,6 +226,9 @@ pub fn storage_discovery_scan() -> u32 {
                 STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address;
             }
             if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
+            if kind == STORAGE_CONTROLLER_AHCI && !storage_reset_ahci_after_probe() {
+                return STORAGE_CONTROLLER_NONE;
+            }
             return kind;
         }
         return STORAGE_CONTROLLER_NONE;
@@ -206,6 +252,8 @@ pub fn storage_discovery_candidate() -> *const StorageControllerCandidate {
 
 @system
 pub fn storage_mmio_is_ready() -> bool { unsafe { return STORAGE_MMIO_READY; } }
+@system
+pub fn storage_ahci_reset_is_ready() -> bool { unsafe { return STORAGE_AHCI_RESET_READY; } }
 @system
 pub fn storage_mmio_reg0() -> u32 { unsafe { return STORAGE_MMIO_REG0; } }
 @system
