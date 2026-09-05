@@ -61,6 +61,10 @@ class StorageDiscoveryTests(unittest.TestCase):
 
     def test_no_reset_dma_or_block_registration_in_mmio_stage(self):
         text = DISCOVERY.read_text(encoding="utf-8")
+        # Segurança é uma propriedade do código executável, não do texto dos
+        # comentários. Remova comentários Sotlas antes de procurar operações
+        # proibidas; assim "DMA, MSI/MSI-X ... desligados" não vira falso positivo.
+        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
         for forbidden in (
             "block_device_register_native",
             "dma_alloc",
@@ -70,7 +74,7 @@ class StorageDiscoveryTests(unittest.TestCase):
             "AHCI_GHC_HR",
             "NVME_CC_EN",
         ):
-            self.assertNotIn(forbidden, text)
+            self.assertNotIn(forbidden, code)
 
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
