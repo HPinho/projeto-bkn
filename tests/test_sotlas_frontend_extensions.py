@@ -1,7 +1,14 @@
 """Regressões da gramática/lowering usados pelo compilador Sotlas modular."""
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
 
 from tools.sotlas_compile import bootstrap
+
+ROOT = Path(__file__).resolve().parents[1]
+COMPILER = ROOT / "tools" / "sotlas_compile" / "compiler.py"
 
 
 class SotlasFrontendExtensionTests(unittest.TestCase):
@@ -64,6 +71,34 @@ class SotlasFrontendExtensionTests(unittest.TestCase):
         bootstrap.check(module)
         emitted = bootstrap.emit_c(module, include_preamble=False)
         self.assertIn("value = (value << 1);", emitted)
+
+    def test_direct_compiler_cli_installs_the_same_frontend_extensions(self):
+        source = """
+        module test::direct_cli;
+        pub fn exercise() -> u16 {
+            let mut short: [u16; 4] = [0; 4];
+            short[0] = 7;
+            short[1] ^= 3;
+            return short[0];
+        }
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp = Path(temp_dir)
+            source_path = temp / "direct_cli.sotlas"
+            output_path = temp / "direct_cli.c"
+            source_path.write_text(source, encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(COMPILER), "bootstrap-emit-c", str(source_path), "-o", str(output_path)],
+                cwd=temp,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            emitted = output_path.read_text(encoding="utf-8")
+            self.assertIn("uint16_t sotlas_c_kw_short[4] = {0};", emitted)
+            self.assertIn("sotlas_c_kw_short[0] = 7;", emitted)
+            self.assertIn("sotlas_c_kw_short[1] = (sotlas_c_kw_short[1] ^ 3);", emitted)
+            self.assertNotIn("static const uint16_t sotlas_c_kw_short", emitted)
 
 
 if __name__ == "__main__":

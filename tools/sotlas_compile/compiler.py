@@ -544,13 +544,19 @@ def _c_identifier(module: str) -> str:
     return re.sub(r"[^A-Za-z0-9_]", "_", module)
 
 def _bootstrap_backend():
-    """Carrega o frontend bootstrap com extensões de backend da arquitetura."""
+    """Carrega lexer/parser/lowering Sotlas e extensões x86 pelo mesmo contrato."""
     try:
         from tools.sotlas_compile import bootstrap
+        from tools.sotlas_compile import frontend_extensions
         from tools.sotlas_compile import x86_intrinsics
     except ImportError:
+        # Execução canônica por caminho (`python tools/sotlas_compile/compiler.py`)
+        # não inicializa o pacote `tools.sotlas_compile`; instale explicitamente
+        # as mesmas extensões usadas por imports de pacote antes do backend x86.
         import bootstrap
+        import frontend_extensions
         import x86_intrinsics
+    frontend_extensions.install(bootstrap)
     x86_intrinsics.install(bootstrap)
     return bootstrap
 
