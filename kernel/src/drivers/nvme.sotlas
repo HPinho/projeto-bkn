@@ -103,7 +103,7 @@ fn nvme_command(queue: u32, opcode: u32, ns: u32, prp: u64,
                 let source = x86_mmio_read32(cq + 8);
                 let valid = (result & 0xFFFF) == cid && (source >> 16) == queue && (source & 0xFFFF) < 16;
                 NVME_HEAD[queue as usize] = (NVME_HEAD[queue as usize] + 1) % 16;
-                if NVME_HEAD[queue as usize] == 0 { NVME_PHASE[queue as usize] ^= 1; }
+                if NVME_HEAD[queue as usize] == 0 { NVME_PHASE[queue as usize] = NVME_PHASE[queue as usize] ^ 1; }
                 x86_mmio_write32(NVME_BASE + 0x1000 + ((queue as u64) * 2 + 1) * NVME_STRIDE, NVME_HEAD[queue as usize]);
                 NVME_BUSY = false;
                 if !valid || (result >> 17) != 0 { NVME_POISONED = true; NVME_READY = false; return false; }
