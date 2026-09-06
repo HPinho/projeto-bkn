@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Guardrails for the staged native x86-64 timer foundation."""
+"""Guardrails for the native x86-64 timer foundation."""
 
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TIMER = ROOT / "kernel/src/arch/x86_64/timer.sotlas"
-RUNTIME = ROOT / "kernel/src/baken_runtime.sotlas"
+RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
+COMPAT = ROOT / "kernel/src/baken_runtime.sotlas"
 
 
 class X86TimerTests(unittest.TestCase):
@@ -25,21 +26,28 @@ class X86TimerTests(unittest.TestCase):
         self.assertNotIn("Stall(", text)
         self.assertNotIn("system_table", text)
 
-    def test_runtime_uses_uefi_stall_only_for_transition_calibration(self):
+    def test_native_runtime_calibrates_without_uefi_stall(self):
         text = RUNTIME.read_text(encoding="utf-8")
-        self.assertEqual(text.count("bs.Stall("), 1)
-        self.assertIn("bs.Stall(10000)", text)
-        self.assertIn("x86_timer_set_cycles_per_us", text)
-        self.assertIn("x86_timer_spin_wait_us(remain)", text)
-        self.assertIn("x86_timer_elapsed_us(frame_start, frame_end)", text)
-        self.assertNotIn("bs.Stall(remain)", text)
-        self.assertNotIn("bs.Stall(15)", text)
+        self.assertIn("x86_timer_calibrate_from_acpi_pm()", text)
+        self.assertIn("x86_timer_spin_wait_us", text)
+        self.assertIn("x86_timer_elapsed_us", text)
+        self.assertNotIn("Stall(", text)
+        self.assertNotIn("x86_timer_set_cycles_per_us(3000)", text)
 
-    def test_runtime_frame_loop_reads_cpu_timer_directly(self):
+    def test_native_runtime_frame_loop_reads_cpu_timer_directly(self):
         text = RUNTIME.read_text(encoding="utf-8")
-        self.assertIn("let frame_start: u64 = x86_timer_read_tsc();", text)
+        self.assertIn("let frame_start = x86_timer_read_tsc();", text)
         self.assertIn("desktop_compositor_render_frame();", text)
-        self.assertIn("baken_efi_frame_wait(frame_start);", text)
+        self.assertIn("baken_native_frame_wait(frame_start);", text)
+
+    def test_compat_timer_aliases_do_not_touch_firmware(self):
+        text = COMPAT.read_text(encoding="utf-8")
+        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        self.assertIn("return x86_timer_read_tsc();", code)
+        self.assertIn("x86_timer_elapsed_us(frame_start, frame_end)", code)
+        self.assertIn("x86_timer_spin_wait_us(target_us - work_us)", code)
+        self.assertNotIn("Stall(", code)
+        self.assertNotIn("BootServices", code)
 
 
 if __name__ == "__main__":

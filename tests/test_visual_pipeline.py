@@ -16,13 +16,15 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("PixelFormat == PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR", boot)
 
     def test_runtime_uses_real_frame_time_and_not_cpu_dependent_spin_delay(self):
-        runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
+        runtime = (ROOT / "kernel/src/baken_native_runtime.sotlas").read_text(encoding="utf-8")
         compositor = (ROOT / "kernel/src/desktop_compositor.sotlas").read_text(encoding="utf-8")
-        self.assertIn("CYCLES_PER_US", runtime.upper())
+        self.assertIn("cycles_per_us", runtime)
         self.assertIn("desktop_compositor_set_frame_delta(dt)", runtime)
         self.assertIn("baken_installer_set_frame_delta(dt)", compositor)
-        self.assertIn("1000000 / refresh_hz as u64", runtime)
+        self.assertIn("1000000 / (refresh_hz as u64)", runtime)
+        self.assertIn("x86_timer_spin_wait_us", runtime)
         self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", runtime)
+        self.assertNotIn("Stall(", runtime)
 
     def test_bootstrap_does_not_discover_uefi_pointer_protocols(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
@@ -72,6 +74,7 @@ class VisualPipelineTests(unittest.TestCase):
     def test_visual_fixes_are_connected_to_the_executable_route(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
         main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
+        compat = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
         shell = (ROOT / "kernel/src/desktop_shell.sotlas").read_text(encoding="utf-8")
         dock = (ROOT / "kernel/src/baken_ui_oop.sotlas").read_text(encoding="utf-8")
         windows = (ROOT / "kernel/src/window_manager.sotlas").read_text(encoding="utf-8")
@@ -79,6 +82,7 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("choose_high_density_gop_mode(gop, bs);", boot)
         self.assertIn("baken_runtime_init_assets();", main)
         self.assertIn("baken_runtime_run(", main)
+        self.assertIn("baken_native_runtime_run(width, height);", compat)
         self.assertIn("bakenfx_draw_desktop_background", shell)
         self.assertIn("desktop_shell_update(SHELL.frame_delta)", shell)
         self.assertIn("dock_update(&mut MAIN_DOCK, dt", shell)
