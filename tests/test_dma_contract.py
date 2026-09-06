@@ -39,12 +39,26 @@ class DmaContractTests(unittest.TestCase):
         self.assertIn("pmm_alloc_pages_aligned(page_count, alignment)", text)
         self.assertIn("direct_map_virtual_address(physical)", text)
         self.assertIn("if rounded < size { return dma_invalid_buffer(); }", text)
-        self.assertIn("if !dma_buffer_valid(&buffer) { return dma_invalid_buffer(); }", text)
+
+        alloc = text.split("pub fn dma_alloc(size: u64, alignment: u64)", 1)[1]
+        alloc = alloc.split("pub fn dma_submit_to_device", 1)[0]
+        self.assertIn("if !dma_buffer_valid(&buffer)", alloc)
+        self.assertIn("pmm_free_pages_lifo(physical, page_count)", alloc)
+
         self.assertIn("valid: true", text)
         self.assertIn("pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool", text)
         self.assertIn("pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool", text)
         self.assertIn("pub fn dma_release(buffer: *mut DmaBuffer) -> bool", text)
         self.assertIn("pmm_free_pages_lifo((*buffer).physical_address, page_count)", text)
+
+    def test_constrained_dma_applies_device_limits_before_exposing_buffer(self):
+        text = DMA.read_text(encoding="utf-8")
+        body = text.split("pub fn dma_alloc_for_device", 1)[1]
+        self.assertIn("pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)", body)
+        self.assertIn("last > max_address", body)
+        self.assertIn("physical / boundary != last / boundary", body)
+        self.assertIn("pmm_free_pages_lifo(physical, page_count)", body)
+        self.assertNotIn("let mut buffer = dma_alloc(size, alignment)", body)
 
     def test_dma_ownership_supports_exclusive_and_shared_modes(self):
         text = DMA.read_text(encoding="utf-8")

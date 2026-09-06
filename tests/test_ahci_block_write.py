@@ -58,10 +58,14 @@ class AhciBlockWriteTests(unittest.TestCase):
     def test_discovery_runs_write_only_after_proven_read(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("pub fn storage_discovery_scan()", 1)[1]
-        early = body.index("if !active_page_tables_is_ready() { return kind; }")
+        post_cutover = body.index("let post_cutover = active_page_tables_is_ready();")
+        boot_filter = body.index("if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }")
+        pre_cutover_return = body.index("if !post_cutover { return kind; }")
         read = body.index("storage_read_ahci_after_identify()")
         write = body.index("ahci_write_probe_sector1")
-        self.assertLess(early, read)
+        self.assertLess(post_cutover, boot_filter)
+        self.assertLess(boot_filter, pre_cutover_return)
+        self.assertLess(pre_cutover_return, read)
         self.assertLess(read, write)
         self.assertIn("ahci_write_is_ready()", body)
 

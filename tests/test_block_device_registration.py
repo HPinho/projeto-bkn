@@ -24,11 +24,15 @@ class BlockDeviceRegistrationTests(unittest.TestCase):
     def test_ahci_registration_occurs_only_after_read_and_write_proofs(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         scan = text.split("pub fn storage_discovery_scan()", 1)[1]
-        early = scan.index("if !active_page_tables_is_ready() { return kind; }")
+        post_cutover = scan.index("let post_cutover = active_page_tables_is_ready();")
+        boot_filter = scan.index("if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }")
+        pre_cutover_return = scan.index("if !post_cutover { return kind; }")
         read = scan.index("storage_read_ahci_after_identify()")
         write = scan.index("ahci_write_probe_sector1")
         register = scan.index("storage_register_ahci_block_device()")
-        self.assertLess(early, read)
+        self.assertLess(post_cutover, boot_filter)
+        self.assertLess(boot_filter, pre_cutover_return)
+        self.assertLess(pre_cutover_return, read)
         self.assertLess(read, write)
         self.assertLess(write, register)
 
