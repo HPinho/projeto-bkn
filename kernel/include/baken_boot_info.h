@@ -3,21 +3,17 @@
 
 /* Contrato de handoff entre bootstrap UEFI e kernel Baken.
  *
- * V2 é deliberadamente um ENVELOPE DE TRANSIÇÃO: os primeiros 80 bytes
- * preservam o ABI usado pelo runtime atual para não deslocar ponteiros em uma
- * migração incremental. Os metadados bare-metal são anexados após esse bloco.
- *
- * Os ponteiros UEFI abaixo são LEGADO e não fazem parte do ABI pós-cutover.
- * Nenhum código novo pode depender deles. Depois de input/storage/timers
- * nativos, o próximo ABI removerá esses campos e ExitBootServices ocorrerá
- * antes da entrada normal do kernel.
+ * V2 preserva o layout de 192 bytes enquanto a migração termina, mas os quatro
+ * slots antigos de firmware em offsets 48..79 não transportam mais ponteiros.
+ * Eles permanecem como reserva ABI zerada até uma futura revisão compactar o
+ * contrato. Nenhum runtime do kernel pode reinterpretá-los como serviços UEFI.
  */
 
 #include <stdint.h>
 #include <stddef.h>
 
 #define BAKEN_BOOT_INFO_VERSION 2U
-#define BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE       (1ULL << 0)
+/* Bit 0 aposentado junto com a antiga ponte de runtime UEFI. */
 #define BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID          (1ULL << 1)
 #define BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID           (1ULL << 2)
 #define BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID    (1ULL << 3)
@@ -25,7 +21,6 @@
 #define BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID    (1ULL << 5)
 
 typedef struct {
-    /* ABI legado congelado (offsets 0..79). */
     uint32_t *framebuffer_base;
     uint64_t framebuffer_size;
     uint32_t screen_width;
@@ -33,12 +28,14 @@ typedef struct {
     uint32_t pixels_per_scanline;
     void *memory_map_base;
     uint64_t memory_map_size;
-    void *system_table;
-    void *pointer_protocol;
-    void *block_io_protocol;
-    void *install_target_block_io_protocol;
 
-    /* Extensão v2: dados necessários ao futuro handoff pós-Boot Services. */
+    /* Reserva ABI: substitui os antigos SystemTable/Pointer/BlockIO pointers
+     * sem alterar offsets do restante do BakenBootInfo v2. */
+    uint64_t reserved_legacy_0;
+    uint64_t reserved_legacy_1;
+    uint64_t reserved_legacy_2;
+    uint64_t reserved_legacy_3;
+
     uint32_t version;
     uint32_t struct_size;
     uint64_t flags;
@@ -69,9 +66,10 @@ _Static_assert(offsetof(BakenBootInfo, framebuffer_base) == 0, "handoff framebuf
 _Static_assert(offsetof(BakenBootInfo, framebuffer_size) == 8, "handoff tamanho deslocado");
 _Static_assert(offsetof(BakenBootInfo, screen_width) == 16, "handoff largura deslocada");
 _Static_assert(offsetof(BakenBootInfo, memory_map_base) == 32, "handoff mapa deslocado");
-_Static_assert(offsetof(BakenBootInfo, system_table) == 48, "handoff tabela UEFI deslocada");
-_Static_assert(offsetof(BakenBootInfo, block_io_protocol) == 64, "handoff Block I/O deslocado");
-_Static_assert(offsetof(BakenBootInfo, install_target_block_io_protocol) == 72, "handoff alvo deslocado");
+_Static_assert(offsetof(BakenBootInfo, reserved_legacy_0) == 48, "reserva ABI 0 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_legacy_1) == 56, "reserva ABI 1 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_legacy_2) == 64, "reserva ABI 2 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_legacy_3) == 72, "reserva ABI 3 deslocada");
 _Static_assert(offsetof(BakenBootInfo, version) == 80, "extensão v2 deslocada");
 _Static_assert(offsetof(BakenBootInfo, memory_descriptor_size) == 96, "descritor de mapa deslocado");
 _Static_assert(offsetof(BakenBootInfo, acpi_rsdp) == 112, "ACPI RSDP deslocada");

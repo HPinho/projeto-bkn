@@ -87,10 +87,13 @@ pub struct BakenBootInfo {
     pub pixels_per_scanline: u32;
     pub memory_map_base: *const u8;
     pub memory_map_size: usize;
-    pub system_table: *mut u8;
-    pub pointer_protocol: *mut u8;
-    pub block_io_protocol: *mut u8;
-    pub install_target_block_io_protocol: *mut u8;
+
+    // Reserva ABI v2: os quatro slots antigos de firmware permanecem zerados
+    // e sem semântica de ponte UEFI. Os offsets são mantidos até o próximo ABI.
+    pub reserved_legacy_0: u64;
+    pub reserved_legacy_1: u64;
+    pub reserved_legacy_2: u64;
+    pub reserved_legacy_3: u64;
 
     pub version: u32;
     pub struct_size: u32;

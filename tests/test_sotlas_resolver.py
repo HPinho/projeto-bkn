@@ -113,8 +113,8 @@ class SotlasResolverTests(unittest.TestCase):
             [field.name for field in boot_info_struct.fields],
             [
                 "framebuffer_base", "framebuffer_size", "screen_width", "screen_height",
-                "pixels_per_scanline", "memory_map_base", "memory_map_size", "system_table",
-                "pointer_protocol", "block_io_protocol", "install_target_block_io_protocol",
+                "pixels_per_scanline", "memory_map_base", "memory_map_size", "reserved_legacy_0",
+                "reserved_legacy_1", "reserved_legacy_2", "reserved_legacy_3",
                 "version", "struct_size", "flags", "memory_descriptor_size",
                 "memory_descriptor_version", "pixel_format", "acpi_rsdp",
                 "page_table_arena_physical_base", "page_table_arena_virtual_base",

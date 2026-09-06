@@ -55,13 +55,15 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, header)
 
-    def test_bootinfo_v2_preserves_legacy_offsets_during_transition(self):
+    def test_bootinfo_v2_preserves_reserved_compatibility_offsets(self):
         header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
         for assertion in (
             "offsetof(BakenBootInfo, framebuffer_base) == 0",
             "offsetof(BakenBootInfo, memory_map_base) == 32",
-            "offsetof(BakenBootInfo, system_table) == 48",
-            "offsetof(BakenBootInfo, install_target_block_io_protocol) == 72",
+            "offsetof(BakenBootInfo, reserved_legacy_0) == 48",
+            "offsetof(BakenBootInfo, reserved_legacy_1) == 56",
+            "offsetof(BakenBootInfo, reserved_legacy_2) == 64",
+            "offsetof(BakenBootInfo, reserved_legacy_3) == 72",
             "offsetof(BakenBootInfo, version) == 80",
             "offsetof(BakenBootInfo, acpi_rsdp) == 112",
             "offsetof(BakenBootInfo, page_table_arena_physical_base) == 120",
@@ -77,6 +79,32 @@ class BareMetalBoundaryTests(unittest.TestCase):
         ):
             with self.subTest(assertion=assertion):
                 self.assertIn(assertion, header)
+
+    def test_bootinfo_v2_no_longer_names_or_flags_uefi_runtime_bridge(self):
+        header = (ROOT / "kernel/include/baken_boot_info.h").read_text(encoding="utf-8")
+        main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
+        main_struct = main.split("pub struct BakenBootInfo {", 1)[1].split("}", 1)[0]
+
+        self.assertNotIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", header)
+        for forbidden in (
+            "system_table",
+            "pointer_protocol",
+            "block_io_protocol",
+            "install_target_block_io_protocol",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, header)
+                self.assertNotIn(forbidden, main_struct)
+
+        for reserved in (
+            "reserved_legacy_0",
+            "reserved_legacy_1",
+            "reserved_legacy_2",
+            "reserved_legacy_3",
+        ):
+            with self.subTest(reserved=reserved):
+                self.assertIn(reserved, header)
+                self.assertIn(reserved, main_struct)
 
     def test_sotlas_entry_mirrors_and_validates_bootinfo_v2(self):
         main = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
