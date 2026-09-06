@@ -9,9 +9,15 @@ POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 BOOT = ROOT / "boot/uefi_bootloader.sotlas"
 FIXTURE = ROOT / "tools/scripts/extend_foundation_fixture.py"
 
+# Opaque calls are expected at the reviewed x86 intrinsic boundary.  Match
+# firmware names as identifiers, not arbitrary substrings: otherwise the UEFI
+# service name `Stall` incorrectly classifies the native intrinsic
+# `__pat_install_wc` because "install" contains the letters "stall".
 FIRMWARE_NAME = re.compile(
-    r"(?:^|_)(?:uefi|efi)(?:_|$)|BootServices|RuntimeServices|SystemTable|"
-    r"LocateProtocol|ReadBlocks|WriteBlocks|Stall|baken_runtime_run|baken_efi_",
+    r"(?:^|_)(?:uefi|efi)(?:_|$)|"
+    r"^baken_efi_|"
+    r"^(?:BootServices|RuntimeServices|SystemTable|LocateProtocol|"
+    r"ReadBlocks|WriteBlocks|Stall|baken_runtime_run)$",
     re.IGNORECASE,
 )
 
@@ -22,6 +28,26 @@ def strip_comments(text: str) -> str:
 
 
 class FoundationZeroUefiPostCutoverGateTests(unittest.TestCase):
+    def test_firmware_name_classifier_is_identifier_aware(self):
+        # PAT/WC is a native x86 intrinsic and must not be confused with the
+        # UEFI Stall service merely because "install" contains "stall".
+        self.assertIsNone(FIRMWARE_NAME.search("__pat_install_wc"))
+        for firmware_name in (
+            "Stall",
+            "EFI_ReadBlocks",
+            "uefi_poll_key",
+            "baken_efi_frame_wait",
+            "BootServices",
+            "RuntimeServices",
+            "SystemTable",
+            "LocateProtocol",
+            "ReadBlocks",
+            "WriteBlocks",
+            "baken_runtime_run",
+        ):
+            with self.subTest(firmware_name=firmware_name):
+                self.assertIsNotNone(FIRMWARE_NAME.search(firmware_name))
+
     def test_reachable_post_cutover_call_graph_has_no_firmware_reentry(self):
         report = audit()
         self.assertFalse(report["firmware_violations"], report)
