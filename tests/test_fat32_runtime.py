@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do gate FAT32 BPB lido da ESP GPT pelo Block Device nativo."""
+"""Guardrails dos gates FAT32 reais via Block Device nativo."""
 
 from pathlib import Path
 import unittest
@@ -74,6 +74,58 @@ class Fat32RuntimeTests(unittest.TestCase):
             body.index("x86_serial_write_stage_marker('y' as u8)"),
         )
 
+    def test_fsinfo_gate_reads_real_sector_and_validates_signatures(self):
+        text = FAT32.read_text(encoding="utf-8")
+        body = text.split("fn fat32_probe_fsinfo_runtime(", 1)[1]
+        body = body.split("fn fat32_probe_backup_boot_runtime(", 1)[0]
+        for token in (
+            "block_device_read_sector(fsinfo_lba, sector)",
+            "fat32_read_u32(base, 0)",
+            "fat32_read_u32(base, 484)",
+            "fat32_read_u32(base, 488)",
+            "fat32_read_u32(base, 492)",
+            "fat32_read_u32(base, 508)",
+            "FAT32_RUNTIME_FSINFO_READY = true",
+            "x86_serial_write_stage_marker('u' as u8)",
+        ):
+            self.assertIn(token, body)
+        self.assertNotIn("block_device_write", body)
+        self.assertLess(
+            body.index("FAT32_RUNTIME_FSINFO_READY = true"),
+            body.index("x86_serial_write_stage_marker('u' as u8)"),
+        )
+
+    def test_backup_boot_gate_compares_full_primary_and_backup_sector(self):
+        text = FAT32.read_text(encoding="utf-8")
+        body = text.split("fn fat32_probe_backup_boot_runtime(", 1)[1]
+        body = body.split("pub fn fat32_probe_esp_bpb()", 1)[0]
+        for token in (
+            "fat32_runtime_fsinfo_is_ready()",
+            "block_device_read_sector(first_lba, primary_sector)",
+            "block_device_read_sector(backup_lba, backup_sector)",
+            "while offset < (FAT32_RUNTIME_BLOCK_SIZE as usize)",
+            "fat32_read_u8(primary, offset) != fat32_read_u8(backup, offset)",
+            "FAT32_RUNTIME_BACKUP_BOOT_READY = true",
+            "x86_serial_write_stage_marker('z' as u8)",
+        ):
+            self.assertIn(token, body)
+        self.assertNotIn("block_device_write", body)
+        self.assertNotIn("WriteBlocks", body)
+        self.assertLess(
+            body.index("FAT32_RUNTIME_BACKUP_BOOT_READY = true"),
+            body.index("x86_serial_write_stage_marker('z' as u8)"),
+        )
+
+    def test_bpb_chain_orders_fsinfo_before_backup_boot(self):
+        text = FAT32.read_text(encoding="utf-8")
+        body = text.split("pub fn fat32_probe_esp_bpb()", 1)[1]
+        body = body.split("pub fn fat32_runtime_is_ready", 1)[0]
+        marker_y = body.index("x86_serial_write_stage_marker('y' as u8)")
+        fsinfo = body.index("fat32_probe_fsinfo_runtime(")
+        backup = body.index("fat32_probe_backup_boot_runtime(")
+        self.assertLess(marker_y, fsinfo)
+        self.assertLess(fsinfo, backup)
+
     def test_gpt_chain_requires_fat32_probe_after_partition_gate(self):
         text = GPT.read_text(encoding="utf-8")
         self.assertIn("import kernel::storage::fat32::*;", text)
@@ -89,7 +141,7 @@ class Fat32RuntimeTests(unittest.TestCase):
         self.assertLess(fat_probe, fat_ready)
         self.assertLess(fat_ready, first_match)
 
-    def test_ci_seeds_valid_fat32_and_requires_runtime_marker(self):
+    def test_ci_seeds_valid_fat32_and_requires_runtime_markers(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         for token in (
             "esp_first = 2048",
@@ -104,12 +156,15 @@ class Fat32RuntimeTests(unittest.TestCase):
             "image.seek(esp_first * block_size)",
             "image.write(boot)",
             "image.seek((esp_first + 6) * block_size)",
-            "image.write(fsinfo)",
+            "backup_boot = image.read(block_size)",
+            "assert backup_boot == boot",
         ):
             self.assertIn(token, text)
         markers = text.split("for marker in ", 1)[1].split("; do", 1)[0]
         self.assertLess(markers.index("STEP=t"), markers.index("STEP=y"))
-        self.assertLess(markers.index("STEP=y"), markers.index("STEP=m"))
+        self.assertLess(markers.index("STEP=y"), markers.index("STEP=u"))
+        self.assertLess(markers.index("STEP=u"), markers.index("STEP=z"))
+        self.assertLess(markers.index("STEP=z"), markers.index("STEP=m"))
         self.assertLess(markers.index("STEP=m"), markers.index("STEP=J"))
 
 

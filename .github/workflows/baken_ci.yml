@@ -285,6 +285,9 @@ jobs:
               esp_last = struct.unpack_from("<Q", primary_entries, 40)[0]
               image.seek(esp_first * block_size)
               boot = image.read(block_size)
+              backup_boot_sector = struct.unpack_from("<H", boot, 50)[0]
+              image.seek((esp_first + backup_boot_sector) * block_size)
+              backup_boot = image.read(block_size)
 
           assert len(entries) == entries_bytes
           assert len(primary_entries) == entries_bytes
@@ -316,6 +319,9 @@ jobs:
           assert struct.unpack_from("<H", boot, 48)[0] == 1
           assert struct.unpack_from("<H", boot, 50)[0] == 6
           assert boot[82:90] == b"FAT32   "
+          assert backup_boot_sector == 6
+          assert backup_boot == boot
+          assert backup_boot[510:512] == b"\x55\xAA"
 
           total = struct.unpack_from("<I", boot, 32)[0]
           reserved = struct.unpack_from("<H", boot, 14)[0]
@@ -326,7 +332,7 @@ jobs:
           assert clusters >= 65525
           assert clusters <= 0x0FFFFFF5
           PY
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=m STEP=J; do
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=m STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
