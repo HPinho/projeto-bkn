@@ -9,6 +9,7 @@ module kernel::storage::fat32;
 import kernel::arch::x86_64::serial::*;
 import kernel::storage::block_device::*;
 import kernel::storage::gpt_redundancy::*;
+import kernel::storage::crc32::*;
 import kernel::memory::dma::*;
 
 pub const FAT32_FAT_COUNT: u32 = 2;
@@ -56,6 +57,9 @@ static mut FAT32_RUNTIME_ROOT_FILE_ENTRY_OFFSET: u32 = 0;
 static mut FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER: u32 = 0;
 static mut FAT32_RUNTIME_ROOT_FILE_SIZE: u32 = 0;
 static mut FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES: u32 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_CONTENT_READY: bool = false;
+static mut FAT32_RUNTIME_ROOT_FILE_CONTENT_BYTES: u32 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_CONTENT_CRC32: u32 = 0;
 static mut FAT32_RUNTIME_SECTOR: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -532,6 +536,73 @@ fn fat32_probe_first_root_file_entry_runtime(
     return false;
 }
 
+// Lê o payload do primeiro arquivo regular encontrado no diretório raiz. Este
+// gate é deliberadamente de arquivo de um único cluster: percorre os setores
+// necessários pela Block Device API e calcula CRC32 somente sobre file_size bytes.
+// O valor é emitido no serial antes do STEP=_ para a CI comparar com o disco raw.
+@system
+fn fat32_probe_root_file_content_runtime(
+    last_lba: u64,
+    data_start_lba: u64,
+    sectors_per_cluster: u32,
+    cluster_count: u64
+) -> bool {
+    unsafe {
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_READY = false;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_BYTES = 0;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_CRC32 = 0;
+    }
+
+    if !fat32_runtime_root_file_is_ready() || !block_device_has_native_target() ||
+       block_device_block_size() != FAT32_RUNTIME_BLOCK_SIZE { return false; }
+    if sectors_per_cluster == 0 { return false; }
+
+    let first_cluster = fat32_runtime_root_file_first_cluster();
+    let file_size = fat32_runtime_root_file_size();
+    if first_cluster < 2 || file_size == 0 ||
+       (first_cluster as u64) > cluster_count + 1 { return false; }
+
+    let cluster_bytes = (sectors_per_cluster as u64) * (FAT32_RUNTIME_BLOCK_SIZE as u64);
+    if (file_size as u64) > cluster_bytes { return false; }
+
+    let file_index = (first_cluster as u64) - 2;
+    if file_index >= cluster_count { return false; }
+    let file_lba = data_start_lba + file_index * (sectors_per_cluster as u64);
+    if file_lba < data_start_lba || file_lba > last_lba { return false; }
+    let file_last_lba = file_lba + (sectors_per_cluster as u64) - 1;
+    if file_last_lba < file_lba || file_last_lba > last_lba { return false; }
+
+    let sector = fat32_runtime_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+
+    let mut crc = crc32_ieee_begin();
+    let mut remaining = file_size as u64;
+    let mut sector_index: u32 = 0;
+    while remaining > 0 {
+        if sector_index >= sectors_per_cluster { return false; }
+        let lba = file_lba + (sector_index as u64);
+        if lba > file_last_lba || !block_device_read_sector(lba, sector) { return false; }
+        let bytes_this_sector: u64 = if remaining > (FAT32_RUNTIME_BLOCK_SIZE as u64) {
+            FAT32_RUNTIME_BLOCK_SIZE as u64
+        } else {
+            remaining
+        };
+        crc = crc32_ieee_update(crc, sector as *const u8, bytes_this_sector as usize);
+        remaining -= bytes_this_sector;
+        sector_index += 1;
+    }
+
+    let computed = crc32_ieee_finish(crc);
+    unsafe {
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_BYTES = file_size;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_CRC32 = computed;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_READY = true;
+    }
+    if !x86_serial_write_hex32_marker('_' as u8, computed) { return false; }
+    x86_serial_write_stage_marker('_' as u8);
+    return true;
+}
+
 @system
 pub fn fat32_probe_esp_bpb() -> bool {
     unsafe {
@@ -561,6 +632,9 @@ pub fn fat32_probe_esp_bpb() -> bool {
         FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER = 0;
         FAT32_RUNTIME_ROOT_FILE_SIZE = 0;
         FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES = 0;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_READY = false;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_BYTES = 0;
+        FAT32_RUNTIME_ROOT_FILE_CONTENT_CRC32 = 0;
     }
 
     if !gpt_partition_is_ready() || !block_device_has_native_target() ||
@@ -669,6 +743,12 @@ pub fn fat32_probe_esp_bpb() -> bool {
         root_cluster,
         cluster_count
     ) || !fat32_runtime_root_file_is_ready() { return false; }
+    if !fat32_probe_root_file_content_runtime(
+        last_lba,
+        data_start_lba,
+        sectors_per_cluster,
+        cluster_count
+    ) || !fat32_runtime_root_file_content_is_ready() { return false; }
     return true;
 }
 
@@ -724,3 +804,9 @@ pub fn fat32_runtime_root_file_first_cluster() -> u32 { unsafe { return FAT32_RU
 pub fn fat32_runtime_root_file_size() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_SIZE; } }
 @system
 pub fn fat32_runtime_root_file_attributes() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES; } }
+@system
+pub fn fat32_runtime_root_file_content_is_ready() -> bool { unsafe { return FAT32_RUNTIME_ROOT_FILE_CONTENT_READY; } }
+@system
+pub fn fat32_runtime_root_file_content_bytes() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_CONTENT_BYTES; } }
+@system
+pub fn fat32_runtime_root_file_content_crc32() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_CONTENT_CRC32; } }
