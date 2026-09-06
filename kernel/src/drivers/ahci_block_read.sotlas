@@ -1,7 +1,7 @@
 // Baken OS — primeiro READ e primeiro WRITE de setor reais via AHCI.
 //
 // Consome o IDENTIFY já concluído pelo runtime AHCI, extrai a capacidade LBA,
-// lê o LBA 0 em um buffer DMA dedicado e, somente no disco descartável de prova,
+// lê o LBA 1023 reservado à fixture (LBA0 contém protective MBR),
 // escreve o LBA 1024 (fora dos headers/arrays GPT) e confirma o conteúdo com
 // um segundo READ DMA real.
 
@@ -19,6 +19,7 @@ pub const AHCI_ATA_WRITE_DMA_EXT: u8 = 0x35;
 pub const AHCI_ATA_WRITE_DMA: u8 = 0xCA;
 pub const AHCI_READ_SECTOR_SIZE: u64 = 512;
 pub const AHCI_READ_MAGIC_SIZE: u64 = 8;
+pub const AHCI_READ_TEST_LBA: u64 = 1023;
 pub const AHCI_WRITE_TEST_LBA: u64 = 1024;
 pub const AHCI_IDENTIFY_WORD_LBA_SUPPORT: u64 = 49;
 pub const AHCI_IDENTIFY_WORD_LBA28_LO: u64 = 60;
@@ -364,6 +365,8 @@ pub fn ahci_read_probe_sector0(hba: u64) -> bool {
             *(((table as usize) + 2) as *mut u8) = AHCI_ATA_READ_DMA;
         }
         *(((table as usize) + 7) as *mut u8) = 0x40;
+        *(((table as usize) + 4) as *mut u8) = (AHCI_READ_TEST_LBA & 0xFF) as u8;
+        *(((table as usize) + 5) as *mut u8) = ((AHCI_READ_TEST_LBA >> 8) & 0xFF) as u8;
         *(((table as usize) + 12) as *mut u8) = 1;
         *(((table as usize) + 13) as *mut u8) = 0;
 

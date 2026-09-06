@@ -1,0 +1,224 @@
+// Native NVMe/NVM, BSP synchronous path: one admin and one I/O queue,
+// 16 entries each, 4K PRP buffers, 512-byte sectors, no metadata. Unsupported
+// formats fail closed. Timeouts poison the queues; DMA memory stays pinned.
+module kernel::drivers::nvme;
+import kernel::drivers::pci_bus::*;
+import kernel::memory::dma::*;
+import kernel::memory::active_page_tables::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::interrupts::irq::*;
+
+static mut NVME_BASE: u64 = 0;
+static mut NVME_VIRTUAL: u64 = 0;
+static mut NVME_PHYSICAL: u64 = 0;
+static mut NVME_STRIDE: u64 = 0;
+static mut NVME_NS: u32 = 0;
+static mut NVME_LAST: u64 = 0;
+static mut NVME_READY: bool = false;
+static mut NVME_POISONED: bool = false;
+static mut NVME_BUSY: bool = false;
+static mut NVME_TAIL: [u32; 2] = [0; 2];
+static mut NVME_HEAD: [u32; 2] = [0; 2];
+static mut NVME_PHASE: [u32; 2] = [1; 2];
+static mut NVME_CID: u32 = 0;
+
+@system
+fn nvme_bar_size(dev: *const PciDevice) -> u64 {
+    unsafe {
+        let bus = (*dev).bus;
+        let slot = (*dev).slot;
+        let func = (*dev).func;
+        let command = pci_read_config16(bus, slot, func, 4);
+        let low = pci_read_config32(bus, slot, func, 0x10);
+        let high = pci_read_config32(bus, slot, func, 0x14);
+        let wide = (*dev).bars[0].is_64bit;
+        pci_write_command(bus, slot, func, command & 0xFFF9);
+        pci_write_config32(bus, slot, func, 0x10, 0xFFFFFFFF);
+        if wide { pci_write_config32(bus, slot, func, 0x14, 0xFFFFFFFF); }
+        let mask_low = pci_read_config32(bus, slot, func, 0x10) & 0xFFFFFFF0;
+        let mask_high: u32 = if wide { pci_read_config32(bus, slot, func, 0x14) } else { 0xFFFFFFFF };
+        pci_write_config32(bus, slot, func, 0x10, low);
+        if wide { pci_write_config32(bus, slot, func, 0x14, high); }
+        // Leave bus mastering disabled until the new queues are programmed.
+        pci_write_command(bus, slot, func, (command & 0xFFFB) | 2);
+        let mask = (mask_low as u64) | ((mask_high as u64) << 32);
+        if mask_low == 0 { return 0; }
+        return (~mask) + 1;
+    }
+}
+
+@system
+fn nvme_zero(base: u64, size: u64) -> void {
+    unsafe { let mut i: u64 = 0; while i < size { *((base + i) as *mut u8) = 0; i += 1; } }
+}
+@system
+fn nvme_store64(base: u64, value: u64) -> void {
+    x86_mmio_write32(base, value as u32);
+    x86_mmio_write32(base + 4, (value >> 32) as u32);
+}
+@system
+fn nvme_load64(base: u64) -> u64 {
+    return (x86_mmio_read32(base) as u64) | ((x86_mmio_read32(base + 4) as u64) << 32);
+}
+@system
+fn nvme_wait_ready(want: u32) -> bool {
+    let start = irq_timer_count();
+    let mut spins: u64 = 0;
+    while spins < 50000000 {
+        let status = unsafe { x86_mmio_read32(NVME_BASE + 0x1C) };
+        if status == 0xFFFFFFFF || (status & 2) != 0 { return false; }
+        if (status & 1) == want { return true; }
+        if irq_timer_count() - start > 5000 { return false; }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn nvme_command(queue: u32, opcode: u32, ns: u32, prp: u64,
+                cdw10: u32, cdw11: u32, cdw12: u32) -> bool {
+    unsafe {
+        if queue > 1 || NVME_BASE == 0 || NVME_POISONED || NVME_BUSY { return false; }
+        NVME_BUSY = true;
+        NVME_CID = (NVME_CID + 1) & 0xFFFF;
+        let cid = NVME_CID;
+        let sq = NVME_VIRTUAL + (queue as u64) * 8192 + (NVME_TAIL[queue as usize] as u64) * 64;
+        nvme_zero(sq, 64);
+        x86_mmio_write32(sq, opcode | (cid << 16));
+        x86_mmio_write32(sq + 4, ns);
+        nvme_store64(sq + 24, prp);
+        x86_mmio_write32(sq + 40, cdw10);
+        x86_mmio_write32(sq + 44, cdw11);
+        x86_mmio_write32(sq + 48, cdw12);
+        __dma_fence();
+        NVME_TAIL[queue as usize] = (NVME_TAIL[queue as usize] + 1) % 16;
+        x86_mmio_write32(NVME_BASE + 0x1000 + (queue as u64) * 2 * NVME_STRIDE, NVME_TAIL[queue as usize]);
+        let start = irq_timer_count();
+        let mut spins: u64 = 0;
+        while spins < 50000000 {
+            let cq = NVME_VIRTUAL + (queue as u64) * 8192 + 4096 + (NVME_HEAD[queue as usize] as u64) * 16;
+            let result = x86_mmio_read32(cq + 12);
+            if ((result >> 16) & 1) == NVME_PHASE[queue as usize] {
+                __dma_fence();
+                let source = x86_mmio_read32(cq + 8);
+                let valid = (result & 0xFFFF) == cid && (source >> 16) == queue && (source & 0xFFFF) < 16;
+                NVME_HEAD[queue as usize] = (NVME_HEAD[queue as usize] + 1) % 16;
+                if NVME_HEAD[queue as usize] == 0 { NVME_PHASE[queue as usize] ^= 1; }
+                x86_mmio_write32(NVME_BASE + 0x1000 + ((queue as u64) * 2 + 1) * NVME_STRIDE, NVME_HEAD[queue as usize]);
+                NVME_BUSY = false;
+                if !valid || (result >> 17) != 0 { NVME_POISONED = true; NVME_READY = false; return false; }
+                return true;
+            }
+            if (x86_mmio_read32(NVME_BASE + 0x1C) & 2) != 0 || irq_timer_count() - start > 5000 { break; }
+            spins += 1;
+        }
+        NVME_POISONED = true;
+        NVME_READY = false;
+        NVME_BUSY = false;
+        return false;
+    }
+}
+
+@system
+pub fn nvme_initialize_first() -> bool {
+    unsafe {
+        if NVME_READY { return true; }
+        // Never recycle an uncertain DMA arena after a failed command.
+        if NVME_BASE != 0 || !dma_allocator_available() { return false; }
+        let mut index: u32 = 0;
+        while index < pci_get_device_count() {
+            let dev = pci_get_device(index);
+            if dev != (null as *const PciDevice) && (*dev).class_code == 1 && (*dev).subclass == 8 && (*dev).prog_if == 2 {
+                let bar = (*dev).bars[0];
+                if bar.is_io || bar.base_address == 0 || (bar.base_address & 4095) != 0 { return false; }
+                let bar_size = nvme_bar_size(dev);
+                if bar_size < 4096 || bar.base_address + bar_size < bar.base_address { return false; }
+                NVME_BASE = bar.base_address;
+                pci_enable_command_bits((*dev).bus, (*dev).slot, (*dev).func, 2);
+                if !active_page_tables_map_mmio_identity_4k(NVME_BASE) { return false; }
+                let cap = nvme_load64(NVME_BASE);
+                if cap == 0 || cap == 0xFFFFFFFFFFFFFFFF || (cap & 0xFFFF) < 15 ||
+                   ((cap >> 48) & 15) != 0 || (cap & ((1 as u64) << 37)) == 0 { return false; }
+                NVME_STRIDE = 4 << ((cap >> 32) & 15);
+                let doorbell_end = 0x1000 + 3 * NVME_STRIDE + 4;
+                if doorbell_end > 65536 || doorbell_end > bar_size { return false; }
+                let mut off: u64 = 4096;
+                while off < doorbell_end {
+                    if !active_page_tables_map_mmio_identity_4k(NVME_BASE + off) { return false; }
+                    off += 4096;
+                }
+                // Mask all controller interrupts: storage uses synchronous
+                // CQ polling, independently of the real timer/IOAPIC gates.
+                x86_mmio_write32(NVME_BASE + 0x0C, 0xFFFFFFFF);
+                x86_mmio_write32(NVME_BASE + 0x14, 0);
+                if !nvme_wait_ready(0) { return false; }
+                let mut arena = dma_alloc_for_device(20480, 4096, 0xFFFFFFFFFFFFFFFF, 0);
+                if !dma_buffer_cpu_owned(&arena) { return false; }
+                NVME_VIRTUAL = arena.virtual_address as u64;
+                NVME_PHYSICAL = arena.physical_address;
+                nvme_zero(NVME_VIRTUAL, arena.size);
+                if !dma_share_with_device(&mut arena) { return false; }
+                x86_mmio_write32(NVME_BASE + 0x24, 15 | (15 << 16));
+                nvme_store64(NVME_BASE + 0x28, NVME_PHYSICAL);
+                nvme_store64(NVME_BASE + 0x30, NVME_PHYSICAL + 4096);
+                pci_enable_command_bits((*dev).bus, (*dev).slot, (*dev).func, 6);
+                __dma_fence();
+                x86_mmio_write32(NVME_BASE + 0x14, 1 | (6 << 16) | (4 << 20));
+                if !nvme_wait_ready(1) { return false; }
+                let data = NVME_PHYSICAL + 16384;
+                let cpu_data = NVME_VIRTUAL + 16384;
+                if !nvme_command(0, 6, 0, data, 1, 0, 0) { return false; }
+                // SQES/CQES required/max entry sizes must include 64/16 bytes.
+                let sizes = x86_mmio_read32(cpu_data + 512);
+                if (sizes & 15) > 6 || ((sizes >> 4) & 15) < 6 || ((sizes >> 8) & 15) > 4 || ((sizes >> 12) & 15) < 4 { return false; }
+                nvme_zero(cpu_data, 4096);
+                if !nvme_command(0, 6, 0, data, 2, 0, 0) { return false; }
+                NVME_NS = x86_mmio_read32(cpu_data);
+                if NVME_NS == 0 || NVME_NS == 0xFFFFFFFF { return false; }
+                nvme_zero(cpu_data, 4096);
+                if !nvme_command(0, 6, NVME_NS, data, 0, 0, 0) { return false; }
+                let blocks = nvme_load64(cpu_data);
+                let formats = x86_mmio_read32(cpu_data + 24);
+                let flbas = (formats >> 16) & 255;
+                if blocks < 2 || (flbas & 0xE0) != 0 { return false; }
+                let format = flbas & 15;
+                if format > ((formats >> 8) & 255) { return false; }
+                let lbaf = x86_mmio_read32(cpu_data + 128 + (format as u64) * 4);
+                if (lbaf & 0xFFFF) != 0 || ((lbaf >> 16) & 255) != 9 { return false; }
+                NVME_LAST = blocks - 1;
+                if !nvme_command(0, 9, 0, 0, 7, 0, 0) { return false; }
+                if !nvme_command(0, 5, 0, NVME_PHYSICAL + 12288, 1 | (15 << 16), 1, 0) { return false; }
+                if !nvme_command(0, 1, 0, NVME_PHYSICAL + 8192, 1 | (15 << 16), 1 | (1 << 16), 0) { return false; }
+                NVME_READY = true;
+                return true;
+            }
+            index += 1;
+        }
+        return false;
+    }
+}
+
+@system
+pub fn nvme_read_sector(context: u64, lba: u64, output: *mut u8) -> bool {
+    unsafe {
+        if !NVME_READY || context != NVME_BASE || lba > NVME_LAST || output == (null as *mut u8) { return false; }
+        if !nvme_command(1, 2, NVME_NS, NVME_PHYSICAL + 16384, lba as u32, (lba >> 32) as u32, 0) { return false; }
+        let mut i: u64 = 0;
+        while i < 512 { *(((output as u64) + i) as *mut u8) = *((NVME_VIRTUAL + 16384 + i) as *const u8); i += 1; }
+        return true;
+    }
+}
+@system
+pub fn nvme_write_sector(context: u64, lba: u64, input: *const u8) -> bool {
+    unsafe {
+        if !NVME_READY || context != NVME_BASE || lba > NVME_LAST || input == (null as *const u8) { return false; }
+        let mut i: u64 = 0;
+        while i < 512 { *((NVME_VIRTUAL + 16384 + i) as *mut u8) = *(((input as u64) + i) as *const u8); i += 1; }
+        // FUA requests stable media completion, not merely a volatile cache.
+        return nvme_command(1, 1, NVME_NS, NVME_PHYSICAL + 16384, lba as u32, (lba >> 32) as u32, 1 << 30);
+    }
+}
+@system
+pub fn nvme_context() -> u64 { unsafe { return NVME_BASE; } }
+@system
+pub fn nvme_last_lba() -> u64 { unsafe { return NVME_LAST; } }

@@ -57,7 +57,7 @@ jobs:
           test -f "$OVMF_VARS"
           cp "$OVMF_VARS" build/OVMF_VARS.fd
           truncate -s 64M build/storage-test.img
-          printf 'BAKENR01' | dd of=build/storage-test.img bs=1 seek=0 conv=notrunc status=none
+          printf 'BAKENR01' | dd of=build/storage-test.img bs=512 seek=1023 conv=notrunc status=none
           printf 'BAKENOLD' | dd of=build/storage-test.img bs=512 seek=1024 conv=notrunc status=none
           python3 - <<'PY'
           from pathlib import Path
@@ -205,7 +205,10 @@ jobs:
               image.write(file_data)
           PY
           storage_last_lba=$(( $(stat -c%s build/storage-test.img) / 512 - 1 ))
-          test "$(head -c 8 build/storage-test.img)" = "BAKENR01"
+          python3 tools/scripts/extend_foundation_fixture.py build/storage-test.img
+          truncate -s 64M build/nvme-test.img
+          printf 'BAKENNV1' | dd of=build/nvme-test.img bs=512 seek=1024 conv=notrunc status=none
+          test "$(dd if=build/storage-test.img bs=512 skip=1023 count=1 status=none | head -c 8)" = "BAKENR01"
           test "$(dd if=build/storage-test.img bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENOLD"
           test "$(dd if=build/storage-test.img bs=512 skip=1 count=1 status=none | head -c 8)" = "EFI PART"
           test "$(dd if=build/storage-test.img bs=512 skip="$storage_last_lba" count=1 status=none | head -c 8)" = "EFI PART"
@@ -220,6 +223,8 @@ jobs:
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \
             -drive file=build/storage-test.img,format=raw,if=ide,index=0 \
+            -drive file=build/nvme-test.img,format=raw,if=none,id=nvme_disk \
+            -device nvme,drive=nvme_disk,serial=BAKEN-CI-NVME \
             -cdrom build/baken_os.iso \
             -device qemu-xhci,id=xhci \
             -device usb-kbd,bus=xhci.0 \
@@ -360,11 +365,12 @@ jobs:
           assert struct.unpack_from("<H", root_dir, 20)[0] == 0
           assert struct.unpack_from("<H", root_dir, 26)[0] == 3
           assert struct.unpack_from("<I", root_dir, 28)[0] == 8
-          assert root_dir[32] == 0
+          assert root_dir[32] == 0xE5
           assert file_data[:8] == b"BAKENOS\n"
           assert zlib.crc32(file_data[:8]) & 0xFFFFFFFF == 0x68244BD8
           PY
           grep -q "BAKEN:HEX=_:68244BD8" build/qemu-serial.log
+          python3 tools/scripts/extend_foundation_fixture.py build/storage-test.img --verify build/qemu-serial.log
           for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=x STEP=o STEP=l STEP=_ STEP=m STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."

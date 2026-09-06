@@ -77,6 +77,31 @@ static inline void __invlpg(uint64_t address) {
     __asm__ __volatile__("invlpg (%0)" : : "r"((uintptr_t)address) : "memory");
 }
 
+static inline void __dma_fence(void) {
+    __asm__ __volatile__("mfence" : : : "memory");
+}
+
+/* BSP-only PAT slot 7. All bootstrap mappings use slot 0 (WB) or 3 (UC).
+ * Preserve those slots and follow the cache-disable/flush sequence. */
+static inline bool __pat_install_wc(void) {
+    uint32_t a = 1, b, c, d;
+    __asm__ __volatile__("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    if (!(d & (1u << 16))) return false;
+    uint64_t flags, cr0, cr3;
+    __asm__ __volatile__("pushfq; popq %0; cli; mov %%cr0,%1; mov %%cr3,%2"
+                         : "=r"(flags), "=r"(cr0), "=r"(cr3) : : "memory");
+    uint64_t uncached = (cr0 | (1ull << 30)) & ~(1ull << 29);
+    __asm__ __volatile__("mov %0,%%cr0; wbinvd" : : "r"(uncached) : "memory");
+    uint32_t lo, hi;
+    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+    hi = (hi & 0x00ffffffu) | 0x01000000u;
+    __asm__ __volatile__("wrmsr; wbinvd" : : "a"(lo), "d"(hi), "c"(0x277) : "memory");
+    __asm__ __volatile__("mov %0,%%cr3; mov %1,%%cr0; pushq %2; popfq"
+                         : : "r"(cr3), "r"(cr0), "r"(flags) : "memory", "cc");
+    __asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0x277));
+    return (hi >> 24) == 1;
+}
+
 static inline uint64_t __rdtsc(void) {
     uint32_t low, high;
     __asm__ __volatile__("rdtsc" : "=a"(low), "=d"(high));
@@ -300,6 +325,8 @@ def install(bootstrap) -> None:
         "__write_cr3": Function("__write_cr3", [("value", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__stack_switch_to_post_cutover": Function("__stack_switch_to_post_cutover", [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
+        "__pat_install_wc": Function("__pat_install_wc", [], Type("bool"), [], public=True, attributes=["@system"]),
         "__rdtsc": Function("__rdtsc", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__cpu_pause": Function("__cpu_pause", [], Type("void"), [], public=True, attributes=["@system"]),
         "__mmio_read32": Function("__mmio_read32", [("address", Type("u64"))], Type("u32"), [], public=True, attributes=["@system"]),

@@ -6,6 +6,7 @@
 module kernel::storage::block_device;
 
 import kernel::drivers::ahci_block_io::*;
+import kernel::drivers::nvme::*;
 
 pub const BLOCK_DEVICE_NONE: u32 = 0;
 pub const BLOCK_DEVICE_AHCI: u32 = 1;
@@ -67,6 +68,7 @@ pub fn block_device_read_sector(lba: u64, output: *mut u8) -> bool {
         if BLOCK_KIND == BLOCK_DEVICE_AHCI {
             return ahci_block_io_read_sector(BLOCK_DRIVER_CONTEXT, lba, output);
         }
+        if BLOCK_KIND == BLOCK_DEVICE_NVME { return nvme_read_sector(BLOCK_DRIVER_CONTEXT, lba, output); }
         return false;
     }
 }
@@ -80,6 +82,7 @@ pub fn block_device_write_sector(lba: u64, input: *const u8) -> bool {
         if BLOCK_KIND == BLOCK_DEVICE_AHCI {
             return ahci_block_io_write_sector(BLOCK_DRIVER_CONTEXT, lba, input);
         }
+        if BLOCK_KIND == BLOCK_DEVICE_NVME { return nvme_write_sector(BLOCK_DRIVER_CONTEXT, lba, input); }
         return false;
     }
 }

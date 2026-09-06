@@ -1,0 +1,144 @@
+// Integration probes use explicit fixture markers before any destructive I/O.
+// This is a diagnostic boot gate, not the interactive installed-system entry.
+module kernel::storage::foundation_probe;
+import kernel::storage::block_device::*;
+import kernel::storage::fat32::*;
+import kernel::storage::fat32_path::*;
+import kernel::memory::dma::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::memory::active_page_tables::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::drivers::nvme::*;
+import kernel::drivers::i8042::*;
+import kernel::interrupts::irq::*;
+
+@system
+pub fn foundation_external_irq_probe() -> bool {
+    let mut pass: u32 = 0;
+    while pass < 2 {
+        let before = irq_keyboard_count();
+        if !i8042_trigger_irq_probe() { return false; }
+        let mut spins: u64 = 0;
+        while irq_keyboard_count() == before && spins < 10000000 { spins += 1; }
+        if irq_keyboard_count() == before { return false; }
+        pass += 1;
+    }
+    x86_serial_write_stage_marker('&' as u8);
+    return true;
+}
+
+@system
+pub fn foundation_memory_probe() -> bool {
+    let before = pmm_allocator_allocated_pages();
+    let mut page = dma_alloc_for_device(4096, 4096, 0xFFFFFFFF, 65536);
+    if !dma_buffer_cpu_owned(&page) || pmm_allocator_allocated_pages() != before + 1 { return false; }
+    if !active_runtime_map(VMM_RUNTIME_BASE, page.physical_address, true, false) { return false; }
+    unsafe {
+        *(VMM_RUNTIME_BASE as *mut u32) = 0xBA4E2026;
+        __dma_fence();
+        if *(page.virtual_address as *const u32) != 0xBA4E2026 { return false; }
+    }
+    if !active_runtime_protect(VMM_RUNTIME_BASE, false, false) { return false; }
+    let entry = active_runtime_pte(VMM_RUNTIME_BASE);
+    if (entry & X86_PTE_WRITABLE) != 0 || (entry & X86_PTE_NX) == 0 { return false; }
+    if active_runtime_protect(VMM_RUNTIME_BASE, true, true) { return false; }
+    if !active_runtime_unmap(VMM_RUNTIME_BASE) || active_runtime_pte(VMM_RUNTIME_BASE) != 0 { return false; }
+    // Prove reuse of the virtual address after INVLPG and a second map.
+    if !active_runtime_map(VMM_RUNTIME_BASE, page.physical_address, false, false) { return false; }
+    unsafe { if *(VMM_RUNTIME_BASE as *const u32) != 0xBA4E2026 { return false; } }
+    if !active_runtime_unmap(VMM_RUNTIME_BASE) { return false; }
+    if !dma_submit_to_device(&mut page, 1) { return false; }
+    if dma_complete_from_device(&mut page, 2) || dma_release(&mut page) { return false; }
+    if !dma_complete_from_device(&mut page, 1) || !dma_release(&mut page) { return false; }
+    if pmm_allocator_allocated_pages() != before { return false; }
+    x86_serial_write_stage_marker('!' as u8);
+    return true;
+}
+
+@system
+pub fn foundation_protective_mbr() -> bool {
+    let mut page = dma_alloc(4096, 4096);
+    if !dma_buffer_cpu_owned(&page) { return false; }
+    let mut ok = block_device_read_sector(0, page.virtual_address);
+    unsafe {
+        let base = page.virtual_address as usize;
+        if *((base + 510) as *const u8) != 0x55 || *((base + 511) as *const u8) != 0xAA { ok = false; }
+        if *((base + 446) as *const u8) != 0 || *((base + 450) as *const u8) != 0xEE ||
+           *((base + 454) as *const u32) != 1 { ok = false; }
+        let expected: u32 = if block_device_last_lba() > 0xFFFFFFFF { 0xFFFFFFFF } else { block_device_last_lba() as u32 };
+        if *((base + 458) as *const u32) != expected { ok = false; }
+        let mut i: usize = 462;
+        while i < 510 { if *((base + i) as *const u8) != 0 { ok = false; } i += 1; }
+    }
+    if !dma_release(&mut page) || !ok { return false; }
+    x86_serial_write_stage_marker('(' as u8);
+    return true;
+}
+
+@system
+pub fn foundation_fat_path_probe() -> bool {
+    // /EFI/BAKEN/Long sample.txt and its canonical 8.3 alias.
+    let long_path: [u16; 26] = [47,69,70,73,47,66,65,75,69,78,47,76,111,110,103,32,115,97,109,112,108,101,46,116,120,116];
+    let short_path: [u16; 23] = [47,69,70,73,47,66,65,75,69,78,47,76,79,78,71,83,65,126,49,46,84,88,84];
+    let file = fat32_lookup(&long_path[0], 26);
+    let alias = fat32_lookup(&short_path[0], 23);
+    if !file.valid || !alias.valid || file.cluster != alias.cluster || file.size != alias.size || file.size != 1300 { return false; }
+    if fat32_chain_length(fat32_runtime_root_cluster()) < 2 || fat32_chain_length(file.cluster) != 3 { return false; }
+    let mut crc: u32 = 0;
+    if !fat32_file_crc(file, &mut crc) { return false; }
+    if !x86_serial_write_hex32_marker('+' as u8, crc) { return false; }
+    if !x86_serial_write_hex32_marker('=' as u8, file.size) { return false; }
+    x86_serial_write_stage_marker('+' as u8);
+    return true;
+}
+
+@system
+pub fn foundation_nvme_probe() -> bool {
+    if !nvme_initialize_first() { return false; }
+    let old_kind = block_device_kind();
+    let old_index = block_device_index();
+    let old_size = block_device_block_size();
+    let old_last = block_device_last_lba();
+    let old_write = block_device_has_writable_native_target();
+    let old_context = block_device_driver_context();
+    if !block_device_register_native(BLOCK_DEVICE_NVME, 0, 512, nvme_last_lba(), true, true) ||
+       !block_device_bind_driver_context(nvme_context()) { return false; }
+    let mut page = dma_alloc(4096, 4096);
+    if !dma_buffer_cpu_owned(&page) { return false; }
+    let mut ok = block_device_read_sector(1024, page.virtual_address);
+    unsafe {
+        // Eight-byte fixture identity and a reserved byte: never write to an
+        // arbitrary discovered namespace. Test media is created by the harness.
+        let expected: [u8; 8] = [66,65,75,69,78,78,86,49];
+        let mut i: usize = 0;
+        while i < 8 {
+            if *((page.virtual_address as usize + i) as *const u8) != expected[i] { ok = false; }
+            i += 1;
+        }
+        let last = ((page.virtual_address as usize) + 511) as *mut u8;
+        if *last != 0 { ok = false; }
+        if ok {
+            i = 0;
+            while i < 512 {
+                *((page.virtual_address as usize + 512 + i) as *mut u8) = *((page.virtual_address as usize + i) as *const u8);
+                i += 1;
+            }
+            *last = 0x5A;
+            ok = block_device_write_sector(1024, page.virtual_address as *const u8);
+            *last = 0;
+            if ok { ok = block_device_read_sector(1024, page.virtual_address) && *last == 0x5A; }
+            // Restore the sentinel sector even if verification failed.
+            if !block_device_write_sector(1024, ((page.virtual_address as usize) + 512) as *const u8) { ok = false; }
+            // Cross a complete CQ phase wrap; every READ must match again.
+            i = 0;
+            while i < 20 && ok { ok = block_device_read_sector(1024, page.virtual_address) && *last == 0; i += 1; }
+        }
+    }
+    if !dma_release(&mut page) { ok = false; }
+    if !block_device_register_native(old_kind, old_index, old_size, old_last, old_write, true) ||
+       !block_device_bind_driver_context(old_context) { return false; }
+    if !ok { return false; }
+    x86_serial_write_stage_marker(')' as u8);
+    return true;
+}

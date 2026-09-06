@@ -271,6 +271,16 @@ pub fn i8042_enable_keyboard_irq_only() -> bool {
     return i8042_set_native_irq_mask(true, false);
 }
 
+// Controller diagnostic stimulus, not a synthetic call into the ISR. D2
+// places a byte in the controller output buffer and asserts its IRQ line.
+// The integration test must observe IDT delivery and EOI before succeeding.
+@system
+pub fn i8042_trigger_irq_probe() -> bool {
+    if !i8042_keyboard_irq_enabled() { return false; }
+    if !i8042_command(0xD2) { return false; }
+    return i8042_write_data(0x00);
+}
+
 // Compatibilidade para a etapa futura que abrirá ambas as rotas no IOAPIC.
 @system
 pub fn i8042_enable_native_irqs() -> bool {

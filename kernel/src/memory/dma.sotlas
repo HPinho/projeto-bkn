@@ -139,6 +139,7 @@ pub fn dma_alloc(size: u64, alignment: u64) -> DmaBuffer {
 pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
     if buffer == (null as *mut DmaBuffer) || fence == 0 { return false; }
     if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
+    __dma_fence();
     unsafe {
         (*buffer).owner = DMA_OWNER_DEVICE;
         (*buffer).fence = fence;
@@ -152,6 +153,7 @@ pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
     if !dma_buffer_device_owned(buffer as *const DmaBuffer) { return false; }
     unsafe {
         if (*buffer).fence != fence { return false; }
+        __dma_fence();
         (*buffer).owner = DMA_OWNER_COMPLETED;
         return true;
     }
@@ -161,6 +163,7 @@ pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool {
 pub fn dma_share_with_device(buffer: *mut DmaBuffer) -> bool {
     if buffer == (null as *mut DmaBuffer) { return false; }
     if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
+    __dma_fence();
     unsafe {
         (*buffer).owner = DMA_OWNER_SHARED;
         (*buffer).fence = 0;
@@ -172,6 +175,7 @@ pub fn dma_share_with_device(buffer: *mut DmaBuffer) -> bool {
 pub fn dma_unshare_from_device(buffer: *mut DmaBuffer) -> bool {
     if buffer == (null as *mut DmaBuffer) { return false; }
     if !dma_buffer_shared(buffer as *const DmaBuffer) { return false; }
+    __dma_fence();
     unsafe {
         (*buffer).owner = DMA_OWNER_CPU;
         (*buffer).fence = 0;
@@ -192,4 +196,21 @@ pub fn dma_release(buffer: *mut DmaBuffer) -> bool {
         (*buffer) = dma_invalid_buffer();
         return true;
     }
+}
+
+// Physical contiguity comes from PMM. Reject unsupported device masks or
+// boundary crossings rather than truncating a DMA address in a descriptor.
+@system
+pub fn dma_alloc_for_device(size: u64, alignment: u64, max_address: u64, boundary: u64) -> DmaBuffer {
+    if max_address == 0 || (boundary != 0 && (boundary & (boundary - 1)) != 0) { return dma_invalid_buffer(); }
+    let mut buffer = dma_alloc(size, alignment);
+    if !dma_buffer_cpu_owned(&buffer) { return dma_invalid_buffer(); }
+    let last = buffer.physical_address + buffer.size - 1;
+    let mut fits = last >= buffer.physical_address && last <= max_address;
+    if boundary != 0 && buffer.physical_address / boundary != last / boundary { fits = false; }
+    if !fits {
+        dma_release(&mut buffer);
+        return dma_invalid_buffer();
+    }
+    return buffer;
 }

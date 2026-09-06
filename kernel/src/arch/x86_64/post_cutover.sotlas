@@ -34,6 +34,7 @@ import kernel::interrupts::interrupt_enable::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::storage_discovery::*;
 import kernel::storage::gpt::*;
+import kernel::storage::foundation_probe::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_runtime::*;
 import kernel::drivers::xhci_program::*;
@@ -574,6 +575,13 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('i' as u8); }
     if !post_cutover_probe_backup_gpt_entries() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('m' as u8); }
+    if !foundation_memory_probe() { loop {} }
+    if !foundation_external_irq_probe() { loop {} }
+    if !foundation_protective_mbr() { loop {} }
+    if !foundation_fat_path_probe() { loop {} }
+    if !foundation_nvme_probe() { loop {} }
+    if !active_framebuffer_write_combining(context.framebuffer_base, context.framebuffer_size) { loop {} }
+    if serial_ready { x86_serial_write_stage_marker('%' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
     loop {}
 }

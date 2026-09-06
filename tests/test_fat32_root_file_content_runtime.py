@@ -22,13 +22,15 @@ class Fat32RootFileContentRuntimeTests(unittest.TestCase):
             self.assertIn(token, body)
         self.assertNotIn("BAKENOS", body)
 
-    def test_runtime_crc_covers_exact_file_size_and_is_single_cluster_scoped(self):
+    def test_runtime_crc_covers_exact_file_size_and_validates_chain(self):
         text = FAT32.read_text(encoding="utf-8")
         body = text.split("fn fat32_probe_root_file_content_runtime(", 1)[1]
         body = body.split("pub fn fat32_probe_esp_bpb()", 1)[0]
         for token in (
             "import kernel::storage::crc32::*;",
-            "if (file_size as u64) > cluster_bytes { return false; }",
+            "let chain_length = fat32_chain_length(first_cluster);",
+            "chain_length != expected_clusters",
+            "current_cluster = fat32_next_cluster(current_cluster)",
             "let mut remaining = file_size as u64;",
             "let mut crc = crc32_ieee_begin();",
             "crc32_ieee_update(crc, sector as *const u8, bytes_this_sector as usize)",

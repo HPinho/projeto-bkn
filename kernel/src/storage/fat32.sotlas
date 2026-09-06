@@ -27,6 +27,7 @@ pub const FAT32_FSINFO_TRAIL_SIGNATURE: u32 = 0xAA550000;
 pub const FAT32_FSINFO_UNKNOWN: u32 = 0xFFFFFFFF;
 pub const FAT32_ENTRY_MASK: u32 = 0x0FFFFFFF;
 pub const FAT32_EOC_MIN: u32 = 0x0FFFFFF8;
+pub const FAT32_RESERVED_MIN: u32 = 0x0FFFFFF0;
 pub const FAT32_ATTR_LONG_NAME: u8 = 0x0F;
 pub const FAT32_ATTR_VOLUME_ID: u8 = 0x08;
 pub const FAT32_ATTR_DIRECTORY: u8 = 0x10;
@@ -404,7 +405,12 @@ fn fat32_probe_root_directory_cluster_runtime(
     if sectors_per_cluster == 0 || root_cluster < 2 ||
        (root_cluster as u64) > cluster_count + 1 { return false; }
 
-    let cluster_index = (root_cluster as u64) - 2;
+    let chain_length = fat32_chain_length(root_cluster);
+    if chain_length == 0 { return false; }
+    let mut current_cluster = root_cluster;
+    let mut cluster_step: u64 = 0;
+    while cluster_step < chain_length {
+    let cluster_index = (current_cluster as u64) - 2;
     if cluster_index >= cluster_count { return false; }
     let cluster_offset = cluster_index * (sectors_per_cluster as u64);
     let root_lba = data_start_lba + cluster_offset;
@@ -437,7 +443,13 @@ fn fat32_probe_root_directory_cluster_runtime(
         if saw_directory_end { break; }
         sector_index += 1;
     }
-    if !saw_directory_end { return false; }
+    if saw_directory_end { break; }
+    cluster_step += 1;
+    if cluster_step < chain_length {
+        current_cluster = fat32_next_cluster(current_cluster);
+        if !fat32_data_cluster_valid(current_cluster) { return false; }
+    }
+    }
 
     x86_serial_write_stage_marker('o' as u8);
     return true;
@@ -469,7 +481,12 @@ fn fat32_probe_first_root_file_entry_runtime(
     if sectors_per_cluster == 0 || root_cluster < 2 ||
        (root_cluster as u64) > cluster_count + 1 { return false; }
 
-    let root_index = (root_cluster as u64) - 2;
+    let chain_length = fat32_chain_length(root_cluster);
+    if chain_length == 0 { return false; }
+    let mut current_cluster = root_cluster;
+    let mut cluster_step: u64 = 0;
+    while cluster_step < chain_length {
+    let root_index = (current_cluster as u64) - 2;
     if root_index >= cluster_count { return false; }
     let root_lba = data_start_lba + root_index * (sectors_per_cluster as u64);
     if root_lba < data_start_lba || root_lba > last_lba { return false; }
@@ -533,12 +550,18 @@ fn fat32_probe_first_root_file_entry_runtime(
         }
         sector_index += 1;
     }
+    cluster_step += 1;
+    if cluster_step < chain_length {
+        current_cluster = fat32_next_cluster(current_cluster);
+        if !fat32_data_cluster_valid(current_cluster) { return false; }
+    }
+    }
     return false;
 }
 
 // Lê o payload do primeiro arquivo regular encontrado no diretório raiz. Este
-// gate é deliberadamente de arquivo de um único cluster: percorre os setores
-// necessários pela Block Device API e calcula CRC32 somente sobre file_size bytes.
+// Percorre a FAT (inclusive arquivos fragmentados), valida a cadeia inteira e
+// calcula CRC32 somente sobre file_size bytes, nunca sobre padding/slack.
 // O valor é emitido no serial antes do STEP=_ para a CI comparar com o disco raw.
 @system
 fn fat32_probe_root_file_content_runtime(
@@ -563,23 +586,25 @@ fn fat32_probe_root_file_content_runtime(
        (first_cluster as u64) > cluster_count + 1 { return false; }
 
     let cluster_bytes = (sectors_per_cluster as u64) * (FAT32_RUNTIME_BLOCK_SIZE as u64);
-    if (file_size as u64) > cluster_bytes { return false; }
+    let chain_length = fat32_chain_length(first_cluster);
+    let expected_clusters = ((file_size as u64) + cluster_bytes - 1) / cluster_bytes;
+    if chain_length == 0 || chain_length != expected_clusters { return false; }
 
-    let file_index = (first_cluster as u64) - 2;
+    let mut current_cluster = first_cluster;
+    let sector = fat32_runtime_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+    let mut crc = crc32_ieee_begin();
+    let mut remaining = file_size as u64;
+    while remaining > 0 {
+    let file_index = (current_cluster as u64) - 2;
     if file_index >= cluster_count { return false; }
     let file_lba = data_start_lba + file_index * (sectors_per_cluster as u64);
     if file_lba < data_start_lba || file_lba > last_lba { return false; }
     let file_last_lba = file_lba + (sectors_per_cluster as u64) - 1;
     if file_last_lba < file_lba || file_last_lba > last_lba { return false; }
 
-    let sector = fat32_runtime_sector_buffer();
-    if sector == (null as *mut u8) { return false; }
-
-    let mut crc = crc32_ieee_begin();
-    let mut remaining = file_size as u64;
     let mut sector_index: u32 = 0;
-    while remaining > 0 {
-        if sector_index >= sectors_per_cluster { return false; }
+    while remaining > 0 && sector_index < sectors_per_cluster {
         let lba = file_lba + (sector_index as u64);
         if lba > file_last_lba || !block_device_read_sector(lba, sector) { return false; }
         let bytes_this_sector: u64 = if remaining > (FAT32_RUNTIME_BLOCK_SIZE as u64) {
@@ -591,6 +616,11 @@ fn fat32_probe_root_file_content_runtime(
         remaining -= bytes_this_sector;
         sector_index += 1;
     }
+    if remaining > 0 {
+        current_cluster = fat32_next_cluster(current_cluster);
+        if !fat32_data_cluster_valid(current_cluster) { return false; }
+    }
+    }
 
     let computed = crc32_ieee_finish(crc);
     unsafe {
@@ -601,6 +631,65 @@ fn fat32_probe_root_file_content_runtime(
     if !x86_serial_write_hex32_marker('_' as u8, computed) { return false; }
     x86_serial_write_stage_marker('_' as u8);
     return true;
+}
+
+// Zero is an error sentinel, EOC is >= FAT32_EOC_MIN. Validate every FAT
+// sector actually traversed against its mirror; never trust one copy silently.
+@system
+pub fn fat32_data_cluster_valid(cluster: u32) -> bool {
+    return cluster >= 2 && cluster < FAT32_RESERVED_MIN &&
+        (cluster as u64) <= fat32_runtime_cluster_count() + 1;
+}
+
+@system
+pub fn fat32_next_cluster(cluster: u32) -> u32 {
+    if !fat32_runtime_is_ready() || !fat32_data_cluster_valid(cluster) { return 0; }
+    let sector_index = (cluster as u64) / 128;
+    if sector_index >= (fat32_runtime_fat_size_sectors() as u64) { return 0; }
+    let lba = fat32_runtime_partition_first_lba() +
+        (fat32_runtime_reserved_sectors() as u64) + sector_index;
+    let mirror = lba + (fat32_runtime_fat_size_sectors() as u64);
+    if mirror > fat32_runtime_partition_last_lba() { return 0; }
+    let a = fat32_runtime_sector_buffer();
+    let b = fat32_runtime_backup_sector_buffer();
+    if a == (null as *mut u8) || b == (null as *mut u8) { return 0; }
+    if !block_device_read_sector(lba, a) || !block_device_read_sector(mirror, b) { return 0; }
+    let mut i: usize = 0;
+    while i < 512 {
+        if fat32_read_u8(a as *const u8, i) != fat32_read_u8(b as *const u8, i) { return 0; }
+        i += 1;
+    }
+    let next = fat32_read_u32(a as *const u8, ((cluster % 128) * 4) as usize) & FAT32_ENTRY_MASK;
+    if next >= FAT32_EOC_MIN { return next; }
+    if !fat32_data_cluster_valid(next) { return 0; }
+    return next;
+}
+
+// Brent cycle detection: O(n) reads, O(1) memory, plus a geometry-derived
+// hard bound. Validate before consuming file bytes or directory entries.
+@system
+pub fn fat32_chain_length(first: u32) -> u64 {
+    if !fat32_data_cluster_valid(first) { return 0; }
+    let mut current = first;
+    let mut anchor = first;
+    let mut power: u64 = 1;
+    let mut distance: u64 = 0;
+    let mut count: u64 = 1;
+    while count <= fat32_runtime_cluster_count() {
+        let next = fat32_next_cluster(current);
+        if next >= FAT32_EOC_MIN { return count; }
+        if next == 0 { return 0; }
+        distance += 1;
+        if next == anchor { return 0; }
+        if distance == power {
+            anchor = next;
+            power *= 2;
+            distance = 0;
+        }
+        current = next;
+        count += 1;
+    }
+    return 0;
 }
 
 @system
@@ -664,6 +753,7 @@ pub fn fat32_probe_esp_bpb() -> bool {
     let total_sectors32 = fat32_read_u32(base, 32);
     let fat_size32 = fat32_read_u32(base, 36);
     let fs_version = fat32_read_u16(base, 42) as u32;
+    let ext_flags = fat32_read_u16(base, 40) as u32;
     let root_cluster = fat32_read_u32(base, 44);
     let fsinfo_sector = fat32_read_u16(base, 48) as u32;
     let backup_boot_sector = fat32_read_u16(base, 50) as u32;
@@ -673,7 +763,8 @@ pub fn fat32_probe_esp_bpb() -> bool {
        !fat32_is_power_of_two(sectors_per_cluster) || reserved_sectors == 0 ||
        fat_count == 0 || fat_count > 2 || root_entry_count != 0 ||
        total_sectors16 != 0 || fat_size16 != 0 || total_sectors32 == 0 ||
-       fat_size32 == 0 || fs_version != 0 || root_cluster < 2 { return false; }
+       fat_size32 == 0 || fs_version != 0 || root_cluster < 2 ||
+       (ext_flags & 0x80) != 0 { return false; }
     if fsinfo_sector == 0 || fsinfo_sector >= reserved_sectors ||
        backup_boot_sector == 0 || backup_boot_sector >= reserved_sectors { return false; }
 
@@ -685,6 +776,7 @@ pub fn fat32_probe_esp_bpb() -> bool {
     let cluster_count = data_sectors / (sectors_per_cluster as u64);
     if cluster_count < FAT32_MIN_CLUSTERS || cluster_count > FAT32_MAX_CLUSTERS { return false; }
     if (root_cluster as u64) > cluster_count + 1 { return false; }
+    if (fat_size32 as u64) * 128 < cluster_count + 2 { return false; }
 
     let data_start_lba = first_lba + overhead;
     if data_start_lba > last_lba || first_lba + total_sectors - 1 > last_lba { return false; }

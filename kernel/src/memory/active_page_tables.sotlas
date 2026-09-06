@@ -27,6 +27,106 @@ static mut ACTIVE_PAGE_TABLE_ROOT: PageTablePage = PageTablePage {
     valid: false
 };
 static mut ACTIVE_PAGE_TABLES_READY: bool = false;
+// Dedicated runtime window, disjoint from identity/direct-map/kernel mappings.
+pub const VMM_RUNTIME_BASE: u64 = 0x0000400000000000;
+pub const VMM_RUNTIME_SIZE: u64 = 0x40000000;
+
+@system
+fn active_runtime_address_valid(address: u64) -> bool {
+    return address >= VMM_RUNTIME_BASE && address - VMM_RUNTIME_BASE < VMM_RUNTIME_SIZE && x86_page_aligned(address);
+}
+
+@system
+fn active_runtime_leaf(address: u64) -> PageTablePage {
+    unsafe {
+        let mut page = ACTIVE_PAGE_TABLE_ROOT;
+        let indices: [u16; 3] = [x86_pml4_index(address), x86_pdpt_index(address), x86_pd_index(address)];
+        let mut i: usize = 0;
+        while i < 3 {
+            let entry = page_table_read_entry(page, indices[i]);
+            if !x86_pte_present(entry) || (entry & X86_PTE_HUGE) != 0 { return page_table_page_invalid(); }
+            page = page_table_arena_page_from_physical(&ACTIVE_PAGE_TABLE_ARENA, x86_pte_address(entry));
+            if !page.valid { return page_table_page_invalid(); }
+            i += 1;
+        }
+        return page;
+    }
+}
+
+@system
+pub fn active_runtime_pte(address: u64) -> u64 {
+    if !active_page_tables_is_ready() || !active_runtime_address_valid(address) { return 0; }
+    return page_table_read_entry(active_runtime_leaf(address), x86_pt_index(address));
+}
+
+// BSP-only while the kernel has no SMP scheduler. Callers own the physical
+// page lifetime; unmapping never frees a page that DMA might still reference.
+@system
+pub fn active_runtime_map(address: u64, physical: u64, writable: bool, executable: bool) -> bool {
+    if !active_runtime_address_valid(address) || !x86_page_aligned(physical) || physical == 0 ||
+       (writable && executable) || !active_page_tables_is_ready() { return false; }
+    let mut flags = X86_PTE_PRESENT;
+    if writable { flags |= X86_PTE_WRITABLE; }
+    if !executable { flags |= X86_PTE_NX; }
+    unsafe {
+        if !page_table_map_4k(&mut ACTIVE_PAGE_TABLE_ARENA, ACTIVE_PAGE_TABLE_ROOT, address, physical, flags) { return false; }
+    }
+    x86_invlpg(address);
+    return true;
+}
+
+@system
+pub fn active_runtime_protect(address: u64, writable: bool, executable: bool) -> bool {
+    let old = active_runtime_pte(address);
+    if !x86_pte_present(old) || (writable && executable) { return false; }
+    let mut flags = X86_PTE_PRESENT;
+    if writable { flags |= X86_PTE_WRITABLE; }
+    if !executable { flags |= X86_PTE_NX; }
+    if !page_table_write_entry(active_runtime_leaf(address), x86_pt_index(address), x86_pte_make(x86_pte_address(old), flags)) { return false; }
+    x86_invlpg(address);
+    return true;
+}
+
+@system
+pub fn active_runtime_unmap(address: u64) -> bool {
+    if !x86_pte_present(active_runtime_pte(address)) { return false; }
+    if !page_table_write_entry(active_runtime_leaf(address), x86_pt_index(address), 0) { return false; }
+    x86_invlpg(address);
+    return true;
+}
+
+// Only convert the existing identity framebuffer mappings, never RAM aliases.
+// PAT selection alone is not a benchmark or proof of effective MTRR policy.
+@system
+pub fn active_framebuffer_write_combining(base: u64, size: u64) -> bool {
+    if !active_page_tables_is_ready() || base == 0 || size == 0 || size > 268435456 { return false; }
+    let end = base + size;
+    if end <= base { return false; }
+    let first = x86_page_align_down(base);
+    let limit = x86_page_align_up(end);
+    if limit < end { return false; }
+    let mut page = first;
+    // Preflight the whole range before changing memory attributes.
+    while page < limit {
+        let pte = page_table_read_entry(active_runtime_leaf(page), x86_pt_index(page));
+        if !x86_pte_present(pte) || x86_pte_address(pte) != page ||
+           (pte & (X86_PTE_WRITABLE | X86_PTE_NX)) != (X86_PTE_WRITABLE | X86_PTE_NX) { return false; }
+        page += 4096;
+    }
+    if !__pat_install_wc() { return false; }
+    page = first;
+    while page < limit {
+        let leaf = active_runtime_leaf(page);
+        let old = page_table_read_entry(leaf, x86_pt_index(page));
+        // 4K leaf: PAT bit 7, PCD bit 4 and PWT bit 3 select slot 7.
+        if !page_table_write_entry(leaf, x86_pt_index(page), old | 0x98) { return false; }
+        x86_invlpg(page);
+        if (page_table_read_entry(leaf, x86_pt_index(page)) & 0x98) != 0x98 { return false; }
+        page += 4096;
+    }
+    __dma_fence();
+    return true;
+}
 
 @system
 pub fn active_page_tables_resume(root_physical: u64,
