@@ -362,8 +362,10 @@ jobs:
           assert struct.unpack_from("<I", root_dir, 28)[0] == 8
           assert root_dir[32] == 0
           assert file_data[:8] == b"BAKENOS\n"
+          assert zlib.crc32(file_data[:8]) & 0xFFFFFFFF == 0x1C8927AD
           PY
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=x STEP=o STEP=l STEP=m STEP=J; do
+          grep -q "BAKEN:HEX=_:1C8927AD" build/qemu-serial.log
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=x STEP=o STEP=l STEP=_ STEP=m STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
