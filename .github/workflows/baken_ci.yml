@@ -123,6 +123,7 @@ jobs:
           cluster_count = data_sectors // sectors_per_cluster
           assert cluster_count >= 65525
           assert fat_size == 754
+          data_start_lba = esp_first + reserved_sectors + fat_count * fat_size
 
           boot = bytearray(block_size)
           boot[0:3] = b"\xEB\x58\x90"
@@ -163,6 +164,18 @@ jobs:
           struct.pack_into("<I", fat_head, 0, 0x0FFFFFF8)
           struct.pack_into("<I", fat_head, 4, 0xFFFFFFFF)
           struct.pack_into("<I", fat_head, 8, 0x0FFFFFFF)
+          struct.pack_into("<I", fat_head, 12, 0x0FFFFFFF)
+
+          root_dir = bytearray(block_size)
+          root_dir[0:11] = b"BAKEN   TXT"
+          root_dir[11] = 0x20
+          struct.pack_into("<H", root_dir, 20, 0)
+          struct.pack_into("<H", root_dir, 26, 3)
+          struct.pack_into("<I", root_dir, 28, 8)
+          root_dir[32] = 0
+
+          file_data = bytearray(block_size)
+          file_data[0:8] = b"BAKENOS\n"
 
           with path.open("r+b") as image:
               image.seek(primary_entries_lba * block_size)
@@ -186,6 +199,10 @@ jobs:
               image.write(fat_head)
               image.seek((esp_first + reserved_sectors + fat_size) * block_size)
               image.write(fat_head)
+              image.seek(data_start_lba * block_size)
+              image.write(root_dir)
+              image.seek((data_start_lba + sectors_per_cluster) * block_size)
+              image.write(file_data)
           PY
           storage_last_lba=$(( $(stat -c%s build/storage-test.img) / 512 - 1 ))
           test "$(head -c 8 build/storage-test.img)" = "BAKENR01"
@@ -289,6 +306,17 @@ jobs:
               image.seek((esp_first + backup_boot_sector) * block_size)
               backup_boot = image.read(block_size)
 
+              total = struct.unpack_from("<I", boot, 32)[0]
+              reserved = struct.unpack_from("<H", boot, 14)[0]
+              fats = boot[16]
+              fat_size = struct.unpack_from("<I", boot, 36)[0]
+              spc = boot[13]
+              data_start_lba = esp_first + reserved + fats * fat_size
+              image.seek(data_start_lba * block_size)
+              root_dir = image.read(block_size)
+              image.seek((data_start_lba + spc) * block_size)
+              file_data = image.read(block_size)
+
           assert len(entries) == entries_bytes
           assert len(primary_entries) == entries_bytes
           assert entries[:16] != bytes(16)
@@ -323,16 +351,19 @@ jobs:
           assert backup_boot == boot
           assert backup_boot[510:512] == b"\x55\xAA"
 
-          total = struct.unpack_from("<I", boot, 32)[0]
-          reserved = struct.unpack_from("<H", boot, 14)[0]
-          fats = boot[16]
-          fat_size = struct.unpack_from("<I", boot, 36)[0]
-          spc = boot[13]
           clusters = (total - reserved - fats * fat_size) // spc
           assert clusters >= 65525
           assert clusters <= 0x0FFFFFF5
+
+          assert root_dir[0:11] == b"BAKEN   TXT"
+          assert root_dir[11] == 0x20
+          assert struct.unpack_from("<H", root_dir, 20)[0] == 0
+          assert struct.unpack_from("<H", root_dir, 26)[0] == 3
+          assert struct.unpack_from("<I", root_dir, 28)[0] == 8
+          assert root_dir[32] == 0
+          assert file_data[:8] == b"BAKENOS\n"
           PY
-          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=m STEP=J; do
+          for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=x STEP=o STEP=l STEP=m STEP=J; do
             if ! grep -q "BAKEN:${marker}" build/qemu-serial.log; then
               echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
               exit 1
