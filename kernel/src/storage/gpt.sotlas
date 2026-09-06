@@ -9,6 +9,7 @@ module kernel::storage::gpt;
 import kernel::storage::crc32::*;
 import kernel::storage::block_device::*;
 import kernel::storage::gpt_redundancy::*;
+import kernel::storage::fat32::*;
 import kernel::memory::dma::*;
 
 pub const GPT_HEADER_MIN_SIZE: u32 = 92;
@@ -264,7 +265,7 @@ pub fn gpt_probe_backup_header() -> bool {
 // Lê todos os bytes do backup Partition Entry Array, setor por setor, usando
 // somente block_device_read_sector(). O CRC é incremental, portanto arrays
 // maiores que a página de scratch não exigem buffer sintético ou firmware.
-// Depois do CRC do backup, o gate n relê e compara o primary GPT completo.
+// Depois dos gates GPT, entrega a ESP publicada ao leitor BPB FAT32 real.
 @system
 pub fn gpt_probe_backup_entries() -> bool {
     unsafe {
@@ -324,7 +325,11 @@ pub fn gpt_probe_backup_entries() -> bool {
         entry_count,
         entry_size,
         computed
-    ) || !gpt_redundancy_is_ready() { return false; }
+    ) || !gpt_redundancy_is_ready() || !gpt_partition_is_ready() { return false; }
+
+    if !fat32_probe_esp_bpb() || !fat32_runtime_is_ready() { return false; }
+    if fat32_runtime_partition_first_lba() != gpt_partition_first_lba() ||
+       fat32_runtime_partition_last_lba() != gpt_partition_last_lba() { return false; }
     return true;
 }
 
