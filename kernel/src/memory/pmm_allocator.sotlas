@@ -1,7 +1,7 @@
 // Baken OS — bootstrap allocator físico pós-ExitBootServices.
 //
 // Este módulo NÃO deve ser ativado durante a fase híbrida UEFI. Ele usa apenas
-// a maior região EfiConventionalMemory já inventariada pelo PMM e fornece um
+// regiões EfiConventionalMemory já inventariadas pelo PMM e fornece um
 // allocator monotônico de páginas para o primeiro estágio pós-cutover.
 //
 // O primeiro estágio usa bitmaps fixos, fornecidos estaticamente pelo kernel.
@@ -262,6 +262,78 @@ pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64 {
             region += 1;
         }
         PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
+        return 0;
+    }
+}
+
+// Reserva física aplicando as limitações do dispositivo ANTES de avançar o
+// cursor monotônico. Assim um controlador de 32 bits pode procurar outra região
+// abaixo de 4 GiB em vez de consumir uma página alta, rejeitá-la e desistir.
+// `max_address` é inclusivo; `boundary == 0` desativa a regra de fronteira.
+@system
+pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64,
+                                   max_address: u64, boundary: u64) -> u64 {
+    if count == 0 || alignment < BAKEN_PAGE_SIZE || max_address == 0 { return 0; }
+    if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 {
+        return 0;
+    }
+    if boundary != 0 && ((boundary & (boundary - 1)) != 0 || boundary < BAKEN_PAGE_SIZE) {
+        return 0;
+    }
+
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+        let bytes = count * BAKEN_PAGE_SIZE;
+        if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
+        if boundary != 0 && bytes > boundary { return 0; }
+
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            let previous_next = PMM_REGION_NEXT[region];
+            let padded = previous_next + alignment - 1;
+            if padded < previous_next { region += 1; continue; }
+            let mut aligned = padded & ~(alignment - 1);
+            if aligned < previous_next { region += 1; continue; }
+
+            let mut end = aligned + bytes;
+            if end <= aligned { region += 1; continue; }
+            let mut last = end - 1;
+
+            if boundary != 0 && aligned / boundary != last / boundary {
+                let boundary_base = aligned & ~(boundary - 1);
+                let next_boundary = boundary_base + boundary;
+                if next_boundary <= boundary_base { region += 1; continue; }
+                let bumped = next_boundary + alignment - 1;
+                if bumped < next_boundary { region += 1; continue; }
+                aligned = bumped & ~(alignment - 1);
+                end = aligned + bytes;
+                if end <= aligned { region += 1; continue; }
+                last = end - 1;
+            }
+
+            if last > max_address || end > PMM_REGION_ENDS[region] {
+                region += 1;
+                continue;
+            }
+            if boundary != 0 && aligned / boundary != last / boundary {
+                region += 1;
+                continue;
+            }
+
+            if !pmm_allocator_mark_pages(aligned, count, true) { return 0; }
+            PMM_REGION_NEXT[region] = end;
+            PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
+            PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
+            PMM_ALLOCATOR.next_page = end;
+            PMM_ALLOCATOR.allocated_pages += count;
+            PMM_ALLOCATOR.last_base = aligned;
+            PMM_ALLOCATOR.last_previous_next = previous_next;
+            PMM_ALLOCATOR.last_page_count = count;
+            PMM_ALLOCATOR.last_region_index = region;
+            return aligned;
+        }
+        // Uma restrição de dispositivo pode falhar mesmo havendo memória livre
+        // para outros consumidores; por isso não envenena o estado global.
         return 0;
     }
 }

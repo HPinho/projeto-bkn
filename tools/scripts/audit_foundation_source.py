@@ -25,14 +25,15 @@ def main() -> int:
     assert skip in scan
     assert scan.index(skip) < scan.index("STORAGE_CANDIDATE.kind = kind;")
     assert scan.index(skip) < scan.index("storage_probe_mmio_after_cutover()")
+    assert "if !post_cutover { return kind; }" in scan
+    assert "return STORAGE_CONTROLLER_AHCI;" in scan
 
-    gate = section(
+    gpt_gate = section(
         post,
-        "pub fn post_cutover_discover_first_storage_controller() -> bool",
-        "pub fn post_cutover_probe_backup_gpt_header()",
+        "pub fn post_cutover_probe_backup_gpt_header() -> bool",
+        "pub fn post_cutover_probe_backup_gpt_entries()",
     )
-    assert "if kind != STORAGE_CONTROLLER_AHCI { return false; }" in gate
-    assert "if !storage_generic_block_io_is_ready() { return false; }" in gate
+    assert "if !storage_generic_block_io_is_ready() { return false; }" in gpt_gate
 
     assert "pub fn pmm_alloc_pages_constrained(" in pmm
     constrained = section(pmm, "pub fn pmm_alloc_pages_constrained(")

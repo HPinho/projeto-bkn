@@ -1,10 +1,11 @@
 // Baken OS — discovery PCI, probe MMIO, reset, DMA, IDENTIFY e I/O AHCI real.
 //
-// A enumeração começa read-only. Pós-cutover, AHCI/NVMe habilitam Memory Space
-// para o probe estrutural. Para AHCI, o HBA é resetado com IE=0, a arena DMA é
-// programada, IDENTIFY é executado, LBA 0 é lido e LBA 1 é escrito/lido de volta
-// somente no disco descartável usado pelo gate de runtime. Só depois dessa prova
-// o caminho AHCI é publicado e exercitado pela Block Device API genérica.
+// A enumeração começa read-only. Pós-cutover, o caminho de boot/sistema escolhe
+// explicitamente AHCI, que é o backend que já publica a Block Device usada por
+// GPT/FAT. NVMe continua descobrível antes do cutover e é inicializado depois
+// por seu gate nativo independente; a ordem PCI nunca decide o disco de sistema.
+// Para AHCI, o HBA é resetado com IE=0, a arena DMA é programada, IDENTIFY é
+// executado, LBA 1023 é lido e LBA 1024 é escrito/lido no disco descartável.
 
 module kernel::drivers::storage_discovery;
 
@@ -365,11 +366,17 @@ pub fn storage_discovery_scan() -> u32 {
         STORAGE_GENERIC_BLOCK_IO_READY = false;
         block_device_reset_registry();
 
+        let post_cutover = active_page_tables_is_ready();
         let count = pci_get_device_count();
         for mut index in 0..count {
             let dev = pci_get_device(index);
             let kind = storage_candidate_kind(dev);
             if kind == STORAGE_CONTROLLER_NONE { continue; }
+
+            // O sistema de arquivos da cadeia de boot depende da Block Device
+            // AHCI já comprovada. Não tocar no MMIO NVMe aqui também evita que a
+            // enumeração PCI altere qual controlador recebe STEP=a.
+            if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }
 
             STORAGE_CANDIDATE.kind = kind;
             STORAGE_CANDIDATE.pci_index = index;
@@ -386,23 +393,22 @@ pub fn storage_discovery_scan() -> u32 {
                 STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address;
             }
             if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
-            // Pre-cutover discovery remains strictly read-only. The real MMIO/reset/DMA
-            // driver path is entered only after the active page tables are installed.
-            if !active_page_tables_is_ready() { return kind; }
-            if kind == STORAGE_CONTROLLER_AHCI {
-                if !storage_reset_ahci_after_probe() { return STORAGE_CONTROLLER_NONE; }
-                if !storage_prepare_ahci_dma_after_reset() { return STORAGE_CONTROLLER_NONE; }
-                if !storage_identify_ahci_after_dma() { return STORAGE_CONTROLLER_NONE; }
-                if !storage_read_ahci_after_identify() { return STORAGE_CONTROLLER_NONE; }
-                if !ahci_write_probe_sector1(STORAGE_CANDIDATE.abar_or_mmio_base) ||
-                   !ahci_write_is_ready() { return STORAGE_CONTROLLER_NONE; }
-                if !storage_register_ahci_block_device() { return STORAGE_CONTROLLER_NONE; }
-                if !storage_prove_generic_block_io() {
-                    block_device_reset_registry();
-                    return STORAGE_CONTROLLER_NONE;
-                }
+            // Pre-cutover discovery permanece estritamente read-only e pode
+            // relatar AHCI ou NVMe. A posse real do boot target só ocorre depois.
+            if !post_cutover { return kind; }
+
+            if !storage_reset_ahci_after_probe() { return STORAGE_CONTROLLER_NONE; }
+            if !storage_prepare_ahci_dma_after_reset() { return STORAGE_CONTROLLER_NONE; }
+            if !storage_identify_ahci_after_dma() { return STORAGE_CONTROLLER_NONE; }
+            if !storage_read_ahci_after_identify() { return STORAGE_CONTROLLER_NONE; }
+            if !ahci_write_probe_sector1(STORAGE_CANDIDATE.abar_or_mmio_base) ||
+               !ahci_write_is_ready() { return STORAGE_CONTROLLER_NONE; }
+            if !storage_register_ahci_block_device() { return STORAGE_CONTROLLER_NONE; }
+            if !storage_prove_generic_block_io() {
+                block_device_reset_registry();
+                return STORAGE_CONTROLLER_NONE;
             }
-            return kind;
+            return STORAGE_CONTROLLER_AHCI;
         }
         return STORAGE_CONTROLLER_NONE;
     }

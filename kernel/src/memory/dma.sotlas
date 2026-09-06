@@ -119,9 +119,15 @@ pub fn dma_alloc(size: u64, alignment: u64) -> DmaBuffer {
     let physical = pmm_alloc_pages_aligned(page_count, alignment);
     if physical == 0 { return dma_invalid_buffer(); }
     let virtual_address = direct_map_virtual_address(physical);
-    if virtual_address == 0 { return dma_invalid_buffer(); }
+    if virtual_address == 0 {
+        pmm_free_pages_lifo(physical, page_count);
+        return dma_invalid_buffer();
+    }
     let allocated_size = page_count * BAKEN_PAGE_SIZE;
-    if (allocated_size / BAKEN_PAGE_SIZE) != page_count { return dma_invalid_buffer(); }
+    if (allocated_size / BAKEN_PAGE_SIZE) != page_count {
+        pmm_free_pages_lifo(physical, page_count);
+        return dma_invalid_buffer();
+    }
     let buffer = DmaBuffer {
         virtual_address: virtual_address as *mut u8,
         physical_address: physical,
@@ -131,7 +137,10 @@ pub fn dma_alloc(size: u64, alignment: u64) -> DmaBuffer {
         fence: 0,
         valid: true
     };
-    if !dma_buffer_valid(&buffer) { return dma_invalid_buffer(); }
+    if !dma_buffer_valid(&buffer) {
+        pmm_free_pages_lifo(physical, page_count);
+        return dma_invalid_buffer();
+    }
     return buffer;
 }
 
@@ -198,18 +207,52 @@ pub fn dma_release(buffer: *mut DmaBuffer) -> bool {
     }
 }
 
-// Physical contiguity comes from PMM. Reject unsupported device masks or
-// boundary crossings rather than truncating a DMA address in a descriptor.
+// Physical contiguity comes from PMM. Address masks and hardware boundaries are
+// applied before the monotonic cursor is advanced, rather than allocating a
+// random high page and rejecting it afterwards.
 @system
 pub fn dma_alloc_for_device(size: u64, alignment: u64, max_address: u64, boundary: u64) -> DmaBuffer {
-    if max_address == 0 || (boundary != 0 && (boundary & (boundary - 1)) != 0) { return dma_invalid_buffer(); }
-    let mut buffer = dma_alloc(size, alignment);
-    if !dma_buffer_cpu_owned(&buffer) { return dma_invalid_buffer(); }
-    let last = buffer.physical_address + buffer.size - 1;
-    let mut fits = last >= buffer.physical_address && last <= max_address;
-    if boundary != 0 && buffer.physical_address / boundary != last / boundary { fits = false; }
-    if !fits {
-        dma_release(&mut buffer);
+    if size == 0 || !dma_alignment_valid(alignment) || max_address == 0 {
+        return dma_invalid_buffer();
+    }
+    if boundary != 0 && ((boundary & (boundary - 1)) != 0 || boundary < BAKEN_PAGE_SIZE) {
+        return dma_invalid_buffer();
+    }
+    if !pmm_inventory_is_valid() || !dma_allocator_available() { return dma_invalid_buffer(); }
+
+    let rounded = size + BAKEN_PAGE_SIZE - 1;
+    if rounded < size { return dma_invalid_buffer(); }
+    let page_count = rounded / BAKEN_PAGE_SIZE;
+    if page_count == 0 { return dma_invalid_buffer(); }
+    let allocated_size = page_count * BAKEN_PAGE_SIZE;
+    if (allocated_size / BAKEN_PAGE_SIZE) != page_count { return dma_invalid_buffer(); }
+
+    let physical = pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary);
+    if physical == 0 { return dma_invalid_buffer(); }
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 {
+        pmm_free_pages_lifo(physical, page_count);
+        return dma_invalid_buffer();
+    }
+
+    let last = physical + allocated_size - 1;
+    if last < physical || last > max_address ||
+       (boundary != 0 && physical / boundary != last / boundary) {
+        pmm_free_pages_lifo(physical, page_count);
+        return dma_invalid_buffer();
+    }
+
+    let buffer = DmaBuffer {
+        virtual_address: virtual_address as *mut u8,
+        physical_address: physical,
+        size: allocated_size,
+        alignment: alignment,
+        owner: DMA_OWNER_CPU,
+        fence: 0,
+        valid: true
+    };
+    if !dma_buffer_valid(&buffer) {
+        pmm_free_pages_lifo(physical, page_count);
         return dma_invalid_buffer();
     }
     return buffer;
