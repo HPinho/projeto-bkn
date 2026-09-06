@@ -377,6 +377,7 @@ jobs:
               exit 1
             fi
           done
+          grep -q "BAKEN:BARE_METAL_READY" build/qemu-serial.log || { echo "::error::Gate final bare-metal ausente"; exit 1; }
 
       - name: Upload QEMU boot diagnostics
         if: always()

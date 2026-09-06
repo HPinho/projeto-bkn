@@ -130,14 +130,19 @@ class FoundationZeroUefiPostCutoverGateTests(unittest.TestCase):
         nvme = entry.index("foundation_nvme_probe()")
         pat = entry.index("active_framebuffer_write_combining(", nvme)
         terminal = entry.index("x86_serial_write_stage_marker('J' as u8)", pat)
+        final_gate = entry.index("x86_serial_write_bare_metal_ready_marker()", terminal)
+        runtime = entry.index("baken_native_kernel_run(", final_gate)
         self.assertLess(nvme, pat)
         self.assertLess(pat, terminal)
+        self.assertLess(terminal, final_gate)
+        self.assertLess(final_gate, runtime)
 
     def test_qemu_fixture_verifier_requires_terminal_post_cutover_proof(self):
         text = FIXTURE.read_text(encoding="utf-8")
         self.assertIn("'BAKEN:STEP=)'", text)
         self.assertIn("'BAKEN:STEP=%'", text)
         self.assertIn("'BAKEN:STEP=J'", text)
+        self.assertIn("'BAKEN:BARE_METAL_READY'", text)
 
 
 if __name__ == "__main__":

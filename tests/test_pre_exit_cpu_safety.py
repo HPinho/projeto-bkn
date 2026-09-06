@@ -12,7 +12,7 @@ CPU = ROOT / "kernel" / "src" / "arch" / "x86_64" / "cpu.sotlas"
 class PreExitCpuSafetyTests(unittest.TestCase):
     def test_kernel_entry_does_not_activate_descriptor_tables_cr3_or_stack_yet(self):
         text = MAIN.read_text(encoding="utf-8")
-        body = text.split("pub fn baken_kernel_main", 1)[1]
+        body = text
         for token in (
             "x86_lgdt_raw(", "x86_lidt_raw(", "x86_ltr_raw(",
             "x86_gdt_activate_segments_raw(", "x86_lidt_table_raw(",

@@ -53,8 +53,7 @@ class CutoverPrepareTests(unittest.TestCase):
 
     def test_hybrid_main_only_registers_prepare_module(self):
         self.assertIn("import kernel::memory::cutover_prepare::*;", self.main)
-        body = self.main.split("pub fn baken_kernel_main", 1)[1]
-        self.assertNotIn("cutover_prepare(", body)
+        self.assertNotIn("pub fn baken_kernel_main", self.main)
 
 
 if __name__ == "__main__":

@@ -35,9 +35,7 @@ class MmuActivateTests(unittest.TestCase):
 
     def test_hybrid_kernel_only_imports_activation_mechanism(self):
         self.assertIn("import kernel::memory::mmu_activate::*;", self.main)
-        body = self.main.split("pub fn baken_kernel_main", 1)[1]
-        self.assertNotIn("x86_mmu_activate_root(", body)
-        self.assertNotIn("x86_write_cr3_raw(", body)
+        self.assertNotIn("pub fn baken_kernel_main", self.main)
 
 
 if __name__ == "__main__":

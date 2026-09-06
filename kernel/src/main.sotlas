@@ -1,12 +1,11 @@
 // Baken OS - entrada canônica do kernel modular em Sotlas (@system).
 // O frontend reduz o grafo Sotlas para objetos independentes; nenhum módulo auxiliar
-// deve declarar outra função baken_kernel_main.
+// deve declarar outra entrada exportada.
 
 module kernel::main;
 
 import kernel::graphics_engine::*;
 import kernel::desktop_compositor::*;
-import kernel::baken_runtime::*;
 import kernel::baken_native_runtime::*;
 import kernel::sotlas_graphics::*;
 import kernel::sotlas_ui::*;
@@ -75,140 +74,6 @@ import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::exceptions::*;
 import kernel::arch::x86_64::post_cutover::*;
 
-pub const BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID: u64 = 8;
-pub const BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID: u64 = 16;
-pub const BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID: u64 = 32;
-
-// Os quatro campos reserved_legacy_* preservam os offsets 48..79 do ABI v2,
-// mas não carregam mais ponteiros ou qualquer semântica de firmware UEFI.
-pub struct BakenBootInfo {
-    pub framebuffer_base: *mut u32;
-    pub framebuffer_size: usize;
-    pub screen_width: u32;
-    pub screen_height: u32;
-    pub pixels_per_scanline: u32;
-    pub memory_map_base: *const u8;
-    pub memory_map_size: usize;
-    pub reserved_legacy_0: u64;
-    pub reserved_legacy_1: u64;
-    pub reserved_legacy_2: u64;
-    pub reserved_legacy_3: u64;
-
-    pub version: u32;
-    pub struct_size: u32;
-    pub flags: u64;
-    pub memory_descriptor_size: u64;
-    pub memory_descriptor_version: u32;
-    pub pixel_format: u32;
-    pub acpi_rsdp: *const u8;
-
-    pub page_table_arena_physical_base: u64;
-    pub page_table_arena_virtual_base: *mut u8;
-    pub page_table_arena_page_count: u64;
-
-    pub loaded_image_physical_base: u64;
-    pub loaded_image_virtual_base: *mut u8;
-    pub loaded_image_size: u64;
-
-    pub transition_stack_physical_base: u64;
-    pub transition_stack_virtual_base: *mut u8;
-    pub transition_stack_page_count: u64;
-}
-
-@system
-pub fn baken_bootinfo_v2_valid(boot_info: *const BakenBootInfo) -> bool {
-    if (boot_info == (null as *const BakenBootInfo)) { return false; }
-    if (boot_info.version != 2) { return false; }
-    if (boot_info.struct_size < 120) { return false; }
-    if (boot_info.framebuffer_base == (null as *mut u32)) { return false; }
-    if (boot_info.screen_width == 0 || boot_info.screen_height == 0) { return false; }
-    if (boot_info.pixels_per_scanline < boot_info.screen_width) { return false; }
-
-    if (boot_info.flags & BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID) != 0 {
-        if boot_info.struct_size < 144 { return false; }
-        if boot_info.page_table_arena_physical_base == 0 { return false; }
-        if boot_info.page_table_arena_virtual_base == (null as *mut u8) { return false; }
-        if boot_info.page_table_arena_page_count == 0 { return false; }
-        if (boot_info.page_table_arena_physical_base % X86_PAGE_SIZE) != 0 { return false; }
-        if ((boot_info.page_table_arena_virtual_base as usize) % (X86_PAGE_SIZE as usize)) != 0 {
-            return false;
-        }
-    }
-
-    if (boot_info.flags & BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID) != 0 {
-        if boot_info.struct_size < 192 { return false; }
-        if boot_info.loaded_image_physical_base == 0 || boot_info.loaded_image_size == 0 { return false; }
-        if boot_info.loaded_image_virtual_base == (null as *mut u8) { return false; }
-    }
-
-    if (boot_info.flags & BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID) != 0 {
-        if boot_info.struct_size < 192 { return false; }
-        if boot_info.transition_stack_physical_base == 0 { return false; }
-        if boot_info.transition_stack_virtual_base == (null as *mut u8) { return false; }
-        if boot_info.transition_stack_page_count == 0 { return false; }
-        if (boot_info.transition_stack_physical_base % X86_PAGE_SIZE) != 0 { return false; }
-        if ((boot_info.transition_stack_virtual_base as usize) % (X86_PAGE_SIZE as usize)) != 0 {
-            return false;
-        }
-    }
-    return true;
-}
-
-@system
-@export
-pub fn baken_kernel_main(boot_info: *const BakenBootInfo) -> ! {
-    if (!baken_bootinfo_v2_valid(boot_info)) {
-        loop {}
-    }
-
-    exception_state_reset();
-    tss_prepare_default_stacks();
-    gdt_prepare();
-    gdt_set_tss_descriptor(tss_base(), tss_limit());
-    if !idt_prepare_exceptions() {
-        loop {}
-    }
-
-    if ((boot_info.flags & 2) != 0 &&
-        boot_info.memory_map_base != (null as *const u8) &&
-        boot_info.memory_descriptor_size >= 40) {
-        pmm_inventory_init(
-            boot_info.memory_map_base,
-            boot_info.memory_map_size,
-            boot_info.memory_descriptor_size as usize
-        );
-    }
-
-    // Arena, imagem carregada e stack própria podem estar presentes no handoff,
-    // mas continuam apenas como metadados durante a rota híbrida. Os mappings de
-    // transição NÃO são executados enquanto Boot Services ainda for necessário.
-    pmm_allocator_is_active();
-    x86_page_aligned(X86_PAGE_SIZE);
-    x86_pat_index_valid(0);
-    vmm_is_active();
-    cutover_plan_ready(cutover_plan_blocked_hybrid());
-    dma_allocator_available();
-
-    if boot_info.acpi_rsdp != (null as *const u8) {
-        if acpi_init(boot_info.acpi_rsdp) {
-            madt_init();
-            mcfg_init();
-            hpet_init();
-            fadt_pm_timer_init();
-        }
-    }
-
-    pci_scan_all();
-    xhci_discovery_scan();
-
-    display_init(
-        boot_info.framebuffer_base,
-        boot_info.screen_width,
-        boot_info.screen_height,
-        boot_info.pixels_per_scanline
-    );
-    baken_runtime_init_assets();
-    desktop_compositor_init(boot_info.screen_width, boot_info.screen_height);
-    baken_runtime_run(boot_info as *const void, boot_info.screen_width, boot_info.screen_height);
-    loop {}
-}
+// O bootstrap liga esta raiz ao export único sotlas_x86_post_cutover_entry.
+// Não há uma segunda entrada híbrida: o runtime gráfico é alcançado somente
+// depois de BAKEN:BARE_METAL_READY na continuação pós-ExitBootServices.

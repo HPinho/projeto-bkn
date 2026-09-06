@@ -191,9 +191,8 @@ pub fn display_driver_present_frame(backbuffer: *const u32,
 
 @system
 pub fn display_driver_wait_vsync() -> void {
-    // Ponte temporaria: o time subsystem nativo substituira este pacing UEFI.
-    let start = baken_rdtsc();
-    baken_efi_frame_wait(start);
+    // A apresentação apenas publica o frame. O runtime é o único dono do
+    // pacing; esperar também aqui reduzia a animação efetiva para ~30 FPS.
 }
 
 @system

@@ -40,8 +40,7 @@ class TransitionImageWxTests(unittest.TestCase):
 
     def test_hybrid_main_registers_but_never_calls_mapper(self):
         self.assertIn("import kernel::memory::transition_image_wx::*;", self.main)
-        body = self.main.split("pub fn baken_kernel_main", 1)[1]
-        self.assertNotIn("transition_image_map_wx(", body)
+        self.assertNotIn("pub fn baken_kernel_main", self.main)
 
 
 if __name__ == "__main__":

@@ -851,19 +851,11 @@ BUILTIN_FUNCTIONS: dict[str, Function] = {
     "__cli": Function("__cli", [], Type("void"), [], public=True, attributes=["@system"]),
     "__sti": Function("__sti", [], Type("void"), [], public=True, attributes=["@system"]),
     "__hlt": Function("__hlt", [], Type("void"), [], public=True, attributes=["@system"]),
-    "baken_runtime_init_assets": Function("baken_runtime_init_assets", [], Type("void"), [], public=True, attributes=["@system"]),
-    "baken_runtime_run": Function("baken_runtime_run", [("boot_info", Type("void", pointer=True)), ("width", Type("u32")), ("height", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
-    "baken_efi_init": Function("baken_efi_init", [("boot_info", Type("void", pointer=True))], Type("void"), [], public=True, attributes=["@system"]),
-    "baken_efi_poll_key": Function("baken_efi_poll_key", [("out_scan", Type("u16", pointer=True)), ("out_uni", Type("u16", pointer=True))], Type("u8"), [], public=True, attributes=["@system"]),
-    "baken_efi_poll_mouse_rel": Function("baken_efi_poll_mouse_rel", [("out_dx", Type("i32", pointer=True)), ("out_dy", Type("i32", pointer=True)), ("out_btn", Type("u8", pointer=True))], Type("u8"), [], public=True, attributes=["@system"]),
-    "baken_efi_poll_mouse_abs": Function("baken_efi_poll_mouse_abs", [("width", Type("u32")), ("height", Type("u32")), ("out_x", Type("i32", pointer=True)), ("out_y", Type("i32", pointer=True)), ("out_btn", Type("u8", pointer=True))], Type("u8"), [], public=True, attributes=["@system"]),
     "baken_fast_memcpy": Function("baken_fast_memcpy", [("dst", Type("void", pointer=True)), ("src", Type("void", pointer=True)), ("n", Type("usize"))], Type("void"), [], public=True, attributes=["@system"]),
     "baken_fast_fill_rect": Function("baken_fast_fill_rect", [("fb", Type("u32", pointer=True)), ("pitch", Type("u32")), ("x", Type("u32")), ("y", Type("u32")), ("w", Type("u32")), ("h", Type("u32")), ("color", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
     "baken_rdtsc": Function("baken_rdtsc", [], Type("u64"), [], public=True, attributes=["@system"]),
     "baken_bind_all_assets": Function("baken_bind_all_assets", [], Type("void"), [], public=True, attributes=["@system"]),
     "baken_serial_print": Function("baken_serial_print", [("s", Type("u8", pointer=True))], Type("void"), [], public=True, attributes=["@system"]),
-    "baken_efi_read_tsc": Function("baken_efi_read_tsc", [], Type("u64"), [], public=True, attributes=["@system"]),
-    "baken_efi_frame_wait": Function("baken_efi_frame_wait", [("frame_start", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
     "baken_get_font_advances": Function("baken_get_font_advances", [("idx", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
     "baken_get_font_alpha": Function("baken_get_font_alpha", [("idx", Type("u32"))], Type("u8", pointer=True), [], public=True, attributes=["@system"]),
     "baken_get_font_width": Function("baken_get_font_width", [("idx", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
@@ -1146,15 +1138,6 @@ PREAMBLE = """/* Gerado pelo frontend Sotlas Bootstrap. */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-
-extern void baken_runtime_init_assets(void);
-extern void baken_runtime_run(const void *boot_info, uint32_t width, uint32_t height);
-extern void baken_efi_init(const void *boot_info);
-extern uint8_t baken_efi_poll_key(uint16_t *out_scan, uint16_t *out_uni);
-extern uint8_t baken_efi_poll_mouse_rel(int32_t *out_dx, int32_t *out_dy, uint8_t *out_btn);
-extern uint8_t baken_efi_poll_mouse_abs(uint32_t width, uint32_t height, int32_t *out_x, int32_t *out_y, uint8_t *out_btn);
-extern uint64_t baken_efi_read_tsc(void);
-extern void baken_efi_frame_wait(uint64_t frame_start);
 
 static inline void __outb(uint16_t port, uint8_t val) {
 #if defined(__x86_64__) || defined(__i386__)

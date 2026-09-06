@@ -96,7 +96,8 @@ def verify(path, serial):
     expected = zlib.crc32(PAYLOAD) & 0xFFFFFFFF
     for marker in (f'BAKEN:HEX=+:{expected:08X}', 'BAKEN:HEX==:00000514',
                    'BAKEN:STEP=!', 'BAKEN:STEP=&', 'BAKEN:STEP=(', 'BAKEN:STEP=+',
-                   'BAKEN:STEP=)', 'BAKEN:STEP=%', 'BAKEN:STEP=J'):
+                   'BAKEN:STEP=)', 'BAKEN:STEP=%', 'BAKEN:STEP=J',
+                   'BAKEN:BARE_METAL_READY'):
         if marker not in log:
             raise ValueError(f'Missing foundation proof: {marker}')
     with Path(path).open('rb') as image:

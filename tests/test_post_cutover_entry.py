@@ -19,11 +19,7 @@ class PostCutoverEntryTests(unittest.TestCase):
         main = MAIN.read_text(encoding="utf-8")
         self.assertIn("@export\npub fn sotlas_x86_post_cutover_entry", text)
         self.assertIn("import kernel::arch::x86_64::post_cutover::*;", main)
-        main_body = main.split("pub fn baken_kernel_main", 1)[1]
-        self.assertNotIn("sotlas_x86_post_cutover_entry(", main_body)
-        self.assertNotIn("post_cutover_activate_cpu(", main_body)
-        self.assertNotIn("post_cutover_activate_pmm(", main_body)
-        self.assertNotIn("post_cutover_activate_vmm(", main_body)
+        self.assertNotIn("pub fn baken_kernel_main", main)
 
     def test_handoff_pointers_are_translated_through_direct_map(self):
         text = POST.read_text(encoding="utf-8")

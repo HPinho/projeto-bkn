@@ -82,7 +82,7 @@ def run(args):
                 while time.monotonic() < deadline:
                     command({'execute': 'human-monitor-command', 'arguments': {'command-line': 'sendkey a'}})
                     text = serial.read_text(errors='replace') if serial.exists() else ''
-                    if 'BAKEN:STEP=J' in text:
+                    if 'BAKEN:BARE_METAL_READY' in text:
                         break
                     time.sleep(1)
                 else:

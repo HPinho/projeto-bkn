@@ -27,8 +27,8 @@ IMPORT_LINE_RE = re.compile(r"^\s*(?:pub\s+)?import\b.*$", re.MULTILINE)
 # Somente declarações na margem são exports de módulo. Métodos podem repetir
 # nomes em tipos distintos e serão tratados pelo gerador de tipos, não aqui.
 EXPORT_RE = re.compile(r"^pub\s+(?:fn|struct|class|enum)\s+([A-Za-z_][A-Za-z0-9_]*)", re.MULTILINE)
-KERNEL_ENTRY_RE = re.compile(
-    r"^\s*@export\s*\n\s*pub\s+fn\s+baken_kernel_main\s*\(", re.MULTILINE
+POST_CUTOVER_ENTRY_RE = re.compile(
+    r"^\s*@export\s*\n\s*pub\s+fn\s+sotlas_x86_post_cutover_entry\s*\(", re.MULTILINE
 )
 # Módulos Sotlas não podem delegar silenciosamente sua semântica ao
 # pré-processador C. O bootloader e ferramentas de host não declaram `module`
@@ -162,13 +162,15 @@ def analyze(entry):
                 raise SotlasError(f"símbolo exportado duas vezes: {qualified}")
             exports[qualified] = str(units[module]["path"].relative_to(root))
     if entry_module == "kernel::main":
-        entry_exports = [module for module in reachable if KERNEL_ENTRY_RE.search(units[module]["text"])]
-        entry_count = sum(len(KERNEL_ENTRY_RE.findall(units[module]["text"])) for module in reachable)
-        if entry_exports != ["kernel::main"] or entry_count != 1:
+        entry_exports = [module for module in reachable if POST_CUTOVER_ENTRY_RE.search(units[module]["text"])]
+        entry_count = sum(len(POST_CUTOVER_ENTRY_RE.findall(units[module]["text"])) for module in reachable)
+        expected = "kernel::arch::x86_64::post_cutover"
+        if entry_exports != [expected] or entry_count != 1:
             detail = ", ".join(entry_exports) if entry_exports else "nenhum"
             raise SotlasError(
-                "a rota do kernel precisa exportar exatamente um baken_kernel_main em "
-                f"kernel::main; encontrado: {detail} ({entry_count} declarações)"
+                "a rota do kernel precisa exportar exatamente um "
+                "sotlas_x86_post_cutover_entry em kernel::arch::x86_64::post_cutover; "
+                f"encontrado: {detail} ({entry_count} declarações)"
             )
     unreachable = sorted(set(units) - set(reachable))
     imported_modules = {dependency for dependencies in graph.values() for dependency in dependencies}
@@ -507,14 +509,10 @@ def validate_module_interfaces(asts: dict, manifest: dict) -> None:
             "baken_pci_out32", "baken_pci_in32", "baken_pci_out16", "baken_pci_in16", "baken_pci_out8", "baken_pci_in8",
             "__rdmsr", "__wrmsr", "baken_io_wait",
             "__cli", "__sti", "__hlt",
-            "baken_runtime_init_assets", "baken_runtime_run",
-            "baken_efi_init", "baken_efi_poll_key", "baken_efi_poll_mouse_rel", "baken_efi_poll_mouse_abs",
             "baken_fast_memcpy",
             "baken_fast_fill_rect",
             "baken_rdtsc",
             "baken_bind_all_assets",
-            "baken_efi_frame_wait",
-            "baken_efi_read_tsc",
             "baken_get_font_advances",
             "baken_get_font_alpha",
             "baken_get_font_width",
@@ -618,20 +616,6 @@ def emit_c_module(ast: SotlasModuleAst, output: Path, header: Path, unit: dict |
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(c_text, encoding="utf-8")
     return output
-def emit_st_kernel_entry(output: Path) -> Path:
-    """Entrada EFI canônica gerada a partir de kernel::main."""
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text("\n".join((
-        "/* Gerado pelo Sotlas Compile a partir de kernel::main. */",
-        '#include "baken_boot_info.h"',
-        "extern void baken_kernel_main(const BakenBootInfo *boot_info);",
-        "void st_kernel_entry(const BakenBootInfo *boot_info) {",
-        "    baken_kernel_main(boot_info);",
-        "}",
-        "",
-    )), encoding="utf-8")
-    return output
-
 def frontend(entry: Path) -> tuple:
     """Executa todas as fases semânticas antes da geração de objetos."""
     entry = entry.resolve()

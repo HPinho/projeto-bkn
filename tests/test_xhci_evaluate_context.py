@@ -61,9 +61,7 @@ class XhciEvaluateContextTests(unittest.TestCase):
 
     def test_main_registers_stage_without_calling_it_from_hybrid_entry(self):
         self.assertIn("import kernel::drivers::xhci_evaluate_context::*;", self.main)
-        body = self.main.split("pub fn baken_kernel_main", 1)[1]
-        self.assertNotIn("xhci_evaluate_ep0_max_packet(", body)
-        self.assertNotIn("xhci_reconcile_ep0_from_descriptor_probe(", body)
+        self.assertNotIn("pub fn baken_kernel_main", self.main)
 
 
 if __name__ == "__main__":

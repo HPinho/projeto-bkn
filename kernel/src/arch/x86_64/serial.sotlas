@@ -125,3 +125,19 @@ pub fn x86_serial_write_timer_ready_marker() -> bool {
     if !x86_serial_write_byte('\n' as u8) { return false; }
     return true;
 }
+
+// Contrato final do bring-up: emitido somente depois que todos os gates
+// bare-metal obrigatórios passaram e imediatamente antes do runtime nativo.
+@system
+pub fn x86_serial_write_bare_metal_ready_marker() -> bool {
+    let marker: [u8; 23] = [
+        66, 65, 75, 69, 78, 58, 66, 65, 82, 69, 95, 77,
+        69, 84, 65, 76, 95, 82, 69, 65, 68, 89, 10
+    ];
+    let mut index: usize = 0;
+    while index < 23 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}

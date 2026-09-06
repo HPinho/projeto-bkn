@@ -35,6 +35,7 @@ import kernel::drivers::pci_bus::*;
 import kernel::drivers::storage_discovery::*;
 import kernel::storage::gpt::*;
 import kernel::storage::foundation_probe::*;
+import kernel::baken_native_runtime::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_runtime::*;
 import kernel::drivers::xhci_program::*;
@@ -583,5 +584,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !active_framebuffer_write_combining(context.framebuffer_base, context.framebuffer_size) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('%' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
-    loop {}
+    if serial_ready { if !x86_serial_write_bare_metal_ready_marker() { loop {} } }
+    baken_native_kernel_run(context.framebuffer_base as *mut u32,
+                            context.screen_width,
+                            context.screen_height,
+                            context.pixels_per_scanline);
 }

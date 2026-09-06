@@ -51,7 +51,10 @@ class SotlasResolverTests(unittest.TestCase):
 
     def test_kernel_graph_requires_one_exported_entry(self):
         manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
-        self.assertIn("kernel::main::baken_kernel_main", manifest["exports"])
+        self.assertIn(
+            "kernel::arch::x86_64::post_cutover::sotlas_x86_post_cutover_entry",
+            manifest["exports"],
+        )
 
     def test_build_modular_compiles_kernel_objects(self):
         manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
@@ -106,31 +109,13 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertIn("kernel::memory::cutover_plan", ast.imports)
         self.assertIn("kernel::drivers::pci_bus", ast.imports)
 
-        boot_info_struct = next((s for s in ast.structs if s.name == "BakenBootInfo"), None)
-        self.assertIsNotNone(boot_info_struct)
-        self.assertTrue(boot_info_struct.is_pub)
-        self.assertEqual(
-            [field.name for field in boot_info_struct.fields],
-            [
-                "framebuffer_base", "framebuffer_size", "screen_width", "screen_height",
-                "pixels_per_scanline", "memory_map_base", "memory_map_size", "reserved_legacy_0",
-                "reserved_legacy_1", "reserved_legacy_2", "reserved_legacy_3",
-                "version", "struct_size", "flags", "memory_descriptor_size",
-                "memory_descriptor_version", "pixel_format", "acpi_rsdp",
-                "page_table_arena_physical_base", "page_table_arena_virtual_base",
-                "page_table_arena_page_count",
-                "loaded_image_physical_base", "loaded_image_virtual_base", "loaded_image_size",
-                "transition_stack_physical_base", "transition_stack_virtual_base",
-                "transition_stack_page_count",
-            ],
-        )
-
-        main_fn = next((f for f in ast.functions if f.name == "baken_kernel_main"), None)
-        self.assertIsNotNone(main_fn)
-        self.assertTrue(main_fn.is_pub)
-        self.assertIn("@export", main_fn.attributes)
-        self.assertIn("@system", main_fn.attributes)
-        self.assertEqual(main_fn.return_type.name, "!")
+        self.assertEqual(ast.functions, [])
+        post_source = (ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas").read_text(encoding="utf-8")
+        post_ast = sotlas_compile.parse_module_ast(post_source)
+        entry_fn = next(f for f in post_ast.functions if f.name == "sotlas_x86_post_cutover_entry")
+        self.assertIn("@export", entry_fn.attributes)
+        self.assertIn("@system", entry_fn.attributes)
+        self.assertEqual(entry_fn.return_type.name, "!")
         self.assertTrue(sotlas_compile.typecheck_ast(ast))
 
     def test_typechecker_rejects_unknown_signature_type(self):

@@ -31,10 +31,10 @@ typedef struct {
 
     /* Reserva ABI: substitui os antigos SystemTable/Pointer/BlockIO pointers
      * sem alterar offsets do restante do BakenBootInfo v2. */
-    uint64_t reserved_legacy_0;
-    uint64_t reserved_legacy_1;
-    uint64_t reserved_legacy_2;
-    uint64_t reserved_legacy_3;
+    uint64_t reserved_abi_0;
+    uint64_t reserved_abi_1;
+    uint64_t reserved_abi_2;
+    uint64_t reserved_abi_3;
 
     uint32_t version;
     uint32_t struct_size;
@@ -66,10 +66,10 @@ _Static_assert(offsetof(BakenBootInfo, framebuffer_base) == 0, "handoff framebuf
 _Static_assert(offsetof(BakenBootInfo, framebuffer_size) == 8, "handoff tamanho deslocado");
 _Static_assert(offsetof(BakenBootInfo, screen_width) == 16, "handoff largura deslocada");
 _Static_assert(offsetof(BakenBootInfo, memory_map_base) == 32, "handoff mapa deslocado");
-_Static_assert(offsetof(BakenBootInfo, reserved_legacy_0) == 48, "reserva ABI 0 deslocada");
-_Static_assert(offsetof(BakenBootInfo, reserved_legacy_1) == 56, "reserva ABI 1 deslocada");
-_Static_assert(offsetof(BakenBootInfo, reserved_legacy_2) == 64, "reserva ABI 2 deslocada");
-_Static_assert(offsetof(BakenBootInfo, reserved_legacy_3) == 72, "reserva ABI 3 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_abi_0) == 48, "reserva ABI 0 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_abi_1) == 56, "reserva ABI 1 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_abi_2) == 64, "reserva ABI 2 deslocada");
+_Static_assert(offsetof(BakenBootInfo, reserved_abi_3) == 72, "reserva ABI 3 deslocada");
 _Static_assert(offsetof(BakenBootInfo, version) == 80, "extensão v2 deslocada");
 _Static_assert(offsetof(BakenBootInfo, memory_descriptor_size) == 96, "descritor de mapa deslocado");
 _Static_assert(offsetof(BakenBootInfo, acpi_rsdp) == 112, "ACPI RSDP deslocada");

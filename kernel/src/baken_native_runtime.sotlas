@@ -21,6 +21,33 @@ import kernel::arch::x86_64::timer::*;
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
 @system
+pub fn baken_native_bind_assets() -> void {
+    let font_adv = baken_get_font_advances(2);
+    let font_alpha = baken_get_font_alpha(2);
+    if font_alpha != (null as *const u8) {
+        raster_bind_font_atlas(font_adv, font_alpha, baken_get_font_width(2),
+                               baken_get_font_height(2), baken_get_font_px(2));
+    }
+    let title_adv = baken_get_font_advances(5);
+    let title_alpha = baken_get_font_alpha(5);
+    if title_alpha != (null as *const u8) {
+        raster_bind_title_font_atlas(title_adv, title_alpha, baken_get_font_width(5),
+                                     baken_get_font_height(5), baken_get_font_px(5));
+    }
+    for mut index in 0..3 {
+        let alpha = baken_get_cjk_alpha(index as u32);
+        if alpha != (null as *const u8) {
+            raster_bind_cjk_item(index as u32, baken_get_cjk_width(index as u32),
+                                 baken_get_cjk_height(index as u32), alpha);
+        }
+    }
+    let logo = baken_get_logo_pixels();
+    if logo != (null as *const u32) {
+        raster_bind_logo_atlas(logo, baken_get_logo_size());
+    }
+}
+
+@system
 pub fn baken_native_runtime_prepare() -> bool {
     // O PM Timer é a referência nativa preferida. Nenhuma frequência de CPU
     // fixa é inventada se a plataforma não fornecer uma referência utilizável.
@@ -28,9 +55,11 @@ pub fn baken_native_runtime_prepare() -> bool {
         if !x86_timer_calibrate_from_acpi_pm() { return false; }
     }
 
+    // Input PS/2 é opcional: plataformas xHCI não podem impedir o desktop de
+    // iniciar. O backend USB alimentará a mesma fila de eventos quando ativo.
     ps2_keyboard_init();
     ps2_mouse_init();
-    return ps2_keyboard_is_present() || ps2_mouse_is_present();
+    return true;
 }
 
 @system
@@ -173,4 +202,15 @@ pub fn baken_native_runtime_run(width: u32, height: u32) -> ! {
         desktop_compositor_render_frame();
         baken_native_frame_wait(frame_start);
     }
+}
+
+@system
+pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
+                               height: u32, pixels_per_scanline: u32) -> ! {
+    if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
+       pixels_per_scanline < width { loop {} }
+    display_init(framebuffer, width, height, pixels_per_scanline);
+    baken_native_bind_assets();
+    desktop_compositor_init(width, height);
+    baken_native_runtime_run(width, height);
 }
