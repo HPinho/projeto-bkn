@@ -27,7 +27,6 @@ typedef UINTN EFI_STATUS;
 #define EFI_ABORTED EFI_ERROR(21)
 #define UEFI_LOADER_DATA 2U
 #define ALLOCATE_ANY_PAGES 0U
-#define BY_PROTOCOL 2U
 #define PIXEL_BLUE_GREEN_RED_RESERVED_8BIT_PER_COLOR 1U
 #define BAKEN_PAGE_TABLE_ARENA_PAGES 1024ULL
 #define BAKEN_TRANSITION_STACK_PAGES 64ULL
@@ -47,15 +46,6 @@ static EFI_GUID EFI_ACPI_20_TABLE_GUID = {
 };
 static EFI_GUID EFI_ACPI_10_TABLE_GUID = {
     0xeb9d2d30, 0x2d88, 0x11d3, {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}
-};
-static EFI_GUID EFI_SIMPLE_POINTER_PROTOCOL_GUID = {
-    0x31878c87, 0x0b75, 0x11d5, {0x9a, 0x4f, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}
-};
-static EFI_GUID EFI_ABSOLUTE_POINTER_PROTOCOL_GUID = {
-    0x8d59d32b, 0xc655, 0x4ae9, {0x9b, 0x15, 0xf2, 0x59, 0x04, 0x99, 0x2a, 0x43}
-};
-static EFI_GUID EFI_BLOCK_IO_PROTOCOL_GUID = {
-    0x964e5b21, 0x6459, 0x11d2, {0x8e, 0x39, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}
 };
 static EFI_GUID EFI_LOADED_IMAGE_PROTOCOL_GUID = {
     0x5b1b31a1, 0x9562, 0x11d2, {0x8e, 0x3f, 0x00, 0xa0, 0xc9, 0x69, 0x72, 0x3b}
@@ -170,25 +160,7 @@ typedef struct _EFI_LOADED_IMAGE_PROTOCOL {
     EFI_STATUS (*Unload)(EFI_HANDLE ImageHandle);
 } EFI_LOADED_IMAGE_PROTOCOL;
 
-typedef struct {
-    uint32_t MediaId;
-    uint8_t RemovableMedia, MediaPresent, LogicalPartition, ReadOnly, WriteCaching;
-    uint32_t BlockSize, IoAlign;
-    uint64_t LastBlock, LowestAlignedLba;
-    uint32_t LogicalBlocksPerPhysicalBlock, OptimalTransferLengthGranularity;
-} EFI_BLOCK_IO_MEDIA;
-
-typedef struct _EFI_BLOCK_IO_PROTOCOL {
-    uint64_t Revision;
-    EFI_BLOCK_IO_MEDIA *Media;
-    EFI_STATUS (*Reset)(struct _EFI_BLOCK_IO_PROTOCOL*, uint8_t);
-    EFI_STATUS (*ReadBlocks)(struct _EFI_BLOCK_IO_PROTOCOL*, uint32_t, uint64_t, UINTN, void*);
-    EFI_STATUS (*WriteBlocks)(struct _EFI_BLOCK_IO_PROTOCOL*, uint32_t, uint64_t, UINTN, void*);
-    EFI_STATUS (*FlushBlocks)(struct _EFI_BLOCK_IO_PROTOCOL*);
-} EFI_BLOCK_IO_PROTOCOL;
-
 typedef EFI_STATUS (*EFI_HANDLE_PROTOCOL)(EFI_HANDLE, const EFI_GUID*, void**);
-typedef EFI_STATUS (*EFI_LOCATE_HANDLE_BUFFER)(uint32_t, const EFI_GUID*, void*, UINTN*, EFI_HANDLE**);
 typedef EFI_STATUS (*EFI_ALLOCATE_PAGES)(uint32_t, uint32_t, UINTN, EFI_PHYSICAL_ADDRESS*);
 typedef EFI_STATUS (*EFI_GET_MEMORY_MAP)(UINTN*, void*, UINTN*, UINTN*, uint32_t*);
 typedef EFI_STATUS (*EFI_ALLOCATE_POOL)(uint32_t, UINTN, void**);
@@ -330,86 +302,6 @@ static EFI_STATUS capture_memory_map(EFI_BOOT_SERVICES *bs,
     return EFI_SUCCESS;
 }
 
-static EFI_BLOCK_IO_PROTOCOL *find_install_target(EFI_BOOT_SERVICES *bs,
-                                                   EFI_BLOCK_IO_PROTOCOL *boot_media) {
-    if (!bs || !bs->LocateHandleBuffer || !bs->HandleProtocol) return NULL;
-    EFI_HANDLE *handles = NULL;
-    UINTN count = 0;
-    EFI_LOCATE_HANDLE_BUFFER locate = (EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
-    EFI_HANDLE_PROTOCOL hp = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
-    if (locate(BY_PROTOCOL, &EFI_BLOCK_IO_PROTOCOL_GUID, NULL, &count, &handles) != EFI_SUCCESS) return NULL;
-
-    EFI_BLOCK_IO_PROTOCOL *target = NULL;
-    for (UINTN i = 0; i < count; ++i) {
-        EFI_BLOCK_IO_PROTOCOL *candidate = NULL;
-        if (hp(handles[i], &EFI_BLOCK_IO_PROTOCOL_GUID, (void**)&candidate) != EFI_SUCCESS ||
-            !candidate || candidate == boot_media || !candidate->Media) continue;
-        if (candidate->Media->MediaPresent && !candidate->Media->ReadOnly &&
-            !candidate->Media->LogicalPartition && candidate->Media->BlockSize == 512 &&
-            candidate->Media->LastBlock >= 131071ULL) {
-            target = candidate;
-            break;
-        }
-    }
-    if (handles && bs->FreePool) ((EFI_FREE_POOL)bs->FreePool)(handles);
-    return target;
-}
-
-static int is_baken_boot_media(EFI_BLOCK_IO_PROTOCOL *io) {
-    uint8_t sector[512];
-    if (!io || !io->Media || !io->ReadBlocks || io->Media->BlockSize != 512 ||
-        io->Media->LastBlock < 4096 ||
-        io->ReadBlocks(io, io->Media->MediaId, 0, 512, sector) != EFI_SUCCESS) return 0;
-
-    uint32_t start = (uint32_t)sector[454] | ((uint32_t)sector[455] << 8) |
-                     ((uint32_t)sector[456] << 16) | ((uint32_t)sector[457] << 24);
-    if (sector[450] == 0xEF && start != 0 &&
-        io->ReadBlocks(io, io->Media->MediaId, start, 512, sector) == EFI_SUCCESS &&
-        sector[3] == 'B' && sector[4] == 'A' && sector[5] == 'K' && sector[6] == 'E' && sector[7] == 'N') return 1;
-
-    if (io->ReadBlocks(io, io->Media->MediaId, 1, 512, sector) != EFI_SUCCESS ||
-        sector[0] != 'E' || sector[1] != 'F' || sector[2] != 'I' || sector[3] != ' ' ||
-        sector[4] != 'P' || sector[5] != 'A' || sector[6] != 'R' || sector[7] != 'T') return 0;
-
-    static const uint8_t data_guid[16] = {
-        0x58, 0x72, 0x3C, 0x7F, 0x1C, 0x2F, 0x03, 0x4E,
-        0xBF, 0x20, 0x42, 0x41, 0x4B, 0x45, 0x4E, 0x31
-    };
-
-    for (uint64_t lba = 2; lba <= 33 && lba <= io->Media->LastBlock; ++lba) {
-        if (io->ReadBlocks(io, io->Media->MediaId, lba, 512, sector) != EFI_SUCCESS) break;
-        for (UINTN off = 0; off + 16 <= 512; off += 128) {
-            UINTN i = 0;
-            for (; i < 16 && sector[off + i] == data_guid[i]; ++i) {}
-            if (i == 16) return 1;
-        }
-    }
-    return 0;
-}
-
-static EFI_BLOCK_IO_PROTOCOL *find_boot_media(EFI_BOOT_SERVICES *bs, EFI_BLOCK_IO_PROTOCOL *fallback) {
-    if (!bs || !bs->LocateHandleBuffer || !bs->HandleProtocol) return fallback;
-    EFI_HANDLE *handles = NULL;
-    UINTN count = 0;
-    EFI_BLOCK_IO_PROTOCOL *result = fallback;
-    EFI_LOCATE_HANDLE_BUFFER locate = (EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
-    EFI_HANDLE_PROTOCOL hp = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
-
-    if (locate(BY_PROTOCOL, &EFI_BLOCK_IO_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS) {
-        for (UINTN i = 0; i < count; ++i) {
-            EFI_BLOCK_IO_PROTOCOL *candidate = NULL;
-            if (hp(handles[i], &EFI_BLOCK_IO_PROTOCOL_GUID, (void**)&candidate) == EFI_SUCCESS &&
-                candidate && candidate->Media && !candidate->Media->LogicalPartition &&
-                is_baken_boot_media(candidate)) {
-                result = candidate;
-                break;
-            }
-        }
-        if (handles && bs->FreePool) ((EFI_FREE_POOL)bs->FreePool)(handles);
-    }
-    return result;
-}
-
 static void choose_high_density_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
                                          EFI_BOOT_SERVICES *bs) {
     if (!gop || !gop->Mode || !gop->Mode->Info || !gop->QueryMode || !gop->SetMode) return;
@@ -439,40 +331,6 @@ static void choose_high_density_gop_mode(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop,
         if (bs && bs->FreePool) ((EFI_FREE_POOL)bs->FreePool)(info);
     }
     if (found && best_mode != gop->Mode->Mode) (void)gop->SetMode(gop, best_mode);
-}
-
-static void *find_pointer_protocol(EFI_BOOT_SERVICES *bs) {
-    if (!bs) return NULL;
-    void *ptr = NULL;
-    if (bs->LocateProtocol) {
-        if (bs->LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
-        if (bs->LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &ptr) == EFI_SUCCESS && ptr) return ptr;
-    }
-
-    if (bs->LocateHandleBuffer && bs->HandleProtocol) {
-        EFI_HANDLE *handles = NULL;
-        UINTN count = 0;
-        EFI_LOCATE_HANDLE_BUFFER locate = (EFI_LOCATE_HANDLE_BUFFER)bs->LocateHandleBuffer;
-        EFI_HANDLE_PROTOCOL hp = (EFI_HANDLE_PROTOCOL)bs->HandleProtocol;
-
-        if (locate(BY_PROTOCOL, &EFI_SIMPLE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
-            for (UINTN i = 0; i < count; ++i) {
-                if (hp(handles[i], &EFI_SIMPLE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
-            }
-            if (handles && bs->FreePool) ((EFI_FREE_POOL)bs->FreePool)(handles);
-            if (ptr) return ptr;
-        }
-
-        handles = NULL;
-        count = 0;
-        if (locate(BY_PROTOCOL, &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, NULL, &count, &handles) == EFI_SUCCESS && handles) {
-            for (UINTN i = 0; i < count; ++i) {
-                if (hp(handles[i], &EFI_ABSOLUTE_POINTER_PROTOCOL_GUID, &ptr) == EFI_SUCCESS && ptr) break;
-            }
-            if (handles && bs->FreePool) ((EFI_FREE_POOL)bs->FreePool)(handles);
-        }
-    }
-    return ptr;
 }
 
 /* Callback estritamente pré-exit: não recebe EFI_BOOT_SERVICES e não chama
@@ -557,19 +415,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     }
 
     EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = NULL;
-    void *pointer = NULL;
-    void *block_io = NULL;
-    EFI_BLOCK_IO_PROTOCOL *install_target = NULL;
-
     if (bs->LocateProtocol) {
         (void)bs->LocateProtocol(&EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID, NULL, (void**)&gop);
-        (void)bs->LocateProtocol(&EFI_BLOCK_IO_PROTOCOL_GUID, NULL, (void**)&block_io);
-        block_io = find_boot_media(bs, (EFI_BLOCK_IO_PROTOCOL*)block_io);
-        install_target = find_install_target(bs, (EFI_BLOCK_IO_PROTOCOL*)block_io);
     }
-    pointer = find_pointer_protocol(bs);
-    (void)pointer;
-    (void)install_target;
     choose_high_density_gop_mode(gop, bs);
 
     if (!gop || !gop->Mode || !gop->Mode->Info || !gop->Mode->FrameBufferBase ||
@@ -615,8 +463,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         boot_info.flags |= BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID;
     }
 
-    /* O runtime UEFI bridge foi aposentado. Os quatro slots legados do ABI v2
-     * permanecem zerados por compatibilidade de layout até o próximo ABI. */
+    /* Input e armazenamento são responsabilidade dos drivers nativos Baken.
+     * O loader não descobre nem transporta Pointer Protocol ou Block I/O. */
 
     BAKEN_FINAL_MEMORY_MAP final_map = {0};
     BAKEN_CUTOVER_BRIDGE_CONTEXT bridge = {0};
