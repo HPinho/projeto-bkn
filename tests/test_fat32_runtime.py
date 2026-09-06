@@ -29,15 +29,16 @@ class Fat32RuntimeTests(unittest.TestCase):
 
     def test_probe_validates_bpb_signature_and_fat32_geometry(self):
         text = FAT32.read_text(encoding="utf-8")
+        self.assertIn("fn fat32_read_u8(base: *const u8, offset: usize) -> u8", text)
         body = text.split("pub fn fat32_probe_esp_bpb()", 1)[1]
         body = body.split("pub fn fat32_runtime_is_ready", 1)[0]
         for token in (
-            "+ 510",
-            "+ 511",
+            "fat32_read_u8(base, 510) != 0x55",
+            "fat32_read_u8(base, 511) != 0xAA",
             "let bytes_per_sector = fat32_read_u16(base, 11)",
-            "+ 13",
+            "let sectors_per_cluster = fat32_read_u8(base, 13) as u32",
             "let reserved_sectors = fat32_read_u16(base, 14)",
-            "+ 16",
+            "let fat_count = fat32_read_u8(base, 16) as u32",
             "let root_entry_count = fat32_read_u16(base, 17)",
             "let total_sectors16 = fat32_read_u16(base, 19)",
             "let fat_size16 = fat32_read_u16(base, 22)",
@@ -52,6 +53,8 @@ class Fat32RuntimeTests(unittest.TestCase):
             "total_sectors > partition_sectors",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("let sectors_per_cluster = unsafe", body)
+        self.assertNotIn("let fat_count = unsafe", body)
 
     def test_runtime_state_is_published_only_before_fat32_marker(self):
         text = FAT32.read_text(encoding="utf-8")
