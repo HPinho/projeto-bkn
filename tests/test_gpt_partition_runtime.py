@@ -73,16 +73,19 @@ class GptPartitionRuntimeTests(unittest.TestCase):
         for token in (
             'type_guid = bytes.fromhex("28732ac11ff8d211ba4b00a0c93ec93b")',
             'unique_guid = bytes.fromhex("78563412341278569abcdef012345678")',
+            'esp_first = 2048',
+            'esp_last = 100000',
             '"<16s16sQQQ72s", entries, 0',
-            "type_guid, unique_guid, 2048, 4095, 0, name",
+            "type_guid, unique_guid, esp_first, esp_last, 0, name",
             "assert primary_entries[:16] == esp_type_guid",
-            'assert struct.unpack_from("<Q", primary_entries, 32)[0] == 2048',
-            'assert struct.unpack_from("<Q", primary_entries, 40)[0] == 4095',
+            "assert esp_first == 2048",
+            "assert esp_last == 100000",
         ):
             self.assertIn(token, text)
         markers = text.split("for marker in ", 1)[1].split("; do", 1)[0]
         self.assertLess(markers.index("STEP=n"), markers.index("STEP=t"))
-        self.assertLess(markers.index("STEP=t"), markers.index("STEP=m"))
+        self.assertLess(markers.index("STEP=t"), markers.index("STEP=y"))
+        self.assertLess(markers.index("STEP=y"), markers.index("STEP=m"))
         self.assertLess(markers.index("STEP=m"), markers.index("STEP=J"))
 
 
