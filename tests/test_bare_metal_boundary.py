@@ -245,14 +245,29 @@ class BareMetalBoundaryTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIsNone(re.search(pattern, compiler, re.IGNORECASE))
 
-    @unittest.expectedFailure
-    def test_bootloader_has_removed_all_transitional_uefi_bridge_fields(self):
-        """Passará quando a descoberta UEFI transitória também for removida do loader."""
+    def test_bootloader_has_removed_transitional_input_and_storage_protocols(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertNotIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
-        self.assertNotIn("pointer_protocol", boot)
-        self.assertNotIn("block_io_protocol", boot)
-        self.assertNotIn("system_table", boot)
+        for forbidden in (
+            "BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE",
+            "EFI_SIMPLE_POINTER_PROTOCOL_GUID",
+            "EFI_ABSOLUTE_POINTER_PROTOCOL_GUID",
+            "EFI_BLOCK_IO_PROTOCOL_GUID",
+            "EFI_BLOCK_IO_PROTOCOL",
+            "find_pointer_protocol",
+            "find_boot_media",
+            "find_install_target",
+            "is_baken_boot_media",
+            "ReadBlocks",
+            "WriteBlocks",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, boot)
+
+        # Estes continuam sendo usos legítimos de firmware antes do corte.
+        self.assertIn("EFI_SYSTEM_TABLE", boot)
+        self.assertIn("EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID", boot)
+        self.assertIn("EFI_LOADED_IMAGE_PROTOCOL_GUID", boot)
+        self.assertIn("baken_exit_boot_services_final(", boot)
 
 
 if __name__ == "__main__":
