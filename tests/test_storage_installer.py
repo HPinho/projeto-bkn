@@ -62,14 +62,35 @@ class StorageInstallerTests(unittest.TestCase):
         self.assertIn("Pronto para Explorar!", oobe)
         self.assertIn("Abrir meu Baken OS", oobe)
 
-    def test_bootloader_recognizes_installed_gpt_as_boot_media(self):
+    def test_installed_gpt_contract_is_native_and_not_bootloader_owned(self):
         bootloader = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        # O contrato relevante é a assinatura GPT + GUID binário Baken Data;
-        # comentários e espaçamento C não fazem parte da ABI.
-        self.assertIn("sector[0] != 'E'", bootloader)
-        self.assertIn("data_guid", bootloader)
-        self.assertIn("0x58, 0x72, 0x3C, 0x7F", bootloader)
-        self.assertIn("0x42, 0x41, 0x4B, 0x45, 0x4E, 0x31", bootloader)
+        gpt = (ROOT / "kernel/src/storage/gpt.sotlas").read_text(encoding="utf-8")
+
+        # O loader UEFI não deve mais descobrir ou ler armazenamento. A leitura e
+        # validação GPT pertencem ao caminho nativo Block Device pós-cutover.
+        for forbidden in (
+            "EFI_BLOCK_IO_PROTOCOL",
+            "ReadBlocks",
+            "find_boot_media",
+            "find_install_target",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, bootloader)
+
+        for native in (
+            "import kernel::storage::block_device::*;",
+            "pub fn gpt_probe_backup_header() -> bool",
+            "block_device_read_sector(last_lba, sector)",
+            "*sector != ('E' as u8)",
+            "pub fn gpt_probe_backup_entries() -> bool",
+            "gpt_probe_primary_backup_redundancy(",
+            "gpt_partition_is_ready()",
+        ):
+            with self.subTest(native=native):
+                self.assertIn(native, gpt)
+
+        # O formato da imagem instalada continua tendo identidade própria Baken.
+        self.assertEqual(str(BUILDER.BAKEN_DATA_GUID), "7f3c7258-2f1c-4e03-bf20-42414b454e31")
 
 
 if __name__ == "__main__":
