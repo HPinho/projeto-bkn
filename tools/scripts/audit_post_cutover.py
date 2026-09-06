@@ -14,6 +14,7 @@ from tools.sotlas_compile.compiler import parse_module_ast
 
 ROOTS = ('sotlas_x86_post_cutover_entry', 'sotlas_x86_irq_dispatch')
 FORBIDDEN = re.compile(r'\b(?:baken_efi_\w*|uefi_\w*|Efi\w*|BootServices|RuntimeServices|Stall|LocateProtocol|ReadBlocks|WriteBlocks|baken_runtime_run)\b')
+SAFE_DATA_SYMBOLS = {'EfiMemoryDescriptor'}
 CALL = re.compile(r'(?<![\w.])([A-Za-z_]\w*)\s*\(')
 KEYWORDS = {'if', 'while', 'for', 'loop', 'unsafe', 'sizeof', 'return', 'match'}
 
@@ -38,6 +39,11 @@ def audit(root=ROOT):
             body = re.sub(r'//[^\n]*|/\*.*?\*/', '', body, flags=re.S)
             body = re.sub(r'"(?:\\.|[^"\\])*"', '""', body)
             for match in FORBIDDEN.finditer(body):
+                # EfiMemoryDescriptor is a copied boot-map POD record, not a
+                # callable firmware interface. Keep the broad Efi* guardrail
+                # for every other symbol so post-cutover service reentry still fails.
+                if match[0] in SAFE_DATA_SYMBOLS:
+                    continue
                 violations.append(f'{path.relative_to(root)}:{name}: {match[0]}')
             pending.extend(set(CALL.findall(body)) - KEYWORDS)
     return {'roots': list(ROOTS), 'reachable_functions': len(seen - opaque),

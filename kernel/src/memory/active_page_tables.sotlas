@@ -40,15 +40,28 @@ fn active_runtime_address_valid(address: u64) -> bool {
 fn active_runtime_leaf(address: u64) -> PageTablePage {
     unsafe {
         let mut page = ACTIVE_PAGE_TABLE_ROOT;
-        let indices: [u16; 3] = [x86_pml4_index(address), x86_pdpt_index(address), x86_pd_index(address)];
-        let mut i: usize = 0;
-        while i < 3 {
-            let entry = page_table_read_entry(page, indices[i]);
-            if !x86_pte_present(entry) || (entry & X86_PTE_HUGE) != 0 { return page_table_page_invalid(); }
-            page = page_table_arena_page_from_physical(&ACTIVE_PAGE_TABLE_ARENA, x86_pte_address(entry));
-            if !page.valid { return page_table_page_invalid(); }
-            i += 1;
+
+        let pml4_entry = page_table_read_entry(page, x86_pml4_index(address));
+        if !x86_pte_present(pml4_entry) || (pml4_entry & X86_PTE_HUGE) != 0 {
+            return page_table_page_invalid();
         }
+        page = page_table_arena_page_from_physical(&ACTIVE_PAGE_TABLE_ARENA, x86_pte_address(pml4_entry));
+        if !page.valid { return page_table_page_invalid(); }
+
+        let pdpt_entry = page_table_read_entry(page, x86_pdpt_index(address));
+        if !x86_pte_present(pdpt_entry) || (pdpt_entry & X86_PTE_HUGE) != 0 {
+            return page_table_page_invalid();
+        }
+        page = page_table_arena_page_from_physical(&ACTIVE_PAGE_TABLE_ARENA, x86_pte_address(pdpt_entry));
+        if !page.valid { return page_table_page_invalid(); }
+
+        let pd_entry = page_table_read_entry(page, x86_pd_index(address));
+        if !x86_pte_present(pd_entry) || (pd_entry & X86_PTE_HUGE) != 0 {
+            return page_table_page_invalid();
+        }
+        page = page_table_arena_page_from_physical(&ACTIVE_PAGE_TABLE_ARENA, x86_pte_address(pd_entry));
+        if !page.valid { return page_table_page_invalid(); }
+
         return page;
     }
 }

@@ -69,7 +69,9 @@ int main(void) {
 '''
         gcc = compiler.find_gcc(ROOT)
         env = dict(os.environ, PATH=str(gcc.parent) + os.pathsep + os.environ.get('PATH', ''))
-        with tempfile.TemporaryDirectory(prefix='fat-chain-', dir=ROOT / 'build') as temp:
+        build_dir = ROOT / 'build'
+        build_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='fat-chain-', dir=build_dir) as temp:
             path = Path(temp)
             c = path / 'chain.c'
             exe = path / ('chain.exe' if os.name == 'nt' else 'chain')
