@@ -65,8 +65,8 @@ class Fat32RootFileContentRuntimeTests(unittest.TestCase):
         text = WORKFLOW.read_text(encoding="utf-8")
         for token in (
             'file_data[0:8] = b"BAKENOS\\n"',
-            "0x1C8927AD",
-            'BAKEN:HEX=_:1C8927AD',
+            "0x68244BD8",
+            'BAKEN:HEX=_:68244BD8',
             "STEP=l STEP=_ STEP=m STEP=J",
         ):
             self.assertIn(token, text)
