@@ -79,6 +79,8 @@ pub const BAKEN_BOOT_INFO_FLAG_PAGE_TABLE_ARENA_VALID: u64 = 8;
 pub const BAKEN_BOOT_INFO_FLAG_LOADED_IMAGE_VALID: u64 = 16;
 pub const BAKEN_BOOT_INFO_FLAG_TRANSITION_STACK_VALID: u64 = 32;
 
+// Os quatro campos reserved_legacy_* preservam os offsets 48..79 do ABI v2,
+// mas não carregam mais ponteiros ou qualquer semântica de firmware UEFI.
 pub struct BakenBootInfo {
     pub framebuffer_base: *mut u32;
     pub framebuffer_size: usize;
@@ -87,9 +89,6 @@ pub struct BakenBootInfo {
     pub pixels_per_scanline: u32;
     pub memory_map_base: *const u8;
     pub memory_map_size: usize;
-
-    // Reserva ABI v2: os quatro slots antigos de firmware permanecem zerados
-    // e sem semântica de ponte UEFI. Os offsets são mantidos até o próximo ABI.
     pub reserved_legacy_0: u64;
     pub reserved_legacy_1: u64;
     pub reserved_legacy_2: u64;
