@@ -44,7 +44,7 @@ class Fat32RootFileEntryRuntimeTests(unittest.TestCase):
             'struct.pack_into("<H", root_dir, 26, 3)',
             'struct.pack_into("<I", root_dir, 28, 8)',
             'file_data[0:8] = b"BAKENOS\\n"',
-            'STEP=x STEP=o STEP=l STEP=m STEP=J',
+            'STEP=x STEP=o STEP=l STEP=_ STEP=m STEP=J',
         ):
             self.assertIn(token, text)
 
