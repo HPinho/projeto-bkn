@@ -7,7 +7,6 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 KEYBOARD = ROOT / "kernel/src/drivers/ps2_keyboard.sotlas"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
-COMPAT = ROOT / "kernel/src/baken_runtime.sotlas"
 
 
 class Ps2KeyboardTests(unittest.TestCase):
@@ -27,13 +26,14 @@ class Ps2KeyboardTests(unittest.TestCase):
 
     def test_runtime_uses_native_keyboard_without_uefi_fallback(self):
         text = RUNTIME.read_text(encoding="utf-8")
-        compat = COMPAT.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::ps2_keyboard::*;", text)
         self.assertIn("ps2_keyboard_init();", text)
         self.assertIn("while ps2_keyboard_poll(&mut scancode, &mut unicode) == 1", text)
         self.assertNotIn("baken_efi_poll_key", text)
-        self.assertNotIn("baken_efi_poll_key", compat)
-        self.assertNotIn("ReadKeyStroke", compat)
+        self.assertFalse((ROOT / "kernel/src/baken_runtime.sotlas").exists())
+        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        for forbidden in ("ReadKeyStroke", "BootServices", "RuntimeServices", "LocateProtocol"):
+            self.assertNotIn(forbidden, code)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 ACPI = ROOT / "kernel/src/acpi/tables.sotlas"
-MAIN = ROOT / "kernel/src/main.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 
 
 class AcpiTableTests(unittest.TestCase):
@@ -29,24 +29,21 @@ class AcpiTableTests(unittest.TestCase):
         text = ACPI.read_text(encoding="utf-8")
         self.assertIn("acpi_sdt_valid(table, signature)", text)
         self.assertIn("ACPI_MAX_SDT_LENGTH", text)
-        for signature in ("ACPI_SIG_MADT", "ACPI_SIG_MCFG", "ACPI_SIG_HPET", "ACPI_SIG_FADT"):
-            self.assertIn(signature, text)
+        for signature in ("ACPI_SIG_MADT", "ACPI_SIG_MCFG", "ACPI_SIG_HPET", "ACPI_SIG_FADT"): self.assertIn(signature, text)
 
-    def test_main_initializes_acpi_from_bootinfo_before_pci_scan(self):
-        text = MAIN.read_text(encoding="utf-8")
+    def test_post_cutover_initializes_acpi_before_interrupt_controllers_and_pci(self):
+        text = POST.read_text(encoding="utf-8")
         self.assertIn("import kernel::acpi::tables::*;", text)
-        acpi_call = "acpi_init(boot_info.acpi_rsdp)"
-        pci_call = "pci_scan_all();"
-        self.assertIn(acpi_call, text)
-        self.assertIn("if acpi_init(boot_info.acpi_rsdp) {", text)
-        self.assertIn("madt_init();", text)
-        self.assertIn("mcfg_init();", text)
-        self.assertLess(text.index(acpi_call), text.index(pci_call))
-        acpi_block_start = text.index("if acpi_init(boot_info.acpi_rsdp) {")
-        pci_start = text.index(pci_call)
-        acpi_block = text[acpi_block_start:pci_start]
-        self.assertIn("madt_init();", acpi_block)
-        self.assertIn("mcfg_init();", acpi_block)
+        acpi_body = text.split("pub fn post_cutover_activate_acpi", 1)[1].split("pub fn post_cutover_acpi_ready", 1)[0]
+        self.assertIn("acpi_init_post_cutover(rsdp)", acpi_body)
+        self.assertIn("acpi_uses_post_cutover_direct_map()", acpi_body)
+        self.assertIn("madt_init()", acpi_body)
+        entry = text.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !", 1)[1]
+        acpi = entry.index("post_cutover_activate_acpi(context)")
+        controllers = entry.index("post_cutover_activate_interrupt_controllers()", acpi)
+        xhci = entry.index("post_cutover_prepare_xhci_controller()", controllers)
+        self.assertLess(acpi, controllers)
+        self.assertLess(controllers, xhci)
 
     def test_acpi_layer_is_read_only(self):
         text = ACPI.read_text(encoding="utf-8")

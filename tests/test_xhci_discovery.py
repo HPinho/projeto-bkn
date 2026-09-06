@@ -6,7 +6,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 XHCI = ROOT / "kernel/src/drivers/xhci_discovery.sotlas"
-MAIN = ROOT / "kernel/src/main.sotlas"
+CONTROLLER = ROOT / "kernel/src/drivers/xhci_controller.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 
 
 class XhciDiscoveryTests(unittest.TestCase):
@@ -21,14 +22,9 @@ class XhciDiscoveryTests(unittest.TestCase):
 
     def test_discovery_is_read_only_and_does_not_promote_driver(self):
         text = XHCI.read_text(encoding="utf-8")
-        forbidden = (
-            "pci_enable", "pci_write", "baken_pci_out", "__out",
-            "mmio_read", "mmio_write", "volatile", "bus_master",
-            "command_ring", "event_ring", "dma_alloc", "xhci_reset",
-        )
+        forbidden = ("pci_enable", "pci_write", "baken_pci_out", "__out", "mmio_read", "mmio_write", "volatile", "bus_master", "command_ring", "event_ring", "dma_alloc", "xhci_reset")
         body = text.split("module kernel::drivers::xhci_discovery;", 1)[1]
-        for token in forbidden:
-            self.assertNotIn(token, body.lower(), token)
+        for token in forbidden: self.assertNotIn(token, body.lower(), token)
         self.assertIn("command_before_driver", text)
         self.assertIn("let bar0 = &(*dev).bars[0]", text)
         self.assertIn("mmio_usable", text)
@@ -46,12 +42,15 @@ class XhciDiscoveryTests(unittest.TestCase):
         self.assertIn("XHCI_CANDIDATE_COUNT", text)
         self.assertIn("xhci_discovery_candidate(index: u32)", text)
 
-    def test_main_scans_xhci_only_after_pci_inventory(self):
-        text = MAIN.read_text(encoding="utf-8")
-        self.assertIn("import kernel::drivers::xhci_discovery::*;", text)
-        pci_pos = text.index("pci_scan_all();")
-        xhci_pos = text.index("xhci_discovery_scan();")
-        self.assertLess(pci_pos, xhci_pos)
+    def test_post_cutover_scans_pci_before_xhci_controller_and_controller_owns_discovery(self):
+        post = POST.read_text(encoding="utf-8")
+        body = post.split("pub fn post_cutover_prepare_xhci_controller()", 1)[1].split("pub fn post_cutover_prepare_xhci_dma_tables", 1)[0]
+        pci_pos = body.index("pci_scan_all()")
+        controller_pos = body.index("xhci_controller_prepare_first()")
+        self.assertLess(pci_pos, controller_pos)
+        controller = CONTROLLER.read_text(encoding="utf-8")
+        self.assertIn("xhci_discovery_scan()", controller)
+        self.assertIn("xhci_discovery_candidate(0)", controller)
 
 
 if __name__ == "__main__":

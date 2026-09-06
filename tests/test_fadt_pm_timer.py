@@ -6,7 +6,8 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 FADT = ROOT / "kernel/src/acpi/fadt.sotlas"
-MAIN = ROOT / "kernel/src/main.sotlas"
+LAPIC_TIMER = ROOT / "kernel/src/interrupts/lapic_timer.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 
 
 class FadtPmTimerTests(unittest.TestCase):
@@ -39,13 +40,16 @@ class FadtPmTimerTests(unittest.TestCase):
         self.assertNotIn("mmio_write", text)
         self.assertNotIn("volatile", text)
 
-    def test_main_initializes_fadt_only_inside_valid_acpi_block(self):
-        text = MAIN.read_text(encoding="utf-8")
-        acpi_start = text.index("if acpi_init(boot_info.acpi_rsdp) {")
-        pci_start = text.index("pci_scan_all();")
-        block = text[acpi_start:pci_start]
-        self.assertIn("fadt_pm_timer_init();", block)
-        self.assertLess(block.index("hpet_init();"), block.index("fadt_pm_timer_init();"))
+    def test_lapic_timer_consumes_fadt_only_after_post_cutover_acpi(self):
+        timer = LAPIC_TIMER.read_text(encoding="utf-8")
+        self.assertIn("fadt_pm_timer_is_ready()", timer)
+        self.assertIn("fadt_pm_timer_init()", timer)
+        self.assertIn("acpi_pm_timer_port_ready()", timer)
+        post = POST.read_text(encoding="utf-8")
+        entry = post.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !", 1)[1]
+        acpi = entry.index("post_cutover_activate_acpi(context)")
+        timer_stage = entry.index("post_cutover_prepare_timer()", acpi)
+        self.assertLess(acpi, timer_stage)
 
 
 if __name__ == "__main__":
