@@ -24,17 +24,13 @@ class VisualPipelineTests(unittest.TestCase):
         self.assertIn("1000000 / refresh_hz as u64", runtime)
         self.assertNotIn("for (volatile int d = 0; d < 40000; ++d)", runtime)
 
-    def test_runtime_supports_simple_and_absolute_uefi_pointers(self):
+    def test_bootstrap_does_not_discover_uefi_pointer_protocols(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        runtime = (ROOT / "kernel/src/baken_runtime.sotlas").read_text(encoding="utf-8")
-        simple = boot.index("LocateProtocol(&EFI_SIMPLE_POINTER_PROTOCOL_GUID")
-        absolute = boot.index("LocateProtocol(&EFI_ABSOLUTE_POINTER_PROTOCOL_GUID")
-        self.assertLess(simple, absolute)
-        self.assertIn("EfiSimplePointerState", runtime)
-        self.assertIn("EfiAbsolutePointerState", runtime)
-        self.assertIn("LocateProtocol(&G_ABSOLUTE_GUID", runtime)
-        self.assertIn("raw_x > range_x", runtime)
-        self.assertIn("mx == 0 && my == 0", runtime)
+        self.assertNotIn("EFI_SIMPLE_POINTER_PROTOCOL_GUID", boot)
+        self.assertNotIn("EFI_ABSOLUTE_POINTER_PROTOCOL_GUID", boot)
+        self.assertNotIn("find_pointer_protocol", boot)
+        self.assertIn("EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID", boot)
+        self.assertIn("x86_stack_switch_to_post_cutover_raw(", boot)
 
     def test_installer_translation_motion_uses_measured_time(self):
         installer = (ROOT / "kernel/src/baken_installer.sotlas").read_text(encoding="utf-8")
