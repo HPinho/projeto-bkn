@@ -68,6 +68,12 @@ fn fat32_is_power_of_two(v: u32) -> bool {
 }
 
 @system
+fn fat32_read_u8(base: *const u8, offset: usize) -> u8 {
+    if base == (null as *const u8) { return 0; }
+    unsafe { return base[offset]; }
+}
+
+@system
 fn fat32_read_u16(base: *const u8, offset: usize) -> u16 {
     if base == (null as *const u8) { return 0; }
     unsafe {
@@ -216,18 +222,15 @@ pub fn fat32_probe_esp_bpb() -> bool {
 
     let sector = fat32_runtime_sector_buffer();
     if sector == (null as *mut u8) || !block_device_read_sector(first_lba, sector) { return false; }
-    unsafe {
-        let jump = *sector;
-        if jump != 0xEB && jump != 0xE9 { return false; }
-        if *(((sector as usize) + 510) as *const u8) != 0x55 ||
-           *(((sector as usize) + 511) as *const u8) != 0xAA { return false; }
-    }
-
     let base = sector as *const u8;
+    let jump = fat32_read_u8(base, 0);
+    if jump != 0xEB && jump != 0xE9 { return false; }
+    if fat32_read_u8(base, 510) != 0x55 || fat32_read_u8(base, 511) != 0xAA { return false; }
+
     let bytes_per_sector = fat32_read_u16(base, 11) as u32;
-    let sectors_per_cluster = unsafe { *(((sector as usize) + 13) as *const u8) as u32 };
+    let sectors_per_cluster = fat32_read_u8(base, 13) as u32;
     let reserved_sectors = fat32_read_u16(base, 14) as u32;
-    let fat_count = unsafe { *(((sector as usize) + 16) as *const u8) as u32 };
+    let fat_count = fat32_read_u8(base, 16) as u32;
     let root_entry_count = fat32_read_u16(base, 17) as u32;
     let total_sectors16 = fat32_read_u16(base, 19) as u32;
     let fat_size16 = fat32_read_u16(base, 22) as u32;
