@@ -395,10 +395,68 @@ fn fat32_probe_fat_head_runtime(
     return true;
 }
 
+// Prova que o RootCluster publicado pelo BPB aponta para um cluster de diretório
+// realmente legível pela Block Device API. O gate percorre todos os setores do
+// cluster até encontrar o marcador FAT32 de fim de diretório (0x00), aceitando
+// diretório raiz vazio ou entradas anteriores válidas/deletadas/LFN.
+@system
+fn fat32_probe_root_directory_cluster_runtime(
+    last_lba: u64,
+    data_start_lba: u64,
+    sectors_per_cluster: u32,
+    root_cluster: u32,
+    cluster_count: u64
+) -> bool {
+    if !block_device_has_native_target() || block_device_block_size() != FAT32_RUNTIME_BLOCK_SIZE {
+        return false;
+    }
+    if sectors_per_cluster == 0 || root_cluster < 2 ||
+       (root_cluster as u64) > cluster_count + 1 { return false; }
+
+    let cluster_index = (root_cluster as u64) - 2;
+    if cluster_index >= cluster_count { return false; }
+    let cluster_offset = cluster_index * (sectors_per_cluster as u64);
+    let root_lba = data_start_lba + cluster_offset;
+    if root_lba < data_start_lba || root_lba > last_lba { return false; }
+    let root_last_lba = root_lba + (sectors_per_cluster as u64) - 1;
+    if root_last_lba < root_lba || root_last_lba > last_lba { return false; }
+
+    let sector = fat32_runtime_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+
+    let mut sector_index: u32 = 0;
+    let mut saw_directory_end = false;
+    while sector_index < sectors_per_cluster {
+        let lba = root_lba + (sector_index as u64);
+        if lba > root_last_lba || !block_device_read_sector(lba, sector) { return false; }
+        let base = sector as *const u8;
+        let mut offset: usize = 0;
+        while offset < (FAT32_RUNTIME_BLOCK_SIZE as usize) {
+            let first = fat32_read_u8(base, offset);
+            if first == 0 {
+                saw_directory_end = true;
+                break;
+            }
+            if first != 0xE5 {
+                let attributes = fat32_read_u8(base, offset + 11);
+                if (attributes & 0xC0) != 0 { return false; }
+            }
+            offset += 32;
+        }
+        if saw_directory_end { break; }
+        sector_index += 1;
+    }
+    if !saw_directory_end { return false; }
+
+    x86_serial_write_stage_marker('o' as u8);
+    return true;
+}
+
 // Lê o Volume Boot Record no primeiro LBA da ESP real encontrada no GPT. Não
 // confia apenas no texto "FAT32   ": valida BPB, assinatura 0x55AA, faixa da
 // partição e contagem de clusters. O STEP=y é portanto um gate de leitura real.
-// Depois dele, STEP=u prova FSInfo, STEP=z o Backup Boot e STEP=x a FAT espelhada.
+// Depois dele, STEP=u prova FSInfo, STEP=z o Backup Boot, STEP=x a FAT espelhada
+// e STEP=o prova que o RootCluster é realmente legível como diretório FAT32.
 @system
 pub fn fat32_probe_esp_bpb() -> bool {
     unsafe {
@@ -513,6 +571,13 @@ pub fn fat32_probe_esp_bpb() -> bool {
         reserved_sectors,
         fat_count,
         fat_size32,
+        root_cluster,
+        cluster_count
+    ) { return false; }
+    if !fat32_probe_root_directory_cluster_runtime(
+        last_lba,
+        data_start_lba,
+        sectors_per_cluster,
         root_cluster,
         cluster_count
     ) { return false; }
