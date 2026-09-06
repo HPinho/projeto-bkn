@@ -226,8 +226,9 @@ class StorageDiscoveryTests(unittest.TestCase):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("pub fn storage_discovery_scan()", 1)[1]
         probe = body.index("storage_probe_mmio_after_cutover()")
-        early = body.index("if !active_page_tables_is_ready() { return kind; }")
+        early = body.index("if !post_cutover { return kind; }")
         reset = body.index("storage_reset_ahci_after_probe()")
+        self.assertIn("let post_cutover = active_page_tables_is_ready();", body)
         self.assertLess(probe, early)
         self.assertLess(early, reset)
 
