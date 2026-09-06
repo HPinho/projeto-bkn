@@ -26,6 +26,9 @@ pub const FAT32_FSINFO_TRAIL_SIGNATURE: u32 = 0xAA550000;
 pub const FAT32_FSINFO_UNKNOWN: u32 = 0xFFFFFFFF;
 pub const FAT32_ENTRY_MASK: u32 = 0x0FFFFFFF;
 pub const FAT32_EOC_MIN: u32 = 0x0FFFFFF8;
+pub const FAT32_ATTR_LONG_NAME: u8 = 0x0F;
+pub const FAT32_ATTR_VOLUME_ID: u8 = 0x08;
+pub const FAT32_ATTR_DIRECTORY: u8 = 0x10;
 
 static mut FAT32_RUNTIME_READY: bool = false;
 static mut FAT32_RUNTIME_PARTITION_FIRST_LBA: u64 = 0;
@@ -47,6 +50,12 @@ static mut FAT32_RUNTIME_FSINFO_FREE_COUNT: u32 = FAT32_FSINFO_UNKNOWN;
 static mut FAT32_RUNTIME_FSINFO_NEXT_FREE: u32 = FAT32_FSINFO_UNKNOWN;
 static mut FAT32_RUNTIME_BACKUP_BOOT_READY: bool = false;
 static mut FAT32_RUNTIME_BACKUP_BOOT_LBA: u64 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_READY: bool = false;
+static mut FAT32_RUNTIME_ROOT_FILE_ENTRY_LBA: u64 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_ENTRY_OFFSET: u32 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER: u32 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_SIZE: u32 = 0;
+static mut FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES: u32 = 0;
 static mut FAT32_RUNTIME_SECTOR: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -146,9 +155,6 @@ fn fat32_runtime_backup_sector_buffer() -> *mut u8 {
 @system
 fn fat32_choose_sectors_per_cluster(bytes_per_sector: u32, total_sectors: u64) -> u32 {
     let total_bytes = total_sectors * (bytes_per_sector as u64);
-
-    // Escolhemos primeiro o tamanho do cluster em bytes e só depois o
-    // convertemos em setores. Assim 512e e 4Kn produzem geometria equivalente.
     let cluster_bytes: u32 = if total_bytes <= 8589934592 {
         4096
     } else if total_bytes <= 17179869184 {
@@ -190,8 +196,6 @@ pub fn fat32_plan_layout(bytes_per_sector: u32, total_sectors: u64) -> Fat32Layo
     let spc = fat32_choose_sectors_per_cluster(bytes_per_sector, total_sectors);
     if spc == 0 { return out; }
 
-    // Resolve FATSize32 iterativamente, pois o tamanho da FAT reduz a área de
-    // dados e portanto altera o número de clusters que a própria FAT indexa.
     let mut fat_size: u64 = 1;
     for mut pass in 0..16 {
         let overhead = (FAT32_RESERVED_SECTORS as u64) + (FAT32_FAT_COUNT as u64) * fat_size;
@@ -210,8 +214,6 @@ pub fn fat32_plan_layout(bytes_per_sector: u32, total_sectors: u64) -> Fat32Layo
     let data_sectors = total_sectors - data_start;
     let clusters = data_sectors / (spc as u64);
 
-    // FAT32 válido usa 28 bits de cluster. A faixa mínima evita formatar como
-    // FAT32 volumes que deveriam ser FAT12/16.
     if clusters < FAT32_MIN_CLUSTERS || clusters > FAT32_MAX_CLUSTERS { return out; }
     if fat_size > 0xFFFFFFFF { return out; }
 
@@ -224,10 +226,6 @@ pub fn fat32_plan_layout(bytes_per_sector: u32, total_sectors: u64) -> Fat32Layo
     return out;
 }
 
-// Lê o FSInfo indicado pelo BPB já validado. O gate só é publicado se o setor
-// vier do Block Device nativo, estiver dentro da área reservada da ESP e tiver
-// as três assinaturas FAT32 válidas. Free_Count e Nxt_Free podem ser UNKNOWN,
-// ou então precisam caber na geometria de clusters publicada pelo BPB.
 @system
 fn fat32_probe_fsinfo_runtime(
     first_lba: u64,
@@ -277,9 +275,6 @@ fn fat32_probe_fsinfo_runtime(
     return true;
 }
 
-// Lê o Backup Boot Sector indicado pelo BPB e o compara byte a byte com o
-// Volume Boot Record primário relido do mesmo Block Device. O gate só é emitido
-// após provar que a cópia de backup inteira de 512 bytes é idêntica ao primário.
 @system
 fn fat32_probe_backup_boot_runtime(
     first_lba: u64,
@@ -324,10 +319,6 @@ fn fat32_probe_backup_boot_runtime(
     return true;
 }
 
-// Prova o início das duas FATs e o setor que contém a entrada do RootCluster.
-// Ambos são lidos pelo Block Device nativo e comparados byte a byte entre FAT0
-// e FAT1. FAT[0]/FAT[1] precisam conter valores reservados válidos; a entrada
-// do RootCluster precisa estar alocada e apontar para outro cluster válido ou EOC.
 @system
 fn fat32_probe_fat_head_runtime(
     first_lba: u64,
@@ -395,10 +386,6 @@ fn fat32_probe_fat_head_runtime(
     return true;
 }
 
-// Prova que o RootCluster publicado pelo BPB aponta para um cluster de diretório
-// realmente legível pela Block Device API. O gate percorre todos os setores do
-// cluster até encontrar o marcador FAT32 de fim de diretório (0x00), aceitando
-// diretório raiz vazio ou entradas anteriores válidas/deletadas/LFN.
 @system
 fn fat32_probe_root_directory_cluster_runtime(
     last_lba: u64,
@@ -452,11 +439,99 @@ fn fat32_probe_root_directory_cluster_runtime(
     return true;
 }
 
-// Lê o Volume Boot Record no primeiro LBA da ESP real encontrada no GPT. Não
-// confia apenas no texto "FAT32   ": valida BPB, assinatura 0x55AA, faixa da
-// partição e contagem de clusters. O STEP=y é portanto um gate de leitura real.
-// Depois dele, STEP=u prova FSInfo, STEP=z o Backup Boot, STEP=x a FAT espelhada
-// e STEP=o prova que o RootCluster é realmente legível como diretório FAT32.
+// Lê novamente o RootCluster e publica a primeira entrada 8.3 de arquivo regular
+// não vazio. LFN, volume labels, diretórios e entradas deletadas são ignorados.
+// O cluster inicial e o tamanho vêm dos bytes reais da entrada de diretório.
+@system
+fn fat32_probe_first_root_file_entry_runtime(
+    last_lba: u64,
+    data_start_lba: u64,
+    sectors_per_cluster: u32,
+    root_cluster: u32,
+    cluster_count: u64
+) -> bool {
+    unsafe {
+        FAT32_RUNTIME_ROOT_FILE_READY = false;
+        FAT32_RUNTIME_ROOT_FILE_ENTRY_LBA = 0;
+        FAT32_RUNTIME_ROOT_FILE_ENTRY_OFFSET = 0;
+        FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER = 0;
+        FAT32_RUNTIME_ROOT_FILE_SIZE = 0;
+        FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES = 0;
+    }
+
+    if !block_device_has_native_target() || block_device_block_size() != FAT32_RUNTIME_BLOCK_SIZE {
+        return false;
+    }
+    if sectors_per_cluster == 0 || root_cluster < 2 ||
+       (root_cluster as u64) > cluster_count + 1 { return false; }
+
+    let root_index = (root_cluster as u64) - 2;
+    if root_index >= cluster_count { return false; }
+    let root_lba = data_start_lba + root_index * (sectors_per_cluster as u64);
+    if root_lba < data_start_lba || root_lba > last_lba { return false; }
+    let root_last_lba = root_lba + (sectors_per_cluster as u64) - 1;
+    if root_last_lba < root_lba || root_last_lba > last_lba { return false; }
+
+    let sector = fat32_runtime_sector_buffer();
+    if sector == (null as *mut u8) { return false; }
+
+    let mut sector_index: u32 = 0;
+    while sector_index < sectors_per_cluster {
+        let lba = root_lba + (sector_index as u64);
+        if lba > root_last_lba || !block_device_read_sector(lba, sector) { return false; }
+        let base = sector as *const u8;
+        let mut offset: usize = 0;
+        while offset < (FAT32_RUNTIME_BLOCK_SIZE as usize) {
+            let first = fat32_read_u8(base, offset);
+            if first == 0 { return false; }
+            if first != 0xE5 {
+                let attributes = fat32_read_u8(base, offset + 11);
+                if (attributes & 0xC0) != 0 { return false; }
+                if attributes != FAT32_ATTR_LONG_NAME &&
+                   (attributes & (FAT32_ATTR_VOLUME_ID | FAT32_ATTR_DIRECTORY)) == 0 {
+                    let mut name_index: usize = 0;
+                    let mut has_name = false;
+                    while name_index < 11 {
+                        if fat32_read_u8(base, offset + name_index) != 0x20 {
+                            has_name = true;
+                        }
+                        name_index += 1;
+                    }
+                    if !has_name { return false; }
+
+                    let high = fat32_read_u16(base, offset + 20) as u32;
+                    let low = fat32_read_u16(base, offset + 26) as u32;
+                    let first_cluster = (high << 16) | low;
+                    let file_size = fat32_read_u32(base, offset + 28);
+                    if file_size == 0 || first_cluster < 2 ||
+                       (first_cluster as u64) > cluster_count + 1 { return false; }
+
+                    let file_index = (first_cluster as u64) - 2;
+                    if file_index >= cluster_count { return false; }
+                    let file_lba = data_start_lba + file_index * (sectors_per_cluster as u64);
+                    if file_lba < data_start_lba || file_lba > last_lba { return false; }
+                    let file_last_lba = file_lba + (sectors_per_cluster as u64) - 1;
+                    if file_last_lba < file_lba || file_last_lba > last_lba { return false; }
+
+                    unsafe {
+                        FAT32_RUNTIME_ROOT_FILE_ENTRY_LBA = lba;
+                        FAT32_RUNTIME_ROOT_FILE_ENTRY_OFFSET = offset as u32;
+                        FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER = first_cluster;
+                        FAT32_RUNTIME_ROOT_FILE_SIZE = file_size;
+                        FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES = attributes as u32;
+                        FAT32_RUNTIME_ROOT_FILE_READY = true;
+                    }
+                    x86_serial_write_stage_marker('l' as u8);
+                    return true;
+                }
+            }
+            offset += 32;
+        }
+        sector_index += 1;
+    }
+    return false;
+}
+
 @system
 pub fn fat32_probe_esp_bpb() -> bool {
     unsafe {
@@ -480,6 +555,12 @@ pub fn fat32_probe_esp_bpb() -> bool {
         FAT32_RUNTIME_FSINFO_NEXT_FREE = FAT32_FSINFO_UNKNOWN;
         FAT32_RUNTIME_BACKUP_BOOT_READY = false;
         FAT32_RUNTIME_BACKUP_BOOT_LBA = 0;
+        FAT32_RUNTIME_ROOT_FILE_READY = false;
+        FAT32_RUNTIME_ROOT_FILE_ENTRY_LBA = 0;
+        FAT32_RUNTIME_ROOT_FILE_ENTRY_OFFSET = 0;
+        FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER = 0;
+        FAT32_RUNTIME_ROOT_FILE_SIZE = 0;
+        FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES = 0;
     }
 
     if !gpt_partition_is_ready() || !block_device_has_native_target() ||
@@ -581,6 +662,13 @@ pub fn fat32_probe_esp_bpb() -> bool {
         root_cluster,
         cluster_count
     ) { return false; }
+    if !fat32_probe_first_root_file_entry_runtime(
+        last_lba,
+        data_start_lba,
+        sectors_per_cluster,
+        root_cluster,
+        cluster_count
+    ) || !fat32_runtime_root_file_is_ready() { return false; }
     return true;
 }
 
@@ -624,3 +712,15 @@ pub fn fat32_runtime_fsinfo_next_free() -> u32 { unsafe { return FAT32_RUNTIME_F
 pub fn fat32_runtime_backup_boot_is_ready() -> bool { unsafe { return FAT32_RUNTIME_BACKUP_BOOT_READY; } }
 @system
 pub fn fat32_runtime_backup_boot_lba() -> u64 { unsafe { return FAT32_RUNTIME_BACKUP_BOOT_LBA; } }
+@system
+pub fn fat32_runtime_root_file_is_ready() -> bool { unsafe { return FAT32_RUNTIME_ROOT_FILE_READY; } }
+@system
+pub fn fat32_runtime_root_file_entry_lba() -> u64 { unsafe { return FAT32_RUNTIME_ROOT_FILE_ENTRY_LBA; } }
+@system
+pub fn fat32_runtime_root_file_entry_offset() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_ENTRY_OFFSET; } }
+@system
+pub fn fat32_runtime_root_file_first_cluster() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_FIRST_CLUSTER; } }
+@system
+pub fn fat32_runtime_root_file_size() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_SIZE; } }
+@system
+pub fn fat32_runtime_root_file_attributes() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_FILE_ATTRIBUTES; } }
