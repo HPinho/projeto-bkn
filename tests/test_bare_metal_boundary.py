@@ -180,9 +180,18 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertIn("return transition_map_range(arena, root, address, address, size, flags);", transition)
         self.assertNotIn("write_cr3", transition)
 
-    def test_bootloader_executes_real_cutover_after_transitional_discovery(self):
+    def test_bootloader_executes_real_cutover_without_transporting_runtime_bridge(self):
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
-        self.assertIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
+        self.assertNotIn("boot_info.flags = BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
+        self.assertIn("boot_info.flags = 0;", boot)
+        for assignment in (
+            "boot_info.system_table =",
+            "boot_info.pointer_protocol =",
+            "boot_info.block_io_protocol =",
+            "boot_info.install_target_block_io_protocol =",
+        ):
+            with self.subTest(assignment=assignment):
+                self.assertNotIn(assignment, boot)
         self.assertIn("baken_exit_boot_services_final(", boot)
         self.assertIn("baken_prepare_cutover_from_final_map", boot)
         self.assertIn("x86_stack_switch_to_post_cutover_raw(", boot)
@@ -210,7 +219,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
 
     @unittest.expectedFailure
     def test_bootloader_has_removed_all_transitional_uefi_bridge_fields(self):
-        """Passará quando o próprio BootInfo v2 não carregar mais os campos legados."""
+        """Passará quando a descoberta UEFI transitória também for removida do loader."""
         boot = (ROOT / "boot/uefi_bootloader.sotlas").read_text(encoding="utf-8")
         self.assertNotIn("BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE", boot)
         self.assertNotIn("pointer_protocol", boot)

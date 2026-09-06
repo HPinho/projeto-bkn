@@ -583,7 +583,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
     boot_info.version = BAKEN_BOOT_INFO_VERSION;
     boot_info.struct_size = (uint32_t)sizeof(BakenBootInfo);
-    boot_info.flags = BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE;
+    boot_info.flags = 0;
     boot_info.pixel_format = gop->Mode->Info->PixelFormat;
     boot_info.acpi_rsdp = find_acpi_rsdp(SystemTable);
     if (boot_info.acpi_rsdp) boot_info.flags |= BAKEN_BOOT_INFO_FLAG_ACPI_RSDP_VALID;
@@ -613,12 +613,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         boot_info.flags |= BAKEN_BOOT_INFO_FLAG_MEMORY_MAP_VALID;
     }
 
-    /* Estes ponteiros existem somente enquanto Boot Services ainda está vivo.
-     * Nenhum deles é transportado para PostCutoverContext. */
-    boot_info.system_table = SystemTable;
-    boot_info.pointer_protocol = pointer;
-    boot_info.block_io_protocol = block_io;
-    boot_info.install_target_block_io_protocol = install_target;
+    /* O runtime UEFI bridge foi aposentado. Os quatro slots legados do ABI v2
+     * permanecem zerados por compatibilidade de layout até o próximo ABI. */
 
     BAKEN_FINAL_MEMORY_MAP final_map = {0};
     BAKEN_CUTOVER_BRIDGE_CONTEXT bridge = {0};
