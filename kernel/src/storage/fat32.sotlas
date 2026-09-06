@@ -1,16 +1,49 @@
-// Baken OS — planejamento FAT32 nativo para a EFI System Partition.
+// Baken OS — planejamento e leitura FAT32 nativos para a EFI System Partition.
 //
-// Calcula BPB/FAT geometry a partir do tamanho lógico de setor e do volume.
-// Não escreve mídia nesta etapa. O formatter real usará este plano sobre a
-// Block Device API quando o write path AHCI/NVMe estiver ativo.
+// O planner calcula BPB/FAT geometry sem tocar mídia. O runtime lê o Volume
+// Boot Record da ESP publicada pelo parser GPT exclusivamente pela Block Device
+// API nativa e só publica o gate depois de validar a geometria FAT32 real.
 
 module kernel::storage::fat32;
+
+import kernel::arch::x86_64::serial::*;
+import kernel::storage::block_device::*;
+import kernel::storage::gpt_redundancy::*;
+import kernel::memory::dma::*;
 
 pub const FAT32_FAT_COUNT: u32 = 2;
 pub const FAT32_RESERVED_SECTORS: u32 = 32;
 pub const FAT32_ROOT_CLUSTER: u32 = 2;
 pub const FAT32_FSINFO_SECTOR: u32 = 1;
 pub const FAT32_BACKUP_BOOT_SECTOR: u32 = 6;
+pub const FAT32_RUNTIME_BLOCK_SIZE: u32 = 512;
+pub const FAT32_RUNTIME_BUFFER_SIZE: u64 = 4096;
+pub const FAT32_MIN_CLUSTERS: u64 = 65525;
+pub const FAT32_MAX_CLUSTERS: u64 = 0x0FFFFFF5;
+
+static mut FAT32_RUNTIME_READY: bool = false;
+static mut FAT32_RUNTIME_PARTITION_FIRST_LBA: u64 = 0;
+static mut FAT32_RUNTIME_PARTITION_LAST_LBA: u64 = 0;
+static mut FAT32_RUNTIME_TOTAL_SECTORS: u64 = 0;
+static mut FAT32_RUNTIME_BYTES_PER_SECTOR: u32 = 0;
+static mut FAT32_RUNTIME_SECTORS_PER_CLUSTER: u32 = 0;
+static mut FAT32_RUNTIME_RESERVED_SECTORS: u32 = 0;
+static mut FAT32_RUNTIME_FAT_COUNT: u32 = 0;
+static mut FAT32_RUNTIME_FAT_SIZE_SECTORS: u32 = 0;
+static mut FAT32_RUNTIME_DATA_START_LBA: u64 = 0;
+static mut FAT32_RUNTIME_CLUSTER_COUNT: u64 = 0;
+static mut FAT32_RUNTIME_ROOT_CLUSTER: u32 = 0;
+static mut FAT32_RUNTIME_FSINFO_SECTOR: u32 = 0;
+static mut FAT32_RUNTIME_BACKUP_BOOT_SECTOR: u32 = 0;
+static mut FAT32_RUNTIME_SECTOR: DmaBuffer = DmaBuffer {
+    virtual_address: null as *mut u8,
+    physical_address: 0,
+    size: 0,
+    alignment: 0,
+    owner: DMA_OWNER_CPU,
+    fence: 0,
+    valid: false
+};
 
 pub struct Fat32Layout {
     pub valid: bool;
@@ -32,6 +65,40 @@ pub struct Fat32Layout {
 fn fat32_is_power_of_two(v: u32) -> bool {
     if v == 0 { return false; }
     return (v & (v - 1)) == 0;
+}
+
+@system
+fn fat32_read_u16(base: *const u8, offset: usize) -> u16 {
+    if base == (null as *const u8) { return 0; }
+    unsafe {
+        return (base[offset] as u16) | ((base[offset + 1] as u16) << 8);
+    }
+}
+
+@system
+fn fat32_read_u32(base: *const u8, offset: usize) -> u32 {
+    if base == (null as *const u8) { return 0; }
+    unsafe {
+        return (base[offset] as u32) |
+            ((base[offset + 1] as u32) << 8) |
+            ((base[offset + 2] as u32) << 16) |
+            ((base[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn fat32_runtime_sector_buffer() -> *mut u8 {
+    unsafe {
+        if dma_buffer_cpu_owned(&FAT32_RUNTIME_SECTOR) {
+            return FAT32_RUNTIME_SECTOR.virtual_address;
+        }
+    }
+    let buffer = dma_alloc(FAT32_RUNTIME_BUFFER_SIZE, DMA_DEFAULT_ALIGNMENT);
+    if !dma_buffer_cpu_owned(&buffer) { return null as *mut u8; }
+    unsafe {
+        FAT32_RUNTIME_SECTOR = buffer;
+        return FAT32_RUNTIME_SECTOR.virtual_address;
+    }
 }
 
 @system
@@ -103,7 +170,7 @@ pub fn fat32_plan_layout(bytes_per_sector: u32, total_sectors: u64) -> Fat32Layo
 
     // FAT32 válido usa 28 bits de cluster. A faixa mínima evita formatar como
     // FAT32 volumes que deveriam ser FAT12/16.
-    if clusters < 65525 || clusters > 0x0FFFFFF5 { return out; }
+    if clusters < FAT32_MIN_CLUSTERS || clusters > FAT32_MAX_CLUSTERS { return out; }
     if fat_size > 0xFFFFFFFF { return out; }
 
     out.sectors_per_cluster = spc;
@@ -114,3 +181,129 @@ pub fn fat32_plan_layout(bytes_per_sector: u32, total_sectors: u64) -> Fat32Layo
     out.valid = true;
     return out;
 }
+
+// Lê o Volume Boot Record no primeiro LBA da ESP real encontrada no GPT. Não
+// confia apenas no texto "FAT32   ": valida BPB, assinatura 0x55AA, faixa da
+// partição e contagem de clusters. O STEP=y é portanto um gate de leitura real.
+@system
+pub fn fat32_probe_esp_bpb() -> bool {
+    unsafe {
+        FAT32_RUNTIME_READY = false;
+        FAT32_RUNTIME_PARTITION_FIRST_LBA = 0;
+        FAT32_RUNTIME_PARTITION_LAST_LBA = 0;
+        FAT32_RUNTIME_TOTAL_SECTORS = 0;
+        FAT32_RUNTIME_BYTES_PER_SECTOR = 0;
+        FAT32_RUNTIME_SECTORS_PER_CLUSTER = 0;
+        FAT32_RUNTIME_RESERVED_SECTORS = 0;
+        FAT32_RUNTIME_FAT_COUNT = 0;
+        FAT32_RUNTIME_FAT_SIZE_SECTORS = 0;
+        FAT32_RUNTIME_DATA_START_LBA = 0;
+        FAT32_RUNTIME_CLUSTER_COUNT = 0;
+        FAT32_RUNTIME_ROOT_CLUSTER = 0;
+        FAT32_RUNTIME_FSINFO_SECTOR = 0;
+        FAT32_RUNTIME_BACKUP_BOOT_SECTOR = 0;
+    }
+
+    if !gpt_partition_is_ready() || !block_device_has_native_target() ||
+       block_device_block_size() != FAT32_RUNTIME_BLOCK_SIZE { return false; }
+
+    let first_lba = gpt_partition_first_lba();
+    let last_lba = gpt_partition_last_lba();
+    if first_lba == 0 || last_lba < first_lba || last_lba > block_device_last_lba() {
+        return false;
+    }
+    let partition_sectors = last_lba - first_lba + 1;
+
+    let sector = fat32_runtime_sector_buffer();
+    if sector == (null as *mut u8) || !block_device_read_sector(first_lba, sector) { return false; }
+    unsafe {
+        let jump = *sector;
+        if jump != 0xEB && jump != 0xE9 { return false; }
+        if *(((sector as usize) + 510) as *const u8) != 0x55 ||
+           *(((sector as usize) + 511) as *const u8) != 0xAA { return false; }
+    }
+
+    let base = sector as *const u8;
+    let bytes_per_sector = fat32_read_u16(base, 11) as u32;
+    let sectors_per_cluster = unsafe { *(((sector as usize) + 13) as *const u8) as u32 };
+    let reserved_sectors = fat32_read_u16(base, 14) as u32;
+    let fat_count = unsafe { *(((sector as usize) + 16) as *const u8) as u32 };
+    let root_entry_count = fat32_read_u16(base, 17) as u32;
+    let total_sectors16 = fat32_read_u16(base, 19) as u32;
+    let fat_size16 = fat32_read_u16(base, 22) as u32;
+    let total_sectors32 = fat32_read_u32(base, 32);
+    let fat_size32 = fat32_read_u32(base, 36);
+    let fs_version = fat32_read_u16(base, 42) as u32;
+    let root_cluster = fat32_read_u32(base, 44);
+    let fsinfo_sector = fat32_read_u16(base, 48) as u32;
+    let backup_boot_sector = fat32_read_u16(base, 50) as u32;
+
+    if bytes_per_sector != block_device_block_size() ||
+       sectors_per_cluster == 0 || sectors_per_cluster > 128 ||
+       !fat32_is_power_of_two(sectors_per_cluster) || reserved_sectors == 0 ||
+       fat_count == 0 || fat_count > 2 || root_entry_count != 0 ||
+       total_sectors16 != 0 || fat_size16 != 0 || total_sectors32 == 0 ||
+       fat_size32 == 0 || fs_version != 0 || root_cluster < 2 { return false; }
+    if fsinfo_sector == 0 || fsinfo_sector >= reserved_sectors ||
+       backup_boot_sector == 0 || backup_boot_sector >= reserved_sectors { return false; }
+
+    let total_sectors = total_sectors32 as u64;
+    if total_sectors > partition_sectors { return false; }
+    let overhead = (reserved_sectors as u64) + (fat_count as u64) * (fat_size32 as u64);
+    if total_sectors <= overhead { return false; }
+    let data_sectors = total_sectors - overhead;
+    let cluster_count = data_sectors / (sectors_per_cluster as u64);
+    if cluster_count < FAT32_MIN_CLUSTERS || cluster_count > FAT32_MAX_CLUSTERS { return false; }
+    if (root_cluster as u64) > cluster_count + 1 { return false; }
+
+    let data_start_lba = first_lba + overhead;
+    if data_start_lba > last_lba || first_lba + total_sectors - 1 > last_lba { return false; }
+
+    unsafe {
+        FAT32_RUNTIME_PARTITION_FIRST_LBA = first_lba;
+        FAT32_RUNTIME_PARTITION_LAST_LBA = last_lba;
+        FAT32_RUNTIME_TOTAL_SECTORS = total_sectors;
+        FAT32_RUNTIME_BYTES_PER_SECTOR = bytes_per_sector;
+        FAT32_RUNTIME_SECTORS_PER_CLUSTER = sectors_per_cluster;
+        FAT32_RUNTIME_RESERVED_SECTORS = reserved_sectors;
+        FAT32_RUNTIME_FAT_COUNT = fat_count;
+        FAT32_RUNTIME_FAT_SIZE_SECTORS = fat_size32;
+        FAT32_RUNTIME_DATA_START_LBA = data_start_lba;
+        FAT32_RUNTIME_CLUSTER_COUNT = cluster_count;
+        FAT32_RUNTIME_ROOT_CLUSTER = root_cluster;
+        FAT32_RUNTIME_FSINFO_SECTOR = fsinfo_sector;
+        FAT32_RUNTIME_BACKUP_BOOT_SECTOR = backup_boot_sector;
+        FAT32_RUNTIME_READY = true;
+    }
+    x86_serial_write_stage_marker('y' as u8);
+    return true;
+}
+
+@system
+pub fn fat32_runtime_is_ready() -> bool { unsafe { return FAT32_RUNTIME_READY; } }
+@system
+pub fn fat32_runtime_partition_first_lba() -> u64 { unsafe { return FAT32_RUNTIME_PARTITION_FIRST_LBA; } }
+@system
+pub fn fat32_runtime_partition_last_lba() -> u64 { unsafe { return FAT32_RUNTIME_PARTITION_LAST_LBA; } }
+@system
+pub fn fat32_runtime_total_sectors() -> u64 { unsafe { return FAT32_RUNTIME_TOTAL_SECTORS; } }
+@system
+pub fn fat32_runtime_bytes_per_sector() -> u32 { unsafe { return FAT32_RUNTIME_BYTES_PER_SECTOR; } }
+@system
+pub fn fat32_runtime_sectors_per_cluster() -> u32 { unsafe { return FAT32_RUNTIME_SECTORS_PER_CLUSTER; } }
+@system
+pub fn fat32_runtime_reserved_sectors() -> u32 { unsafe { return FAT32_RUNTIME_RESERVED_SECTORS; } }
+@system
+pub fn fat32_runtime_fat_count() -> u32 { unsafe { return FAT32_RUNTIME_FAT_COUNT; } }
+@system
+pub fn fat32_runtime_fat_size_sectors() -> u32 { unsafe { return FAT32_RUNTIME_FAT_SIZE_SECTORS; } }
+@system
+pub fn fat32_runtime_data_start_lba() -> u64 { unsafe { return FAT32_RUNTIME_DATA_START_LBA; } }
+@system
+pub fn fat32_runtime_cluster_count() -> u64 { unsafe { return FAT32_RUNTIME_CLUSTER_COUNT; } }
+@system
+pub fn fat32_runtime_root_cluster() -> u32 { unsafe { return FAT32_RUNTIME_ROOT_CLUSTER; } }
+@system
+pub fn fat32_runtime_fsinfo_sector() -> u32 { unsafe { return FAT32_RUNTIME_FSINFO_SECTOR; } }
+@system
+pub fn fat32_runtime_backup_boot_sector() -> u32 { unsafe { return FAT32_RUNTIME_BACKUP_BOOT_SECTOR; } }
