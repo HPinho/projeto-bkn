@@ -1,0 +1,3 @@
+This fixture intentionally exists to keep the audit work visible to the test suite.
+The runtime storage boot target must be AHCI while the independent NVMe gate is exercised later.
+DMA allocations for constrained devices must apply address-mask and boundary rules before PMM reservation.
