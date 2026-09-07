@@ -139,6 +139,11 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
     );
 }
 
+extern void sotlas_x86_scheduler_idle_entry(void);
+static inline uint64_t __scheduler_idle_entry_address(void) {
+    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_idle_entry;
+}
+
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
 
 __attribute__((naked, used)) static void __sotlas_x86_exception_common(void) {
@@ -239,9 +244,10 @@ static inline uint64_t __exception_stub_address(uint16_t vector) {
 
 /*
  * IRQ externo em CPL0. Cada stub empilha o vetor; o common salva todos os GPRs,
- * chama Sotlas sob a ABI Win64 e restaura o contexto antes de IRETQ.
+ * chama Sotlas sob a ABI Win64 e restaura o frame que o dispatcher selecionar.
+ * Isso permite preempção sem uma segunda pilha de contexto artificial.
  */
-extern void sotlas_x86_irq_dispatch(uint64_t vector);
+extern uint64_t sotlas_x86_irq_dispatch(uint64_t vector, uint64_t frame_address);
 __attribute__((naked, used)) static void __sotlas_x86_irq_common(void) {
     __asm__(
         "pushq %rax\n\t"
@@ -261,10 +267,15 @@ __attribute__((naked, used)) static void __sotlas_x86_irq_common(void) {
         "pushq %r15\n\t"
         "movq %rsp, %r12\n\t"
         "movq 120(%r12), %rcx\n\t"
+        "movq %r12, %rdx\n\t"
         "andq $-16, %rsp\n\t"
         "subq $32, %rsp\n\t"
         "call sotlas_x86_irq_dispatch\n\t"
-        "movq %r12, %rsp\n\t"
+        "testq %rax, %rax\n\t"
+        "jnz 1f\n\t"
+        "movq %r12, %rax\n\t"
+        "1:\n\t"
+        "movq %rax, %rsp\n\t"
         "popq %r15\n\t"
         "popq %r14\n\t"
         "popq %r13\n\t"
@@ -324,6 +335,7 @@ def install(bootstrap) -> None:
         "__read_cr3": Function("__read_cr3", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__write_cr3": Function("__write_cr3", [("value", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__stack_switch_to_post_cutover": Function("__stack_switch_to_post_cutover", [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
         "__pat_install_wc": Function("__pat_install_wc", [], Type("bool"), [], public=True, attributes=["@system"]),
