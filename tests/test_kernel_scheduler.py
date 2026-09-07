@@ -43,15 +43,27 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("GDT_KERNEL_CODE_SELECTOR as u64", text)
         self.assertIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202", text)
 
-    def test_new_thread_entry_reserves_full_win64_home_space(self):
-        text = FRAME.read_text(encoding="utf-8")
-        self.assertIn("X86_KERNEL_THREAD_RETURN_SLOT_BYTES: u64 = 8", text)
-        self.assertIn("X86_KERNEL_THREAD_HOME_SPACE_BYTES: u64 = 32", text)
-        self.assertIn("X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES", text)
-        self.assertIn("let entry_stack = aligned_top - X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES", text)
-        self.assertIn("if (entry_stack & 0x0F) != 8", text)
-        self.assertIn("let synthetic_return = entry_stack as *mut u64", text)
-        self.assertIn("(*synthetic_return) = 0", text)
+    def test_new_thread_entry_uses_native_trampoline_and_explicit_stack_top(self):
+        frame = FRAME.read_text(encoding="utf-8")
+        cpu = CPU.read_text(encoding="utf-8")
+        intrinsics = INTRINSICS.read_text(encoding="utf-8")
+
+        self.assertIn("x86_scheduler_thread_trampoline_address()", frame)
+        self.assertIn("(*frame).r11 = entry_rip", frame)
+        self.assertIn("(*frame).r10 = aligned_top", frame)
+        self.assertIn("(*frame).rip = trampoline_rip", frame)
+        self.assertNotIn("synthetic_return", frame)
+
+        self.assertIn("pub fn x86_scheduler_thread_trampoline_address() -> u64", cpu)
+        self.assertIn("__scheduler_thread_trampoline_address()", cpu)
+
+        trampoline = intrinsics.split("static void __scheduler_thread_trampoline(void)", 1)[1]
+        trampoline = trampoline.split("static inline uint64_t __scheduler_thread_trampoline_address", 1)[0]
+        restore = trampoline.index('"movq %r10, %rsp\\n\\t"')
+        home = trampoline.index('"subq $32, %rsp\\n\\t"')
+        call = trampoline.index('"call *%r11\\n\\t"')
+        self.assertLess(restore, home)
+        self.assertLess(home, call)
 
     def test_irq_backend_can_restore_dispatcher_selected_frame(self):
         text = INTRINSICS.read_text(encoding="utf-8")
