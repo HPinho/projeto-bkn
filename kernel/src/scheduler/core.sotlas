@@ -22,6 +22,7 @@ static mut SCHEDULER_ACTIVE: bool = false;
 static mut SCHEDULER_CURRENT_THREAD_ID: u64 = SCHEDULER_BOOT_THREAD_ID;
 static mut SCHEDULER_SWITCH_COUNT: u64 = 0;
 static mut SCHEDULER_FIRST_SWITCH_MARKED: bool = false;
+static mut SCHEDULER_BOOTSTRAP_PROBE_COMPLETE: bool = false;
 static mut SCHEDULER_BOOT_THREAD: KernelThread = KernelThread {
     id: SCHEDULER_BOOT_THREAD_ID,
     state: KERNEL_THREAD_UNUSED,
@@ -78,6 +79,7 @@ pub fn scheduler_initialize() -> bool {
         SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_BOOT_THREAD_ID;
         SCHEDULER_SWITCH_COUNT = 0;
         SCHEDULER_FIRST_SWITCH_MARKED = false;
+        SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = false;
     }
 
     if !pmm_allocator_is_active() { return false; }
@@ -126,6 +128,11 @@ pub fn scheduler_first_switch_observed() -> bool {
     unsafe { return SCHEDULER_FIRST_SWITCH_MARKED; }
 }
 
+@system
+pub fn scheduler_bootstrap_probe_complete() -> bool {
+    unsafe { return SCHEDULER_BOOTSTRAP_PROBE_COMPLETE; }
+}
+
 // Chamado somente do IRQ de timer com interrupções mascaradas pelo interrupt
 // gate. O retorno é o endereço do frame que __sotlas_x86_irq_common restaurará.
 @system
@@ -135,8 +142,16 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
     unsafe {
         if SCHEDULER_CURRENT_THREAD_ID == SCHEDULER_BOOT_THREAD_ID {
             SCHEDULER_BOOT_THREAD.saved_frame = frame_address;
-            SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_READY;
 
+            // Depois da prova inicial a bootstrap continua executando enquanto
+            // for runnable. A idle thread não deve roubar 50% do tempo de CPU;
+            // ela só será escolhida quando uma futura API bloquear a bootstrap.
+            if SCHEDULER_BOOTSTRAP_PROBE_COMPLETE {
+                SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_RUNNING;
+                return frame_address;
+            }
+
+            SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_READY;
             if SCHEDULER_IDLE_THREAD.state == KERNEL_THREAD_READY &&
                SCHEDULER_IDLE_THREAD.saved_frame != 0 {
                 SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_RUNNING;
@@ -162,6 +177,7 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
                 SCHEDULER_BOOT_THREAD.switch_count += 1;
                 SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_BOOT_THREAD_ID;
                 SCHEDULER_SWITCH_COUNT += 1;
+                SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = true;
                 return SCHEDULER_BOOT_THREAD.saved_frame;
             }
 
@@ -179,7 +195,8 @@ pub fn scheduler_wait_first_round_trip() -> bool {
     let mut spins: u64 = 0;
     while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
         if scheduler_switch_count() >= 2 &&
-           scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
+           scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID &&
+           scheduler_bootstrap_probe_complete() {
             return true;
         }
         x86_cpu_pause();
