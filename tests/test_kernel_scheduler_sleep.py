@@ -58,7 +58,8 @@ class KernelSchedulerSleepTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         for marker in ("BAKEN:SLEEP_BLOCKED", "BAKEN:SLEEP_WAKE", "BAKEN:SLEEP_RESUME"):
             self.assertIn(marker, workflow)
-            self.assertIn(f"grep -Fq '{marker}'", workflow)
+        self.assertIn('grep -Fq "$marker"', workflow)
+        self.assertIn('require_serial_marker "$marker"', workflow)
 
 
 if __name__ == "__main__":

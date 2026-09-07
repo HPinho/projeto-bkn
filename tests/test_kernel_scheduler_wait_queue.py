@@ -90,7 +90,8 @@ class KernelSchedulerWaitQueueTests(unittest.TestCase):
         workflow = NVME_WORKFLOW.read_text(encoding="utf-8")
         for marker in ("BAKEN:WAIT_BLOCKED", "BAKEN:WAIT_WAKE", "BAKEN:WAIT_RESUME"):
             self.assertIn(marker, workflow)
-            self.assertIn(f"grep -Fq '{marker}'", workflow)
+        self.assertIn('grep -Fq "$marker"', workflow)
+        self.assertIn('require_serial_marker "$marker"', workflow)
 
 
 if __name__ == "__main__":

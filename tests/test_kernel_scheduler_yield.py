@@ -57,7 +57,8 @@ class KernelSchedulerYieldTests(unittest.TestCase):
         workflow = NVME_WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("pub fn scheduler_diag_yield_round_trip() -> void", diag)
         self.assertIn("BAKEN:YIELD_ROUND_TRIP", workflow)
-        self.assertIn("grep -Fq 'BAKEN:YIELD_ROUND_TRIP'", workflow)
+        self.assertIn('grep -Fq "$marker"', workflow)
+        self.assertIn('require_serial_marker "$marker"', workflow)
 
 
 if __name__ == "__main__":

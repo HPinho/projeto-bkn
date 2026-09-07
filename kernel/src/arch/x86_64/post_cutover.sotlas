@@ -155,11 +155,20 @@ pub fn post_cutover_cpu_tables_active() -> bool { unsafe { return POST_CUTOVER_C
 @system
 pub fn post_cutover_activate_pmm(context: *const PostCutoverContext) -> bool {
     if !post_cutover_cpu_tables_active() || !post_cutover_context_valid(context) { return false; }
+    x86_serial_write_stage_marker('p' as u8);
     let memory_map = post_cutover_memory_map_virtual(context);
     if memory_map == (null as *const u8) { return false; }
-    if !pmm_inventory_init(memory_map, context.memory_map_size as usize, context.memory_descriptor_size as usize) { return false; }
+    if !pmm_inventory_init(memory_map, context.memory_map_size as usize, context.memory_descriptor_size as usize) {
+        x86_serial_write_hex32_marker('P' as u8, 1);
+        return false;
+    }
+    x86_serial_write_stage_marker('q' as u8);
     if !pmm_allocator_activate_after_exit_boot_services() || !pmm_allocator_is_active() ||
-       !pmm_allocator_bitmap_is_active() { return false; }
+       !pmm_allocator_bitmap_is_active() {
+        x86_serial_write_hex32_marker('P' as u8, pmm_allocator_reuse_self_test_failure_stage());
+        return false;
+    }
+    x86_serial_write_stage_marker('r' as u8);
     unsafe { POST_CUTOVER_PMM_ACTIVE = true; }
     return true;
 }

@@ -259,7 +259,9 @@ class KernelSchedulerTests(unittest.TestCase):
             "BAKEN:STACK_RELEASE",
         ):
             with self.subTest(marker=marker):
-                self.assertIn(f"grep -Fq '{marker}'", text)
+                self.assertIn(marker, text)
+        self.assertIn('grep -Fq "$marker"', text)
+        self.assertIn('require_serial_marker "$marker"', text)
 
     def test_idle_entry_address_is_low_level_backend_helper(self):
         cpu = CPU.read_text(encoding="utf-8")

@@ -54,6 +54,11 @@ static mut PMM_REGION_BITMAPS: [PmmBitmap; PMM_BOOTSTRAP_MAX_REGIONS] = [
 ];
 static mut PMM_BOOTSTRAP_BITMAP_STORAGE: [u8; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES] = [0; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES];
 static mut PMM_REUSE_SELF_TEST_PASSED: bool = false;
+// Código persistente do último ponto alcançado pela auto-prova.  Ele não é
+// necessário ao allocator: é diagnóstico serial para o primeiro boot real.
+// 0=nenhuma falha, 1=início, 2=A, 3=B, 4=free(A), 5=reuso(A),
+// 6=free(reuso), 7=free(B), 8=contabilidade final.
+static mut PMM_REUSE_SELF_TEST_FAILURE_STAGE: u32 = 0;
 
 @system
 pub fn pmm_allocator_is_active() -> bool {
@@ -76,6 +81,11 @@ pub fn pmm_allocator_region_count() -> u64 { unsafe { return PMM_ALLOCATOR.activ
 
 @system
 pub fn pmm_allocator_reuse_self_test_passed() -> bool { unsafe { return PMM_REUSE_SELF_TEST_PASSED; } }
+
+@system
+pub fn pmm_allocator_reuse_self_test_failure_stage() -> u32 {
+    unsafe { return PMM_REUSE_SELF_TEST_FAILURE_STAGE; }
+}
 
 @system
 fn pmm_allocator_mark_pages(base: u64, count: u64, used: bool) -> bool {
@@ -253,6 +263,7 @@ pub fn pmm_allocator_reset_locked() {
         PMM_ALLOCATOR.active_region_count = 0;
         PMM_ALLOCATOR.last_region_index = 0;
         PMM_REUSE_SELF_TEST_PASSED = false;
+        PMM_REUSE_SELF_TEST_FAILURE_STAGE = 0;
         let mut region: u64 = 0;
         while region < PMM_BOOTSTRAP_MAX_REGIONS {
             PMM_REGION_BASES[region] = 0;
@@ -410,18 +421,42 @@ pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool {
 
 @system
 fn pmm_allocator_self_test_reuse() -> bool {
+    unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 1; }
     let before = pmm_allocator_allocated_pages();
     let first = pmm_alloc_pages(2);
-    if first == 0 { return false; }
+    if first == 0 {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 2; }
+        return false;
+    }
     let second = pmm_alloc_pages(2);
-    if second == 0 { return false; }
+    if second == 0 {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 3; }
+        return false;
+    }
     // Liberação fora de ordem: `second` continua vivo enquanto `first` é solto.
-    if !pmm_free_pages(first, 2) { return false; }
+    if !pmm_free_pages(first, 2) {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 4; }
+        return false;
+    }
     let recycled = pmm_alloc_pages(2);
-    if recycled == 0 || recycled != first { return false; }
-    if !pmm_free_pages(recycled, 2) { return false; }
-    if !pmm_free_pages(second, 2) { return false; }
-    return pmm_allocator_allocated_pages() == before;
+    if recycled == 0 || recycled != first {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 5; }
+        return false;
+    }
+    if !pmm_free_pages(recycled, 2) {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 6; }
+        return false;
+    }
+    if !pmm_free_pages(second, 2) {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 7; }
+        return false;
+    }
+    if pmm_allocator_allocated_pages() != before {
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 8; }
+        return false;
+    }
+    unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = 0; }
+    return true;
 }
 
 // Ativação canônica somente depois de ExitBootServices bem-sucedido.
@@ -478,7 +513,11 @@ pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
     // O próprio gate P do boot só pode passar se free fora de ordem e first-fit
     // reutilizável funcionarem sem deixar páginas ocupadas pelo teste.
     if !pmm_allocator_self_test_reuse() {
+        let failure_stage = pmm_allocator_reuse_self_test_failure_stage();
         pmm_allocator_reset_locked();
+        // O reset fecha o allocator, mas não pode apagar a única evidência que
+        // o post-cutover consegue emitir no serial.
+        unsafe { PMM_REUSE_SELF_TEST_FAILURE_STAGE = failure_stage; }
         return false;
     }
     unsafe { PMM_REUSE_SELF_TEST_PASSED = true; }
