@@ -142,14 +142,17 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
 /*
  * Entrada canônica de uma nova kernel thread.
  *
- * IRETQ não é CALL: ele não cria return address nem o home-space da ABI Win64.
- * O frame inicial entrega o entry RIP em R11 e deixa RSP alinhado a 16 bytes.
- * Este trampoline é naked, reserva os 32 bytes de shadow space e faz uma CALL
- * real. Quando thread_exit existir, o retorno da entry será encaminhado a ele;
- * até lá, retornar é uma falha terminal segura.
+ * IRETQ não é CALL e a primeira ativação não deve depender do RSP residual do
+ * frame sintético. O frame entrega R10 = stack_top e R11 = entry RIP. Como o
+ * trampoline é naked, a primeira instrução restaura RSP sem tocar memória;
+ * depois alinhamos, fornecemos os 32 bytes de shadow space da ABI Win64 e
+ * fazemos uma CALL real. Quando thread_exit existir, o retorno será encaminhado
+ * ao scheduler; até lá, retornar continua sendo uma falha terminal segura.
  */
 __attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline(void) {
     __asm__(
+        "movq %r10, %rsp\n\t"
+        "andq $-16, %rsp\n\t"
         "subq $32, %rsp\n\t"
         "call *%r11\n\t"
         "addq $32, %rsp\n\t"
