@@ -215,9 +215,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
 
     // A fundação já deixou o LAPIC timer ativo. Inicializamos o scheduler com
     // IRQs mascaradas, provamos bootstrap -> idle -> bootstrap e então criamos
-    // uma terceira thread CPL0 por meio da API genérica da run queue. Essa
-    // thread recebe stack própria do PMM, executa um quantum e é bloqueada pelo
-    // self-test; só depois o runtime gráfico é liberado.
+    // uma terceira thread CPL0 por meio da API genérica. A entry retorna pelo
+    // trampoline, vira TERMINATED e um IRQ posterior em outra thread executa o
+    // reaper antes de liberar o runtime gráfico.
     x86_cli_raw();
     let scheduler_ready = scheduler_initialize();
     x86_sti_raw();
@@ -230,6 +230,7 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !run_queue_ready { loop {} }
     scheduler_diag_run_queue_created();
     if !scheduler_wait_run_queue_probe() { loop {} }
+    if !scheduler_wait_reaper_probe() { loop {} }
 
     display_init(framebuffer, width, height, pixels_per_scanline);
     baken_native_bind_assets();
