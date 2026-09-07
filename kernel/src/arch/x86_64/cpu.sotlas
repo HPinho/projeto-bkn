@@ -47,6 +47,11 @@ pub fn x86_stack_switch_to_post_cutover_raw(stack_top: u64, argument: u64) -> vo
 }
 
 @system
+pub fn x86_scheduler_thread_trampoline_address() -> u64 {
+    return __scheduler_thread_trampoline_address();
+}
+
+@system
 pub fn x86_scheduler_idle_entry_address() -> u64 {
     return __scheduler_idle_entry_address();
 }
