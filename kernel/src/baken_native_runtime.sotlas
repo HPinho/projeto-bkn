@@ -1,9 +1,6 @@
 // Baken OS — runtime nativo pós-UEFI para a rota desktop/installer/OOBE.
 //
 // Esta unidade não conhece SystemTable, BootServices nem protocolos UEFI.
-// Timer usa ACPI PM Timer + TSC; input inicial usa i8042/PS2. USB HID/xHCI
-// poderá alimentar a mesma camada de eventos depois, sem alterar compositor/UI.
-
 module kernel::baken_native_runtime;
 
 import kernel::graphics_engine::*;
@@ -18,8 +15,10 @@ import kernel::drivers::ps2_mouse::*;
 import kernel::drivers::ps2_keyboard::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::fpu::*;
 import kernel::process::address_space::*;
 import kernel::process::registry::*;
+import kernel::process::userspace_loader::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::yield::*;
 import kernel::scheduler::diagnostics::*;
@@ -56,14 +55,9 @@ pub fn baken_native_bind_assets() -> void {
 
 @system
 pub fn baken_native_runtime_prepare() -> bool {
-    // O PM Timer é a referência nativa preferida. Nenhuma frequência de CPU
-    // fixa é inventada se a plataforma não fornecer uma referência utilizável.
     if !x86_timer_is_calibrated() {
         if !x86_timer_calibrate_from_acpi_pm() { return false; }
     }
-
-    // Input PS/2 é opcional: plataformas xHCI não podem impedir o desktop de
-    // iniciar. O backend USB alimentará a mesma fila de eventos quando ativo.
     ps2_keyboard_init();
     ps2_mouse_init();
     return true;
@@ -84,28 +78,16 @@ fn baken_native_frame_wait(frame_start: u64) -> void {
     let frame_end = x86_timer_read_tsc();
     let cycles_per_us = x86_timer_cycles_per_us();
     let reported_refresh = display_get_refresh_hz();
-    let refresh_hz: u32 = if reported_refresh < 30 {
-        60
-    } else if reported_refresh > 240 {
-        240
-    } else {
-        reported_refresh
-    };
+    let refresh_hz: u32 = if reported_refresh < 30 { 60 } else if reported_refresh > 240 { 240 } else { reported_refresh };
     let target_us: u64 = 1000000 / (refresh_hz as u64);
-
     if cycles_per_us > 0 && frame_end > frame_start {
         let work_us = x86_timer_elapsed_us(frame_start, frame_end);
-        if work_us < target_us {
-            x86_timer_spin_wait_us(target_us - work_us);
-        }
+        if work_us < target_us { x86_timer_spin_wait_us(target_us - work_us); }
     }
-
     let now_tsc = x86_timer_read_tsc();
     let mut dt: f32 = 0.0166667;
     unsafe {
-        if NATIVE_LAST_FRAME_TSC > 0 &&
-           now_tsc > NATIVE_LAST_FRAME_TSC &&
-           cycles_per_us > 0 {
+        if NATIVE_LAST_FRAME_TSC > 0 && now_tsc > NATIVE_LAST_FRAME_TSC && cycles_per_us > 0 {
             let total_us = x86_timer_elapsed_us(NATIVE_LAST_FRAME_TSC, now_tsc);
             dt = (total_us as f32) / 1000000.0;
             if dt < 0.001 { dt = 0.001; }
@@ -119,15 +101,9 @@ fn baken_native_frame_wait(frame_start: u64) -> void {
 @system
 fn baken_native_dispatch_click(mx: i32, my: i32, w: u32, h: u32) -> void {
     let session = desktop_compositor_get_session();
-    if session == 0 {
-        baken_installer_handle_click(mx, my, w, h);
-    } else if session == 1 {
-        baken_oobe_handle_click(mx, my, w, h);
-    } else {
-        if !wm_handle_mouse_down(mx, my) {
-            desktop_shell_handle_click(mx, my);
-        }
-    }
+    if session == 0 { baken_installer_handle_click(mx, my, w, h); }
+    else if session == 1 { baken_oobe_handle_click(mx, my, w, h); }
+    else { if !wm_handle_mouse_down(mx, my) { desktop_shell_handle_click(mx, my); } }
 }
 
 @system
@@ -135,31 +111,24 @@ fn baken_native_dispatch_move(mx: i32, my: i32) -> void {
     baken_cursor_set_pos(mx, my);
     desktop_shell_set_cursor(mx, my);
     raster_set_cursor_parallax(mx, my);
-    if desktop_compositor_get_session() == 2 {
-        wm_handle_mouse_move(mx, my);
-    }
+    if desktop_compositor_get_session() == 2 { wm_handle_mouse_move(mx, my); }
 }
 
 @system
 fn baken_native_dispatch_up() -> void {
-    if desktop_compositor_get_session() == 2 {
-        wm_handle_mouse_up();
-    }
+    if desktop_compositor_get_session() == 2 { wm_handle_mouse_up(); }
 }
 
 @system
 pub fn baken_native_runtime_run(width: u32, height: u32) -> ! {
     if width == 0 || height == 0 { loop {} }
     if !baken_native_runtime_prepare() { loop {} }
-
     let mut mouse_x: i32 = (width / 2) as i32;
     let mut mouse_y: i32 = (height / 2) as i32;
     let mut left_down: u8 = 0;
     baken_native_dispatch_move(mouse_x, mouse_y);
-
     loop {
         let frame_start = x86_timer_read_tsc();
-
         let mut scancode: u16 = 0;
         let mut unicode: u16 = 0;
         while ps2_keyboard_poll(&mut scancode, &mut unicode) == 1 {
@@ -172,21 +141,16 @@ pub fn baken_native_runtime_run(width: u32, height: u32) -> ! {
                     baken_oobe_handle_click(mouse_x, mouse_y, width, height);
                 }
             } else if session == 2 {
-                if unicode >= 49 && unicode <= 53 {
-                    desktop_shell_open_app((unicode - 49) as u32);
-                } else if unicode == 105 || unicode == 73 {
-                    desktop_compositor_set_session(0);
-                }
+                if unicode >= 49 && unicode <= 53 { desktop_shell_open_app((unicode - 49) as u32); }
+                else if unicode == 105 || unicode == 73 { desktop_compositor_set_session(0); }
             }
         }
-
         let mut dx: i32 = 0;
         let mut dy: i32 = 0;
         let mut curr_btn: u8 = left_down;
         let mut mouse_btn: u8 = 0;
         if ps2_mouse_poll(&mut dx, &mut dy, &mut mouse_btn) == 1 {
-            mouse_x += dx;
-            mouse_y += dy;
+            mouse_x += dx; mouse_y += dy;
             if mouse_x < 0 { mouse_x = 0; }
             if mouse_y < 0 { mouse_y = 0; }
             if mouse_x >= (width as i32) { mouse_x = (width as i32) - 1; }
@@ -194,18 +158,10 @@ pub fn baken_native_runtime_run(width: u32, height: u32) -> ! {
             curr_btn = mouse_btn;
             baken_native_dispatch_move(mouse_x, mouse_y);
         }
-
-        if curr_btn == 1 && left_down == 0 {
-            baken_native_dispatch_click(mouse_x, mouse_y, width, height);
-        } else if curr_btn == 1 {
-            if desktop_compositor_get_session() == 2 {
-                wm_handle_mouse_move(mouse_x, mouse_y);
-            }
-        } else if left_down == 1 {
-            baken_native_dispatch_up();
-        }
+        if curr_btn == 1 && left_down == 0 { baken_native_dispatch_click(mouse_x, mouse_y, width, height); }
+        else if curr_btn == 1 { if desktop_compositor_get_session() == 2 { wm_handle_mouse_move(mouse_x, mouse_y); } }
+        else if left_down == 1 { baken_native_dispatch_up(); }
         left_down = curr_btn;
-
         desktop_compositor_render_frame();
         baken_native_frame_wait(frame_start);
     }
@@ -217,8 +173,6 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
 
-    // Kernel-core gate separado da fundação de hardware: duas raízes CR3 são
-    // construídas e testadas com troca temporária de CR3, sem entrar em CPL3.
     if !process_address_space_activate_foundation() ||
        !process_address_space_is_ready() ||
        !process_address_space_self_test_passed() { loop {} }
@@ -226,9 +180,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !process_registry_activate() { loop {} }
     if !process_registry_emit_ready_marker() { loop {} }
 
-    // A fundação já deixou o LAPIC timer ativo. O bring-up prova em sequência:
-    // preempção, run queue, yield voluntário, exit/reaper e uma wait queue real
-    // com enqueue+BLOCKED sob IF=0 e handoff atômico STI+INT 0x43.
+    // FPU/SIMD precisa estar estabilizada antes que qualquer thread seja publicada.
+    if !fpu_initialize() || !fpu_emit_ready_marker() { loop {} }
+
     x86_cli_raw();
     let scheduler_ready = scheduler_initialize();
     x86_sti_raw();
@@ -246,9 +200,6 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !scheduler_wait_reaper_probe() { loop {} }
     if !scheduler_finish_process_probe() { loop {} }
 
-    // Wait queue proof: a thread bloqueia e devolve a CPU ao bootstrap. O
-    // bootstrap confirma que ela está enfileirada, acorda exatamente um waiter
-    // e cede de novo; a thread deve retomar após o INT 0x43 e terminar limpa.
     if !scheduler_wait_probe_start() { loop {} }
     if !scheduler_yield() { loop {} }
     if !scheduler_wait_probe_blocked() { loop {} }
@@ -256,6 +207,12 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !scheduler_yield() { loop {} }
     if !scheduler_wait_probe_resumed() { loop {} }
     if !scheduler_wait_probe_wait_complete() { loop {} }
+
+    // Prova real CPL3 -> syscall -> exit -> reaper -> teardown do address space.
+    if !userspace_loader_start_probe() { loop {} }
+    if !userspace_loader_wait_probe() { loop {} }
+    if !userspace_loader_finish_probe() { loop {} }
+    if !userspace_loader_emit_ready_markers() { loop {} }
 
     display_init(framebuffer, width, height, pixels_per_scanline);
     baken_native_bind_assets();
