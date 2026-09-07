@@ -24,9 +24,9 @@ pub fn scheduler_diag_round_trip() -> void {
 @system
 pub fn scheduler_diag_run_queue_created() -> void {
     if !x86_serial_is_ready() { return; }
-    let marker: [u8; 25] = [
+    let marker: [u8; 24] = [
         66, 65, 75, 69, 78, 58, 82, 85, 78, 95, 81, 85, 69, 85, 69,
-        95, 67, 82, 69, 65, 84, 69, 68, 10, 10
+        95, 67, 82, 69, 65, 84, 69, 68, 10
     ];
     let mut index: usize = 0;
     while index < 24 {
