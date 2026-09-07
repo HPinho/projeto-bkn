@@ -8,6 +8,7 @@
 module kernel::arch::x86_64::exceptions;
 
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
 
 pub const EXCEPTION_VECTOR_COUNT: u16 = 32;
 pub const EXCEPTION_PAGE_FAULT: u64 = 14;
@@ -150,6 +151,11 @@ pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> void {
 
         LAST_EXCEPTION.valid = true;
     }
+
+    // Exceções são terminais nesta fase, portanto emitir o vetor é seguro e
+    // transforma um freeze silencioso em diagnóstico verificável no QEMU.
+    // BAKEN:HEX=E:XXXXXXXX, onde E identifica o vetor de exceção.
+    x86_serial_write_hex32_marker('E' as u8, unsafe { LAST_EXCEPTION.vector as u32 });
 
     // Primeira ABI de excecao e deliberadamente terminal. Nenhum IRETQ e
     // permitido ate preservarmos todos os GPRs e validarmos RSP/SS/CPL/IST.
