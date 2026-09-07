@@ -17,6 +17,8 @@ import kernel::baken_cursor::*;
 import kernel::drivers::ps2_mouse::*;
 import kernel::drivers::ps2_keyboard::*;
 import kernel::arch::x86_64::timer::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::scheduler::core::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -209,6 +211,15 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
                                height: u32, pixels_per_scanline: u32) -> ! {
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
+
+    // A fundação já deixou o LAPIC timer ativo. Inicializamos as estruturas do
+    // scheduler com CLI para que um tick não observe a idle thread pela metade,
+    // restauramos IF e exigimos um round-trip bootstrap -> idle -> bootstrap.
+    x86_cli_raw();
+    let scheduler_ready = scheduler_initialize();
+    x86_sti_raw();
+    if !scheduler_ready || !scheduler_wait_first_round_trip() { loop {} }
+
     display_init(framebuffer, width, height, pixels_per_scanline);
     baken_native_bind_assets();
     desktop_compositor_init(width, height);
