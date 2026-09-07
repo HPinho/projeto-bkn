@@ -1,6 +1,6 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
-// A fundação obrigatória (CR3/tabelas CPU, PMM/VMM, ACPI/APIC, IRQ/timer e
+// A fundação obrigatória (CR3/tabelas CPU, PMM/VMM/heap, ACPI/APIC, IRQ/timer e
 // PAT/WC) permanece fail-closed. Provas de hardware opcional continuam sendo
 // executadas, mas sua ausência não impede o runtime normal: o marcador
 // BAKEN:BARE_METAL_READY só é emitido quando todas as provas passam.
@@ -17,6 +17,7 @@ import kernel::memory::direct_map::*;
 import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::vmm::*;
+import kernel::memory::kernel_heap::*;
 import kernel::memory::active_page_tables::*;
 import kernel::arch::x86_64::paging::*;
 import kernel::acpi::tables::*;
@@ -75,6 +76,7 @@ pub struct PostCutoverContext {
 static mut POST_CUTOVER_CPU_TABLES_ACTIVE: bool = false;
 static mut POST_CUTOVER_PMM_ACTIVE: bool = false;
 static mut POST_CUTOVER_VMM_ACTIVE: bool = false;
+static mut POST_CUTOVER_HEAP_ACTIVE: bool = false;
 static mut POST_CUTOVER_ACPI_READY: bool = false;
 static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
 static mut POST_CUTOVER_IRQS_READY: bool = false;
@@ -195,8 +197,22 @@ pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
 pub fn post_cutover_vmm_active() -> bool { unsafe { return POST_CUTOVER_VMM_ACTIVE; } }
 
 @system
+pub fn post_cutover_activate_heap() -> bool {
+    unsafe { POST_CUTOVER_HEAP_ACTIVE = false; }
+    if !post_cutover_vmm_active() { return false; }
+    if !kernel_heap_activate() || !kernel_heap_is_active() || !kernel_heap_self_test_passed() {
+        return false;
+    }
+    unsafe { POST_CUTOVER_HEAP_ACTIVE = true; }
+    return true;
+}
+
+@system
+pub fn post_cutover_heap_active() -> bool { unsafe { return POST_CUTOVER_HEAP_ACTIVE; } }
+
+@system
 pub fn post_cutover_activate_acpi(context: *const PostCutoverContext) -> bool {
-    if !post_cutover_vmm_active() || !post_cutover_context_valid(context) { return false; }
+    if !post_cutover_vmm_active() || !post_cutover_heap_active() || !post_cutover_context_valid(context) { return false; }
     let rsdp = post_cutover_acpi_rsdp_virtual(context);
     if rsdp == (null as *const u8) { return false; }
     if !acpi_init_post_cutover(rsdp) || !acpi_is_ready() { return false; }
@@ -525,6 +541,8 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_stage_marker('P' as u8); }
     if !post_cutover_activate_vmm(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('V' as u8); }
+    if !post_cutover_activate_heap() { loop {} }
+    if serial_ready { if !x86_serial_write_heap_ready_marker() { loop {} } }
     if !post_cutover_activate_acpi(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('A' as u8); }
     if !post_cutover_activate_interrupt_controllers() { loop {} }

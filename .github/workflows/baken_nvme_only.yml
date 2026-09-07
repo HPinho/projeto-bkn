@@ -128,6 +128,7 @@ jobs:
           markers=(
             'BAKEN:STEP=k'
             'BAKEN:STEP=)'
+            'BAKEN:HEAP_READY'
             'BAKEN:BARE_METAL_READY'
             'BAKEN:SCHEDULER_SWITCH'
             'BAKEN:SCHEDULER_ROUND_TRIP'

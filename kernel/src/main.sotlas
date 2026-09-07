@@ -13,6 +13,7 @@ import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::pmm_bitmap::*;
 import kernel::memory::vmm::*;
+import kernel::memory::kernel_heap::*;
 import kernel::memory::memory_map_policy::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::direct_map_ranges::*;

@@ -1,0 +1,322 @@
+// Baken OS — heap geral do kernel, freestanding e PMM-backed.
+//
+// O heap recebe arenas físicas do PMM reutilizável e as acessa exclusivamente
+// pelo direct-map pós-cutover. Metadados ficam em tabelas estáticas para que a
+// própria implementação não dependa de heap, libc ou firmware.
+
+module kernel::memory::kernel_heap;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::pmm::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::memory::vmm::*;
+import kernel::memory::direct_map::*;
+
+pub const KERNEL_HEAP_ALIGNMENT: u64 = 16;
+pub const KERNEL_HEAP_GROW_PAGES: u64 = 16;
+pub const KERNEL_HEAP_DESCRIPTOR_CAPACITY: usize = 256;
+pub const KERNEL_HEAP_U64_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
+
+static mut KERNEL_HEAP_BLOCK_BASES: [u64; KERNEL_HEAP_DESCRIPTOR_CAPACITY] = [0; KERNEL_HEAP_DESCRIPTOR_CAPACITY];
+static mut KERNEL_HEAP_BLOCK_SIZES: [u64; KERNEL_HEAP_DESCRIPTOR_CAPACITY] = [0; KERNEL_HEAP_DESCRIPTOR_CAPACITY];
+static mut KERNEL_HEAP_BLOCK_ACTIVE: [bool; KERNEL_HEAP_DESCRIPTOR_CAPACITY] = [false; KERNEL_HEAP_DESCRIPTOR_CAPACITY];
+static mut KERNEL_HEAP_BLOCK_USED: [bool; KERNEL_HEAP_DESCRIPTOR_CAPACITY] = [false; KERNEL_HEAP_DESCRIPTOR_CAPACITY];
+
+static mut KERNEL_HEAP_ACTIVE: bool = false;
+static mut KERNEL_HEAP_SELF_TEST_PASSED: bool = false;
+static mut KERNEL_HEAP_RESERVED_BYTES: u64 = 0;
+static mut KERNEL_HEAP_ALLOCATED_BYTES: u64 = 0;
+static mut KERNEL_HEAP_ALLOCATION_COUNT: u64 = 0;
+
+@system
+fn kernel_heap_align_size(size: u64) -> u64 {
+    if size == 0 { return 0; }
+    let rounded = size + KERNEL_HEAP_ALIGNMENT - 1;
+    if rounded < size { return 0; }
+    return rounded & ~(KERNEL_HEAP_ALIGNMENT - 1);
+}
+
+@system
+fn kernel_heap_reset_locked() -> void {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+            KERNEL_HEAP_BLOCK_BASES[slot] = 0;
+            KERNEL_HEAP_BLOCK_SIZES[slot] = 0;
+            KERNEL_HEAP_BLOCK_ACTIVE[slot] = false;
+            KERNEL_HEAP_BLOCK_USED[slot] = false;
+            slot += 1;
+        }
+        KERNEL_HEAP_ACTIVE = false;
+        KERNEL_HEAP_SELF_TEST_PASSED = false;
+        KERNEL_HEAP_RESERVED_BYTES = 0;
+        KERNEL_HEAP_ALLOCATED_BYTES = 0;
+        KERNEL_HEAP_ALLOCATION_COUNT = 0;
+    }
+}
+
+@system
+fn kernel_heap_find_descriptor_locked() -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+            if !KERNEL_HEAP_BLOCK_ACTIVE[slot] { return slot; }
+            slot += 1;
+        }
+    }
+    return KERNEL_HEAP_DESCRIPTOR_CAPACITY;
+}
+
+@system
+fn kernel_heap_find_fit_locked(size: u64) -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+            if KERNEL_HEAP_BLOCK_ACTIVE[slot] && !KERNEL_HEAP_BLOCK_USED[slot] &&
+               KERNEL_HEAP_BLOCK_SIZES[slot] >= size {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return KERNEL_HEAP_DESCRIPTOR_CAPACITY;
+}
+
+@system
+fn kernel_heap_grow_locked(minimum_size: u64) -> bool {
+    let aligned = kernel_heap_align_size(minimum_size);
+    if aligned == 0 { return false; }
+    let descriptor = kernel_heap_find_descriptor_locked();
+    if descriptor >= KERNEL_HEAP_DESCRIPTOR_CAPACITY { return false; }
+
+    let rounded = aligned + BAKEN_PAGE_SIZE - 1;
+    if rounded < aligned { return false; }
+    let mut pages = rounded / BAKEN_PAGE_SIZE;
+    if pages < KERNEL_HEAP_GROW_PAGES { pages = KERNEL_HEAP_GROW_PAGES; }
+    if pages == 0 || pages > KERNEL_HEAP_U64_MAX / BAKEN_PAGE_SIZE { return false; }
+    let bytes = pages * BAKEN_PAGE_SIZE;
+
+    let physical = pmm_alloc_pages(pages);
+    if physical == 0 { return false; }
+    let virtual_base = direct_map_virtual_address(physical);
+    if virtual_base == 0 {
+        pmm_free_pages(physical, pages);
+        return false;
+    }
+
+    unsafe {
+        if KERNEL_HEAP_RESERVED_BYTES > KERNEL_HEAP_U64_MAX - bytes {
+            pmm_free_pages(physical, pages);
+            return false;
+        }
+        KERNEL_HEAP_BLOCK_BASES[descriptor] = virtual_base;
+        KERNEL_HEAP_BLOCK_SIZES[descriptor] = bytes;
+        KERNEL_HEAP_BLOCK_ACTIVE[descriptor] = true;
+        KERNEL_HEAP_BLOCK_USED[descriptor] = false;
+        KERNEL_HEAP_RESERVED_BYTES += bytes;
+    }
+    return true;
+}
+
+@system
+fn kernel_heap_alloc_locked(size: u64) -> *mut u8 {
+    let aligned = kernel_heap_align_size(size);
+    if aligned == 0 { return null as *mut u8; }
+
+    let mut slot = kernel_heap_find_fit_locked(aligned);
+    if slot >= KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+        if !kernel_heap_grow_locked(aligned) { return null as *mut u8; }
+        slot = kernel_heap_find_fit_locked(aligned);
+        if slot >= KERNEL_HEAP_DESCRIPTOR_CAPACITY { return null as *mut u8; }
+    }
+
+    unsafe {
+        let original_size = KERNEL_HEAP_BLOCK_SIZES[slot];
+        if original_size < aligned { return null as *mut u8; }
+        let remainder = original_size - aligned;
+        if remainder >= KERNEL_HEAP_ALIGNMENT {
+            let split = kernel_heap_find_descriptor_locked();
+            if split < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+                let split_base = KERNEL_HEAP_BLOCK_BASES[slot] + aligned;
+                if split_base < KERNEL_HEAP_BLOCK_BASES[slot] { return null as *mut u8; }
+                KERNEL_HEAP_BLOCK_BASES[split] = split_base;
+                KERNEL_HEAP_BLOCK_SIZES[split] = remainder;
+                KERNEL_HEAP_BLOCK_ACTIVE[split] = true;
+                KERNEL_HEAP_BLOCK_USED[split] = false;
+                KERNEL_HEAP_BLOCK_SIZES[slot] = aligned;
+            }
+        }
+
+        let committed = KERNEL_HEAP_BLOCK_SIZES[slot];
+        if KERNEL_HEAP_ALLOCATED_BYTES > KERNEL_HEAP_U64_MAX - committed ||
+           KERNEL_HEAP_ALLOCATION_COUNT == KERNEL_HEAP_U64_MAX {
+            return null as *mut u8;
+        }
+        KERNEL_HEAP_BLOCK_USED[slot] = true;
+        KERNEL_HEAP_ALLOCATED_BYTES += committed;
+        KERNEL_HEAP_ALLOCATION_COUNT += 1;
+        return KERNEL_HEAP_BLOCK_BASES[slot] as *mut u8;
+    }
+}
+
+@system
+fn kernel_heap_coalesce_locked() -> void {
+    let mut changed: bool = true;
+    unsafe {
+        while changed {
+            changed = false;
+            let mut left: usize = 0;
+            while left < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+                if KERNEL_HEAP_BLOCK_ACTIVE[left] && !KERNEL_HEAP_BLOCK_USED[left] {
+                    let mut right: usize = 0;
+                    while right < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+                        if right != left && KERNEL_HEAP_BLOCK_ACTIVE[right] &&
+                           !KERNEL_HEAP_BLOCK_USED[right] {
+                            let left_end = KERNEL_HEAP_BLOCK_BASES[left] + KERNEL_HEAP_BLOCK_SIZES[left];
+                            let right_end = KERNEL_HEAP_BLOCK_BASES[right] + KERNEL_HEAP_BLOCK_SIZES[right];
+                            if left_end > KERNEL_HEAP_BLOCK_BASES[left] &&
+                               left_end == KERNEL_HEAP_BLOCK_BASES[right] {
+                                if KERNEL_HEAP_BLOCK_SIZES[left] <= KERNEL_HEAP_U64_MAX - KERNEL_HEAP_BLOCK_SIZES[right] {
+                                    KERNEL_HEAP_BLOCK_SIZES[left] += KERNEL_HEAP_BLOCK_SIZES[right];
+                                    KERNEL_HEAP_BLOCK_BASES[right] = 0;
+                                    KERNEL_HEAP_BLOCK_SIZES[right] = 0;
+                                    KERNEL_HEAP_BLOCK_ACTIVE[right] = false;
+                                    KERNEL_HEAP_BLOCK_USED[right] = false;
+                                    changed = true;
+                                    break;
+                                }
+                            } else if right_end > KERNEL_HEAP_BLOCK_BASES[right] &&
+                                      right_end == KERNEL_HEAP_BLOCK_BASES[left] {
+                                if KERNEL_HEAP_BLOCK_SIZES[right] <= KERNEL_HEAP_U64_MAX - KERNEL_HEAP_BLOCK_SIZES[left] {
+                                    KERNEL_HEAP_BLOCK_BASES[left] = KERNEL_HEAP_BLOCK_BASES[right];
+                                    KERNEL_HEAP_BLOCK_SIZES[left] += KERNEL_HEAP_BLOCK_SIZES[right];
+                                    KERNEL_HEAP_BLOCK_BASES[right] = 0;
+                                    KERNEL_HEAP_BLOCK_SIZES[right] = 0;
+                                    KERNEL_HEAP_BLOCK_ACTIVE[right] = false;
+                                    KERNEL_HEAP_BLOCK_USED[right] = false;
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                        }
+                        right += 1;
+                    }
+                }
+                if changed { break; }
+                left += 1;
+            }
+        }
+    }
+}
+
+@system
+fn kernel_heap_free_locked(pointer: *mut u8) -> bool {
+    if pointer == (null as *mut u8) { return false; }
+    let address = pointer as u64;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < KERNEL_HEAP_DESCRIPTOR_CAPACITY {
+            if KERNEL_HEAP_BLOCK_ACTIVE[slot] && KERNEL_HEAP_BLOCK_BASES[slot] == address {
+                if !KERNEL_HEAP_BLOCK_USED[slot] { return false; }
+                let bytes = KERNEL_HEAP_BLOCK_SIZES[slot];
+                if bytes == 0 || KERNEL_HEAP_ALLOCATED_BYTES < bytes || KERNEL_HEAP_ALLOCATION_COUNT == 0 {
+                    return false;
+                }
+                KERNEL_HEAP_BLOCK_USED[slot] = false;
+                KERNEL_HEAP_ALLOCATED_BYTES -= bytes;
+                KERNEL_HEAP_ALLOCATION_COUNT -= 1;
+                kernel_heap_coalesce_locked();
+                return true;
+            }
+            slot += 1;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn kernel_heap_alloc(size: u64) -> *mut u8 {
+    unsafe { if !KERNEL_HEAP_ACTIVE { return null as *mut u8; } }
+    let flags = x86_irq_save_disable();
+    let pointer = kernel_heap_alloc_locked(size);
+    x86_irq_restore(flags);
+    return pointer;
+}
+
+@system
+pub fn kernel_heap_free(pointer: *mut u8) -> bool {
+    unsafe { if !KERNEL_HEAP_ACTIVE { return false; } }
+    let flags = x86_irq_save_disable();
+    let released = kernel_heap_free_locked(pointer);
+    x86_irq_restore(flags);
+    return released;
+}
+
+@system
+fn kernel_heap_self_test() -> bool {
+    let before = kernel_heap_allocated_bytes();
+    let first = kernel_heap_alloc(64);
+    if first == (null as *mut u8) { return false; }
+    let second = kernel_heap_alloc(128);
+    if second == (null as *mut u8) { return false; }
+
+    let first_word = first as *mut u64;
+    let second_word = second as *mut u64;
+    unsafe {
+        *first_word = 0x1122334455667788;
+        *second_word = 0x8877665544332211;
+    }
+    if !kernel_heap_free(first) { return false; }
+
+    let recycled = kernel_heap_alloc(32);
+    if recycled == (null as *mut u8) || (recycled as u64) != (first as u64) { return false; }
+    let recycled_word = recycled as *mut u64;
+    unsafe {
+        *recycled_word = 0xA5A55A5AA55A5A5A;
+        if *second_word != 0x8877665544332211 { return false; }
+    }
+
+    if !kernel_heap_free(recycled) { return false; }
+    if !kernel_heap_free(second) { return false; }
+    if kernel_heap_allocated_bytes() != before { return false; }
+    return true;
+}
+
+@system
+pub fn kernel_heap_activate() -> bool {
+    if !pmm_allocator_is_active() || !vmm_is_active() ||
+       vmm_direct_map_base() != BAKEN_DIRECT_MAP_BASE {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    kernel_heap_reset_locked();
+    if !kernel_heap_grow_locked(KERNEL_HEAP_ALIGNMENT) {
+        x86_irq_restore(flags);
+        return false;
+    }
+    unsafe { KERNEL_HEAP_ACTIVE = true; }
+    x86_irq_restore(flags);
+
+    if !kernel_heap_self_test() {
+        unsafe { KERNEL_HEAP_ACTIVE = false; }
+        return false;
+    }
+    unsafe { KERNEL_HEAP_SELF_TEST_PASSED = true; }
+    return true;
+}
+
+@system
+pub fn kernel_heap_is_active() -> bool { unsafe { return KERNEL_HEAP_ACTIVE; } }
+
+@system
+pub fn kernel_heap_self_test_passed() -> bool { unsafe { return KERNEL_HEAP_SELF_TEST_PASSED; } }
+
+@system
+pub fn kernel_heap_reserved_bytes() -> u64 { unsafe { return KERNEL_HEAP_RESERVED_BYTES; } }
+
+@system
+pub fn kernel_heap_allocated_bytes() -> u64 { unsafe { return KERNEL_HEAP_ALLOCATED_BYTES; } }
+
+@system
+pub fn kernel_heap_allocation_count() -> u64 { unsafe { return KERNEL_HEAP_ALLOCATION_COUNT; } }

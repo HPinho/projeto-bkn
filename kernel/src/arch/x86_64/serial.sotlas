@@ -126,6 +126,20 @@ pub fn x86_serial_write_timer_ready_marker() -> bool {
     return true;
 }
 
+// Prova nominal do heap para os gates QEMU; não usa formatação nem alocação.
+@system
+pub fn x86_serial_write_heap_ready_marker() -> bool {
+    let marker: [u8; 17] = [
+        66, 65, 75, 69, 78, 58, 72, 69, 65, 80, 95, 82, 69, 65, 68, 89, 10
+    ];
+    let mut index: usize = 0;
+    while index < 17 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
 // Contrato final do bring-up: emitido somente depois que todos os gates
 // bare-metal obrigatórios passaram e imediatamente antes do runtime nativo.
 @system
