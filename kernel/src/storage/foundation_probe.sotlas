@@ -102,8 +102,14 @@ pub fn foundation_nvme_probe() -> bool {
     let old_last = block_device_last_lba();
     let old_write = block_device_has_writable_native_target();
     let old_context = block_device_driver_context();
-    if !block_device_register_native(BLOCK_DEVICE_NVME, 0, 512, nvme_last_lba(), true, true) ||
-       !block_device_bind_driver_context(nvme_context()) { return false; }
+    let active_nvme = block_device_has_native_target() && old_kind == BLOCK_DEVICE_NVME &&
+        old_size == 512 && old_last == nvme_last_lba() && old_context == nvme_context();
+    // Em uma máquina NVMe-only, discovery já publicou este namespace. Não
+    // substituímos o registro ativo apenas para executar a certificação da fixture.
+    if !active_nvme {
+        if !block_device_register_native(BLOCK_DEVICE_NVME, 0, 512, nvme_last_lba(), true, true) ||
+           !block_device_bind_driver_context(nvme_context()) { return false; }
+    }
     let mut page = dma_alloc(4096, 4096);
     if !dma_buffer_cpu_owned(&page) { return false; }
     let mut ok = block_device_read_sector(1024, page.virtual_address);
@@ -136,8 +142,10 @@ pub fn foundation_nvme_probe() -> bool {
         }
     }
     if !dma_release(&mut page) { ok = false; }
-    if !block_device_register_native(old_kind, old_index, old_size, old_last, old_write, true) ||
-       !block_device_bind_driver_context(old_context) { return false; }
+    if !active_nvme {
+        if !block_device_register_native(old_kind, old_index, old_size, old_last, old_write, true) ||
+           !block_device_bind_driver_context(old_context) { return false; }
+    }
     if !ok { return false; }
     x86_serial_write_stage_marker(')' as u8);
     return true;
