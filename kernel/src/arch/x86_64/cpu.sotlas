@@ -52,6 +52,11 @@ pub fn x86_scheduler_thread_trampoline_address() -> u64 {
 }
 
 @system
+pub fn x86_scheduler_exit_probe_entry_address() -> u64 {
+    return __scheduler_exit_probe_entry_address();
+}
+
+@system
 pub fn x86_scheduler_idle_entry_address() -> u64 {
     return __scheduler_idle_entry_address();
 }
