@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do discovery PCI, MMIO, DMA, IDENTIFY e registro AHCI."""
+"""Guardrails do discovery PCI, MMIO, AHCI e fallback NVMe nativo."""
 
 from pathlib import Path
 import unittest
@@ -139,28 +139,43 @@ class StorageDiscoveryTests(unittest.TestCase):
         self.assertNotRegex(body, r"\*buffer\s*=(?!=)")
         self.assertNotIn("BAKENR01", text)
 
-    def test_scan_orders_non_destructive_bringup_before_fixture_certification(self):
+    def test_scan_orders_non_destructive_ahci_bringup_before_fixture_certification(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("pub fn storage_discovery_scan()", 1)[1]
-        probe = body.index("storage_probe_mmio_after_cutover()")
-        reset = body.index("storage_reset_ahci_after_probe()")
-        dma = body.index("storage_prepare_ahci_dma_after_reset()")
-        identify = body.index("storage_identify_ahci_after_dma()")
-        capacity = body.index("storage_prepare_ahci_capacity_after_identify()")
-        register = body.index("storage_register_ahci_block_device()")
-        certify = body.index("storage_certify_ahci_fixture()")
+        ahci = body.index("if kind != STORAGE_CONTROLLER_AHCI { continue; }")
+        probe = body.index("storage_probe_mmio_after_cutover()", ahci)
+        reset = body.index("storage_reset_ahci_after_probe()", ahci)
+        dma = body.index("storage_prepare_ahci_dma_after_reset()", ahci)
+        identify = body.index("storage_identify_ahci_after_dma()", ahci)
+        capacity = body.index("storage_prepare_ahci_capacity_after_identify()", ahci)
+        register = body.index("storage_register_ahci_block_device()", ahci)
+        certify = body.index("storage_certify_ahci_fixture()", ahci)
         self.assertLess(probe, reset); self.assertLess(reset, dma); self.assertLess(dma, identify)
         self.assertLess(identify, capacity); self.assertLess(capacity, register); self.assertLess(register, certify)
 
     def test_pre_cutover_discovery_returns_candidate_without_programming_driver(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("pub fn storage_discovery_scan()", 1)[1]
-        probe = body.index("storage_probe_mmio_after_cutover()")
-        early = body.index("if !post_cutover { return kind; }")
-        reset = body.index("storage_reset_ahci_after_probe()")
+        pre = body.index("if !post_cutover {")
+        probe = body.index("storage_probe_mmio_after_cutover()", pre)
+        early = body.index("return kind;", probe)
+        ahci = body.index("if kind != STORAGE_CONTROLLER_AHCI { continue; }", early)
         self.assertIn("let post_cutover = active_page_tables_is_ready();", body)
+        self.assertLess(pre, probe)
         self.assertLess(probe, early)
-        self.assertLess(early, reset)
+        self.assertLess(early, ahci)
+
+    def test_post_cutover_tries_nvme_only_after_ahci_path(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("pub fn storage_discovery_scan()", 1)[1]
+        ahci = body.index("if kind != STORAGE_CONTROLLER_AHCI { continue; }")
+        ahci_register = body.index("storage_register_ahci_block_device()", ahci)
+        nvme = body.index("if kind != STORAGE_CONTROLLER_NVME { continue; }", ahci_register)
+        nvme_register = body.index("storage_register_nvme_block_device()", nvme)
+        self.assertLess(ahci, ahci_register)
+        self.assertLess(ahci_register, nvme)
+        self.assertLess(nvme, nvme_register)
+        self.assertIn("return STORAGE_CONTROLLER_NVME;", body[nvme_register:])
 
     def test_installer_requires_discovery_but_not_treats_it_as_driver(self):
         text = ENGINE.read_text(encoding="utf-8")
