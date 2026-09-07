@@ -62,6 +62,9 @@ pub fn x86_scheduler_idle_entry_address() -> u64 {
 }
 
 @system
+pub fn x86_scheduler_yield_interrupt() -> void { __scheduler_yield_interrupt(); }
+
+@system
 pub fn x86_cpu_pause() -> void { __cpu_pause(); }
 
 @system
