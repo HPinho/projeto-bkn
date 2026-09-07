@@ -1,0 +1,123 @@
+name: Baken OS NVMe-only Bare-Metal Verification
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  nvme-only-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies & QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
+
+      - name: Verify NVMe Storage Contracts
+        run: |
+          python3 tests/test_storage_native_readiness.py
+          python3 tests/test_foundation_nvme_gate.py
+          python3 tests/test_storage_discovery.py
+          python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
+
+      - name: Build Native Sotlas UEFI Kernel
+        run: |
+          mkdir -p build/iso_root/EFI/BOOT
+          SOTLAS_CC=x86_64-w64-mingw32-gcc python3 tools/sotlas_compile/compiler.py build \
+            kernel/src/main.sotlas \
+            --manifest build/sotlas-main.manifest.json \
+            --output build/iso_root/EFI/BOOT/BOOTX64.EFI
+          test "$(head -c 2 build/iso_root/EFI/BOOT/BOOTX64.EFI)" = "MZ"
+
+      - name: Build UEFI ISO Image
+        run: |
+          python3 tools/scripts/create_uefi_iso.py
+          test -s build/baken_os.iso
+
+      - name: Create NVMe-only Foundation Fixture
+        run: |
+          python3 tools/scripts/create_foundation_storage_fixture.py build/nvme-only-test.img --nvme
+          test "$(dd if=build/nvme-only-test.img bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENNV1"
+          test "$(dd if=build/nvme-only-test.img bs=512 skip=1 count=1 status=none | head -c 8)" = "EFI PART"
+          test "$(dd if=build/nvme-only-test.img bs=1 skip=$((2048 * 512 + 82)) count=8 status=none)" = "FAT32   "
+
+      - name: Run NVMe-only Headless QEMU Boot Proof
+        shell: bash
+        run: |
+          echo "BAKEN_NVME_ONLY_REVISION=$(git rev-parse --short HEAD)"
+          command -v socat
+          OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
+          test -n "$OVMF_CODE"
+          OVMF_VARS="${OVMF_CODE/CODE/VARS}"
+          test -f "$OVMF_VARS"
+          cp "$OVMF_VARS" build/OVMF_VARS_NVME_ONLY.fd
+          rm -f build/qemu-nvme-only-serial.log build/qemu-nvme-only-monitor.sock
+
+          set +e
+          timeout --signal=TERM --kill-after=5s 60s qemu-system-x86_64 \
+            -machine q35 -m 512M -no-reboot \
+            -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+            -drive if=pflash,format=raw,file=build/OVMF_VARS_NVME_ONLY.fd \
+            -drive file=build/nvme-only-test.img,format=raw,if=none,id=nvme_only_disk \
+            -device nvme,drive=nvme_only_disk,serial=BAKEN-CI-NVME-ONLY \
+            -cdrom build/baken_os.iso \
+            -device qemu-xhci,id=xhci \
+            -device usb-kbd,bus=xhci.0 \
+            -display none \
+            -monitor unix:build/qemu-nvme-only-monitor.sock,server=on,wait=off \
+            -serial file:build/qemu-nvme-only-serial.log &
+          qemu_pid=$!
+
+          for i in $(seq 1 50); do
+            test -S build/qemu-nvme-only-monitor.sock && break
+            sleep 0.1
+          done
+          test -S build/qemu-nvme-only-monitor.sock
+
+          injection_failed=0
+          for i in $(seq 1 20); do
+            if ! printf 'sendkey a\n' | socat - UNIX-CONNECT:build/qemu-nvme-only-monitor.sock >/dev/null 2>&1; then
+              injection_failed=1
+              break
+            fi
+            sleep 2
+          done
+          wait "$qemu_pid"
+          status=$?
+          set -e
+
+          cat build/qemu-nvme-only-serial.log
+          test "$injection_failed" -eq 0
+          test "$status" -eq 124
+
+          python3 tools/scripts/extend_foundation_fixture.py \
+            build/nvme-only-test.img --verify build/qemu-nvme-only-serial.log
+
+          grep -Fq 'BAKEN:STEP=k' build/qemu-nvme-only-serial.log
+          grep -Fq 'BAKEN:STEP=)' build/qemu-nvme-only-serial.log
+          grep -Fq 'BAKEN:BARE_METAL_READY' build/qemu-nvme-only-serial.log
+          if grep -Fq 'BAKEN:STEP=v' build/qemu-nvme-only-serial.log; then
+            echo 'AHCI fixture certification unexpectedly ran in NVMe-only proof' >&2
+            exit 1
+          fi
+          test "$(dd if=build/nvme-only-test.img bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENNV1"
+
+      - name: Upload NVMe-only boot diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-nvme-only-diagnostics
+          path: |
+            build/qemu-nvme-only-serial.log
+          if-no-files-found: ignore
