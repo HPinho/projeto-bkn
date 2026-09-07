@@ -1,0 +1,82 @@
+// Baken OS — contexto de thread CPL0 compatível com o frame real de IRQ x86-64.
+//
+// O scheduler não inventa um formato paralelo: este layout espelha exatamente
+// __sotlas_x86_irq_common. Um frame salvo pelo timer pode ser retomado por IRETQ,
+// e um frame inicial fabricado aqui entra em uma thread nova pelo mesmo caminho.
+
+module kernel::arch::x86_64::thread_context;
+
+import kernel::arch::x86_64::gdt::*;
+
+pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 19;
+pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 152;
+pub const X86_KERNEL_THREAD_ENTRY_STACK_BIAS: u64 = 8;
+pub const X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202;
+
+@repr(C)
+pub struct X86KernelThreadFrame {
+    pub r15: u64;
+    pub r14: u64;
+    pub r13: u64;
+    pub r12: u64;
+    pub r11: u64;
+    pub r10: u64;
+    pub r9: u64;
+    pub r8: u64;
+    pub rdi: u64;
+    pub rsi: u64;
+    pub rbp: u64;
+    pub rbx: u64;
+    pub rdx: u64;
+    pub rcx: u64;
+    pub rax: u64;
+    pub vector: u64;
+    pub rip: u64;
+    pub cs: u64;
+    pub rflags: u64;
+}
+
+@system
+pub fn x86_kernel_thread_frame_address_valid(frame_address: u64) -> bool {
+    if frame_address == 0 { return false; }
+    return (frame_address & 7) == 0;
+}
+
+@system
+pub fn x86_kernel_thread_prepare_frame(stack_top: u64, entry_rip: u64) -> u64 {
+    if stack_top == 0 || entry_rip == 0 { return 0; }
+
+    // Uma função Win64 é normalmente alcançada após CALL, portanto entra com
+    // RSP = 8 (mod 16). IRETQ não empilha return address; reservamos 8 bytes no
+    // topo para reproduzir a mesma condição de ABI para a thread inicial.
+    let aligned_top = stack_top & 0xFFFFFFFFFFFFFFF0;
+    if aligned_top <= X86_KERNEL_THREAD_ENTRY_STACK_BIAS { return 0; }
+    let entry_stack = aligned_top - X86_KERNEL_THREAD_ENTRY_STACK_BIAS;
+    if entry_stack <= X86_KERNEL_THREAD_FRAME_BYTES { return 0; }
+    let frame_address = entry_stack - X86_KERNEL_THREAD_FRAME_BYTES;
+    if !x86_kernel_thread_frame_address_valid(frame_address) { return 0; }
+
+    let frame = frame_address as *mut X86KernelThreadFrame;
+    unsafe {
+        (*frame).r15 = 0;
+        (*frame).r14 = 0;
+        (*frame).r13 = 0;
+        (*frame).r12 = 0;
+        (*frame).r11 = 0;
+        (*frame).r10 = 0;
+        (*frame).r9 = 0;
+        (*frame).r8 = 0;
+        (*frame).rdi = 0;
+        (*frame).rsi = 0;
+        (*frame).rbp = 0;
+        (*frame).rbx = 0;
+        (*frame).rdx = 0;
+        (*frame).rcx = 0;
+        (*frame).rax = 0;
+        (*frame).vector = 0;
+        (*frame).rip = entry_rip;
+        (*frame).cs = GDT_KERNEL_CODE_SELECTOR as u64;
+        (*frame).rflags = X86_KERNEL_THREAD_INITIAL_RFLAGS;
+    }
+    return frame_address;
+}
