@@ -293,7 +293,7 @@ pub fn storage_discovery_scan() -> u32 {
                !storage_register_ahci_block_device() { return STORAGE_CONTROLLER_NONE; }
             // Certificação é best-effort para o boot normal. Na fixture do CI,
             // ela define STORAGE_GENERIC_BLOCK_IO_READY e produz os marcadores.
-            let certified = storage_certify_ahci_fixture();
+            if storage_certify_ahci_fixture() { STORAGE_GENERIC_BLOCK_IO_READY = true; }
             return STORAGE_CONTROLLER_AHCI;
         }
         return STORAGE_CONTROLLER_NONE;
