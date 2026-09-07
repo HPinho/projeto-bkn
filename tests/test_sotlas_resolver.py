@@ -9,7 +9,6 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("compiler", ROOT / "tools" / "sotlas_compile" / "compiler.py")
 assert SPEC is not None and SPEC.loader is not None
@@ -26,39 +25,35 @@ class SotlasResolverTests(unittest.TestCase):
             self.assertEqual(sotlas_compile.find_gcc(ROOT), Path(sys.executable))
 
     def test_real_kernel_graph_has_single_entry_and_graphical_compositor(self):
-        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
+        manifest = sotlas_compile.analyze(ROOT / "kernel/src/main.sotlas")
         self.assertEqual(manifest["entry"], "kernel::main")
         self.assertEqual(manifest["audited_modules"], len(manifest["compile_order"]))
-        self.assertIn("kernel::desktop_compositor", manifest["compile_order"])
+        for module in (
+            "kernel::desktop_compositor", "kernel::graphics_engine", "kernel::window_manager",
+            "kernel::memory::pmm", "kernel::memory::memory_map_policy",
+            "kernel::arch::x86_64::post_cutover", "kernel::drivers::pci_bus",
+        ):
+            self.assertIn(module, manifest["compile_order"])
+        self.assertNotIn("kernel::memory::cutover_plan", manifest["compile_order"])
         self.assertGreaterEqual(len(manifest["compile_order"]), 6)
-        self.assertIn("kernel::graphics_engine", manifest["compile_order"])
-        self.assertIn("kernel::window_manager", manifest["compile_order"])
-        self.assertIn("kernel::memory::pmm", manifest["compile_order"])
-        self.assertIn("kernel::memory::cutover_plan", manifest["compile_order"])
-        self.assertIn("kernel::drivers::pci_bus", manifest["compile_order"])
         self.assertEqual(manifest["unreachable_modules"], [])
         self.assertEqual(manifest["orphan_roots"], [])
 
     def test_missing_import_is_reported(self):
-        source = ROOT / "tests" / "fixtures" / "sotlas" / "missing" / "kernel" / "src" / "main.sotlas"
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
-            sotlas_compile.analyze(source)
+            sotlas_compile.analyze(ROOT / "tests/fixtures/sotlas/missing/kernel/src/main.sotlas")
 
     def test_circular_import_is_reported(self):
-        source = ROOT / "tests" / "fixtures" / "sotlas" / "cycle" / "kernel" / "src" / "main.sotlas"
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
-            sotlas_compile.analyze(source)
+            sotlas_compile.analyze(ROOT / "tests/fixtures/sotlas/cycle/kernel/src/main.sotlas")
 
     def test_kernel_graph_requires_one_exported_entry(self):
-        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
-        self.assertIn(
-            "kernel::arch::x86_64::post_cutover::sotlas_x86_post_cutover_entry",
-            manifest["exports"],
-        )
+        manifest = sotlas_compile.analyze(ROOT / "kernel/src/main.sotlas")
+        self.assertIn("kernel::arch::x86_64::post_cutover::sotlas_x86_post_cutover_entry", manifest["exports"])
 
     def test_build_modular_compiles_kernel_objects(self):
-        manifest = sotlas_compile.analyze(ROOT / "kernel" / "src" / "main.sotlas")
-        result = sotlas_compile.build_modular(ROOT / "kernel" / "src" / "main.sotlas")
+        manifest = sotlas_compile.analyze(ROOT / "kernel/src/main.sotlas")
+        result = sotlas_compile.build_modular(ROOT / "kernel/src/main.sotlas")
         module_count = len(manifest["compile_order"])
         self.assertIn("compiled_objects", result)
         self.assertEqual(len(result["compiled_objects"]), module_count + 1)
@@ -73,17 +68,11 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertNotIn("bridge_runtime", result)
 
     def test_self_import_is_reported(self):
-        source = ROOT / "tests" / "fixtures" / "sotlas" / "self_import" / "kernel" / "src" / "main.sotlas"
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
-            sotlas_compile.analyze(source)
+            sotlas_compile.analyze(self.fixture("self_import"))
 
     def test_module_cannot_hide_c_preprocessor_directives(self):
-        units = {
-            "kernel::bad": {
-                "path": ROOT / "kernel" / "src" / "bad.sotlas",
-                "text": "module kernel::bad;\n#include <stdio.h>\n",
-            }
-        }
+        units = {"kernel::bad": {"path": ROOT / "kernel/src/bad.sotlas", "text": "module kernel::bad;\n#include <stdio.h>\n"}}
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.validate_module_dialect(units, ROOT)
 
@@ -100,15 +89,12 @@ class SotlasResolverTests(unittest.TestCase):
             sotlas_compile.analyze(self.fixture("two_entries"))
 
     def test_ast_parsing_and_typechecking(self):
-        source = (ROOT / "kernel" / "src" / "main.sotlas").read_text(encoding="utf-8")
+        source = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
         ast = sotlas_compile.parse_module_ast(source)
         self.assertEqual(ast.name, "kernel::main")
-        self.assertIn("kernel::graphics_engine", ast.imports)
-        self.assertIn("kernel::desktop_compositor", ast.imports)
-        self.assertIn("kernel::memory::pmm", ast.imports)
-        self.assertIn("kernel::memory::cutover_plan", ast.imports)
-        self.assertIn("kernel::drivers::pci_bus", ast.imports)
-
+        for module in ("kernel::graphics_engine", "kernel::desktop_compositor", "kernel::memory::pmm", "kernel::memory::memory_map_policy", "kernel::drivers::pci_bus"):
+            self.assertIn(module, ast.imports)
+        self.assertNotIn("kernel::memory::cutover_plan", ast.imports)
         self.assertEqual(ast.functions, [])
         post_source = (ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas").read_text(encoding="utf-8")
         post_ast = sotlas_compile.parse_module_ast(post_source)
@@ -119,14 +105,12 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertTrue(sotlas_compile.typecheck_ast(ast))
 
     def test_typechecker_rejects_unknown_signature_type(self):
-        ast = sotlas_compile.parse_module_ast(
-            "module kernel::bad;\npub fn run(value: MissingType) -> void { }\n"
-        )
+        ast = sotlas_compile.parse_module_ast("module kernel::bad;\npub fn run(value: MissingType) -> void { }\n")
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.typecheck_ast(ast)
 
     def test_ui_parser_collects_public_dock_fields(self):
-        source = (ROOT / "kernel" / "src" / "baken_ui_oop.sotlas").read_text(encoding="utf-8")
+        source = (ROOT / "kernel/src/baken_ui_oop.sotlas").read_text(encoding="utf-8")
         ast = sotlas_compile.parse_module_ast(source)
         dock = next((item for item in ast.structs if item.name == "DesktopDock"), None)
         self.assertIsNotNone(dock)
@@ -134,13 +118,10 @@ class SotlasResolverTests(unittest.TestCase):
         self.assertTrue(any(field.name == "item_count" for field in dock.fields))
 
     def test_interface_checker_rejects_unknown_function_call(self):
-        ast = sotlas_compile.parse_module_ast(
-            "module kernel::bad;\npub fn run() -> void { missing_call(); }\n"
-        )
+        ast = sotlas_compile.parse_module_ast("module kernel::bad;\npub fn run() -> void { missing_call(); }\n")
         manifest = {"units": [{"module": "kernel::bad", "imports": []}]}
         with self.assertRaisesRegex(sotlas_compile.SotlasError, ".+"):
             sotlas_compile.validate_module_interfaces({"kernel::bad": ast}, manifest)
 
 
-if __name__ == "__main__":
-    unittest.main()
+if __name__ == "__main__": unittest.main()
