@@ -108,6 +108,9 @@ jobs:
           grep -Fq 'BAKEN:STEP=)' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:BARE_METAL_READY' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:SCHEDULER_SWITCH' build/qemu-nvme-only-serial.log
+          grep -Fq 'BAKEN:SCHEDULER_ROUND_TRIP' build/qemu-nvme-only-serial.log
+          grep -Fq 'BAKEN:RUN_QUEUE_CREATED' build/qemu-nvme-only-serial.log
+          grep -Fq 'BAKEN:RUN_QUEUE_SWITCH' build/qemu-nvme-only-serial.log
           if grep -Fq 'BAKEN:STEP=v' build/qemu-nvme-only-serial.log; then
             echo 'AHCI fixture certification unexpectedly ran in NVMe-only proof' >&2
             exit 1
