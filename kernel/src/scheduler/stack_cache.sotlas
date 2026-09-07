@@ -1,0 +1,78 @@
+// Baken OS — cache fixo de stacks aposentadas do scheduler.
+//
+// O cache mantém ownership de stacks de kernel que não podem ser devolvidas ao
+// bootstrap PMM via LIFO. Não aloca memória e não toca firmware; apenas permite
+// reutilizar uma stack física compatível por uma thread futura.
+
+module kernel::scheduler::stack_cache;
+
+pub const SCHEDULER_STACK_CACHE_CAPACITY: usize = 8;
+
+static mut SCHEDULER_STACK_CACHE_BASES: [u64; SCHEDULER_STACK_CACHE_CAPACITY] = [0; SCHEDULER_STACK_CACHE_CAPACITY];
+static mut SCHEDULER_STACK_CACHE_PAGES: [u64; SCHEDULER_STACK_CACHE_CAPACITY] = [0; SCHEDULER_STACK_CACHE_CAPACITY];
+
+@system
+pub fn scheduler_stack_cache_reset() -> void {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_STACK_CACHE_CAPACITY {
+            SCHEDULER_STACK_CACHE_BASES[slot] = 0;
+            SCHEDULER_STACK_CACHE_PAGES[slot] = 0;
+            slot += 1;
+        }
+    }
+}
+
+@system
+pub fn scheduler_stack_cache_put(base: u64, pages: u64) -> bool {
+    if base == 0 || pages == 0 { return false; }
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_STACK_CACHE_CAPACITY {
+            if SCHEDULER_STACK_CACHE_BASES[slot] == base { return false; }
+            slot += 1;
+        }
+        slot = 0;
+        while slot < SCHEDULER_STACK_CACHE_CAPACITY {
+            if SCHEDULER_STACK_CACHE_BASES[slot] == 0 {
+                SCHEDULER_STACK_CACHE_BASES[slot] = base;
+                SCHEDULER_STACK_CACHE_PAGES[slot] = pages;
+                return true;
+            }
+            slot += 1;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn scheduler_stack_cache_take(pages: u64) -> u64 {
+    if pages == 0 { return 0; }
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_STACK_CACHE_CAPACITY {
+            if SCHEDULER_STACK_CACHE_BASES[slot] != 0 &&
+               SCHEDULER_STACK_CACHE_PAGES[slot] == pages {
+                let base = SCHEDULER_STACK_CACHE_BASES[slot];
+                SCHEDULER_STACK_CACHE_BASES[slot] = 0;
+                SCHEDULER_STACK_CACHE_PAGES[slot] = 0;
+                return base;
+            }
+            slot += 1;
+        }
+    }
+    return 0;
+}
+
+@system
+pub fn scheduler_stack_cache_count() -> u64 {
+    let mut count: u64 = 0;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_STACK_CACHE_CAPACITY {
+            if SCHEDULER_STACK_CACHE_BASES[slot] != 0 { count += 1; }
+            slot += 1;
+        }
+    }
+    return count;
+}
