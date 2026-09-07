@@ -33,9 +33,9 @@ class ProcessAddressSpaceTests(unittest.TestCase):
         for token in (
             "PROCESS_ADDRESS_SPACE_TABLE_PAGES: u64 = 4",
             "pmm_alloc_pages(PROCESS_ADDRESS_SPACE_TABLE_PAGES)",
-            "user_pdpt_physical: table_base + X86_PAGE_SIZE",
-            "user_pd_physical: table_base + (2 * X86_PAGE_SIZE)",
-            "user_pt_physical: table_base + (3 * X86_PAGE_SIZE)",
+            "let pdpt = process_address_space_page(table_base + X86_PAGE_SIZE)",
+            "let pd = process_address_space_page(table_base + (2 * X86_PAGE_SIZE))",
+            "let pt = process_address_space_page(table_base + (3 * X86_PAGE_SIZE))",
         ):
             self.assertIn(token, self.text)
 

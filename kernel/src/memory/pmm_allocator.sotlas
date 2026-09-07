@@ -17,6 +17,10 @@ pub const PMM_BOOTSTRAP_BITMAP_BYTES: u64 = 16384;
 pub const PMM_BOOTSTRAP_MAX_REGIONS: u64 = 8;
 pub const PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES: u64 = 131072;
 pub const PMM_PHYSICAL_ADDRESS_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
+// Memória física baixa permanece fora do allocator geral. A faixa abaixo de
+// 1 MiB pode conter estruturas/compatibilidade legada de plataforma e só deve
+// voltar a ser usada por um allocator explicitamente dedicado a low memory.
+pub const PMM_GENERAL_ALLOC_MIN_PHYSICAL: u64 = 0x00100000;
 
 pub struct PmmAllocatorState {
     pub state: u32;
@@ -354,7 +358,7 @@ pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64,
 // Isso rejeita double-free e ranges parcialmente livres antes de alterar bits.
 @system
 pub fn pmm_free_pages(base: u64, count: u64) -> bool {
-    if base == 0 || count == 0 { return false; }
+    if base == 0 || count == 0 || base < PMM_GENERAL_ALLOC_MIN_PHYSICAL { return false; }
     unsafe {
         if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE &&
            PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_EXHAUSTED { return false; }
@@ -491,10 +495,36 @@ pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
                 tracked_pages
             );
             if !pmm_bitmap_valid(&PMM_REGION_BITMAPS[slot]) { return false; }
-            if !pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], 0, true) { return false; }
+
+            // Mesmo que o firmware reporte páginas convencionais abaixo de
+            // 1 MiB, o PMM geral não as publica. Isso evita reutilizar memória
+            // baixa como stacks/page tables/DMA sem um contrato low-memory.
+            let mut reserved_page: u64 = 0;
+            while reserved_page < tracked_pages {
+                let reserved_offset = reserved_page * BAKEN_PAGE_SIZE;
+                if reserved_offset / BAKEN_PAGE_SIZE != reserved_page { return false; }
+                let reserved_physical = source.base + reserved_offset;
+                if reserved_physical < source.base { return false; }
+                if reserved_physical >= PMM_GENERAL_ALLOC_MIN_PHYSICAL { break; }
+                if !pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], reserved_page, true) {
+                    return false;
+                }
+                reserved_page += 1;
+            }
+            // Regiões inteiramente acima do limite ainda preservam a página
+            // zero local como sentinela do bitmap, compatível com find_free_run.
+            if reserved_page == 0 &&
+               !pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], 0, true) { return false; }
+
             PMM_REGION_BASES[slot] = source.base;
             PMM_REGION_ENDS[slot] = end;
-            PMM_REGION_NEXT[slot] = source.base + BAKEN_PAGE_SIZE;
+            let mut next_candidate = source.base + BAKEN_PAGE_SIZE;
+            if next_candidate < source.base { return false; }
+            if next_candidate < PMM_GENERAL_ALLOC_MIN_PHYSICAL {
+                next_candidate = PMM_GENERAL_ALLOC_MIN_PHYSICAL;
+            }
+            if next_candidate > end { next_candidate = end; }
+            PMM_REGION_NEXT[slot] = next_candidate;
             slot += 1;
         }
         if slot == 0 { return false; }

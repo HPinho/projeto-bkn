@@ -48,6 +48,19 @@ class PmmAllocatorTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
 
+    def test_general_allocator_reserves_legacy_low_memory(self):
+        self.assertIn("PMM_GENERAL_ALLOC_MIN_PHYSICAL: u64 = 0x00100000", self.alloc)
+        activate = self.alloc.split("pub fn pmm_allocator_activate_after_exit_boot_services", 1)[1]
+        for token in (
+            "reserved_physical >= PMM_GENERAL_ALLOC_MIN_PHYSICAL",
+            "pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], reserved_page, true)",
+            "next_candidate = PMM_GENERAL_ALLOC_MIN_PHYSICAL",
+        ):
+            self.assertIn(token, activate)
+        free_body = self.alloc.split("pub fn pmm_free_pages(base: u64, count: u64) -> bool", 1)[1]
+        free_body = free_body.split("pub fn pmm_free_pages_lifo", 1)[0]
+        self.assertIn("base < PMM_GENERAL_ALLOC_MIN_PHYSICAL", free_body)
+
     def test_lifo_api_remains_compatible_but_delegates_to_general_free(self):
         body = self.alloc.split("pub fn pmm_free_pages_lifo", 1)[1]
         body = body.split("fn pmm_allocator_self_test_reuse", 1)[0]
