@@ -116,6 +116,7 @@ jobs:
           grep -Fq 'BAKEN:SCHEDULER_ROUND_TRIP' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:RUN_QUEUE_CREATED' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:RUN_QUEUE_SWITCH' build/qemu-nvme-only-serial.log
+          grep -Fq 'BAKEN:YIELD_ROUND_TRIP' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:THREAD_EXIT' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:THREAD_REAP' build/qemu-nvme-only-serial.log
           grep -Fq 'BAKEN:STACK_RELEASE' build/qemu-nvme-only-serial.log
