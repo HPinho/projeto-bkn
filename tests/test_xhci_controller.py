@@ -44,23 +44,28 @@ class XhciControllerTests(unittest.TestCase):
         self.assertIn("xhci_max_scratchpads", text)
         self.assertIn("xhci_controller_max_scratchpads", text)
 
-    def test_post_cutover_requires_keyboard_before_xhci(self):
+    def test_post_cutover_requires_native_timer_not_ps2_keyboard_before_xhci(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_prepare_xhci_controller()", 1)[1].split(
             "pub fn post_cutover_prepare_xhci_dma_tables()", 1
         )[0]
-        self.assertIn("post_cutover_keyboard_live()", body)
+        self.assertIn("post_cutover_timer_live()", body)
+        self.assertNotIn("post_cutover_keyboard_live()", body)
+        self.assertIn("active_page_tables_is_ready()", body)
         self.assertIn("pci_scan_all()", body)
         self.assertIn("xhci_controller_prepare_first()", body)
         self.assertIn("POST_CUTOVER_XHCI_READY = true", body)
 
-    def test_x_marker_comes_after_keyboard_marker(self):
+    def test_ci_still_requires_keyboard_and_xhci_certification_markers(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
+        self.assertIn("let keyboard_ok = post_cutover_enable_keyboard_interrupts();", body)
+        self.assertIn("let xhci_ok = post_cutover_prepare_xhci_controller();", body)
         self.assertLess(
             body.index("x86_serial_write_stage_marker('K' as u8)"),
             body.index("x86_serial_write_stage_marker('X' as u8)"),
         )
+        self.assertIn("if serial_ready && foundation_verified", body)
 
     def test_ci_attaches_xhci_and_requires_reset_marker(self):
         text = WORKFLOW.read_text(encoding="utf-8")
