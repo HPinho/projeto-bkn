@@ -30,18 +30,22 @@ class KernelSchedulerTests(unittest.TestCase):
 
     def test_x86_thread_frame_matches_irq_restore_shape(self):
         text = FRAME.read_text(encoding="utf-8")
-        self.assertIn("X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 19", text)
-        self.assertIn("X86_KERNEL_THREAD_FRAME_BYTES: u64 = 152", text)
+        self.assertIn("X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 21", text)
+        self.assertIn("X86_KERNEL_THREAD_FRAME_BYTES: u64 = 168", text)
         fields = [
             "pub r15: u64", "pub r14: u64", "pub r13: u64", "pub r12: u64",
             "pub r11: u64", "pub r10: u64", "pub r9: u64", "pub r8: u64",
             "pub rdi: u64", "pub rsi: u64", "pub rbp: u64", "pub rbx: u64",
             "pub rdx: u64", "pub rcx: u64", "pub rax: u64", "pub vector: u64",
             "pub rip: u64", "pub cs: u64", "pub rflags: u64",
+            "pub rsp: u64", "pub ss: u64",
         ]
         positions = [text.index(field) for field in fields]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("GDT_KERNEL_CODE_SELECTOR as u64", text)
+        self.assertIn("GDT_KERNEL_DATA_SELECTOR as u64", text)
+        self.assertIn("(*frame).rsp = aligned_top", text)
+        self.assertIn("(*frame).ss = GDT_KERNEL_DATA_SELECTOR as u64", text)
         self.assertIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x2", text)
         self.assertNotIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202", text)
 
@@ -54,6 +58,8 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("(*frame).r11 = entry_rip", frame)
         self.assertIn("(*frame).r10 = aligned_top", frame)
         self.assertIn("(*frame).rip = trampoline_rip", frame)
+        self.assertIn("(*frame).rsp = aligned_top", frame)
+        self.assertIn("(*frame).ss = GDT_KERNEL_DATA_SELECTOR as u64", frame)
         self.assertNotIn("synthetic_return", frame)
 
         self.assertIn("pub fn x86_scheduler_thread_trampoline_address() -> u64", cpu)
