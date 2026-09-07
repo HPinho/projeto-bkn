@@ -1,19 +1,18 @@
-// Baken OS — fundação de IRQs externos x86-64.
-//
-// Instala apenas vetores conhecidos, mantém IOAPIC mascarado e nunca executa STI.
-// O backend salva/restaura GPRs e retorna com IRETQ; este módulo contém a política.
-
+// Baken OS — fundação de IRQs externos x86-64 + syscall CPL3.
 module kernel::interrupts::irq;
 
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::fpu::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::arch::x86_64::serial::*;
+import kernel::arch::x86_64::thread_context::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::i8042::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::sleep::*;
+import kernel::syscall::dispatch::*;
 
 pub const IRQ_VECTOR_TIMER: u16 = 0x40;
 pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
@@ -36,13 +35,20 @@ fn irq_install_gate(vector: u16) -> bool {
 }
 
 @system
+fn irq_install_user_gate(vector: u16) -> bool {
+    let handler = x86_irq_stub_address(vector);
+    if handler == 0 { return false; }
+    return idt_set_user_irq_gate(vector, handler);
+}
+
+@system
 pub fn irq_prepare_idt() -> bool {
     unsafe { IRQ_IDT_READY = false; }
     if !idt_exceptions_ready() { return false; }
     if !irq_install_gate(IRQ_VECTOR_TIMER) { return false; }
     if !irq_install_gate(IRQ_VECTOR_KEYBOARD) { return false; }
     if !irq_install_gate(IRQ_VECTOR_MOUSE) { return false; }
-    if !irq_install_gate(IRQ_VECTOR_RESCHEDULE) { return false; }
+    if !irq_install_user_gate(IRQ_VECTOR_RESCHEDULE) { return false; }
     if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
     unsafe { IRQ_IDT_READY = true; }
     return true;
@@ -52,51 +58,61 @@ pub fn irq_prepare_idt() -> bool {
 pub fn irq_prepare_masked_ioapic_routes() -> bool {
     unsafe { IRQ_ROUTES_READY = false; }
     if !IRQ_IDT_READY || !lapic_is_ready() || !ioapic_is_ready() { return false; }
-
     let keyboard = interrupt_route_keyboard(IRQ_VECTOR_KEYBOARD);
     if !keyboard.valid { return false; }
     let mouse = interrupt_route_ps2_mouse(IRQ_VECTOR_MOUSE);
     if !mouse.valid { return false; }
-
     let destination = lapic_id();
     if !ioapic_program_route_masked(&keyboard, destination) { return false; }
     if !ioapic_program_route_masked(&mouse, destination) { return false; }
-
     unsafe { IRQ_ROUTES_READY = true; }
     return true;
 }
 
 @system
 pub fn irq_idt_ready() -> bool { unsafe { return IRQ_IDT_READY; } }
-
 @system
 pub fn irq_routes_ready() -> bool { unsafe { return IRQ_ROUTES_READY; } }
-
 @system
 pub fn irq_timer_count() -> u64 { unsafe { return IRQ_TIMER_COUNT; } }
-
 @system
 pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
-
 @system
 pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
-
 @system
 pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
+
+@system
+fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
+    let old_tid = scheduler_current_thread_id();
+    if fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
+    let selected = scheduler_on_timer_interrupt(frame_address);
+    let new_tid = scheduler_current_thread_id();
+    if fpu_is_ready() && !fpu_restore_thread(new_tid) { loop {} }
+    return selected;
+}
 
 @system
 @export
 pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
     if vector == IRQ_VECTOR_SPURIOUS as u64 {
         unsafe { IRQ_SPURIOUS_COUNT += 1; }
-        // Vetor espúrio do LAPIC não recebe EOI.
         return frame_address;
     }
 
     if vector == IRQ_VECTOR_RESCHEDULE as u64 {
-        // Interrupção de software CPL0: compartilha o motor real de seleção de
-        // frame do scheduler, mas não representa uma fonte LAPIC e nunca recebe EOI.
-        return scheduler_on_timer_interrupt(frame_address);
+        if x86_saved_frame_is_user(frame_address) {
+            let action = syscall_dispatch_frame(frame_address);
+            if action == SYSCALL_ACTION_EXIT {
+                if !scheduler_terminate_current() { loop {} }
+                return irq_schedule_with_fpu(frame_address);
+            }
+            return frame_address;
+        }
+        // Durante bring-up, antes de FPU/SIMD ficar ativa, preserva exatamente
+        // o caminho histórico CPL0. Depois, save/restore envolve a mesma troca.
+        if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
+        return irq_schedule_with_fpu(frame_address);
     }
 
     if vector == IRQ_VECTOR_TIMER as u64 {
@@ -105,21 +121,15 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             IRQ_TIMER_COUNT += 1;
             timer_count = IRQ_TIMER_COUNT;
         }
-        // O LAPIC recebe EOI antes de potencialmente retomarmos outra thread.
         lapic_eoi();
-        // Diagnóstico temporário e delimitado do bring-up do scheduler. Os três
-        // primeiros ticks permitem distinguir falha de IRETQ de falha de política.
         if timer_count <= 3 {
             x86_serial_write_hex32_marker('T' as u8, timer_count as u32);
         }
-        // Deadlines de sleep são publicados sob IF=0. O próprio tick pode tornar
-        // a thread READY antes da política normal escolher o próximo frame.
         scheduler_sleep_on_timer_tick(timer_count);
-        return scheduler_on_timer_interrupt(frame_address);
+        if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
+        return irq_schedule_with_fpu(frame_address);
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
-        // ISR nunca inicializa/reconfigura o i8042. O caminho abaixo só drena
-        // bytes já prontos quando IRQ nativa foi previamente habilitada.
         i8042_drain_irq_output();
         unsafe { IRQ_KEYBOARD_COUNT += 1; }
         lapic_eoi();
@@ -131,8 +141,5 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         lapic_eoi();
         return frame_address;
     }
-
-    // Nenhum gate desconhecido deve apontar para este dispatcher.
-    // Falha fechada: não envia EOI para uma fonte que não reconhecemos.
     return frame_address;
 }

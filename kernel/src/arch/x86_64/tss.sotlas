@@ -1,8 +1,8 @@
 // Baken OS - x86_64 Task State Segment foundation.
 //
-// A TSS em long mode fornece RSP0 e ISTs para transicoes de privilegio e
-// excecoes criticas. Este modulo prepara estrutura e stacks dedicadas; LTR
-// permanece bloqueado ate o cutover real de UEFI Boot Services.
+// A TSS em long mode fornece RSP0 e ISTs para transições de privilégio e
+// exceções críticas. RSP0 pode ser trocado para a kernel-entry stack da thread
+// CPL3 corrente; ISTs permanecem dedicadas e independentes do scheduler.
 
 module kernel::arch::x86_64::tss;
 
@@ -30,31 +30,14 @@ pub struct Tss64 {
 }
 
 static mut TSS: Tss64 = Tss64 {
-    reserved0: 0,
-    rsp0: 0,
-    rsp1: 0,
-    rsp2: 0,
-    reserved1: 0,
-    ist1: 0,
-    ist2: 0,
-    ist3: 0,
-    ist4: 0,
-    ist5: 0,
-    ist6: 0,
-    ist7: 0,
-    reserved2: 0,
-    reserved3: 0,
-    io_map_base: 0,
+    reserved0: 0, rsp0: 0, rsp1: 0, rsp2: 0, reserved1: 0,
+    ist1: 0, ist2: 0, ist3: 0, ist4: 0, ist5: 0, ist6: 0, ist7: 0,
+    reserved2: 0, reserved3: 0, io_map_base: 0,
 };
-
-// Cada buffer possui pouco mais de 16 KiB. O topo e arredondado para baixo
-// em 16 bytes, portanto continua dentro da alocacao mesmo se o array base
-// tiver apenas alinhamento natural de u64.
 static mut KERNEL_RSP0_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
 static mut DOUBLE_FAULT_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
 static mut NMI_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
 static mut MACHINE_CHECK_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
-
 static mut TSS_PREPARED: bool = false;
 
 @system
@@ -66,19 +49,9 @@ pub fn tss_stack_top(base: *const u64) -> u64 {
 @system
 pub fn tss_prepare(kernel_rsp0: u64, ist_double_fault: u64, ist_nmi: u64, ist_machine_check: u64) -> void {
     unsafe {
-        TSS.rsp0 = kernel_rsp0;
-        TSS.rsp1 = 0;
-        TSS.rsp2 = 0;
-        TSS.ist1 = ist_double_fault;
-        TSS.ist2 = ist_nmi;
-        TSS.ist3 = ist_machine_check;
-        TSS.ist4 = 0;
-        TSS.ist5 = 0;
-        TSS.ist6 = 0;
-        TSS.ist7 = 0;
-        // sizeof(Tss64) = 104 bytes; apontar o I/O bitmap para o byte seguinte
-        // significa que nenhum bitmap esta presente enquanto o mecanismo nao
-        // for implementado explicitamente.
+        TSS.rsp0 = kernel_rsp0; TSS.rsp1 = 0; TSS.rsp2 = 0;
+        TSS.ist1 = ist_double_fault; TSS.ist2 = ist_nmi; TSS.ist3 = ist_machine_check;
+        TSS.ist4 = 0; TSS.ist5 = 0; TSS.ist6 = 0; TSS.ist7 = 0;
         TSS.io_map_base = 104;
         TSS_PREPARED = true;
     }
@@ -91,54 +64,36 @@ pub fn tss_prepare_default_stacks() -> void {
         let df_base: *const u64 = &DOUBLE_FAULT_STACK[0];
         let nmi_base: *const u64 = &NMI_STACK[0];
         let mc_base: *const u64 = &MACHINE_CHECK_STACK[0];
-        tss_prepare(
-            tss_stack_top(rsp0_base),
-            tss_stack_top(df_base),
-            tss_stack_top(nmi_base),
-            tss_stack_top(mc_base)
-        );
+        tss_prepare(tss_stack_top(rsp0_base), tss_stack_top(df_base),
+                    tss_stack_top(nmi_base), tss_stack_top(mc_base));
     }
 }
 
+// Só altera RSP0. O caller deve fornecer o topo de uma stack supervisor
+// pertencente à thread que será retomada em CPL3.
 @system
-pub fn tss_base() -> u64 {
+pub fn tss_set_rsp0(kernel_rsp0: u64) -> bool {
+    if kernel_rsp0 == 0 || (kernel_rsp0 & 15) != 0 { return false; }
     unsafe {
-        let ptr: *const Tss64 = &TSS;
-        return ptr as u64;
+        if !TSS_PREPARED { return false; }
+        TSS.rsp0 = kernel_rsp0;
+        return TSS.rsp0 == kernel_rsp0;
     }
 }
 
 @system
-pub fn tss_limit() -> u32 {
-    return 103;
-}
-
+pub fn tss_base() -> u64 { unsafe { let ptr: *const Tss64 = &TSS; return ptr as u64; } }
 @system
-pub fn tss_size() -> u32 {
-    return 104;
-}
-
+pub fn tss_limit() -> u32 { return 103; }
 @system
-pub fn tss_is_prepared() -> bool {
-    unsafe { return TSS_PREPARED; }
-}
-
+pub fn tss_size() -> u32 { return 104; }
 @system
-pub fn tss_rsp0() -> u64 {
-    unsafe { return TSS.rsp0; }
-}
-
+pub fn tss_is_prepared() -> bool { unsafe { return TSS_PREPARED; } }
 @system
-pub fn tss_ist1_double_fault() -> u64 {
-    unsafe { return TSS.ist1; }
-}
-
+pub fn tss_rsp0() -> u64 { unsafe { return TSS.rsp0; } }
 @system
-pub fn tss_ist2_nmi() -> u64 {
-    unsafe { return TSS.ist2; }
-}
-
+pub fn tss_ist1_double_fault() -> u64 { unsafe { return TSS.ist1; } }
 @system
-pub fn tss_ist3_machine_check() -> u64 {
-    unsafe { return TSS.ist3; }
-}
+pub fn tss_ist2_nmi() -> u64 { unsafe { return TSS.ist2; } }
+@system
+pub fn tss_ist3_machine_check() -> u64 { unsafe { return TSS.ist3; } }
