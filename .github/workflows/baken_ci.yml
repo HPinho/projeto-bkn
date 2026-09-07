@@ -255,6 +255,7 @@ jobs:
           if test -f build/qemu-serial.log; then
             cat build/qemu-serial.log
           fi
+          python3 tools/scripts/verify_kernel_smoke.py build/qemu-serial.log
           if test "$injection_failed" -ne 0; then
             echo '::error::Não foi possível injetar a tecla no monitor QEMU.'
             exit 1

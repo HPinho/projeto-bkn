@@ -1,9 +1,11 @@
 // Baken OS — fundação de address spaces isolados para processos x86-64.
 //
-// Esta etapa NÃO entra em Ring 3 e NÃO troca CR3. Ela constrói raízes independentes
+// Esta etapa NÃO entra em Ring 3. Ela constrói raízes independentes
 // em RAM real do PMM, herda somente mappings supervisor do kernel e materializa uma
 // subárvore user exclusiva. Assim a política de isolamento pode ser provada antes
 // de introduzir transições CPL3/SYSCALL.
+// O self-test troca CR3 temporariamente, com IRQs desligadas, e restaura a raiz
+// original antes de liberar qualquer frame ou iniciar o scheduler.
 
 module kernel::process::address_space;
 
@@ -284,6 +286,34 @@ pub fn process_address_space_destroy(space: *mut ProcessAddressSpace) -> bool {
 }
 
 @system
+fn process_address_space_cr3_probe(first: *const ProcessAddressSpace,
+                                    second: *const ProcessAddressSpace) -> bool {
+    if !process_address_space_valid(first) || !process_address_space_valid(second) ||
+       x86_interrupts_enabled() { return false; }
+    let saved_cr3 = x86_read_cr3_raw();
+    let mut passed: bool = false;
+    unsafe {
+        // Sem retornos antecipados entre a primeira troca e a restauração.
+        // As leituras MMIO são voláteis no backend: não podem ser reutilizadas
+        // pelo otimizador entre raízes com o mesmo endereço virtual.
+        x86_write_cr3_raw((*first).root_physical);
+        let first_value = x86_mmio_read32(PROCESS_USER_BASE);
+        let first_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+        x86_write_cr3_raw((*second).root_physical);
+        let second_value = x86_mmio_read32(PROCESS_USER_BASE);
+        let second_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+        x86_write_cr3_raw((*first).root_physical);
+        let first_again = x86_mmio_read32(PROCESS_USER_BASE);
+        x86_write_cr3_raw(saved_cr3);
+        passed = first_root == (*first).root_physical &&
+                 second_root == (*second).root_physical &&
+                 first_value == 0x33334444 && second_value == 0xCCCCDDDD &&
+                 first_again == first_value;
+    }
+    return passed && x86_read_cr3_raw() == saved_cr3;
+}
+
+@system
 fn process_address_space_self_test() -> bool {
     let before = pmm_allocator_allocated_pages();
     let mut first = process_address_space_create();
@@ -331,6 +361,8 @@ fn process_address_space_self_test() -> bool {
     if !x86_pte_present(first_user_root) || !x86_pte_present(second_user_root) ||
        (first_user_root & X86_PTE_USER) == 0 || (second_user_root & X86_PTE_USER) == 0 ||
        x86_pte_address(first_user_root) == x86_pte_address(second_user_root) { return false; }
+
+    if !process_address_space_cr3_probe(&first, &second) { return false; }
 
     if process_address_space_unmap_user_page(&mut first, PROCESS_USER_BASE) != first_frame ||
        process_address_space_unmap_user_page(&mut second, PROCESS_USER_BASE) != second_frame {

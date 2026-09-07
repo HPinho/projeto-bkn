@@ -20,9 +20,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install System Dependencies & QEMU
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
+          timeout --foreground 4m sudo apt-get update
+          timeout --foreground 6m sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
 
       - name: Verify NVMe Storage Contracts
         run: |
@@ -103,6 +104,7 @@ jobs:
             echo '--- QEMU x86 interrupt/exception trace tail ---'
             tail -n 160 build/qemu-nvme-only-int.log
           fi
+          python3 tools/scripts/verify_kernel_smoke.py build/qemu-nvme-only-serial.log
           if test "$injection_failed" -ne 0; then
             echo '::error::Não foi possível injetar a tecla no monitor QEMU NVMe-only.'
             exit 1

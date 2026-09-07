@@ -83,9 +83,17 @@ class ProcessAddressSpaceTests(unittest.TestCase):
         self.assertIn("pmm_free_pages(base, PROCESS_ADDRESS_SPACE_TABLE_PAGES)", body)
         self.assertNotIn("pmm_free_pages_lifo", body)
 
-    def test_stage10_does_not_switch_cr3_or_claim_ring3(self):
+    def test_cr3_probe_restores_kernel_before_return_and_does_not_claim_ring3(self):
         self.assertIn("x86_read_cr3_raw()", self.text)
-        self.assertNotIn("x86_write_cr3_raw", self.text)
+        body = self.text.split("fn process_address_space_cr3_probe", 1)[1].split(
+            "fn process_address_space_self_test", 1)[0]
+        switched = body.split("x86_write_cr3_raw((*first).root_physical);", 1)[1]
+        before_restore = switched.split("x86_write_cr3_raw(saved_cr3);", 1)[0]
+        self.assertNotIn("return ", before_restore)
+        self.assertIn("x86_interrupts_enabled()", body)
+        self.assertEqual(body.count("x86_mmio_read32(PROCESS_USER_BASE)"), 3)
+        self.assertIn("x86_read_cr3_raw() == saved_cr3", body)
+        self.assertIn("first_again == first_value", body)
         self.assertNotIn("__write_cr3", self.text)
         self.assertNotIn("iretq", self.text.lower())
         self.assertNotIn("sysret", self.text.lower())

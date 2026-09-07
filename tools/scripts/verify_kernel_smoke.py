@@ -1,0 +1,47 @@
+"""Fail closed on incomplete kernel execution or any reported CPU exception."""
+import argparse
+from pathlib import Path
+
+
+REQUIRED = (
+    "HEAP_READY", "PROCESS_ISOLATION_READY", "BARE_METAL_READY",
+    "SCHEDULER_SWITCH", "SCHEDULER_ROUND_TRIP", "RUN_QUEUE_CREATED",
+    "RUN_QUEUE_SWITCH", "YIELD_ROUND_TRIP", "WAIT_BLOCKED", "WAIT_WAKE",
+    "WAIT_RESUME", "SLEEP_BLOCKED", "SLEEP_WAKE", "SLEEP_RESUME",
+    "THREAD_EXIT", "THREAD_REAP", "STACK_RELEASE",
+)
+
+
+def validate(serial: str) -> list[str]:
+    lines = {line.strip() for line in serial.splitlines()}
+    errors = []
+    if "BAKEN:HEX=E:" in serial:
+        errors.append("CPU exception reported (BAKEN:HEX=E:)")
+    errors.extend(f"Missing BAKEN:{marker}" for marker in REQUIRED
+                  if f"BAKEN:{marker}" not in lines)
+    return errors
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("serial", type=Path)
+    args = parser.parse_args()
+    try:
+        serial = args.serial.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"::error::Cannot read kernel serial log: {exc}")
+        return 1
+    errors = validate(serial)
+    for error in errors:
+        print(f"::error::{error}")
+    if errors:
+        print("Last kernel checkpoints:")
+        print("\n".join(line for line in serial.splitlines()
+                        if "BAKEN:" in line)[-4096:])
+        return 1
+    print("Kernel smoke passed: all milestones present, no CPU exception.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
