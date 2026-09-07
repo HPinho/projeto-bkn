@@ -9,6 +9,7 @@ IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
 CPU = ROOT / "kernel/src/arch/x86_64/cpu.sotlas"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
 INTRINSICS = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
+NVME_WORKFLOW = ROOT / ".github/workflows/baken_nvme_only.yml"
 
 
 class KernelSchedulerTests(unittest.TestCase):
@@ -71,14 +72,76 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("x86_kernel_thread_prepare_frame(stack_top, idle_entry)", text)
         self.assertIn("pub fn sotlas_x86_scheduler_idle_entry() -> !", text)
 
-    def test_scheduler_round_trip_is_required_before_runtime(self):
+    def test_scheduler_has_fixed_run_queue_with_bootstrap_idle_and_dynamic_slots(self):
+        text = CORE.read_text(encoding="utf-8")
+        self.assertIn("SCHEDULER_THREAD_SLOT_COUNT: usize = 8", text)
+        self.assertIn("SCHEDULER_BOOT_SLOT: usize = 0", text)
+        self.assertIn("SCHEDULER_IDLE_SLOT: usize = 1", text)
+        self.assertIn("SCHEDULER_FIRST_DYNAMIC_SLOT: usize = 2", text)
+        self.assertIn(
+            "static mut SCHEDULER_THREADS: [KernelThread; SCHEDULER_THREAD_SLOT_COUNT]",
+            text,
+        )
+        self.assertIn("scheduler_find_next_ready_normal", text)
+        self.assertIn("scheduler_select_slot", text)
+
+    def test_generic_kernel_thread_creation_owns_pmm_backed_stack(self):
+        text = CORE.read_text(encoding="utf-8")
+        create = text.split("pub fn scheduler_create_kernel_thread", 1)[1]
+        create = create.split("pub fn scheduler_block_current", 1)[0]
+        self.assertIn("scheduler_find_free_dynamic_slot()", create)
+        self.assertIn("pmm_alloc_pages(stack_pages)", create)
+        self.assertIn("direct_map_virtual_address(stack_physical)", create)
+        self.assertIn("x86_kernel_thread_prepare_frame(stack_top, entry_rip)", create)
+        self.assertIn("KERNEL_THREAD_READY", create)
+        self.assertGreaterEqual(create.count("pmm_free_pages_lifo(stack_physical, stack_pages)"), 4)
+
+    def test_block_and_wake_are_explicit_thread_state_transitions(self):
+        text = CORE.read_text(encoding="utf-8")
+        block = text.split("pub fn scheduler_block_current", 1)[1]
+        block = block.split("pub fn scheduler_wake_thread", 1)[0]
+        wake = text.split("pub fn scheduler_wake_thread", 1)[1]
+        wake = wake.split("pub fn scheduler_is_active", 1)[0]
+        self.assertIn("KERNEL_THREAD_BLOCKED", block)
+        self.assertIn("KERNEL_THREAD_BLOCKED", wake)
+        self.assertIn("KERNEL_THREAD_READY", wake)
+
+    def test_idle_is_only_fallback_when_no_normal_thread_is_ready(self):
+        text = CORE.read_text(encoding="utf-8")
+        body = text.split("pub fn scheduler_on_timer_interrupt", 1)[1]
+        normal_pick = body.index("scheduler_find_next_ready_normal(start)")
+        idle_pick = body.index("scheduler_select_slot(SCHEDULER_IDLE_SLOT, frame_address)", normal_pick)
+        self.assertLess(normal_pick, idle_pick)
+
+    def test_scheduler_round_trip_and_run_queue_probe_are_required_before_runtime(self):
         text = RUNTIME.read_text(encoding="utf-8")
         body = text.split("pub fn baken_native_kernel_run", 1)[1]
         self.assertIn("x86_cli_raw();", body)
         self.assertIn("scheduler_initialize()", body)
         self.assertIn("x86_sti_raw();", body)
         self.assertIn("scheduler_wait_first_round_trip()", body)
-        self.assertLess(body.index("scheduler_wait_first_round_trip()"), body.index("display_init("))
+        self.assertIn("scheduler_start_run_queue_probe()", body)
+        self.assertIn("scheduler_wait_run_queue_probe()", body)
+        self.assertLess(body.index("scheduler_wait_first_round_trip()"), body.index("scheduler_start_run_queue_probe()"))
+        self.assertLess(body.index("scheduler_wait_run_queue_probe()"), body.index("display_init("))
+
+    def test_run_queue_probe_is_a_real_third_thread_with_own_stack(self):
+        text = CORE.read_text(encoding="utf-8")
+        probe = text.split("pub fn scheduler_start_run_queue_probe", 1)[1]
+        probe = probe.split("pub fn scheduler_on_timer_interrupt", 1)[0]
+        self.assertIn("x86_scheduler_idle_entry_address()", probe)
+        self.assertIn(
+            "scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES)",
+            probe,
+        )
+        irq_path = text.split("pub fn scheduler_on_timer_interrupt", 1)[1]
+        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID", irq_path)
+        self.assertIn("KERNEL_THREAD_BLOCKED", irq_path)
+        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true", irq_path)
+
+    def test_qemu_gate_requires_real_scheduler_switch(self):
+        text = NVME_WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("grep -Fq 'BAKEN:SCHEDULER_SWITCH'", text)
 
     def test_idle_entry_address_is_low_level_backend_helper(self):
         cpu = CPU.read_text(encoding="utf-8")
