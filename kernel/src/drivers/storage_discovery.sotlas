@@ -375,7 +375,8 @@ pub fn storage_discovery_scan() -> u32 {
 @system pub fn storage_ahci_identify_is_ready() -> bool { unsafe { return STORAGE_AHCI_IDENTIFY_READY; } }
 @system pub fn storage_ahci_read_is_ready() -> bool { unsafe { return STORAGE_AHCI_READ_READY; } }
 @system pub fn storage_block_device_is_ready() -> bool { unsafe { return STORAGE_BLOCK_DEVICE_READY; } }
-@system pub fn storage_generic_block_io_is_ready() -> bool { unsafe { return STORAGE_GENERIC_BLOCK_IO_READY; } }
+// O boot normal depende do BlockDevice nativo publicado, nunca da certificação da fixture.
+@system pub fn storage_generic_block_io_is_ready() -> bool { unsafe { return STORAGE_BLOCK_DEVICE_READY && block_device_has_native_target(); } }
 @system pub fn storage_ahci_total_sectors() -> u64 { return ahci_total_sectors(); }
 @system pub fn storage_mmio_reg0() -> u32 { unsafe { return STORAGE_MMIO_REG0; } }
 @system pub fn storage_mmio_reg1() -> u32 { unsafe { return STORAGE_MMIO_REG1; } }
