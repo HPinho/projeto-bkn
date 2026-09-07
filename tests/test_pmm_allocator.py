@@ -1,21 +1,109 @@
 #!/usr/bin/env python3
-"""Guardrails do bootstrap PMM pós-ExitBootServices."""
+"""Guardrails do PMM bitmap-backed pós-ExitBootServices."""
 from pathlib import Path
 import unittest
-ROOT=Path(__file__).resolve().parents[1]; ALLOC=ROOT/"kernel/src/memory/pmm_allocator.sotlas"; POST=ROOT/"kernel/src/arch/x86_64/post_cutover.sotlas"
+
+ROOT = Path(__file__).resolve().parents[1]
+ALLOC = ROOT / "kernel/src/memory/pmm_allocator.sotlas"
+POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
+
+
 class PmmAllocatorTests(unittest.TestCase):
-    def setUp(self): self.alloc=ALLOC.read_text(encoding="utf-8"); self.post=POST.read_text(encoding="utf-8")
-    def test_allocator_is_locked_by_default(self): self.assertIn("state: PMM_ALLOCATOR_STATE_LOCKED",self.alloc); self.assertIn("if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }",self.alloc)
-    def test_allocator_requires_real_inventory(self): self.assertIn("if !pmm_inventory_is_valid() { return false; }",self.alloc); self.assertIn("pmm_get_conventional_region(source_index)",self.alloc); self.assertIn("PMM_BOOTSTRAP_MAX_REGIONS",self.alloc)
-    def test_allocator_uses_page_aligned_monotonic_region(self):
-        for token in ("pub fn pmm_alloc_page() -> u64","return pmm_alloc_pages(1);","pub fn pmm_alloc_pages(count: u64) -> u64","while region < PMM_ALLOCATOR.active_region_count","PMM_REGION_NEXT[region] = end","PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED","pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64)","(alignment % BAKEN_PAGE_SIZE) != 0","pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool","base != PMM_ALLOCATOR.last_base","PMM_ALLOCATOR.next_page = PMM_ALLOCATOR.last_previous_next"): self.assertIn(token,self.alloc)
-    def test_bootstrap_bitmap_bounds_the_first_pmm_window(self):
-        for token in ("import kernel::memory::pmm_bitmap::*;","PMM_BOOTSTRAP_BITMAP_MAX_PAGES","PMM_BOOTSTRAP_BITMAP_BYTES","pmm_bitmap_make(","pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], 0, true)","pub fn pmm_allocator_bitmap_is_active() -> bool","pub fn pmm_allocator_region_count() -> u64"): self.assertIn(token,self.alloc)
-    def test_allocations_and_lifo_release_are_mirrored_in_bitmap(self): self.assertIn("fn pmm_allocator_mark_pages(base: u64, count: u64, used: bool) -> bool",self.alloc); self.assertGreaterEqual(self.alloc.count("pmm_allocator_mark_pages("),4); self.assertIn("pmm_allocator_mark_pages(base, count, false)",self.alloc)
+    def setUp(self):
+        self.alloc = ALLOC.read_text(encoding="utf-8")
+        self.post = POST.read_text(encoding="utf-8")
+
+    def test_allocator_is_locked_by_default(self):
+        self.assertIn("state: PMM_ALLOCATOR_STATE_LOCKED", self.alloc)
+        self.assertIn("PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE", self.alloc)
+
+    def test_allocator_requires_real_inventory(self):
+        self.assertIn("if !pmm_inventory_is_valid() { return false; }", self.alloc)
+        self.assertIn("pmm_get_conventional_region(source_index)", self.alloc)
+        self.assertIn("PMM_BOOTSTRAP_MAX_REGIONS", self.alloc)
+
+    def test_all_allocation_modes_use_bitmap_free_run_policy(self):
+        for token in (
+            "fn pmm_allocator_find_run(region: u64, count: u64, alignment: u64",
+            "pmm_allocator_run_is_free(region, page, count)",
+            "pub fn pmm_alloc_pages(count: u64) -> u64",
+            "pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64",
+            "pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64",
+            "pmm_allocator_commit_allocation(region, base, count)",
+        ):
+            self.assertIn(token, self.alloc)
+        self.assertGreaterEqual(self.alloc.count("pmm_allocator_find_run(region, count"), 3)
+
+    def test_arbitrary_free_rejects_double_and_partial_free(self):
+        body = self.alloc.split("pub fn pmm_free_pages(base: u64, count: u64) -> bool", 1)[1]
+        body = body.split("pub fn pmm_free_pages_lifo", 1)[0]
+        for token in (
+            "pmm_allocator_region_for_range(base, count)",
+            "first == 0",
+            "pmm_allocator_run_is_used(region, first, count)",
+            "pmm_allocator_mark_pages(base, count, false)",
+            "PMM_ALLOCATOR.allocated_pages -= count",
+        ):
+            self.assertIn(token, body)
+
+    def test_lifo_api_remains_compatible_but_delegates_to_general_free(self):
+        body = self.alloc.split("pub fn pmm_free_pages_lifo", 1)[1]
+        body = body.split("fn pmm_allocator_self_test_reuse", 1)[0]
+        self.assertIn("base != PMM_ALLOCATOR.last_base", body)
+        self.assertIn("pmm_free_pages(base, count)", body)
+        self.assertIn("PMM_REGION_NEXT[region] = previous_frontier", body)
+
+    def test_allocator_self_test_proves_out_of_order_reuse(self):
+        body = self.alloc.split("fn pmm_allocator_self_test_reuse", 1)[1]
+        body = body.split("pub fn pmm_allocator_activate_after_exit_boot_services", 1)[0]
+        for token in (
+            "let first = pmm_alloc_pages(2)",
+            "let second = pmm_alloc_pages(2)",
+            "pmm_free_pages(first, 2)",
+            "let recycled = pmm_alloc_pages(2)",
+            "recycled != first",
+            "pmm_free_pages(second, 2)",
+        ):
+            self.assertIn(token, body)
+        activate = self.alloc.split("pub fn pmm_allocator_activate_after_exit_boot_services", 1)[1]
+        self.assertIn("if !pmm_allocator_self_test_reuse()", activate)
+        self.assertIn("PMM_REUSE_SELF_TEST_PASSED = true", activate)
+
+    def test_failed_large_or_aligned_request_does_not_poison_free_pages(self):
+        self.assertIn("fn pmm_allocator_any_free_page() -> bool", self.alloc)
+        self.assertIn("pmm_allocator_note_failure_if_empty()", self.alloc)
+        self.assertIn("if pmm_allocator_any_free_page() { return; }", self.alloc)
+        constrained = self.alloc.split("pub fn pmm_alloc_pages_constrained", 1)[1]
+        constrained = constrained.split("pub fn pmm_free_pages", 1)[0]
+        self.assertNotIn("PMM_ALLOCATOR_STATE_EXHAUSTED", constrained)
+
+    def test_bootstrap_bitmap_bounds_pmm_regions(self):
+        for token in (
+            "import kernel::memory::pmm_bitmap::*;",
+            "PMM_BOOTSTRAP_BITMAP_MAX_PAGES",
+            "PMM_BOOTSTRAP_BITMAP_BYTES",
+            "pmm_bitmap_make(",
+            "pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], 0, true)",
+            "pub fn pmm_allocator_bitmap_is_active() -> bool",
+        ):
+            self.assertIn(token, self.alloc)
+
     def test_post_cutover_activates_allocator_after_inventory_and_before_vmm(self):
-        body=self.post.split("pub fn post_cutover_activate_pmm",1)[1].split("pub fn post_cutover_pmm_active",1)[0]; inventory=body.index("pmm_inventory_init("); activate=body.index("pmm_allocator_activate_after_exit_boot_services()"); self.assertLess(inventory,activate); self.assertIn("pmm_allocator_bitmap_is_active()",body)
-        entry=self.post.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !",1)[1]; pmm=entry.index("post_cutover_activate_pmm(context)"); vmm=entry.index("post_cutover_activate_vmm(context)",pmm); self.assertLess(pmm,vmm)
-    def test_allocator_has_no_uefi_or_heap_dependency(self):
-        code="\n".join(line.split("//",1)[0] for line in self.alloc.splitlines())
-        for token in ("BootServices->","AllocatePages","AllocatePool","malloc(","free("): self.assertNotIn(token,code)
-if __name__ == "__main__": unittest.main()
+        body = self.post.split("pub fn post_cutover_activate_pmm", 1)[1].split("pub fn post_cutover_pmm_active", 1)[0]
+        inventory = body.index("pmm_inventory_init(")
+        activate = body.index("pmm_allocator_activate_after_exit_boot_services()")
+        self.assertLess(inventory, activate)
+        self.assertIn("pmm_allocator_bitmap_is_active()", body)
+        entry = self.post.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !", 1)[1]
+        pmm = entry.index("post_cutover_activate_pmm(context)")
+        vmm = entry.index("post_cutover_activate_vmm(context)", pmm)
+        self.assertLess(pmm, vmm)
+
+    def test_allocator_has_no_uefi_or_host_heap_dependency(self):
+        code = "\n".join(line.split("//", 1)[0] for line in self.alloc.splitlines())
+        for token in ("BootServices->", "AllocatePages", "AllocatePool", "malloc(", "free("):
+            self.assertNotIn(token, code)
+
+
+if __name__ == "__main__":
+    unittest.main()

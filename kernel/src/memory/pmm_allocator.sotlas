@@ -1,12 +1,8 @@
-// Baken OS — bootstrap allocator físico pós-ExitBootServices.
+// Baken OS — allocator físico pós-ExitBootServices com bitmap reutilizável.
 //
-// Este módulo NÃO deve ser ativado durante a fase híbrida UEFI. Ele usa apenas
-// regiões EfiConventionalMemory já inventariadas pelo PMM e fornece um
-// allocator monotônico de páginas para o primeiro estágio pós-cutover.
-//
-// O primeiro estágio usa bitmaps fixos, fornecidos estaticamente pelo kernel.
-// Cada região cobre até 512 MiB; até oito regiões convencionais são aceitas,
-// sem heap e sem depender de estruturas UEFI após o cutover.
+// Não usa Boot Services, heap ou estruturas UEFI após o cutover. As regiões
+// EfiConventionalMemory são inventariadas antes da ativação e cada bitmap fixo
+// passa a ser a fonte de verdade para alocação/liberação de páginas físicas.
 
 module kernel::memory::pmm_allocator;
 
@@ -20,11 +16,13 @@ pub const PMM_BOOTSTRAP_BITMAP_MAX_PAGES: u64 = 131072;
 pub const PMM_BOOTSTRAP_BITMAP_BYTES: u64 = 16384;
 pub const PMM_BOOTSTRAP_MAX_REGIONS: u64 = 8;
 pub const PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES: u64 = 131072;
+pub const PMM_PHYSICAL_ADDRESS_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
 
 pub struct PmmAllocatorState {
     pub state: u32;
     pub region_base: u64;
     pub region_end: u64;
+    // High-water informativo/compatível. A decisão de alocação vem do bitmap.
     pub next_page: u64;
     pub allocated_pages: u64;
     pub last_base: u64;
@@ -55,18 +53,15 @@ static mut PMM_REGION_BITMAPS: [PmmBitmap; PMM_BOOTSTRAP_MAX_REGIONS] = [
     PMM_BOOTSTRAP_MAX_REGIONS
 ];
 static mut PMM_BOOTSTRAP_BITMAP_STORAGE: [u8; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES] = [0; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES];
+static mut PMM_REUSE_SELF_TEST_PASSED: bool = false;
 
 @system
 pub fn pmm_allocator_is_active() -> bool {
-    unsafe {
-        return PMM_ALLOCATOR.state == PMM_ALLOCATOR_STATE_ACTIVE;
-    }
+    unsafe { return PMM_ALLOCATOR.state == PMM_ALLOCATOR_STATE_ACTIVE; }
 }
 
 @system
-pub fn pmm_allocator_state() -> u32 {
-    unsafe { return PMM_ALLOCATOR.state; }
-}
+pub fn pmm_allocator_state() -> u32 { unsafe { return PMM_ALLOCATOR.state; } }
 
 @system
 pub fn pmm_allocator_bitmap_is_active() -> bool {
@@ -77,13 +72,11 @@ pub fn pmm_allocator_bitmap_is_active() -> bool {
 }
 
 @system
-pub fn pmm_allocator_region_count() -> u64 {
-    unsafe { return PMM_ALLOCATOR.active_region_count; }
-}
+pub fn pmm_allocator_region_count() -> u64 { unsafe { return PMM_ALLOCATOR.active_region_count; } }
 
-// Espelha as alocações visíveis no bitmap. A política de alocação ainda é
-// monotônica nesta fase; o bitmap dá uma fonte de verdade verificável para a
-// futura transição a free-runs multi-região.
+@system
+pub fn pmm_allocator_reuse_self_test_passed() -> bool { unsafe { return PMM_REUSE_SELF_TEST_PASSED; } }
+
 @system
 fn pmm_allocator_mark_pages(base: u64, count: u64, used: bool) -> bool {
     if base == 0 || count == 0 { return false; }
@@ -105,8 +98,142 @@ fn pmm_allocator_mark_pages(base: u64, count: u64, used: bool) -> bool {
             }
             region += 1;
         }
-        return false;
     }
+    return false;
+}
+
+@system
+fn pmm_allocator_region_for_range(base: u64, count: u64) -> u64 {
+    if base == 0 || count == 0 { return PMM_BOOTSTRAP_MAX_REGIONS; }
+    let bytes = count * BAKEN_PAGE_SIZE;
+    if bytes / BAKEN_PAGE_SIZE != count { return PMM_BOOTSTRAP_MAX_REGIONS; }
+    let end = base + bytes;
+    if end <= base { return PMM_BOOTSTRAP_MAX_REGIONS; }
+    unsafe {
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            if base >= PMM_REGION_BASES[region] && end <= PMM_REGION_ENDS[region] {
+                let offset = base - PMM_REGION_BASES[region];
+                if (offset % BAKEN_PAGE_SIZE) == 0 { return region; }
+            }
+            region += 1;
+        }
+    }
+    return PMM_BOOTSTRAP_MAX_REGIONS;
+}
+
+@system
+fn pmm_allocator_run_is_free(region: u64, first: u64, count: u64) -> bool {
+    if count == 0 { return false; }
+    unsafe {
+        if region >= PMM_ALLOCATOR.active_region_count ||
+           !pmm_bitmap_valid(&PMM_REGION_BITMAPS[region]) { return false; }
+        let page_count = PMM_REGION_BITMAPS[region].page_count;
+        if first == 0 || first >= page_count || count > page_count - first { return false; }
+        let mut page = first;
+        let end = first + count;
+        while page < end {
+            if pmm_bitmap_test(&PMM_REGION_BITMAPS[region], page) { return false; }
+            page += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn pmm_allocator_run_is_used(region: u64, first: u64, count: u64) -> bool {
+    if count == 0 { return false; }
+    unsafe {
+        if region >= PMM_ALLOCATOR.active_region_count ||
+           !pmm_bitmap_valid(&PMM_REGION_BITMAPS[region]) { return false; }
+        let page_count = PMM_REGION_BITMAPS[region].page_count;
+        if first == 0 || first >= page_count || count > page_count - first { return false; }
+        let mut page = first;
+        let end = first + count;
+        while page < end {
+            if !pmm_bitmap_test(&PMM_REGION_BITMAPS[region], page) { return false; }
+            page += 1;
+        }
+    }
+    return true;
+}
+
+// Busca first-fit no bitmap aplicando alinhamento, teto físico e boundary antes
+// de publicar ownership. Página zero de cada região permanece reservada.
+@system
+fn pmm_allocator_find_run(region: u64, count: u64, alignment: u64,
+                          max_address: u64, boundary: u64) -> u64 {
+    if count == 0 || alignment < BAKEN_PAGE_SIZE { return 0; }
+    let bytes = count * BAKEN_PAGE_SIZE;
+    if bytes / BAKEN_PAGE_SIZE != count { return 0; }
+    unsafe {
+        if region >= PMM_ALLOCATOR.active_region_count ||
+           !pmm_bitmap_valid(&PMM_REGION_BITMAPS[region]) { return 0; }
+        let page_count = PMM_REGION_BITMAPS[region].page_count;
+        let mut page: u64 = 1;
+        while page < page_count {
+            if count > page_count - page { break; }
+            let offset = page * BAKEN_PAGE_SIZE;
+            let base = PMM_REGION_BASES[region] + offset;
+            if base < PMM_REGION_BASES[region] { return 0; }
+            let end = base + bytes;
+            if end <= base || end > PMM_REGION_ENDS[region] { break; }
+            let last = end - 1;
+            let aligned = (base & (alignment - 1)) == 0;
+            let address_ok = last <= max_address;
+            let boundary_ok = boundary == 0 || base / boundary == last / boundary;
+            if aligned && address_ok && boundary_ok &&
+               pmm_allocator_run_is_free(region, page, count) {
+                return base;
+            }
+            page += 1;
+        }
+    }
+    return 0;
+}
+
+@system
+fn pmm_allocator_any_free_page() -> bool {
+    unsafe {
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            if pmm_bitmap_find_free_run(&PMM_REGION_BITMAPS[region], 1) != 0 { return true; }
+            region += 1;
+        }
+    }
+    return false;
+}
+
+@system
+fn pmm_allocator_note_failure_if_empty() -> void {
+    if pmm_allocator_any_free_page() { return; }
+    unsafe { PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED; }
+}
+
+@system
+fn pmm_allocator_commit_allocation(region: u64, base: u64, count: u64) -> bool {
+    if base == 0 || count == 0 { return false; }
+    let bytes = count * BAKEN_PAGE_SIZE;
+    if bytes / BAKEN_PAGE_SIZE != count { return false; }
+    let end = base + bytes;
+    if end <= base { return false; }
+    unsafe {
+        if region >= PMM_ALLOCATOR.active_region_count ||
+           PMM_ALLOCATOR.allocated_pages > PMM_PHYSICAL_ADDRESS_MAX - count { return false; }
+        let previous_frontier = PMM_REGION_NEXT[region];
+        if !pmm_allocator_mark_pages(base, count, true) { return false; }
+        if end > PMM_REGION_NEXT[region] { PMM_REGION_NEXT[region] = end; }
+        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_ACTIVE;
+        PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
+        PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
+        PMM_ALLOCATOR.next_page = PMM_REGION_NEXT[region];
+        PMM_ALLOCATOR.allocated_pages += count;
+        PMM_ALLOCATOR.last_base = base;
+        PMM_ALLOCATOR.last_previous_next = previous_frontier;
+        PMM_ALLOCATOR.last_page_count = count;
+        PMM_ALLOCATOR.last_region_index = region;
+    }
+    return true;
 }
 
 @system
@@ -122,6 +249,7 @@ pub fn pmm_allocator_reset_locked() {
         PMM_ALLOCATOR.last_page_count = 0;
         PMM_ALLOCATOR.active_region_count = 0;
         PMM_ALLOCATOR.last_region_index = 0;
+        PMM_REUSE_SELF_TEST_PASSED = false;
         let mut region: u64 = 0;
         while region < PMM_BOOTSTRAP_MAX_REGIONS {
             PMM_REGION_BASES[region] = 0;
@@ -133,9 +261,164 @@ pub fn pmm_allocator_reset_locked() {
     }
 }
 
-// Esta função só poderá ser chamada pelo caminho canônico imediatamente APÓS
-// ExitBootServices() bem-sucedido. Enquanto main.sotlas ainda usa UEFI, nenhum
-// chamador deve existir na rota ativa.
+@system
+pub fn pmm_alloc_page() -> u64 { return pmm_alloc_pages(1); }
+
+@system
+pub fn pmm_alloc_pages(count: u64) -> u64 {
+    if count == 0 { return 0; }
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            let base = pmm_allocator_find_run(region, count, BAKEN_PAGE_SIZE,
+                                              PMM_PHYSICAL_ADDRESS_MAX, 0);
+            if base != 0 {
+                if pmm_allocator_commit_allocation(region, base, count) { return base; }
+                return 0;
+            }
+            region += 1;
+        }
+    }
+    pmm_allocator_note_failure_if_empty();
+    return 0;
+}
+
+@system
+pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64 {
+    if count == 0 || alignment < BAKEN_PAGE_SIZE { return 0; }
+    if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 { return 0; }
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            let base = pmm_allocator_find_run(region, count, alignment,
+                                              PMM_PHYSICAL_ADDRESS_MAX, 0);
+            if base != 0 {
+                if pmm_allocator_commit_allocation(region, base, count) { return base; }
+                return 0;
+            }
+            region += 1;
+        }
+    }
+    pmm_allocator_note_failure_if_empty();
+    return 0;
+}
+
+// `max_address` é inclusivo; `boundary == 0` desativa a fronteira.
+@system
+pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64,
+                                   max_address: u64, boundary: u64) -> u64 {
+    if count == 0 || alignment < BAKEN_PAGE_SIZE || max_address == 0 { return 0; }
+    if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 { return 0; }
+    if boundary != 0 && ((boundary & (boundary - 1)) != 0 || boundary < BAKEN_PAGE_SIZE) { return 0; }
+    let bytes = count * BAKEN_PAGE_SIZE;
+    if bytes / BAKEN_PAGE_SIZE != count { return 0; }
+    if boundary != 0 && bytes > boundary { return 0; }
+
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
+        let mut region: u64 = 0;
+        while region < PMM_ALLOCATOR.active_region_count {
+            let base = pmm_allocator_find_run(region, count, alignment, max_address, boundary);
+            if base != 0 {
+                if pmm_allocator_commit_allocation(region, base, count) { return base; }
+                return 0;
+            }
+            region += 1;
+        }
+    }
+    // Falha por restrição do dispositivo não altera o estado global.
+    return 0;
+}
+
+// Liberação arbitrária bitmap-backed. O range inteiro deve pertencer a uma
+// região, estar alinhado, não incluir a sentinela e estar atualmente alocado.
+// Isso rejeita double-free e ranges parcialmente livres antes de alterar bits.
+@system
+pub fn pmm_free_pages(base: u64, count: u64) -> bool {
+    if base == 0 || count == 0 { return false; }
+    unsafe {
+        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE &&
+           PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_EXHAUSTED { return false; }
+    }
+    let region = pmm_allocator_region_for_range(base, count);
+    if region >= PMM_BOOTSTRAP_MAX_REGIONS { return false; }
+    let mut region_base: u64 = 0;
+    unsafe { region_base = PMM_REGION_BASES[region]; }
+    let offset = base - region_base;
+    let first = offset / BAKEN_PAGE_SIZE;
+    if first == 0 || !pmm_allocator_run_is_used(region, first, count) { return false; }
+
+    let bytes = count * BAKEN_PAGE_SIZE;
+    let end = base + bytes;
+    unsafe {
+        if PMM_ALLOCATOR.allocated_pages < count { return false; }
+        if !pmm_allocator_mark_pages(base, count, false) { return false; }
+        PMM_ALLOCATOR.allocated_pages -= count;
+        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_ACTIVE;
+
+        // Se um free arbitrário toca a última alocação, invalida o atalho LIFO
+        // para impedir um segundo free usando metadados obsoletos.
+        if PMM_ALLOCATOR.last_base != 0 && PMM_ALLOCATOR.last_page_count != 0 {
+            let last_bytes = PMM_ALLOCATOR.last_page_count * BAKEN_PAGE_SIZE;
+            let last_end = PMM_ALLOCATOR.last_base + last_bytes;
+            if last_end > PMM_ALLOCATOR.last_base &&
+               base < last_end && end > PMM_ALLOCATOR.last_base {
+                PMM_ALLOCATOR.last_base = 0;
+                PMM_ALLOCATOR.last_previous_next = 0;
+                PMM_ALLOCATOR.last_page_count = 0;
+                PMM_ALLOCATOR.last_region_index = 0;
+            }
+        }
+    }
+    return true;
+}
+
+// Compatibilidade para consumidores ainda LIFO. A política real é bitmap; este
+// wrapper só aceita exatamente a alocação mais recente e pode reduzir o
+// high-water quando essa alocação havia estendido a fronteira.
+@system
+pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool {
+    if base == 0 || count == 0 { return false; }
+    let mut region: u64 = 0;
+    let mut previous_frontier: u64 = 0;
+    unsafe {
+        if base != PMM_ALLOCATOR.last_base || count != PMM_ALLOCATOR.last_page_count { return false; }
+        region = PMM_ALLOCATOR.last_region_index;
+        previous_frontier = PMM_ALLOCATOR.last_previous_next;
+    }
+    if !pmm_free_pages(base, count) { return false; }
+    unsafe {
+        if region < PMM_ALLOCATOR.active_region_count && previous_frontier != 0 &&
+           previous_frontier <= PMM_REGION_NEXT[region] {
+            let released_end = base + count * BAKEN_PAGE_SIZE;
+            if released_end == PMM_REGION_NEXT[region] {
+                PMM_REGION_NEXT[region] = previous_frontier;
+                PMM_ALLOCATOR.next_page = previous_frontier;
+            }
+        }
+    }
+    return true;
+}
+
+@system
+fn pmm_allocator_self_test_reuse() -> bool {
+    let before = pmm_allocator_allocated_pages();
+    let first = pmm_alloc_pages(2);
+    if first == 0 { return false; }
+    let second = pmm_alloc_pages(2);
+    if second == 0 { return false; }
+    // Liberação fora de ordem: `second` continua vivo enquanto `first` é solto.
+    if !pmm_free_pages(first, 2) { return false; }
+    let recycled = pmm_alloc_pages(2);
+    if recycled == 0 || recycled != first { return false; }
+    if !pmm_free_pages(recycled, 2) { return false; }
+    if !pmm_free_pages(second, 2) { return false; }
+    return pmm_allocator_allocated_pages() == before;
+}
+
+// Ativação canônica somente depois de ExitBootServices bem-sucedido.
 @system
 pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
     if !pmm_inventory_is_valid() { return false; }
@@ -167,7 +450,6 @@ pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
                 tracked_pages
             );
             if !pmm_bitmap_valid(&PMM_REGION_BITMAPS[slot]) { return false; }
-            // Página zero de cada região permanece reservada como sentinela.
             if !pmm_bitmap_mark(&mut PMM_REGION_BITMAPS[slot], 0, true) { return false; }
             PMM_REGION_BASES[slot] = source.base;
             PMM_REGION_ENDS[slot] = end;
@@ -186,185 +468,16 @@ pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
         PMM_ALLOCATOR.active_region_count = slot;
         PMM_ALLOCATOR.last_region_index = 0;
     }
+
+    // O próprio gate P do boot só pode passar se free fora de ordem e first-fit
+    // reutilizável funcionarem sem deixar páginas ocupadas pelo teste.
+    if !pmm_allocator_self_test_reuse() {
+        pmm_allocator_reset_locked();
+        return false;
+    }
+    unsafe { PMM_REUSE_SELF_TEST_PASSED = true; }
     return true;
 }
 
 @system
-pub fn pmm_alloc_page() -> u64 {
-    return pmm_alloc_pages(1);
-}
-
-@system
-pub fn pmm_alloc_pages(count: u64) -> u64 {
-    if count == 0 { return 0; }
-
-    unsafe {
-        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
-
-        let bytes = count * BAKEN_PAGE_SIZE;
-        if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
-        let mut region: u64 = 0;
-        while region < PMM_ALLOCATOR.active_region_count {
-            let base = PMM_REGION_NEXT[region];
-            let end = base + bytes;
-            if base != 0 && end >= base && end <= PMM_REGION_ENDS[region] {
-                if !pmm_allocator_mark_pages(base, count, true) { return 0; }
-                PMM_REGION_NEXT[region] = end;
-                PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
-                PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
-                PMM_ALLOCATOR.next_page = end;
-                PMM_ALLOCATOR.allocated_pages += count;
-                PMM_ALLOCATOR.last_base = base;
-                PMM_ALLOCATOR.last_previous_next = base;
-                PMM_ALLOCATOR.last_page_count = count;
-                PMM_ALLOCATOR.last_region_index = region;
-                return base;
-            }
-            region += 1;
-        }
-        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
-        return 0;
-    }
-}
-
-// Reserva contígua para consumidores físicos (DMA/page tables). O bootstrap é
-// monotônico, portanto o padding de alinhamento é consumido de propósito e
-// nunca devolvido ao firmware depois de ExitBootServices.
-@system
-pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64 {
-    if count == 0 || alignment < BAKEN_PAGE_SIZE { return 0; }
-    if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 {
-        return 0;
-    }
-    unsafe {
-        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
-        let bytes = count * BAKEN_PAGE_SIZE;
-        if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
-        let mut region: u64 = 0;
-        while region < PMM_ALLOCATOR.active_region_count {
-            let previous_next = PMM_REGION_NEXT[region];
-            let aligned = (previous_next + alignment - 1) & ~(alignment - 1);
-            if aligned < previous_next { region += 1; continue; }
-            let end = aligned + bytes;
-            if end >= aligned && end <= PMM_REGION_ENDS[region] {
-                if !pmm_allocator_mark_pages(aligned, count, true) { return 0; }
-                PMM_REGION_NEXT[region] = end;
-                PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
-                PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
-                PMM_ALLOCATOR.next_page = end;
-                PMM_ALLOCATOR.allocated_pages += count;
-                PMM_ALLOCATOR.last_base = aligned;
-                PMM_ALLOCATOR.last_previous_next = previous_next;
-                PMM_ALLOCATOR.last_page_count = count;
-                PMM_ALLOCATOR.last_region_index = region;
-                return aligned;
-            }
-            region += 1;
-        }
-        PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_EXHAUSTED;
-        return 0;
-    }
-}
-
-// Reserva física aplicando as limitações do dispositivo ANTES de avançar o
-// cursor monotônico. Assim um controlador de 32 bits pode procurar outra região
-// abaixo de 4 GiB em vez de consumir uma página alta, rejeitá-la e desistir.
-// `max_address` é inclusivo; `boundary == 0` desativa a regra de fronteira.
-@system
-pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64,
-                                   max_address: u64, boundary: u64) -> u64 {
-    if count == 0 || alignment < BAKEN_PAGE_SIZE || max_address == 0 { return 0; }
-    if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 {
-        return 0;
-    }
-    if boundary != 0 && ((boundary & (boundary - 1)) != 0 || boundary < BAKEN_PAGE_SIZE) {
-        return 0;
-    }
-
-    unsafe {
-        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
-        let bytes = count * BAKEN_PAGE_SIZE;
-        if (bytes / BAKEN_PAGE_SIZE) != count { return 0; }
-        if boundary != 0 && bytes > boundary { return 0; }
-
-        let mut region: u64 = 0;
-        while region < PMM_ALLOCATOR.active_region_count {
-            let previous_next = PMM_REGION_NEXT[region];
-            let padded = previous_next + alignment - 1;
-            if padded < previous_next { region += 1; continue; }
-            let mut aligned = padded & ~(alignment - 1);
-            if aligned < previous_next { region += 1; continue; }
-
-            let mut end = aligned + bytes;
-            if end <= aligned { region += 1; continue; }
-            let mut last = end - 1;
-
-            if boundary != 0 && aligned / boundary != last / boundary {
-                let boundary_base = aligned & ~(boundary - 1);
-                let next_boundary = boundary_base + boundary;
-                if next_boundary <= boundary_base { region += 1; continue; }
-                let bumped = next_boundary + alignment - 1;
-                if bumped < next_boundary { region += 1; continue; }
-                aligned = bumped & ~(alignment - 1);
-                end = aligned + bytes;
-                if end <= aligned { region += 1; continue; }
-                last = end - 1;
-            }
-
-            if last > max_address || end > PMM_REGION_ENDS[region] {
-                region += 1;
-                continue;
-            }
-            if boundary != 0 && aligned / boundary != last / boundary {
-                region += 1;
-                continue;
-            }
-
-            if !pmm_allocator_mark_pages(aligned, count, true) { return 0; }
-            PMM_REGION_NEXT[region] = end;
-            PMM_ALLOCATOR.region_base = PMM_REGION_BASES[region];
-            PMM_ALLOCATOR.region_end = PMM_REGION_ENDS[region];
-            PMM_ALLOCATOR.next_page = end;
-            PMM_ALLOCATOR.allocated_pages += count;
-            PMM_ALLOCATOR.last_base = aligned;
-            PMM_ALLOCATOR.last_previous_next = previous_next;
-            PMM_ALLOCATOR.last_page_count = count;
-            PMM_ALLOCATOR.last_region_index = region;
-            return aligned;
-        }
-        // Uma restrição de dispositivo pode falhar mesmo havendo memória livre
-        // para outros consumidores; por isso não envenena o estado global.
-        return 0;
-    }
-}
-
-// Liberação LIFO: segura para arenas de bootstrap e impede reutilizar uma
-// alocação no meio da região. Free-list/bitmap arbitrário virá com ownership
-// de drivers e fences DMA.
-@system
-pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool {
-    if base == 0 || count == 0 { return false; }
-    unsafe {
-        if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return false; }
-        if base != PMM_ALLOCATOR.last_base || count != PMM_ALLOCATOR.last_page_count {
-            return false;
-        }
-        if PMM_ALLOCATOR.allocated_pages < count { return false; }
-        if !pmm_allocator_mark_pages(base, count, false) { return false; }
-        let region = PMM_ALLOCATOR.last_region_index;
-        if region >= PMM_ALLOCATOR.active_region_count { return false; }
-        PMM_REGION_NEXT[region] = PMM_ALLOCATOR.last_previous_next;
-        PMM_ALLOCATOR.next_page = PMM_ALLOCATOR.last_previous_next;
-        PMM_ALLOCATOR.allocated_pages -= count;
-        PMM_ALLOCATOR.last_base = 0;
-        PMM_ALLOCATOR.last_previous_next = 0;
-        PMM_ALLOCATOR.last_page_count = 0;
-        PMM_ALLOCATOR.last_region_index = 0;
-        return true;
-    }
-}
-
-@system
-pub fn pmm_allocator_allocated_pages() -> u64 {
-    unsafe { return PMM_ALLOCATOR.allocated_pages; }
-}
+pub fn pmm_allocator_allocated_pages() -> u64 { unsafe { return PMM_ALLOCATOR.allocated_pages; } }
