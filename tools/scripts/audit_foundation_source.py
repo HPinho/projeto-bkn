@@ -20,13 +20,20 @@ def main() -> int:
     dma = (ROOT / "kernel/src/memory/dma.sotlas").read_text(encoding="utf-8")
 
     scan = section(discovery, "pub fn storage_discovery_scan() -> u32")
-    skip = "if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }"
+    ahci_filter = "if kind != STORAGE_CONTROLLER_AHCI { continue; }"
+    nvme_filter = "if kind != STORAGE_CONTROLLER_NVME { continue; }"
     assert "let post_cutover = active_page_tables_is_ready();" in scan
-    assert skip in scan
-    assert scan.index(skip) < scan.index("STORAGE_CANDIDATE.kind = kind;")
-    assert scan.index(skip) < scan.index("storage_probe_mmio_after_cutover()")
-    assert "if !post_cutover { return kind; }" in scan
+    assert "if !post_cutover {" in scan
+    assert ahci_filter in scan
+    assert nvme_filter in scan
+    assert "storage_register_ahci_block_device()" in scan
+    assert "storage_register_nvme_block_device()" in scan
     assert "return STORAGE_CONTROLLER_AHCI;" in scan
+    assert "return STORAGE_CONTROLLER_NVME;" in scan
+    assert scan.index(ahci_filter) < scan.index("storage_register_ahci_block_device()")
+    assert scan.index("storage_register_ahci_block_device()") < scan.index(nvme_filter)
+    assert scan.index(nvme_filter) < scan.index("storage_register_nvme_block_device()")
+    assert "if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }" not in scan
 
     gpt_gate = section(
         post,
@@ -44,7 +51,7 @@ def main() -> int:
     assert "pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)" in device
     assert "let mut buffer = dma_alloc(size, alignment)" not in device
 
-    print("[OK] foundation source audit: boot target, Block Device and constrained DMA invariants")
+    print("[OK] foundation source audit: AHCI/NVMe boot target, Block Device and constrained DMA invariants")
     return 0
 
 
