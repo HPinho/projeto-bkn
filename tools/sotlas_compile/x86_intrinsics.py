@@ -139,6 +139,30 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
     );
 }
 
+/*
+ * Entrada canônica de uma nova kernel thread.
+ *
+ * IRETQ não é CALL: ele não cria return address nem o home-space da ABI Win64.
+ * O frame inicial entrega o entry RIP em R11 e deixa RSP alinhado a 16 bytes.
+ * Este trampoline é naked, reserva os 32 bytes de shadow space e faz uma CALL
+ * real. Quando thread_exit existir, o retorno da entry será encaminhado a ele;
+ * até lá, retornar é uma falha terminal segura.
+ */
+__attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline(void) {
+    __asm__(
+        "subq $32, %rsp\n\t"
+        "call *%r11\n\t"
+        "addq $32, %rsp\n\t"
+        "cli\n\t"
+        "1: hlt\n\t"
+        "jmp 1b\n\t"
+    );
+}
+
+static inline uint64_t __scheduler_thread_trampoline_address(void) {
+    return (uint64_t)(uintptr_t)&__scheduler_thread_trampoline;
+}
+
 extern void sotlas_x86_scheduler_idle_entry(void);
 static inline uint64_t __scheduler_idle_entry_address(void) {
     return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_idle_entry;
@@ -335,6 +359,7 @@ def install(bootstrap) -> None:
         "__read_cr3": Function("__read_cr3", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__write_cr3": Function("__write_cr3", [("value", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__stack_switch_to_post_cutover": Function("__stack_switch_to_post_cutover", [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__scheduler_thread_trampoline_address": Function("__scheduler_thread_trampoline_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
