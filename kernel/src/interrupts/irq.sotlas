@@ -7,6 +7,7 @@ module kernel::interrupts::irq;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::idt::*;
+import kernel::arch::x86_64::serial::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
@@ -90,9 +91,18 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
     }
 
     if vector == IRQ_VECTOR_TIMER as u64 {
-        unsafe { IRQ_TIMER_COUNT += 1; }
+        let mut timer_count: u64 = 0;
+        unsafe {
+            IRQ_TIMER_COUNT += 1;
+            timer_count = IRQ_TIMER_COUNT;
+        }
         // O LAPIC recebe EOI antes de potencialmente retomarmos outra thread.
         lapic_eoi();
+        // Diagnóstico temporário e delimitado do bring-up do scheduler. Os três
+        // primeiros ticks permitem distinguir falha de IRETQ de falha de política.
+        if timer_count <= 3 {
+            x86_serial_write_hex32_marker('T' as u8, timer_count as u32);
+        }
         return scheduler_on_timer_interrupt(frame_address);
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
