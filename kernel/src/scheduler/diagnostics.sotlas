@@ -1,0 +1,36 @@
+// Baken OS — markers de diagnóstico do scheduler usados pelos gates de QEMU.
+//
+// Este módulo não participa da política de escalonamento; apenas materializa
+// checkpoints seriais inequívocos para que a CI não confunda timeout com prova.
+
+module kernel::scheduler::diagnostics;
+
+import kernel::arch::x86_64::serial::*;
+
+@system
+pub fn scheduler_diag_round_trip() -> void {
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 27] = [
+        66, 65, 75, 69, 78, 58, 83, 67, 72, 69, 68, 85, 76, 69, 82,
+        95, 82, 79, 85, 78, 68, 95, 84, 82, 73, 80, 10
+    ];
+    let mut index: usize = 0;
+    while index < 27 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+pub fn scheduler_diag_run_queue_created() -> void {
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 25] = [
+        66, 65, 75, 69, 78, 58, 82, 85, 78, 95, 81, 85, 69, 85, 69,
+        95, 67, 82, 69, 65, 84, 69, 68, 10, 10
+    ];
+    let mut index: usize = 0;
+    while index < 24 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
