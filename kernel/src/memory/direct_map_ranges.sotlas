@@ -1,8 +1,9 @@
 // Baken OS — materialização range-aware do direct physical map.
 //
-// Percorre um UEFI Memory Map explícito e solicita mappings somente para
-// descritores aprovados pela memory_map_policy. MMIO, Runtime Services e ranges
-// sem atributo WB ficam fora. O módulo usa o mapper genérico, mas não toca CR3.
+// Percorre o snapshot de memória explícito do bootstrap e solicita mappings
+// somente para descritores aprovados pela memory_map_policy. MMIO, ranges de
+// runtime do firmware e ranges sem atributo WB ficam fora. O módulo usa o
+// mapper genérico, mas não toca CR3.
 
 module kernel::memory::direct_map_ranges;
 
@@ -43,7 +44,7 @@ fn direct_map_range_flags() -> u64 {
 }
 
 @system
-pub fn direct_map_build_from_uefi_ranges(arena: *mut PageTableArena,
+pub fn direct_map_build_from_boot_ranges(arena: *mut PageTableArena,
                                          root: PageTablePage,
                                          memory_map_base: *const u8,
                                          memory_map_size: usize,
@@ -68,7 +69,7 @@ pub fn direct_map_build_from_uefi_ranges(arena: *mut PageTableArena,
         if address < (memory_map_base as usize) {
             return direct_map_range_stats_invalid();
         }
-        let descriptor = address as *const EfiMemoryDescriptor;
+        let descriptor = address as *const BootMemoryDescriptor;
         descriptor_count += 1;
 
         let type_code = descriptor.type_code;
@@ -76,7 +77,7 @@ pub fn direct_map_build_from_uefi_ranges(arena: *mut PageTableArena,
         let physical_start = descriptor.physical_start;
         let page_count = descriptor.number_of_pages;
 
-        if !uefi_memory_descriptor_is_direct_map_wb(type_code, attribute) || page_count == 0 {
+        if !boot_memory_descriptor_is_direct_map_wb(type_code, attribute) || page_count == 0 {
             skipped_descriptor_count += 1;
             offset += descriptor_size;
             continue;

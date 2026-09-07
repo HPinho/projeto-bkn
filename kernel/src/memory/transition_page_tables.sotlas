@@ -1,12 +1,12 @@
-// Baken OS — composição das page tables necessárias ao futuro cutover.
+// Baken OS — composição das page tables necessárias ao cutover.
 //
 // Recebe uma arena bootstrap já válida, cria a PML4 raiz e materializa:
-//   1) direct-map somente dos ranges UEFI/RAM aprovados;
+//   1) direct-map somente dos ranges RAM aprovados do snapshot de boot;
 //   2) imagem PE com política W^X por seção;
 //   3) framebuffer MMIO identidade RW+NX+UC;
 //   4) stack RW+NX, mantendo a guard page ausente.
 //
-// Falha fechada se qualquer etapa falhar. NÃO escreve CR3, NÃO chama UEFI e
+// Falha fechada se qualquer etapa falhar. NÃO escreve CR3, NÃO chama firmware e
 // NÃO ativa PMM/VMM. A ativação da MMU é uma etapa posterior e separada.
 
 module kernel::memory::transition_page_tables;
@@ -66,7 +66,7 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
     if !root.valid { return transition_page_tables_invalid(); }
     if !page_table_zero(root) { return transition_page_tables_invalid(); }
 
-    let direct = direct_map_build_from_uefi_ranges(
+    let direct = direct_map_build_from_boot_ranges(
         arena,
         root,
         memory_map_base,

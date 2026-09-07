@@ -1,20 +1,19 @@
-// Baken OS - inventario inicial do Physical Memory Manager.
+// Baken OS - inventário inicial do Physical Memory Manager.
 //
-// Esta fase interpreta o Memory Map UEFI real recebido pelo BakenBootInfo v2,
-// mas NAO aloca paginas ainda. Enquanto a ponte UEFI continuar ativa, Boot
-// Services ainda podem consumir EfiConventionalMemory. A alocacao fisica so
-// sera habilitada depois do cutover real para ExitBootServices().
+// Esta fase interpreta somente o snapshot final de memória entregue pelo
+// bootstrap. O formato POD é preservado para leitura do buffer de handoff, mas
+// a API e os nomes expostos ao kernel são próprios do Baken. A alocação física
+// só é habilitada após ExitBootServices no caminho pós-cutover.
 
 module kernel::memory::pmm;
 
-pub const BAKEN_PAGE_SIZE: u64 = 4096;
-pub const EFI_CONVENTIONAL_MEMORY: u32 = 7;
-pub const EFI_ACPI_RECLAIM_MEMORY: u32 = 9;
-pub const EFI_ACPI_MEMORY_NVS: u32 = 10;
-pub const EFI_MEMORY_MAPPED_IO: u32 = 11;
-pub const EFI_MEMORY_MAPPED_IO_PORT_SPACE: u32 = 12;
+import kernel::memory::memory_map_policy::*;
 
-pub struct EfiMemoryDescriptor {
+pub const BAKEN_PAGE_SIZE: u64 = 4096;
+
+// Espelho POD do descritor recebido no snapshot de boot. O layout de 40 bytes é
+// parte do contrato de handoff; não contém ponteiros ou serviços de firmware.
+pub struct BootMemoryDescriptor {
     pub type_code: u32;
     pub padding: u32;
     pub physical_start: u64;
@@ -23,7 +22,7 @@ pub struct EfiMemoryDescriptor {
     pub attribute: u64;
 }
 
-// Região física normalizada. Ela não expõe descritores UEFI ao restante do
+// Região física normalizada. Ela não expõe o formato do snapshot ao restante do
 // kernel e permanece válida enquanto o buffer do mapa final existir.
 pub struct PmmPhysicalRegion {
     pub base: u64;
@@ -95,7 +94,7 @@ pub fn pmm_inventory_init(memory_map_base: *const u8,
         let mut offset: usize = 0;
         while (offset + descriptor_size) <= memory_map_size {
             let address: usize = (memory_map_base as usize) + offset;
-            let descriptor = address as *const EfiMemoryDescriptor;
+            let descriptor = address as *const BootMemoryDescriptor;
             let pages: u64 = descriptor.number_of_pages;
             let base: u64 = descriptor.physical_start;
             let end: u64 = base + (pages * BAKEN_PAGE_SIZE);
@@ -106,18 +105,18 @@ pub fn pmm_inventory_init(memory_map_base: *const u8,
                 PMM_INVENTORY.highest_physical_address = end;
             }
 
-            if descriptor.type_code == EFI_CONVENTIONAL_MEMORY {
+            if descriptor.type_code == BAKEN_BOOT_MEMORY_CONVENTIONAL {
                 PMM_INVENTORY.conventional_pages += pages;
                 if pages > PMM_INVENTORY.largest_conventional_pages {
                     PMM_INVENTORY.largest_conventional_pages = pages;
                     PMM_INVENTORY.largest_conventional_base = base;
                 }
-            } else if descriptor.type_code == EFI_ACPI_RECLAIM_MEMORY {
+            } else if descriptor.type_code == BAKEN_BOOT_MEMORY_ACPI_RECLAIM {
                 PMM_INVENTORY.acpi_reclaim_pages += pages;
-            } else if descriptor.type_code == EFI_ACPI_MEMORY_NVS {
+            } else if descriptor.type_code == BAKEN_BOOT_MEMORY_ACPI_NVS {
                 PMM_INVENTORY.acpi_nvs_pages += pages;
-            } else if descriptor.type_code == EFI_MEMORY_MAPPED_IO ||
-                      descriptor.type_code == EFI_MEMORY_MAPPED_IO_PORT_SPACE {
+            } else if descriptor.type_code == BAKEN_BOOT_MEMORY_MMIO ||
+                      descriptor.type_code == BAKEN_BOOT_MEMORY_MMIO_PORT_SPACE {
                 PMM_INVENTORY.mmio_pages += pages;
             }
 
@@ -164,10 +163,8 @@ pub fn pmm_get_highest_physical_address() -> u64 {
     unsafe { return PMM_INVENTORY.highest_physical_address; }
 }
 
-// Enumeração determinística das regiões EfiConventionalMemory do mapa final.
-// O índice é ordinal entre regiões convencionais, não entre todos os descritores.
-// Isso prepara o PMM multi-região sem permitir que o bootstrap use memória que
-// não foi explicitamente inventariada após ExitBootServices.
+// Enumeração determinística das regiões convencionais do snapshot final. O
+// índice é ordinal entre regiões convencionais, não entre todos os descritores.
 @system
 pub fn pmm_get_conventional_region(index: u64) -> PmmPhysicalRegion {
     unsafe {
@@ -177,8 +174,8 @@ pub fn pmm_get_conventional_region(index: u64) -> PmmPhysicalRegion {
         let mut offset: usize = 0;
         while (offset + PMM_INVENTORY.descriptor_size) <= PMM_INVENTORY.memory_map_size {
             let address: usize = (PMM_INVENTORY.memory_map_base as usize) + offset;
-            let descriptor = address as *const EfiMemoryDescriptor;
-            if descriptor.type_code == EFI_CONVENTIONAL_MEMORY && descriptor.number_of_pages != 0 {
+            let descriptor = address as *const BootMemoryDescriptor;
+            if descriptor.type_code == BAKEN_BOOT_MEMORY_CONVENTIONAL && descriptor.number_of_pages != 0 {
                 if ordinal == index {
                     return PmmPhysicalRegion {
                         base: descriptor.physical_start,
