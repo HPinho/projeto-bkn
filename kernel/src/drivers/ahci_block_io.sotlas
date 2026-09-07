@@ -2,7 +2,8 @@
 //
 // Esta camada reaproveita o HBA/porta/command list/command table já inicializados
 // pelo runtime AHCI e usa um buffer DMA próprio para READ/WRITE de qualquer LBA
-// válido. Os probes destrutivos específicos do CI permanecem separados.
+// válido. Os probes destrutivos específicos do CI permanecem separados e não
+// são pré-condição para o I/O normal do dispositivo.
 
 module kernel::drivers::ahci_block_io;
 
@@ -175,7 +176,9 @@ fn ahci_block_io_issue(hba: u64, lba: u64, command: u8, write_to_disk: bool) -> 
 @system
 pub fn ahci_block_io_read_sector(hba: u64, lba: u64, output: *mut u8) -> bool {
     if output == (null as *mut u8) || hba == 0 { return false; }
-    if !ahci_read_is_ready() || !ahci_capacity_is_ready() || lba >= ahci_total_sectors() { return false; }
+    // IDENTIFY + capacidade são o contrato de disponibilidade do I/O normal.
+    // `ahci_read_is_ready()` pertence somente ao probe de certificação da fixture.
+    if !ahci_runtime_is_ready() || !ahci_capacity_is_ready() || lba >= ahci_total_sectors() { return false; }
     if !ahci_block_io_prepare_buffer() { return false; }
 
     let mut command: u8 = AHCI_ATA_READ_DMA;
@@ -189,7 +192,8 @@ pub fn ahci_block_io_read_sector(hba: u64, lba: u64, output: *mut u8) -> bool {
 @system
 pub fn ahci_block_io_write_sector(hba: u64, lba: u64, input: *const u8) -> bool {
     if input == (null as *const u8) || hba == 0 { return false; }
-    if !ahci_write_is_ready() || !ahci_capacity_is_ready() || lba >= ahci_total_sectors() { return false; }
+    // A escrita genérica também não depende do write/readback destrutivo do CI.
+    if !ahci_runtime_is_ready() || !ahci_capacity_is_ready() || lba >= ahci_total_sectors() { return false; }
     if !ahci_block_io_prepare_buffer() { return false; }
 
     let data = unsafe { AHCI_BLOCK_IO_BUFFER.virtual_address };
