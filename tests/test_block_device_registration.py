@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails da publicação do caminho AHCI provado na Block Device API."""
+"""Guardrails da publicação AHCI na Block Device API."""
 
 from pathlib import Path
 import unittest
@@ -21,52 +21,51 @@ class BlockDeviceRegistrationTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
 
-    def test_ahci_registration_occurs_only_after_read_and_write_proofs(self):
+    def test_ahci_registration_occurs_before_fixture_certification(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         scan = text.split("pub fn storage_discovery_scan()", 1)[1]
         post_cutover = scan.index("let post_cutover = active_page_tables_is_ready();")
         boot_filter = scan.index("if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }")
         pre_cutover_return = scan.index("if !post_cutover { return kind; }")
-        read = scan.index("storage_read_ahci_after_identify()")
-        write = scan.index("ahci_write_probe_sector1")
+        capacity = scan.index("storage_prepare_ahci_capacity_after_identify()")
         register = scan.index("storage_register_ahci_block_device()")
+        certify = scan.index("storage_certify_ahci_fixture()")
         self.assertLess(post_cutover, boot_filter)
         self.assertLess(boot_filter, pre_cutover_return)
-        self.assertLess(pre_cutover_return, read)
-        self.assertLess(read, write)
-        self.assertLess(write, register)
+        self.assertLess(pre_cutover_return, capacity)
+        self.assertLess(capacity, register)
+        self.assertLess(register, certify)
 
-    def test_registration_publishes_identify_capacity_and_writable_state(self):
+    def test_registration_uses_identify_capacity_not_ci_probe_flags(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("fn storage_register_ahci_block_device()", 1)[1]
-        body = body.split("pub fn storage_discovery_scan()", 1)[0]
+        body = body.split("fn storage_block_io_zero", 1)[0]
         for token in (
-            "!STORAGE_AHCI_READ_READY", "!ahci_write_is_ready()",
+            "STORAGE_AHCI_IDENTIFY_READY", "ahci_runtime_is_ready()", "ahci_capacity_is_ready()",
             "ahci_total_sectors()", "let last_lba = total_sectors - 1",
             "block_device_register_native(BLOCK_DEVICE_AHCI",
             "AHCI_READ_SECTOR_SIZE as u32", "true, true",
-            "block_device_has_native_target()",
-            "block_device_has_writable_native_target()",
+            "block_device_has_native_target()", "block_device_has_writable_native_target()",
             "block_device_kind() != BLOCK_DEVICE_AHCI",
             "block_device_index() != STORAGE_CANDIDATE.pci_index",
-            "block_device_last_lba() != last_lba",
-            "STORAGE_BLOCK_DEVICE_READY = true",
+            "block_device_last_lba() != last_lba", "STORAGE_BLOCK_DEVICE_READY = true",
             "x86_serial_write_stage_marker('k' as u8)",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("ahci_write_is_ready()", body)
+        self.assertNotIn("AHCI_WRITE_TEST_LBA", body)
 
     def test_scan_resets_registry_before_each_discovery(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         scan = text.split("pub fn storage_discovery_scan()", 1)[1]
-        self.assertLess(scan.index("block_device_reset_registry()"),
-                        scan.index("let count = pci_get_device_count()"))
+        self.assertLess(scan.index("block_device_reset_registry()"), scan.index("let count = pci_get_device_count()"))
 
-    def test_ci_requires_block_device_gate_after_write(self):
+    def test_ci_still_requires_fixture_read_write_after_registration(self):
         text = WORKFLOW.read_text(encoding="utf-8")
         markers = text.split("for marker in ", 1)[1].split("; do", 1)[0]
+        self.assertLess(markers.index("STEP=k"), markers.index("STEP=e"))
         self.assertLess(markers.index("STEP=e"), markers.index("STEP=f"))
-        self.assertLess(markers.index("STEP=f"), markers.index("STEP=k"))
-        self.assertLess(markers.index("STEP=k"), markers.index("STEP=v"))
+        self.assertLess(markers.index("STEP=f"), markers.index("STEP=v"))
         self.assertLess(markers.index("STEP=v"), markers.index("STEP=J"))
 
 
