@@ -20,9 +20,10 @@ jobs:
           python-version: '3.11'
 
       - name: Install System Dependencies & QEMU
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
+          timeout --foreground 4m sudo apt-get update
+          timeout --foreground 6m sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
 
       - name: Run Complete Test Suite
         run: |
