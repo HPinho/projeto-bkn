@@ -62,7 +62,7 @@ jobs:
           OVMF_VARS="${OVMF_CODE/CODE/VARS}"
           test -f "$OVMF_VARS"
           cp "$OVMF_VARS" build/OVMF_VARS_NVME_ONLY.fd
-          rm -f build/qemu-nvme-only-serial.log build/qemu-nvme-only-monitor.sock
+          rm -f build/qemu-nvme-only-serial.log build/qemu-nvme-only-monitor.sock build/qemu-nvme-only-int.log
 
           set +e
           timeout --signal=TERM --kill-after=5s 60s qemu-system-x86_64 \
@@ -76,7 +76,8 @@ jobs:
             -device usb-kbd,bus=xhci.0 \
             -display none \
             -monitor unix:build/qemu-nvme-only-monitor.sock,server=on,wait=off \
-            -serial file:build/qemu-nvme-only-serial.log &
+            -serial file:build/qemu-nvme-only-serial.log \
+            -d int -D build/qemu-nvme-only-int.log &
           qemu_pid=$!
 
           for i in $(seq 1 50); do
@@ -98,6 +99,10 @@ jobs:
           set -e
 
           cat build/qemu-nvme-only-serial.log
+          if test -f build/qemu-nvme-only-int.log; then
+            echo '--- QEMU x86 interrupt/exception trace tail ---'
+            tail -n 160 build/qemu-nvme-only-int.log
+          fi
           test "$injection_failed" -eq 0
           test "$status" -eq 124
 
@@ -124,4 +129,5 @@ jobs:
           name: qemu-nvme-only-diagnostics
           path: |
             build/qemu-nvme-only-serial.log
+            build/qemu-nvme-only-int.log
           if-no-files-found: ignore
