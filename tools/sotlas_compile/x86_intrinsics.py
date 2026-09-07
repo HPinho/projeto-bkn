@@ -112,6 +112,12 @@ static inline void __cpu_pause(void) {
     __asm__ __volatile__("pause");
 }
 
+/* Yield síncrono CPL0. O vetor 0x43 é um interrupt gate dedicado de software;
+ * o frame salvo é idêntico ao do timer e o retorno continua sendo IRETQ. */
+static inline void __scheduler_yield_interrupt(void) {
+    __asm__ __volatile__("int $0x43" : : : "memory");
+}
+
 static inline uint32_t __mmio_read32(uint64_t address) {
     uint32_t value = *(volatile uint32_t *)(uintptr_t)address;
     __asm__ __volatile__("" : : : "memory");
@@ -339,6 +345,7 @@ __attribute__((naked, used)) static void __sotlas_x86_irq_common(void) {
 SOTLAS_X86_IRQ_STUB(64)
 SOTLAS_X86_IRQ_STUB(65)
 SOTLAS_X86_IRQ_STUB(66)
+SOTLAS_X86_IRQ_STUB(67)
 SOTLAS_X86_IRQ_STUB(255)
 
 #undef SOTLAS_X86_IRQ_STUB
@@ -348,6 +355,7 @@ static inline uint64_t __irq_stub_address(uint16_t vector) {
         case 64: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_64;
         case 65: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_65;
         case 66: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_66;
+        case 67: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_67;
         case 255: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_255;
         default: return 0;
     }
@@ -373,6 +381,7 @@ def install(bootstrap) -> None:
         "__scheduler_thread_trampoline_address": Function("__scheduler_thread_trampoline_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_exit_probe_entry_address": Function("__scheduler_exit_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__scheduler_yield_interrupt": Function("__scheduler_yield_interrupt", [], Type("void"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
         "__pat_install_wc": Function("__pat_install_wc", [], Type("bool"), [], public=True, attributes=["@system"]),
