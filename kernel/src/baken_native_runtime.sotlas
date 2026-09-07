@@ -244,6 +244,7 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     scheduler_diag_yield_round_trip();
     if !scheduler_wait_run_queue_probe() { loop {} }
     if !scheduler_wait_reaper_probe() { loop {} }
+    if !scheduler_finish_process_probe() { loop {} }
 
     // Wait queue proof: a thread bloqueia e devolve a CPU ao bootstrap. O
     // bootstrap confirma que ela está enfileirada, acorda exatamente um waiter

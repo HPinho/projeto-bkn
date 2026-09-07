@@ -122,6 +122,21 @@ pub fn process_retain(pid: u64) -> bool {
 }
 
 @system
+pub fn process_borrow_root(pid: u64) -> u64 {
+    // Borrow válido apenas enquanto o chamador mantiver uma referência.
+    let flags = x86_irq_save_disable();
+    let slot = process_find_locked(pid);
+    let mut root: u64 = 0;
+    unsafe {
+        if slot != PROCESS_INVALID_SLOT && PROCESS_REFERENCES[slot] != 0 {
+            root = PROCESS_SPACES[slot].root_physical;
+        }
+    }
+    x86_irq_restore(flags);
+    return root;
+}
+
+@system
 pub fn process_release(pid: u64) -> bool {
     let flags = x86_irq_save_disable();
     let result = process_release_locked(pid);
@@ -193,4 +208,3 @@ pub fn process_registry_emit_ready_marker() -> bool {
     }
     return true;
 }
-

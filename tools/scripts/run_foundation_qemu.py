@@ -18,6 +18,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 from tools.scripts.extend_foundation_fixture import extend, verify
+from tools.scripts.verify_kernel_smoke import validate
 
 
 def run(args):
@@ -39,6 +40,9 @@ def run(args):
             image.seek(lba * 512)
             image.write(magic)
     subprocess.run([sys.executable, '-c', blocks[0]], cwd=work, check=True)
+    with disk.open('r+b') as image:
+        image.seek(1023 * 512)
+        image.write(b'BAKENR01')
     extend(disk)
     shutil.copyfile(args.ovmf_vars, work / 'vars.fd')
     with socket.socket() as sock:
@@ -82,7 +86,9 @@ def run(args):
                 while time.monotonic() < deadline:
                     command({'execute': 'human-monitor-command', 'arguments': {'command-line': 'sendkey a'}})
                     text = serial.read_text(errors='replace') if serial.exists() else ''
-                    if 'BAKEN:BARE_METAL_READY' in text:
+                    if 'BAKEN:HEX=E:' in text:
+                        raise RuntimeError(f'CPU exception; see {serial}')
+                    if not validate(text):
                         break
                     time.sleep(1)
                 else:
@@ -91,6 +97,9 @@ def run(args):
             process.terminate()
             process.wait(timeout=10)
     subprocess.run([sys.executable, '-c', blocks[1]], cwd=work, check=True)
+    errors = validate(serial.read_text(errors='replace'))
+    if errors:
+        raise RuntimeError('; '.join(errors))
     verify(disk, serial)
     with disk.open('rb') as image:
         image.seek(1024 * 512)

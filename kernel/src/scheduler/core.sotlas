@@ -13,6 +13,8 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::direct_map::*;
+import kernel::process::registry::*;
+import kernel::arch::x86_64::paging::*;
 
 pub const SCHEDULER_BOOT_THREAD_ID: u64 = 0;
 pub const SCHEDULER_IDLE_THREAD_ID: u64 = 1;
@@ -27,6 +29,9 @@ pub const SCHEDULER_DEFAULT_THREAD_STACK_PAGES: u64 = 4;
 pub const SCHEDULER_ROUND_TRIP_SPIN_LIMIT: u64 = 10000000;
 
 static mut SCHEDULER_ACTIVE: bool = false;
+static mut SCHEDULER_KERNEL_ROOT: u64 = 0;
+static mut SCHEDULER_PROCESS_PROBE_PID: u64 = 0;
+static mut SCHEDULER_PROCESS_PROBE_EXECUTED: bool = false;
 static mut SCHEDULER_CURRENT_SLOT: usize = SCHEDULER_BOOT_SLOT;
 static mut SCHEDULER_NEXT_THREAD_ID: u64 = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
 static mut SCHEDULER_SWITCH_COUNT: u64 = 0;
@@ -45,6 +50,8 @@ static mut SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID: u64 = 0;
 static mut SCHEDULER_THREADS: [KernelThread; SCHEDULER_THREAD_SLOT_COUNT] = [
     KernelThread {
         id: 0,
+        process_id: 0,
+        address_space_root: 0,
         state: KERNEL_THREAD_UNUSED,
         reserved: 0,
         saved_frame: 0,
@@ -159,6 +166,18 @@ pub fn sotlas_x86_scheduler_idle_entry() -> ! {
 @system
 @export
 pub fn sotlas_x86_scheduler_exit_probe_entry() -> void {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        let slot = SCHEDULER_CURRENT_SLOT;
+        if slot < SCHEDULER_THREAD_SLOT_COUNT {
+            let pid = SCHEDULER_THREADS[slot].process_id;
+            let root = SCHEDULER_THREADS[slot].address_space_root;
+            SCHEDULER_PROCESS_PROBE_EXECUTED = pid != 0 &&
+                pid == SCHEDULER_PROCESS_PROBE_PID && root != SCHEDULER_KERNEL_ROOT &&
+                root == (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK);
+        }
+    }
+    x86_irq_restore(flags);
     return;
 }
 
@@ -233,6 +252,13 @@ fn scheduler_select_slot(slot: usize, fallback_frame: u64) -> u64 {
         let resume = SCHEDULER_THREADS[slot].saved_frame;
         if resume == 0 { return fallback_frame; }
         let previous = SCHEDULER_CURRENT_SLOT;
+        let mut root = SCHEDULER_THREADS[slot].address_space_root;
+        if SCHEDULER_THREADS[slot].process_id == 0 { root = SCHEDULER_KERNEL_ROOT; }
+        // Nunca retomar um frame sob uma raiz ausente ou não alinhada.
+        if root == 0 || !x86_page_aligned(root) { loop {} }
+        if (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK) != root {
+            x86_write_cr3_raw(root);
+        }
         SCHEDULER_THREADS[slot].state = KERNEL_THREAD_RUNNING;
         SCHEDULER_CURRENT_SLOT = slot;
         if slot != previous {
@@ -287,6 +313,8 @@ fn scheduler_reap_terminated_noncurrent() -> u64 {
                     if thread_id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID {
                         SCHEDULER_RUN_QUEUE_PROBE_REAPED = true;
                     }
+                    let pid = SCHEDULER_THREADS[slot].process_id;
+                    if pid != 0 && !process_release(pid) { loop {} }
                     SCHEDULER_THREADS[slot] = kernel_thread_empty(0);
                     SCHEDULER_REAP_COUNT += 1;
                     reaped += 1;
@@ -303,6 +331,8 @@ fn scheduler_reap_terminated_noncurrent() -> u64 {
 pub fn scheduler_initialize() -> bool {
     unsafe {
         if SCHEDULER_ACTIVE { return true; }
+        SCHEDULER_KERNEL_ROOT = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+        if SCHEDULER_KERNEL_ROOT == 0 { return false; }
         SCHEDULER_CURRENT_SLOT = SCHEDULER_BOOT_SLOT;
         SCHEDULER_NEXT_THREAD_ID = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
         SCHEDULER_SWITCH_COUNT = 0;
@@ -365,6 +395,11 @@ pub fn scheduler_initialize() -> bool {
 @system
 pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
     if !scheduler_is_active() || entry_rip == 0 || stack_pages == 0 { return 0; }
+    unsafe {
+        if SCHEDULER_NEXT_THREAD_ID == 0 || SCHEDULER_NEXT_THREAD_ID == 0xFFFFFFFFFFFFFFFF {
+            return 0;
+        }
+    }
     let slot = scheduler_find_free_dynamic_slot();
     if slot == SCHEDULER_INVALID_SLOT { return 0; }
 
@@ -406,6 +441,34 @@ pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
         SCHEDULER_THREADS[slot].stack_pages = stack_pages;
         return thread_id;
     }
+}
+
+@system
+pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u64) -> u64 {
+    // Ainda entrada CPL0: ownership/CR3 não equivalem a uma thread userspace.
+    // IRQ-off cobre retenção, publicação READY e vínculo PID/root atomicamente.
+    let flags = x86_irq_save_disable();
+    if !process_retain(pid) { x86_irq_restore(flags); return 0; }
+    let root = process_borrow_root(pid);
+    if root == 0 {
+        process_release(pid);
+        x86_irq_restore(flags);
+        return 0;
+    }
+    let tid = scheduler_create_kernel_thread(entry_rip, stack_pages);
+    if tid == 0 {
+        process_release(pid);
+        x86_irq_restore(flags);
+        return 0;
+    }
+    let slot = scheduler_find_thread_slot(tid);
+    if slot == SCHEDULER_INVALID_SLOT { loop {} }
+    unsafe {
+        SCHEDULER_THREADS[slot].process_id = pid;
+        SCHEDULER_THREADS[slot].address_space_root = root;
+    }
+    x86_irq_restore(flags);
+    return tid;
 }
 
 @system
@@ -534,9 +597,13 @@ pub fn scheduler_start_run_queue_probe() -> bool {
     }
     let entry = x86_scheduler_exit_probe_entry_address();
     if entry == 0 { return false; }
-    let thread_id = scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
-    if thread_id == 0 { return false; }
+    let pid = process_create();
+    if pid == 0 { return false; }
+    let thread_id = scheduler_create_process_thread(pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    if thread_id == 0 { process_destroy(pid); return false; }
+    if process_destroy(pid) { return false; }
     unsafe {
+        SCHEDULER_PROCESS_PROBE_PID = pid;
         SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID = thread_id;
         SCHEDULER_RUN_QUEUE_PROBE_SELECTED = false;
         SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = false;
@@ -644,6 +711,29 @@ pub fn scheduler_wait_run_queue_probe() -> bool {
         spins += 1;
     }
     return false;
+}
+
+@system
+pub fn scheduler_finish_process_probe() -> bool {
+    let flags = x86_irq_save_disable();
+    let mut passed: bool = false;
+    unsafe {
+        if SCHEDULER_PROCESS_PROBE_EXECUTED && SCHEDULER_RUN_QUEUE_PROBE_REAPED &&
+           SCHEDULER_PROCESS_PROBE_PID != 0 &&
+           (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK) == SCHEDULER_KERNEL_ROOT {
+            passed = process_destroy(SCHEDULER_PROCESS_PROBE_PID);
+            if passed { SCHEDULER_PROCESS_PROBE_PID = 0; }
+        }
+    }
+    x86_irq_restore(flags);
+    if !passed { return false; }
+    let marker: [u8; 30] = [66, 65, 75, 69, 78, 58, 80, 82, 79, 67, 69, 83, 83, 95, 83, 67, 72, 69, 68, 85, 76, 69, 82, 95, 82, 69, 65, 68, 89, 10];
+    let mut index: usize = 0;
+    while index < 30 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
 }
 
 @system

@@ -234,7 +234,7 @@ class KernelSchedulerTests(unittest.TestCase):
         probe = probe.split("pub fn scheduler_on_timer_interrupt", 1)[0]
         self.assertIn("x86_scheduler_exit_probe_entry_address()", probe)
         self.assertIn(
-            "scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES)",
+            "scheduler_create_process_thread(pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES)",
             probe,
         )
         self.assertIn("pub fn x86_scheduler_exit_probe_entry_address() -> u64", cpu)

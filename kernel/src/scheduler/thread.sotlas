@@ -15,6 +15,8 @@ pub const KERNEL_THREAD_TERMINATED: u32 = 4;
 @repr(C)
 pub struct KernelThread {
     pub id: u64;
+    pub process_id: u64;
+    pub address_space_root: u64;
     pub state: u32;
     pub reserved: u32;
     pub saved_frame: u64;
@@ -28,6 +30,8 @@ pub struct KernelThread {
 pub fn kernel_thread_empty(id: u64) -> KernelThread {
     return KernelThread {
         id: id,
+        process_id: 0,
+        address_space_root: 0,
         state: KERNEL_THREAD_UNUSED,
         reserved: 0,
         saved_frame: 0,

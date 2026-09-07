@@ -39,6 +39,7 @@ pub struct ProcessAddressSpace {
 
 static mut PROCESS_ADDRESS_SPACE_READY: bool = false;
 static mut PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED: bool = false;
+static mut PROCESS_KERNEL_ROOT_PHYSICAL: u64 = 0;
 
 @system
 pub fn process_address_space_invalid() -> ProcessAddressSpace {
@@ -166,7 +167,13 @@ pub fn process_address_space_create() -> ProcessAddressSpace {
     if !pmm_allocator_is_active() || !vmm_is_active() ||
        vmm_direct_map_base() != BAKEN_DIRECT_MAP_BASE { return process_address_space_invalid(); }
 
-    let source_root = process_address_space_current_root();
+    // Depois do bring-up, nunca herdar a subárvore user de outro processo.
+    let mut source_root = process_address_space_current_root();
+    unsafe {
+        if PROCESS_KERNEL_ROOT_PHYSICAL != 0 {
+            source_root = process_address_space_page(PROCESS_KERNEL_ROOT_PHYSICAL);
+        }
+    }
     if !page_table_page_writable(source_root) { return process_address_space_invalid(); }
 
     let table_base = pmm_alloc_pages(PROCESS_ADDRESS_SPACE_TABLE_PAGES);
@@ -378,6 +385,7 @@ fn process_address_space_self_test() -> bool {
 @system
 pub fn process_address_space_activate_foundation() -> bool {
     unsafe {
+        if PROCESS_ADDRESS_SPACE_READY { return true; }
         PROCESS_ADDRESS_SPACE_READY = false;
         PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED = false;
     }
@@ -387,6 +395,9 @@ pub fn process_address_space_activate_foundation() -> bool {
     // Ainda BSP-only. IRQ-off protege PMM/page-table metadata contra qualquer
     // handler futuro que venha a ganhar alocação antes do scheduler existir.
     let flags = x86_irq_save_disable();
+    unsafe {
+        PROCESS_KERNEL_ROOT_PHYSICAL = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+    }
     let passed = process_address_space_self_test();
     x86_irq_restore(flags);
     if !passed { return false; }

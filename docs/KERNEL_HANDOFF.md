@@ -6,7 +6,7 @@ estáticos e prova de execução; não equivale a uma certificação do kernel.
 ## Ponto de partida confirmado
 
 - Repositório: https://github.com/HPinho/projeto-bkn
-- Checkout: `E:\projeto-bkn`, branch `main`, base atual `8f9050d`.
+- Checkout: `E:\projeto-bkn`, branch `main`, base desta rodada `59f1a16`.
 - Kernel escrito em `.sotlas`; compilador em `tools/sotlas_compile/`.
 - Acesso ao terminal: prefixar comandos com `rtk`; usar `rtk proxy` se o
   comando filtrado não funcionar. Ler as instruções AGENTS/RTK antes de trabalhar.
@@ -15,6 +15,8 @@ estáticos e prova de execução; não equivale a uma certificação do kernel.
 
 ## Evidência já obtida
 
+- Confirmados no GitHub: runs **34158406771** e **34158406869**, ambos com
+  sucesso em `59f1a165e76078d659800b1c4f3af310e0e7b967` (registro de processos).
 - Confirmados no GitHub: CI principal **34156827304** e NVMe-only
   **34156827300**, ambos com sucesso em `8f9050d5dd7d695be04c9c39765f5b3f68c89a0d`.
   Incluem a prova CR3 primeira → segunda → primeira → kernel e os gates
@@ -52,7 +54,8 @@ estáticos e prova de execução; não equivale a uma certificação do kernel.
 
 1. Prova controlada CR3 concluída no smoke. Agora auditar ownership/lifetime
    para processos duradouros, além do self-test temporário.
-2. Processos/PID/TID e vínculo thread–address space; garantir reaper seguro.
+2. Vínculo PID/TID, CR3 e reaper CPL0 implementado nesta rodada; ainda falta
+   contexto de entrada CPL3 e integração userspace.
 3. Ring 3: stack de usuário, frame de entrada, TSS.RSP0 e caminho de retorno
    seguro; validar exceções e permissões de páginas em QEMU.
 4. Syscalls: definir ABI, entrada/saída, validação de ponteiros e cópias
@@ -100,7 +103,7 @@ Verificar o SHA do run antes de atribuir sucesso a alterações novas.
   kernel), repetir link e validar boot/QEMU antes de avançar para lifetime/PID/TID e
   contexto de processo. A etapa CR3 foi publicada pelo usuário em `8f9050d`.
 
-## Etapa atual — registro de processos (alterações locais)
+## Registro de processos — publicado em 59f1a16
 
 - Implementado `kernel/src/process/registry.sotlas`: 16 slots BSP, PID 0
   reservado, PIDs monotônicos sem wrap/reuso, ownership privado das raízes.
@@ -113,7 +116,7 @@ Verificar o SHA do run antes de atribuir sucesso a alterações novas.
   verifica devolução da contagem de páginas PMM ao valor inicial.
 - Integrado após a prova CR3 e antes de `scheduler_initialize`. O gate comum
   dos dois workflows exige `BAKEN:PROCESS_REGISTRY_READY`; o marker só é
-  emitido depois de ativação bem-sucedida. Ainda sem prova QEMU deste patch.
+  emitido depois de ativação bem-sucedida. Os runs da base 59f1a16 passaram.
 - `tests/test_process_registry.py`: contratos estáticos complementares; não
   confundir com execução do self-test em hardware.
 - Grafo: 127 módulos. Rodada intermediária: 995 testes passaram.
@@ -129,13 +132,39 @@ Verificar o SHA do run antes de atribuir sucesso a alterações novas.
 - Atualizado `tests/test_sotlas_resolver.py`: exige o objeto ABI adicional e
   o bootloader explicitamente. **Suíte final: 996 testes passaram em 62,249 s**.
   `git diff --check` passou; imagem identificada como PE x86-64 / EFI application.
-- Ainda pendente: vincular referências ao scheduler/reaper e executar processos
-  de usuário. Não confundir registro de processos com Ring 3 funcional.
-- Limitação de criação: a raiz ativa deve ser a raiz supervisor do kernel;
-  antes de criar processos a partir de outro processo será necessário fixar
-  uma raiz canônica do kernel em vez de copiar a raiz corrente.
-- Próxima implementação: vínculo thread–PID retido antes de publicar thread,
-  liberação após execução/reaper, contexto CR3/TSS por processo, depois Ring 3.
+- O registro não equivale a Ring 3 funcional.
+- Limitação histórica de criação a partir da raiz corrente: corrigida na rodada
+  seguinte pela captura da raiz canônica do kernel.
+- A rodada seguinte integra vínculo thread–PID e contexto CR3; TSS por thread
+  e Ring 3 permanecem como passos posteriores.
   FPU/SIMD, syscalls, loader userspace e SMP continuam pendentes.
-- Alterações desta etapa ainda sem commit/push. Publicar e acompanhar ambos os
-  workflows no SHA novo antes de afirmar validação runtime do registro.
+- Essa etapa foi publicada pelo usuário em 59f1a16.
+
+## Rodada atual — scheduler com PID/CR3 (um único commit solicitado)
+
+- `KernelThread` agora carrega PID e raiz física. PID 0 permanece kernel/idle.
+- Criação de thread de processo retém a referência antes da publicação e
+  mantém IF desligado até gravar PID/root; desfaz retenção nas falhas de criação.
+- Seleção pelo scheduler troca CR3 antes de retomar o frame. Contexto continua
+  CPL0, com stack de kernel compartilhada pelas raízes supervisor.
+- Reaper libera a referência depois de devolver/cachear a stack de uma thread
+  não corrente e antes de reutilizar o slot. TID não faz wrap.
+- A criação de address spaces usa a raiz canônica do kernel capturada no bring-up,
+  não a raiz de outro processo que eventualmente esteja executando.
+- Probe da run queue usa um processo real do registro; a entrada verifica CR3;
+  o bootstrap exige reaper, retorno à raiz do kernel e destruição do processo.
+  Só então emite `BAKEN:PROCESS_SCHEDULER_READY`, exigido no gate comum.
+- Runner QEMU local agora usa gate completo (não para em BARE_METAL_READY) e
+  inicializa também o sentinela de leitura AHCI do setor 1023.
+- **Rodada final: 1.004 testes passaram em 60,616 s**; `git diff --check` passou.
+- **Build EFI passou:** 127 módulos / 129 objetos; imagem
+  `build/process-scheduler/BOOTX64.EFI`, ISO `build/process-scheduler/baken.iso`.
+- **Smoke QEMU local passou**, incluindo `PROCESS_SCHEDULER_READY`, wait/wakeup,
+  sleep e verificação de disco SATA/FAT32/NVMe, sem `BAKEN:HEX=E:`.
+  Evidência local: `build/foundation-ryem021e/build/qemu-serial.log` (ignorada
+  pelo Git). Esse smoke termina quando todos os gates passam, não é um soak test.
+- **Não concluído:** Ring 3/TSS.RSP0 por thread, syscalls e user-copy, loader
+  userspace, contexto FPU/SIMD e SMP. Esta rodada não implementa o kernel inteiro.
+- Não confundir execução CPL0 sob raiz privada com execução isolada CPL3.
+- Ao continuar: validar o SHA novo no CI; depois preparar TSS/kernel stack de
+  entrada por thread, frames CPL3 e retorno seguro antes de expor syscalls.
