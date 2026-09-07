@@ -1,8 +1,8 @@
-// Baken OS — primeiro scheduler preemptivo real do kernel.
+// Baken OS — scheduler preemptivo CPL0.
 //
-// Fase inicial deliberadamente pequena: duas threads CPL0, bootstrap + idle.
-// O timer entrega o frame real salvo pelo stub x86-64; o scheduler apenas escolhe
-// qual frame deve ser restaurado. Não há cópia artificial de registradores.
+// O frame real salvo pelo IRQ de timer é a unidade de contexto. A run queue
+// mantém bootstrap, idle e threads de kernel criadas dinamicamente; o common
+// stub restaura diretamente o frame escolhido e retorna por IRETQ.
 
 module kernel::scheduler::core;
 
@@ -15,34 +15,40 @@ import kernel::memory::direct_map::*;
 
 pub const SCHEDULER_BOOT_THREAD_ID: u64 = 0;
 pub const SCHEDULER_IDLE_THREAD_ID: u64 = 1;
+pub const SCHEDULER_FIRST_DYNAMIC_THREAD_ID: u64 = 2;
+pub const SCHEDULER_THREAD_SLOT_COUNT: usize = 8;
+pub const SCHEDULER_BOOT_SLOT: usize = 0;
+pub const SCHEDULER_IDLE_SLOT: usize = 1;
+pub const SCHEDULER_FIRST_DYNAMIC_SLOT: usize = 2;
+pub const SCHEDULER_INVALID_SLOT: usize = SCHEDULER_THREAD_SLOT_COUNT;
 pub const SCHEDULER_IDLE_STACK_PAGES: u64 = 4;
+pub const SCHEDULER_DEFAULT_THREAD_STACK_PAGES: u64 = 4;
 pub const SCHEDULER_ROUND_TRIP_SPIN_LIMIT: u64 = 10000000;
 
 static mut SCHEDULER_ACTIVE: bool = false;
-static mut SCHEDULER_CURRENT_THREAD_ID: u64 = SCHEDULER_BOOT_THREAD_ID;
+static mut SCHEDULER_CURRENT_SLOT: usize = SCHEDULER_BOOT_SLOT;
+static mut SCHEDULER_NEXT_THREAD_ID: u64 = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
 static mut SCHEDULER_SWITCH_COUNT: u64 = 0;
 static mut SCHEDULER_FIRST_SWITCH_MARKED: bool = false;
+static mut SCHEDULER_RUN_QUEUE_SWITCH_MARKED: bool = false;
 static mut SCHEDULER_BOOTSTRAP_PROBE_COMPLETE: bool = false;
-static mut SCHEDULER_BOOT_THREAD: KernelThread = KernelThread {
-    id: SCHEDULER_BOOT_THREAD_ID,
-    state: KERNEL_THREAD_UNUSED,
-    reserved: 0,
-    saved_frame: 0,
-    stack_physical_base: 0,
-    stack_virtual_top: 0,
-    stack_pages: 0,
-    switch_count: 0
-};
-static mut SCHEDULER_IDLE_THREAD: KernelThread = KernelThread {
-    id: SCHEDULER_IDLE_THREAD_ID,
-    state: KERNEL_THREAD_UNUSED,
-    reserved: 0,
-    saved_frame: 0,
-    stack_physical_base: 0,
-    stack_virtual_top: 0,
-    stack_pages: 0,
-    switch_count: 0
-};
+static mut SCHEDULER_RUN_QUEUE_PROBE_COMPLETE: bool = false;
+static mut SCHEDULER_RUN_QUEUE_PROBE_SELECTED: bool = false;
+static mut SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID: u64 = 0;
+
+static mut SCHEDULER_THREADS: [KernelThread; SCHEDULER_THREAD_SLOT_COUNT] = [
+    KernelThread {
+        id: 0,
+        state: KERNEL_THREAD_UNUSED,
+        reserved: 0,
+        saved_frame: 0,
+        stack_physical_base: 0,
+        stack_virtual_top: 0,
+        stack_pages: 0,
+        switch_count: 0
+    };
+    SCHEDULER_THREAD_SLOT_COUNT
+];
 
 @system
 fn scheduler_write_switch_marker_once() -> void {
@@ -63,6 +69,24 @@ fn scheduler_write_switch_marker_once() -> void {
 }
 
 @system
+fn scheduler_write_run_queue_marker_once() -> void {
+    unsafe {
+        if SCHEDULER_RUN_QUEUE_SWITCH_MARKED { return; }
+        SCHEDULER_RUN_QUEUE_SWITCH_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 23] = [
+        66, 65, 75, 69, 78, 58, 82, 85, 78, 95, 81, 85,
+        69, 85, 69, 95, 83, 87, 73, 84, 67, 72, 10
+    ];
+    let mut index: usize = 0;
+    while index < 23 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
 @export
 pub fn sotlas_x86_scheduler_idle_entry() -> ! {
     loop {
@@ -71,39 +95,207 @@ pub fn sotlas_x86_scheduler_idle_entry() -> ! {
 }
 
 @system
+fn scheduler_reset_thread_slots() -> void {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_THREAD_SLOT_COUNT {
+            SCHEDULER_THREADS[slot] = kernel_thread_empty(0);
+            slot += 1;
+        }
+        SCHEDULER_THREADS[SCHEDULER_BOOT_SLOT] = kernel_thread_bootstrap(SCHEDULER_BOOT_THREAD_ID);
+        SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT] = kernel_thread_empty(SCHEDULER_IDLE_THREAD_ID);
+    }
+}
+
+@system
+fn scheduler_find_free_dynamic_slot() -> usize {
+    unsafe {
+        let mut slot: usize = SCHEDULER_FIRST_DYNAMIC_SLOT;
+        while slot < SCHEDULER_THREAD_SLOT_COUNT {
+            if SCHEDULER_THREADS[slot].state == KERNEL_THREAD_UNUSED ||
+               SCHEDULER_THREADS[slot].state == KERNEL_THREAD_TERMINATED {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return SCHEDULER_INVALID_SLOT;
+}
+
+@system
+fn scheduler_find_thread_slot(thread_id: u64) -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_THREAD_SLOT_COUNT {
+            if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_UNUSED &&
+               SCHEDULER_THREADS[slot].id == thread_id {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return SCHEDULER_INVALID_SLOT;
+}
+
+@system
+fn scheduler_find_next_ready_normal(start_slot: usize) -> usize {
+    let mut slot = start_slot;
+    if slot >= SCHEDULER_THREAD_SLOT_COUNT { slot = 0; }
+    let mut checked: usize = 0;
+    unsafe {
+        while checked < SCHEDULER_THREAD_SLOT_COUNT {
+            if slot != SCHEDULER_IDLE_SLOT &&
+               SCHEDULER_THREADS[slot].state == KERNEL_THREAD_READY &&
+               SCHEDULER_THREADS[slot].saved_frame != 0 {
+                return slot;
+            }
+            slot += 1;
+            if slot >= SCHEDULER_THREAD_SLOT_COUNT { slot = 0; }
+            checked += 1;
+        }
+    }
+    return SCHEDULER_INVALID_SLOT;
+}
+
+@system
+fn scheduler_select_slot(slot: usize, fallback_frame: u64) -> u64 {
+    if slot >= SCHEDULER_THREAD_SLOT_COUNT { return fallback_frame; }
+    unsafe {
+        let resume = SCHEDULER_THREADS[slot].saved_frame;
+        if resume == 0 { return fallback_frame; }
+        let previous = SCHEDULER_CURRENT_SLOT;
+        SCHEDULER_THREADS[slot].state = KERNEL_THREAD_RUNNING;
+        SCHEDULER_CURRENT_SLOT = slot;
+        if slot != previous {
+            SCHEDULER_THREADS[slot].switch_count += 1;
+            SCHEDULER_SWITCH_COUNT += 1;
+            scheduler_write_switch_marker_once();
+            if slot >= SCHEDULER_FIRST_DYNAMIC_SLOT {
+                scheduler_write_run_queue_marker_once();
+                if SCHEDULER_THREADS[slot].id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID {
+                    SCHEDULER_RUN_QUEUE_PROBE_SELECTED = true;
+                }
+            }
+        }
+        return resume;
+    }
+}
+
+@system
 pub fn scheduler_initialize() -> bool {
     unsafe {
         if SCHEDULER_ACTIVE { return true; }
-        SCHEDULER_BOOT_THREAD = kernel_thread_bootstrap(SCHEDULER_BOOT_THREAD_ID);
-        SCHEDULER_IDLE_THREAD = kernel_thread_empty(SCHEDULER_IDLE_THREAD_ID);
-        SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_BOOT_THREAD_ID;
+        SCHEDULER_CURRENT_SLOT = SCHEDULER_BOOT_SLOT;
+        SCHEDULER_NEXT_THREAD_ID = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
         SCHEDULER_SWITCH_COUNT = 0;
         SCHEDULER_FIRST_SWITCH_MARKED = false;
+        SCHEDULER_RUN_QUEUE_SWITCH_MARKED = false;
         SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = false;
+        SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = false;
+        SCHEDULER_RUN_QUEUE_PROBE_SELECTED = false;
+        SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID = 0;
     }
+    scheduler_reset_thread_slots();
 
     if !pmm_allocator_is_active() { return false; }
     let stack_physical = pmm_alloc_pages(SCHEDULER_IDLE_STACK_PAGES);
     if stack_physical == 0 { return false; }
     let stack_virtual = direct_map_virtual_address(stack_physical);
-    if stack_virtual == 0 { return false; }
+    if stack_virtual == 0 {
+        pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES);
+        return false;
+    }
     let stack_bytes = SCHEDULER_IDLE_STACK_PAGES * 4096;
-    if stack_bytes / 4096 != SCHEDULER_IDLE_STACK_PAGES { return false; }
+    if stack_bytes / 4096 != SCHEDULER_IDLE_STACK_PAGES {
+        pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES);
+        return false;
+    }
     let stack_top = stack_virtual + stack_bytes;
-    if stack_top <= stack_virtual { return false; }
+    if stack_top <= stack_virtual {
+        pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES);
+        return false;
+    }
 
     let idle_entry = x86_scheduler_idle_entry_address();
-    if idle_entry == 0 { return false; }
+    if idle_entry == 0 {
+        pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES);
+        return false;
+    }
     let idle_frame = x86_kernel_thread_prepare_frame(stack_top, idle_entry);
-    if idle_frame == 0 { return false; }
+    if idle_frame == 0 {
+        pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES);
+        return false;
+    }
 
     unsafe {
-        SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_READY;
-        SCHEDULER_IDLE_THREAD.saved_frame = idle_frame;
-        SCHEDULER_IDLE_THREAD.stack_physical_base = stack_physical;
-        SCHEDULER_IDLE_THREAD.stack_virtual_top = stack_top;
-        SCHEDULER_IDLE_THREAD.stack_pages = SCHEDULER_IDLE_STACK_PAGES;
+        SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].state = KERNEL_THREAD_READY;
+        SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].saved_frame = idle_frame;
+        SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].stack_physical_base = stack_physical;
+        SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].stack_virtual_top = stack_top;
+        SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].stack_pages = SCHEDULER_IDLE_STACK_PAGES;
         SCHEDULER_ACTIVE = true;
+    }
+    return true;
+}
+
+@system
+pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
+    if !scheduler_is_active() || entry_rip == 0 || stack_pages == 0 { return 0; }
+    let slot = scheduler_find_free_dynamic_slot();
+    if slot == SCHEDULER_INVALID_SLOT { return 0; }
+
+    let stack_physical = pmm_alloc_pages(stack_pages);
+    if stack_physical == 0 { return 0; }
+    let stack_virtual = direct_map_virtual_address(stack_physical);
+    if stack_virtual == 0 {
+        pmm_free_pages_lifo(stack_physical, stack_pages);
+        return 0;
+    }
+    let stack_bytes = stack_pages * 4096;
+    if stack_bytes / 4096 != stack_pages {
+        pmm_free_pages_lifo(stack_physical, stack_pages);
+        return 0;
+    }
+    let stack_top = stack_virtual + stack_bytes;
+    if stack_top <= stack_virtual {
+        pmm_free_pages_lifo(stack_physical, stack_pages);
+        return 0;
+    }
+    let initial_frame = x86_kernel_thread_prepare_frame(stack_top, entry_rip);
+    if initial_frame == 0 {
+        pmm_free_pages_lifo(stack_physical, stack_pages);
+        return 0;
+    }
+
+    unsafe {
+        let thread_id = SCHEDULER_NEXT_THREAD_ID;
+        SCHEDULER_NEXT_THREAD_ID += 1;
+        SCHEDULER_THREADS[slot] = kernel_thread_empty(thread_id);
+        SCHEDULER_THREADS[slot].state = KERNEL_THREAD_READY;
+        SCHEDULER_THREADS[slot].saved_frame = initial_frame;
+        SCHEDULER_THREADS[slot].stack_physical_base = stack_physical;
+        SCHEDULER_THREADS[slot].stack_virtual_top = stack_top;
+        SCHEDULER_THREADS[slot].stack_pages = stack_pages;
+        return thread_id;
+    }
+}
+
+@system
+pub fn scheduler_block_current() -> bool {
+    unsafe {
+        if !SCHEDULER_ACTIVE || SCHEDULER_CURRENT_SLOT == SCHEDULER_IDLE_SLOT { return false; }
+        SCHEDULER_THREADS[SCHEDULER_CURRENT_SLOT].state = KERNEL_THREAD_BLOCKED;
+        return true;
+    }
+}
+
+@system
+pub fn scheduler_wake_thread(thread_id: u64) -> bool {
+    let slot = scheduler_find_thread_slot(thread_id);
+    if slot == SCHEDULER_INVALID_SLOT || slot == SCHEDULER_IDLE_SLOT { return false; }
+    unsafe {
+        if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_BLOCKED { return false; }
+        SCHEDULER_THREADS[slot].state = KERNEL_THREAD_READY;
     }
     return true;
 }
@@ -115,12 +307,31 @@ pub fn scheduler_is_active() -> bool {
 
 @system
 pub fn scheduler_current_thread_id() -> u64 {
-    unsafe { return SCHEDULER_CURRENT_THREAD_ID; }
+    unsafe {
+        if SCHEDULER_CURRENT_SLOT >= SCHEDULER_THREAD_SLOT_COUNT { return 0; }
+        return SCHEDULER_THREADS[SCHEDULER_CURRENT_SLOT].id;
+    }
 }
 
 @system
 pub fn scheduler_switch_count() -> u64 {
     unsafe { return SCHEDULER_SWITCH_COUNT; }
+}
+
+@system
+pub fn scheduler_thread_count() -> u64 {
+    let mut count: u64 = 0;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_THREAD_SLOT_COUNT {
+            if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_UNUSED &&
+               SCHEDULER_THREADS[slot].state != KERNEL_THREAD_TERMINATED {
+                count += 1;
+            }
+            slot += 1;
+        }
+    }
+    return count;
 }
 
 @system
@@ -133,6 +344,31 @@ pub fn scheduler_bootstrap_probe_complete() -> bool {
     unsafe { return SCHEDULER_BOOTSTRAP_PROBE_COMPLETE; }
 }
 
+@system
+pub fn scheduler_run_queue_probe_complete() -> bool {
+    unsafe { return SCHEDULER_RUN_QUEUE_PROBE_COMPLETE; }
+}
+
+@system
+pub fn scheduler_start_run_queue_probe() -> bool {
+    if !scheduler_is_active() || !scheduler_bootstrap_probe_complete() { return false; }
+    unsafe {
+        if SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID != 0 {
+            return SCHEDULER_RUN_QUEUE_PROBE_COMPLETE;
+        }
+    }
+    let entry = x86_scheduler_idle_entry_address();
+    if entry == 0 { return false; }
+    let thread_id = scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    if thread_id == 0 { return false; }
+    unsafe {
+        SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID = thread_id;
+        SCHEDULER_RUN_QUEUE_PROBE_SELECTED = false;
+        SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = false;
+    }
+    return true;
+}
+
 // Chamado somente do IRQ de timer com interrupções mascaradas pelo interrupt
 // gate. O retorno é o endereço do frame que __sotlas_x86_irq_common restaurará.
 @system
@@ -140,49 +376,56 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
     if frame_address == 0 || !scheduler_is_active() { return frame_address; }
 
     unsafe {
-        if SCHEDULER_CURRENT_THREAD_ID == SCHEDULER_BOOT_THREAD_ID {
-            SCHEDULER_BOOT_THREAD.saved_frame = frame_address;
+        let current = SCHEDULER_CURRENT_SLOT;
+        if current >= SCHEDULER_THREAD_SLOT_COUNT { return frame_address; }
+        SCHEDULER_THREADS[current].saved_frame = frame_address;
 
-            // Depois da prova inicial a bootstrap continua executando enquanto
-            // for runnable. A idle thread não deve roubar 50% do tempo de CPU;
-            // ela só será escolhida quando uma futura API bloquear a bootstrap.
-            if SCHEDULER_BOOTSTRAP_PROBE_COMPLETE {
-                SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_RUNNING;
-                return frame_address;
+        // Bootstrap proof: força exatamente um round-trip bootstrap -> idle ->
+        // bootstrap antes de liberar a política normal da run queue.
+        if !SCHEDULER_BOOTSTRAP_PROBE_COMPLETE {
+            if current == SCHEDULER_BOOT_SLOT {
+                SCHEDULER_THREADS[SCHEDULER_BOOT_SLOT].state = KERNEL_THREAD_READY;
+                return scheduler_select_slot(SCHEDULER_IDLE_SLOT, frame_address);
             }
-
-            SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_READY;
-            if SCHEDULER_IDLE_THREAD.state == KERNEL_THREAD_READY &&
-               SCHEDULER_IDLE_THREAD.saved_frame != 0 {
-                SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_RUNNING;
-                SCHEDULER_IDLE_THREAD.switch_count += 1;
-                SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_IDLE_THREAD_ID;
-                SCHEDULER_SWITCH_COUNT += 1;
-                let resume = SCHEDULER_IDLE_THREAD.saved_frame;
-                scheduler_write_switch_marker_once();
-                return resume;
+            if current == SCHEDULER_IDLE_SLOT {
+                SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].state = KERNEL_THREAD_READY;
+                SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = true;
+                return scheduler_select_slot(SCHEDULER_BOOT_SLOT, frame_address);
             }
-
-            SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_RUNNING;
             return frame_address;
         }
 
-        if SCHEDULER_CURRENT_THREAD_ID == SCHEDULER_IDLE_THREAD_ID {
-            SCHEDULER_IDLE_THREAD.saved_frame = frame_address;
-            SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_READY;
+        // A thread de certificação da run queue usa a mesma entry idle, porém uma
+        // stack e um slot próprios. Após um quantum real ela é bloqueada, o que
+        // comprova que a seleção genérica consegue voltar à bootstrap.
+        let current_id = SCHEDULER_THREADS[current].id;
+        if current >= SCHEDULER_FIRST_DYNAMIC_SLOT &&
+           current_id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID &&
+           SCHEDULER_RUN_QUEUE_PROBE_SELECTED {
+            SCHEDULER_THREADS[current].state = KERNEL_THREAD_BLOCKED;
+        } else if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
+            SCHEDULER_THREADS[current].state = KERNEL_THREAD_READY;
+        }
 
-            if SCHEDULER_BOOT_THREAD.state == KERNEL_THREAD_READY &&
-               SCHEDULER_BOOT_THREAD.saved_frame != 0 {
-                SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_RUNNING;
-                SCHEDULER_BOOT_THREAD.switch_count += 1;
-                SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_BOOT_THREAD_ID;
-                SCHEDULER_SWITCH_COUNT += 1;
-                SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = true;
-                return SCHEDULER_BOOT_THREAD.saved_frame;
+        let mut start = current + 1;
+        if start >= SCHEDULER_THREAD_SLOT_COUNT { start = 0; }
+        let next = scheduler_find_next_ready_normal(start);
+        if next != SCHEDULER_INVALID_SLOT {
+            let resume = scheduler_select_slot(next, frame_address);
+            if current_id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID &&
+               SCHEDULER_RUN_QUEUE_PROBE_SELECTED &&
+               next == SCHEDULER_BOOT_SLOT {
+                SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true;
             }
+            return resume;
+        }
 
-            SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_RUNNING;
-            return frame_address;
+        // Idle só entra quando nenhuma thread normal está READY.
+        if SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].saved_frame != 0 {
+            if SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].state != KERNEL_THREAD_RUNNING {
+                SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].state = KERNEL_THREAD_READY;
+            }
+            return scheduler_select_slot(SCHEDULER_IDLE_SLOT, frame_address);
         }
     }
 
@@ -197,6 +440,21 @@ pub fn scheduler_wait_first_round_trip() -> bool {
         if scheduler_switch_count() >= 2 &&
            scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID &&
            scheduler_bootstrap_probe_complete() {
+            return true;
+        }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn scheduler_wait_run_queue_probe() -> bool {
+    if !scheduler_is_active() { return false; }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
+        if scheduler_run_queue_probe_complete() &&
+           scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
             return true;
         }
         x86_cpu_pause();
