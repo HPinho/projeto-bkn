@@ -1,14 +1,9 @@
 // Baken OS — entrada x86-64 executada somente após ExitBootServices.
 //
-// Ordem: CR3/tabelas CPU -> PMM -> VMM -> ACPI/MADT -> LAPIC/IOAPIC -> IRQs
-// -> LAPIC timer live -> IRQ1 teclado live -> xHCI resetado -> DMA tables programadas
-// -> No-op DMA -> USB port/reset -> Enable Slot -> contexts -> Address Device
-// -> Device Descriptor 8B -> EP0 MPS -> Device Descriptor 18B
-// -> Configuration Header 9B -> Configuration Descriptor completo
-// -> parsing HID Boot + Interrupt IN -> HID Endpoint Context -> Configure Endpoint
-// -> SET_CONFIGURATION real via EP0 -> primeiro report HID Interrupt IN real
-// -> storage AHCI real -> Block Device I/O genérico -> backup GPT Header
-// -> backup GPT Partition Entry Array + CRC32 real.
+// A fundação obrigatória (CR3/tabelas CPU, PMM/VMM, ACPI/APIC, IRQ/timer e
+// PAT/WC) permanece fail-closed. Provas de hardware opcional continuam sendo
+// executadas, mas sua ausência não impede o runtime normal: o marcador
+// BAKEN:BARE_METAL_READY só é emitido quando todas as provas passam.
 
 module kernel::arch::x86_64::post_cutover;
 
@@ -299,7 +294,9 @@ pub fn post_cutover_prepare_xhci_controller() -> bool {
         POST_CUTOVER_XHCI_NOOP_LIVE = false;
         POST_CUTOVER_USB_PORT_READY = false;
     }
-    if !post_cutover_keyboard_live() || !active_page_tables_is_ready() { return false; }
+    // xHCI não depende da presença de um teclado PS/2. O timer/IRQs e as page
+    // tables próprias são a fundação necessária; input legado é backend opcional.
+    if !post_cutover_timer_live() || !active_page_tables_is_ready() { return false; }
     if pci_scan_all() == 0 { return false; }
     if !xhci_controller_prepare_first() || !xhci_controller_is_ready() { return false; }
     unsafe { POST_CUTOVER_XHCI_READY = true; }
@@ -436,9 +433,6 @@ pub fn post_cutover_parse_first_usb_hid_interface() -> bool {
     return true;
 }
 
-// L prepara o Endpoint Context HID no Input Context e em seguida executa um
-// Configure Endpoint real pelo Command Ring compartilhado. SET_CONFIGURATION e
-// doorbell do endpoint continuam fora deste gate.
 @system
 pub fn post_cutover_configure_first_usb_hid_endpoint() -> bool {
     if !xhci_configuration_is_ready() { return false; }
@@ -451,8 +445,6 @@ pub fn post_cutover_configure_first_usb_hid_endpoint() -> bool {
     return true;
 }
 
-// O prova o request USB SET_CONFIGURATION real sobre EP0. O gate só conclui
-// depois do Transfer Event do Status Stage IN e não publica HID Interrupt IN.
 @system
 pub fn post_cutover_set_first_usb_configuration() -> bool {
     if !xhci_configure_endpoint_is_ready() || !xhci_configuration_is_ready() { return false; }
@@ -462,9 +454,6 @@ pub fn post_cutover_set_first_usb_configuration() -> bool {
     return xhci_set_configuration_value() == configuration_value;
 }
 
-// W publica Normal TRBs reais no endpoint Interrupt IN e exige observar a tecla
-// 'a' injetada pelo monitor do QEMU (usage HID 0x04). Cada tentativa só avança
-// após um Transfer Event real consumido pelo Event Ring global.
 @system
 pub fn post_cutover_prove_first_usb_hid_keyboard_report() -> bool {
     if !xhci_set_configuration_is_ready() || xhci_hid_protocol() != USB_HID_PROTOCOL_KEYBOARD {
@@ -483,9 +472,6 @@ pub fn post_cutover_prove_first_usb_hid_keyboard_report() -> bool {
     return false;
 }
 
-// J executa o caminho de storage pós-cutover: enumeração, posse AHCI, DMA,
-// IDENTIFY, READ/WRITE e dispatch genérico. O marcador J continua sendo o fim
-// desta sequência, agora somente após Header e Entry Array do backup GPT.
 @system
 pub fn post_cutover_discover_first_storage_controller() -> bool {
     let kind = storage_discovery_scan();
@@ -521,6 +507,9 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = argument as *const PostCutoverContext;
     let serial_ready = x86_serial_init();
     if serial_ready { x86_serial_write_stage_marker('B' as u8); }
+
+    // Núcleo obrigatório: se qualquer uma destas invariantes falhar não existe
+    // ambiente seguro para continuar executando o kernel.
     if !post_cutover_activate_cpu(context) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('C' as u8); }
     if !post_cutover_activate_pmm(context) { loop {} }
@@ -537,54 +526,110 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if serial_ready { x86_serial_write_timer_ready_marker(); }
     if !post_cutover_enable_timer_interrupts() { loop {} }
     if serial_ready { x86_serial_write_stage_marker('T' as u8); }
-    if !post_cutover_enable_keyboard_interrupts() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('K' as u8); }
-    if !post_cutover_prepare_xhci_controller() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('X' as u8); }
-    if !post_cutover_prepare_xhci_dma_tables() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('D' as u8); }
-    if !post_cutover_start_xhci_and_prove_noop() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('N' as u8); }
-    if !post_cutover_prepare_first_usb_port() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('U' as u8); }
-    if !post_cutover_enable_first_usb_slot() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('S' as u8); }
-    if !post_cutover_prepare_first_usb_context() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('Y' as u8); }
-    if !post_cutover_address_first_usb_device() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('Z' as u8); }
-    if !post_cutover_probe_first_usb_descriptor() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('Q' as u8); }
-    if !post_cutover_reconcile_first_usb_ep0() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('E' as u8); }
-    if !post_cutover_read_full_usb_device_descriptor() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('F' as u8); }
-    if !post_cutover_probe_first_usb_configuration_header() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('G' as u8); }
-    if !post_cutover_read_full_usb_configuration_descriptor() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('H' as u8); }
-    if !post_cutover_parse_first_usb_hid_interface() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('M' as u8); }
-    if !post_cutover_configure_first_usb_hid_endpoint() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('L' as u8); }
-    if !post_cutover_set_first_usb_configuration() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('O' as u8); }
-    if !post_cutover_prove_first_usb_hid_keyboard_report() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('W' as u8); }
-    if !post_cutover_discover_first_storage_controller() { loop {} }
-    if !post_cutover_probe_backup_gpt_header() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('i' as u8); }
-    if !post_cutover_probe_backup_gpt_entries() { loop {} }
-    if serial_ready { x86_serial_write_stage_marker('m' as u8); }
-    if !foundation_memory_probe() { loop {} }
-    if !foundation_external_irq_probe() { loop {} }
-    if !foundation_protective_mbr() { loop {} }
-    if !foundation_fat_path_probe() { loop {} }
-    if !foundation_nvme_probe() { loop {} }
+
+    // Daqui em diante são provas de controladores/dispositivos concretos. O
+    // sistema normal pode iniciar sem um backend específico; porém o CI só
+    // recebe BAKEN:BARE_METAL_READY quando cada prova abaixo foi concluída.
+    let mut foundation_verified: bool = true;
+
+    let keyboard_ok = post_cutover_enable_keyboard_interrupts();
+    if !keyboard_ok { foundation_verified = false; }
+    if keyboard_ok && serial_ready { x86_serial_write_stage_marker('K' as u8); }
+
+    let xhci_ok = post_cutover_prepare_xhci_controller();
+    if !xhci_ok { foundation_verified = false; }
+    if xhci_ok && serial_ready { x86_serial_write_stage_marker('X' as u8); }
+
+    let xhci_dma_ok = post_cutover_prepare_xhci_dma_tables();
+    if !xhci_dma_ok { foundation_verified = false; }
+    if xhci_dma_ok && serial_ready { x86_serial_write_stage_marker('D' as u8); }
+
+    let xhci_noop_ok = post_cutover_start_xhci_and_prove_noop();
+    if !xhci_noop_ok { foundation_verified = false; }
+    if xhci_noop_ok && serial_ready { x86_serial_write_stage_marker('N' as u8); }
+
+    let usb_port_ok = post_cutover_prepare_first_usb_port();
+    if !usb_port_ok { foundation_verified = false; }
+    if usb_port_ok && serial_ready { x86_serial_write_stage_marker('U' as u8); }
+
+    let usb_slot_ok = post_cutover_enable_first_usb_slot();
+    if !usb_slot_ok { foundation_verified = false; }
+    if usb_slot_ok && serial_ready { x86_serial_write_stage_marker('S' as u8); }
+
+    let usb_context_ok = post_cutover_prepare_first_usb_context();
+    if !usb_context_ok { foundation_verified = false; }
+    if usb_context_ok && serial_ready { x86_serial_write_stage_marker('Y' as u8); }
+
+    let usb_address_ok = post_cutover_address_first_usb_device();
+    if !usb_address_ok { foundation_verified = false; }
+    if usb_address_ok && serial_ready { x86_serial_write_stage_marker('Z' as u8); }
+
+    let usb_descriptor8_ok = post_cutover_probe_first_usb_descriptor();
+    if !usb_descriptor8_ok { foundation_verified = false; }
+    if usb_descriptor8_ok && serial_ready { x86_serial_write_stage_marker('Q' as u8); }
+
+    let usb_ep0_ok = post_cutover_reconcile_first_usb_ep0();
+    if !usb_ep0_ok { foundation_verified = false; }
+    if usb_ep0_ok && serial_ready { x86_serial_write_stage_marker('E' as u8); }
+
+    let usb_descriptor_ok = post_cutover_read_full_usb_device_descriptor();
+    if !usb_descriptor_ok { foundation_verified = false; }
+    if usb_descriptor_ok && serial_ready { x86_serial_write_stage_marker('F' as u8); }
+
+    let usb_config_header_ok = post_cutover_probe_first_usb_configuration_header();
+    if !usb_config_header_ok { foundation_verified = false; }
+    if usb_config_header_ok && serial_ready { x86_serial_write_stage_marker('G' as u8); }
+
+    let usb_config_ok = post_cutover_read_full_usb_configuration_descriptor();
+    if !usb_config_ok { foundation_verified = false; }
+    if usb_config_ok && serial_ready { x86_serial_write_stage_marker('H' as u8); }
+
+    let usb_hid_ok = post_cutover_parse_first_usb_hid_interface();
+    if !usb_hid_ok { foundation_verified = false; }
+    if usb_hid_ok && serial_ready { x86_serial_write_stage_marker('M' as u8); }
+
+    let usb_endpoint_ok = post_cutover_configure_first_usb_hid_endpoint();
+    if !usb_endpoint_ok { foundation_verified = false; }
+    if usb_endpoint_ok && serial_ready { x86_serial_write_stage_marker('L' as u8); }
+
+    let usb_set_configuration_ok = post_cutover_set_first_usb_configuration();
+    if !usb_set_configuration_ok { foundation_verified = false; }
+    if usb_set_configuration_ok && serial_ready { x86_serial_write_stage_marker('O' as u8); }
+
+    let usb_report_ok = post_cutover_prove_first_usb_hid_keyboard_report();
+    if !usb_report_ok { foundation_verified = false; }
+    if usb_report_ok && serial_ready { x86_serial_write_stage_marker('W' as u8); }
+
+    let storage_ok = post_cutover_discover_first_storage_controller();
+    if !storage_ok { foundation_verified = false; }
+
+    let gpt_header_ok = post_cutover_probe_backup_gpt_header();
+    if !gpt_header_ok { foundation_verified = false; }
+    if gpt_header_ok && serial_ready { x86_serial_write_stage_marker('i' as u8); }
+
+    let gpt_entries_ok = post_cutover_probe_backup_gpt_entries();
+    if !gpt_entries_ok { foundation_verified = false; }
+    if gpt_entries_ok && serial_ready { x86_serial_write_stage_marker('m' as u8); }
+
+    if !foundation_memory_probe() { foundation_verified = false; }
+    if !foundation_external_irq_probe() { foundation_verified = false; }
+    if !foundation_protective_mbr() { foundation_verified = false; }
+    if !foundation_fat_path_probe() { foundation_verified = false; }
+    if !foundation_nvme_probe() { foundation_verified = false; }
+
+    // Cache policy do framebuffer pertence à fundação obrigatória: o runtime
+    // gráfico não começa com o framebuffer em política desconhecida.
     if !active_framebuffer_write_combining(context.framebuffer_base, context.framebuffer_size) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('%' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
-    if serial_ready { if !x86_serial_write_bare_metal_ready_marker() { loop {} } }
+
+    // Este marcador é uma certificação, não apenas "o desktop começou". Assim o
+    // QEMU continua fail-closed, enquanto hardware real sem um dispositivo
+    // opcional não fica preso em um loop infinito.
+    if serial_ready && foundation_verified {
+        if !x86_serial_write_bare_metal_ready_marker() { loop {} }
+    }
+
     baken_native_kernel_run(context.framebuffer_base as *mut u32,
                             context.screen_width,
                             context.screen_height,
