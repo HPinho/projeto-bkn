@@ -2,9 +2,9 @@
 //
 // O scheduler usa o frame salvo pelo IRQ como unidade de retomada. Para uma
 // thread nova, o mesmo shape carrega um contrato de primeira entrada explícito:
-// R10 = topo da stack, R11 = entry Sotlas e RIP = trampoline nativo. O trampoline
-// restaura RSP antes de tocar memória, habilita IRQs só depois de a stack estar
-// válida e então faz uma CALL ABI-correta.
+// R10 = topo da stack, R11 = entry Sotlas e RIP = trampoline nativo. Em 64-bit
+// mode o hardware empilha SS:RSP em todo interrupt e IRETQ os desempilha mesmo
+// ao retornar para CPL0; por isso o frame sintético também precisa desses campos.
 
 module kernel::arch::x86_64::thread_context;
 
@@ -12,10 +12,10 @@ import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 
-pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 19;
-pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 152;
-// Primeira entrada deliberadamente começa com IF=0. O trampoline restaura RSP
-// e executa STI somente depois de a stack e o shadow space estarem válidos.
+pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 21;
+pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 168;
+// Primeira entrada deliberadamente começa com IF=0. O IRETQ restaura uma
+// SS:RSP CPL0 válida; o trampoline reafirma RSP e só então executa STI.
 pub const X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x2;
 pub const X86_KERNEL_THREAD_STACK_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0;
 
@@ -40,6 +40,8 @@ pub struct X86KernelThreadFrame {
     pub rip: u64;
     pub cs: u64;
     pub rflags: u64;
+    pub rsp: u64;
+    pub ss: u64;
 }
 
 // Durante o bring-up mantemos somente o endereço do último frame sintético
@@ -60,8 +62,8 @@ pub fn x86_kernel_thread_last_prepared_frame() -> u64 {
 }
 
 // Dump fail-safe sem formatação/heap: cada tag usa o marcador hexadecimal já
-// validado pelo bring-up. O objetivo é saber se RIP/CS/RFLAGS foram corrompidos
-// entre prepare_frame() e o IRETQ que dispara #GP.
+// validado pelo bring-up. Além do trio RIP/CS/RFLAGS, P/D registram o RSP/SS
+// arquitetural que o IRETQ consumirá antes de entrar no trampoline.
 @system
 pub fn x86_kernel_thread_dump_last_prepared_frame() -> bool {
     let frame_address = x86_kernel_thread_last_prepared_frame();
@@ -76,6 +78,8 @@ pub fn x86_kernel_thread_dump_last_prepared_frame() -> bool {
         if !x86_serial_write_hex32_marker('R' as u8, (*frame).rip as u32) { return false; }
         if !x86_serial_write_hex32_marker('S' as u8, (*frame).cs as u32) { return false; }
         if !x86_serial_write_hex32_marker('L' as u8, (*frame).rflags as u32) { return false; }
+        if !x86_serial_write_hex32_marker('P' as u8, (*frame).rsp as u32) { return false; }
+        if !x86_serial_write_hex32_marker('D' as u8, (*frame).ss as u32) { return false; }
     }
     return true;
 }
@@ -116,6 +120,8 @@ pub fn x86_kernel_thread_prepare_frame(stack_top: u64, entry_rip: u64) -> u64 {
         (*frame).rip = trampoline_rip;
         (*frame).cs = GDT_KERNEL_CODE_SELECTOR as u64;
         (*frame).rflags = X86_KERNEL_THREAD_INITIAL_RFLAGS;
+        (*frame).rsp = aligned_top;
+        (*frame).ss = GDT_KERNEL_DATA_SELECTOR as u64;
         X86_KERNEL_THREAD_LAST_PREPARED_FRAME = frame_address;
     }
     return frame_address;
