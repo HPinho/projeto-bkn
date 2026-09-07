@@ -125,11 +125,26 @@ jobs:
             grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-nvme-only-serial.log | tail -n 32 >&2
             exit 1
           }
-          for marker in BAKEN:STEP=k BAKEN:STEP=) BAKEN:BARE_METAL_READY \
-                        BAKEN:SCHEDULER_SWITCH BAKEN:SCHEDULER_ROUND_TRIP BAKEN:RUN_QUEUE_CREATED \
-                        BAKEN:RUN_QUEUE_SWITCH BAKEN:YIELD_ROUND_TRIP BAKEN:WAIT_BLOCKED BAKEN:WAIT_WAKE \
-                        BAKEN:WAIT_RESUME BAKEN:SLEEP_BLOCKED BAKEN:SLEEP_WAKE BAKEN:SLEEP_RESUME \
-                        BAKEN:THREAD_EXIT BAKEN:THREAD_REAP BAKEN:STACK_RELEASE; do
+          markers=(
+            'BAKEN:STEP=k'
+            'BAKEN:STEP=)'
+            'BAKEN:BARE_METAL_READY'
+            'BAKEN:SCHEDULER_SWITCH'
+            'BAKEN:SCHEDULER_ROUND_TRIP'
+            'BAKEN:RUN_QUEUE_CREATED'
+            'BAKEN:RUN_QUEUE_SWITCH'
+            'BAKEN:YIELD_ROUND_TRIP'
+            'BAKEN:WAIT_BLOCKED'
+            'BAKEN:WAIT_WAKE'
+            'BAKEN:WAIT_RESUME'
+            'BAKEN:SLEEP_BLOCKED'
+            'BAKEN:SLEEP_WAKE'
+            'BAKEN:SLEEP_RESUME'
+            'BAKEN:THREAD_EXIT'
+            'BAKEN:THREAD_REAP'
+            'BAKEN:STACK_RELEASE'
+          )
+          for marker in "${markers[@]}"; do
             require_serial_marker "$marker"
           done
           if grep -Fq 'BAKEN:STEP=v' build/qemu-nvme-only-serial.log; then
