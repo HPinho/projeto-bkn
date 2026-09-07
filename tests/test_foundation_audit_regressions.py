@@ -14,16 +14,23 @@ WORKFLOW = ROOT / ".github/workflows/baken_ci.yml"
 
 
 class FoundationAuditRegressionTests(unittest.TestCase):
-    def test_post_cutover_boot_storage_skips_nvme_before_mmio_probe(self):
+    def test_post_cutover_storage_prefers_ahci_then_falls_back_to_nvme(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         body = text.split("pub fn storage_discovery_scan() -> u32", 1)[1]
-        skip = "if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }"
+        ahci_filter = "if kind != STORAGE_CONTROLLER_AHCI { continue; }"
+        nvme_filter = "if kind != STORAGE_CONTROLLER_NVME { continue; }"
         self.assertIn("let post_cutover = active_page_tables_is_ready();", body)
-        self.assertIn(skip, body)
-        self.assertLess(body.index(skip), body.index("STORAGE_CANDIDATE.kind = kind;"))
-        self.assertLess(body.index(skip), body.index("storage_probe_mmio_after_cutover()"))
-        self.assertIn("if !post_cutover { return kind; }", body)
+        self.assertIn("if !post_cutover {", body)
+        self.assertIn(ahci_filter, body)
+        self.assertIn(nvme_filter, body)
+        self.assertIn("storage_register_ahci_block_device()", body)
+        self.assertIn("storage_register_nvme_block_device()", body)
         self.assertIn("return STORAGE_CONTROLLER_AHCI;", body)
+        self.assertIn("return STORAGE_CONTROLLER_NVME;", body)
+        self.assertLess(body.index(ahci_filter), body.index("storage_register_ahci_block_device()"))
+        self.assertLess(body.index("storage_register_ahci_block_device()"), body.index(nvme_filter))
+        self.assertLess(body.index(nvme_filter), body.index("storage_register_nvme_block_device()"))
+        self.assertNotIn("if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }", body)
 
     def test_gpt_gate_requires_generic_block_io_after_storage_discovery(self):
         text = POST.read_text(encoding="utf-8")
