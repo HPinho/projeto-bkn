@@ -63,10 +63,12 @@ class KernelSchedulerTests(unittest.TestCase):
         restore = trampoline.index('"movq %r10, %rsp\\n\\t"')
         home = trampoline.index('"subq $32, %rsp\\n\\t"')
         sti = trampoline.index('"sti\\n\\t"')
-        call = trampoline.index('"call *%r11\\n\\t"')
+        entry_call = trampoline.index('"call *%r11\\n\\t"')
+        exit_call = trampoline.index('"call sotlas_x86_scheduler_thread_exit\\n\\t"')
         self.assertLess(restore, home)
         self.assertLess(home, sti)
-        self.assertLess(sti, call)
+        self.assertLess(sti, entry_call)
+        self.assertLess(entry_call, exit_call)
 
     def test_irq_backend_can_restore_dispatcher_selected_frame(self):
         text = INTRINSICS.read_text(encoding="utf-8")
@@ -121,15 +123,39 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("KERNEL_THREAD_READY", create)
         self.assertGreaterEqual(create.count("pmm_free_pages_lifo(stack_physical, stack_pages)"), 4)
 
+    def test_terminated_slots_are_not_reused_before_reaper(self):
+        text = CORE.read_text(encoding="utf-8")
+        finder = text.split("fn scheduler_find_free_dynamic_slot", 1)[1]
+        finder = finder.split("fn scheduler_find_thread_slot", 1)[0]
+        self.assertIn("KERNEL_THREAD_UNUSED", finder)
+        condition = finder.split("if SCHEDULER_THREADS[slot].state", 1)[1]
+        condition = condition.split("{", 1)[0]
+        self.assertNotIn("KERNEL_THREAD_TERMINATED", condition)
+
     def test_block_and_wake_are_explicit_thread_state_transitions(self):
         text = CORE.read_text(encoding="utf-8")
         block = text.split("pub fn scheduler_block_current", 1)[1]
         block = block.split("pub fn scheduler_wake_thread", 1)[0]
         wake = text.split("pub fn scheduler_wake_thread", 1)[1]
-        wake = wake.split("pub fn scheduler_is_active", 1)[0]
+        wake = wake.split("pub fn scheduler_terminate_current", 1)[0]
         self.assertIn("KERNEL_THREAD_BLOCKED", block)
         self.assertIn("KERNEL_THREAD_BLOCKED", wake)
         self.assertIn("KERNEL_THREAD_READY", wake)
+
+    def test_thread_exit_marks_terminated_without_freeing_current_stack(self):
+        text = CORE.read_text(encoding="utf-8")
+        terminate = text.split("pub fn scheduler_terminate_current", 1)[1]
+        terminate = terminate.split("pub fn sotlas_x86_scheduler_thread_exit", 1)[0]
+        exit_path = text.split("pub fn sotlas_x86_scheduler_thread_exit", 1)[1]
+        exit_path = exit_path.split("pub fn scheduler_is_active", 1)[0]
+
+        self.assertIn("KERNEL_THREAD_TERMINATED", terminate)
+        self.assertIn("scheduler_write_thread_exit_marker_once()", terminate)
+        self.assertNotIn("pmm_free_pages_lifo", terminate)
+        self.assertIn("x86_cli_raw();", exit_path)
+        self.assertIn("scheduler_terminate_current()", exit_path)
+        self.assertIn("x86_sti_raw();", exit_path)
+        self.assertNotIn("pmm_free_pages_lifo", exit_path)
 
     def test_idle_is_only_fallback_when_no_normal_thread_is_ready(self):
         text = CORE.read_text(encoding="utf-8")
@@ -150,27 +176,38 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertLess(body.index("scheduler_wait_first_round_trip()"), body.index("scheduler_start_run_queue_probe()"))
         self.assertLess(body.index("scheduler_wait_run_queue_probe()"), body.index("display_init("))
 
-    def test_run_queue_probe_is_a_real_third_thread_with_own_stack(self):
+    def test_run_queue_probe_is_a_real_returning_thread_with_terminated_state(self):
         text = CORE.read_text(encoding="utf-8")
+        cpu = CPU.read_text(encoding="utf-8")
+        intrinsics = INTRINSICS.read_text(encoding="utf-8")
+
+        self.assertIn("pub fn sotlas_x86_scheduler_exit_probe_entry() -> void", text)
         probe = text.split("pub fn scheduler_start_run_queue_probe", 1)[1]
         probe = probe.split("pub fn scheduler_on_timer_interrupt", 1)[0]
-        self.assertIn("x86_scheduler_idle_entry_address()", probe)
+        self.assertIn("x86_scheduler_exit_probe_entry_address()", probe)
         self.assertIn(
             "scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES)",
             probe,
         )
-        irq_path = text.split("pub fn scheduler_on_timer_interrupt", 1)[1]
-        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID", irq_path)
-        self.assertIn("KERNEL_THREAD_BLOCKED", irq_path)
-        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true", irq_path)
+        self.assertIn("pub fn x86_scheduler_exit_probe_entry_address() -> u64", cpu)
+        self.assertIn("__scheduler_exit_probe_entry_address()", cpu)
+        self.assertIn("extern void sotlas_x86_scheduler_thread_exit(void);", intrinsics)
+        self.assertIn('"call sotlas_x86_scheduler_thread_exit\\n\\t"', intrinsics)
 
-    def test_qemu_gate_requires_round_trip_and_dynamic_thread_proof(self):
+        irq_path = text.split("pub fn scheduler_on_timer_interrupt", 1)[1]
+        self.assertIn("current_terminated", irq_path)
+        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true", irq_path)
+        wait = text.split("pub fn scheduler_wait_run_queue_probe", 1)[1]
+        self.assertIn("scheduler_thread_is_terminated(SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID)", wait)
+
+    def test_qemu_gate_requires_round_trip_dynamic_thread_and_exit_proof(self):
         text = NVME_WORKFLOW.read_text(encoding="utf-8")
         for marker in (
             "BAKEN:SCHEDULER_SWITCH",
             "BAKEN:SCHEDULER_ROUND_TRIP",
             "BAKEN:RUN_QUEUE_CREATED",
             "BAKEN:RUN_QUEUE_SWITCH",
+            "BAKEN:THREAD_EXIT",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(f"grep -Fq '{marker}'", text)
