@@ -147,8 +147,10 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
  * entra com IF=0; o trampoline restaura RSP sem tocar memória, alinha a stack,
  * fornece os 32 bytes de shadow space e só então executa STI. O interrupt shadow
  * de STI garante que a CALL imediatamente seguinte complete antes de um IRQ ser
- * aceito, portanto toda interrupção subsequente já observa uma stack válida.
+ * aceito. Se a entry retornar, o retorno normal é convertido em thread_exit;
+ * uma kernel thread nunca cai acidentalmente fora do scheduler.
  */
+extern void sotlas_x86_scheduler_thread_exit(void);
 __attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline(void) {
     __asm__(
         "movq %r10, %rsp\n\t"
@@ -156,7 +158,7 @@ __attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline
         "subq $32, %rsp\n\t"
         "sti\n\t"
         "call *%r11\n\t"
-        "addq $32, %rsp\n\t"
+        "call sotlas_x86_scheduler_thread_exit\n\t"
         "cli\n\t"
         "1: hlt\n\t"
         "jmp 1b\n\t"
@@ -165,6 +167,11 @@ __attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline
 
 static inline uint64_t __scheduler_thread_trampoline_address(void) {
     return (uint64_t)(uintptr_t)&__scheduler_thread_trampoline;
+}
+
+extern void sotlas_x86_scheduler_exit_probe_entry(void);
+static inline uint64_t __scheduler_exit_probe_entry_address(void) {
+    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_exit_probe_entry;
 }
 
 extern void sotlas_x86_scheduler_idle_entry(void);
@@ -364,6 +371,7 @@ def install(bootstrap) -> None:
         "__write_cr3": Function("__write_cr3", [("value", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__stack_switch_to_post_cutover": Function("__stack_switch_to_post_cutover", [("stack_top", Type("u64")), ("argument", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__scheduler_thread_trampoline_address": Function("__scheduler_thread_trampoline_address", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__scheduler_exit_probe_entry_address": Function("__scheduler_exit_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
