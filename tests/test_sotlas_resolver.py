@@ -56,7 +56,11 @@ class SotlasResolverTests(unittest.TestCase):
         result = sotlas_compile.build_modular(ROOT / "kernel/src/main.sotlas")
         module_count = len(manifest["compile_order"])
         self.assertIn("compiled_objects", result)
-        self.assertEqual(len(result["compiled_objects"]), module_count + 1)
+        # One object per module, plus compiler memory ABI and UEFI entry.
+        self.assertEqual(len(result["compiled_objects"]), module_count + 2)
+        objects = {Path(path).name for path in result["compiled_objects"]}
+        self.assertIn("sotlas_freestanding_memory.o", objects)
+        self.assertIn("uefi_bootloader.o", objects)
         self.assertEqual(len(result["generated_sources"]), module_count)
         self.assertEqual(len(result["generated_headers"]), module_count)
         self.assertTrue(all(Path(path).is_file() for path in result["generated_headers"]))

@@ -6,7 +6,7 @@ estáticos e prova de execução; não equivale a uma certificação do kernel.
 ## Ponto de partida confirmado
 
 - Repositório: https://github.com/HPinho/projeto-bkn
-- Checkout: `E:\projeto-bkn`, branch `main`, base `dcd48c9`.
+- Checkout: `E:\projeto-bkn`, branch `main`, base atual `8f9050d`.
 - Kernel escrito em `.sotlas`; compilador em `tools/sotlas_compile/`.
 - Acesso ao terminal: prefixar comandos com `rtk`; usar `rtk proxy` se o
   comando filtrado não funcionar. Ler as instruções AGENTS/RTK antes de trabalhar.
@@ -15,6 +15,10 @@ estáticos e prova de execução; não equivale a uma certificação do kernel.
 
 ## Evidência já obtida
 
+- Confirmados no GitHub: CI principal **34156827304** e NVMe-only
+  **34156827300**, ambos com sucesso em `8f9050d5dd7d695be04c9c39765f5b3f68c89a0d`.
+  Incluem a prova CR3 primeira → segunda → primeira → kernel e os gates
+  reforçados. Essa validação não se estende a alterações posteriores.
 - CI principal 34155388044 e NVMe-only 34155387973 na base `dcd48c9`
   consultados no GitHub: sucesso. O NVMe exige `SCHEDULER_ROUND_TRIP`.
 - Frame sintético de thread corrigido: 21 qwords / 168 bytes, incluindo
@@ -35,19 +39,19 @@ estáticos e prova de execução; não equivale a uma certificação do kernel.
   páginas de usuário e self-test de backing distinto para mesmo VA.
   NÃO executa Ring 3 nem troca CR3 para rodar um processo.
 
-## Alterações locais ainda não publicadas
+## Alterações publicadas em 8f9050d
 
 - `tools/scripts/verify_kernel_smoke.py`: gate comum que rejeita qualquer
   `BAKEN:HEX=E:` e exige heap, isolamento, scheduler, yield, wait, sleep e reaper.
 - `tests/test_kernel_smoke_gate.py`: testes comportamentais e integração.
 - `.github/workflows/baken_ci.yml` e `baken_nvme_only.yml`: usam esse gate;
   NVMe também limita instalação de dependências a dez minutos.
-- Essas mudanças ainda NÃO têm validação QEMU própria nem commit/push.
+- Publicadas pelo usuário; os dois workflows acima passaram.
 
 ## Sequência de implementação restante
 
-1. Auditar ownership/lifetime dos address spaces e preparar ativação/restauração
-   de CR3 com prova de acesso real e restauração do espaço do kernel.
+1. Prova controlada CR3 concluída no smoke. Agora auditar ownership/lifetime
+   para processos duradouros, além do self-test temporário.
 2. Processos/PID/TID e vínculo thread–address space; garantir reaper seguro.
 3. Ring 3: stack de usuário, frame de entrada, TSS.RSP0 e caminho de retorno
    seguro; validar exceções e permissões de páginas em QEMU.
@@ -73,7 +77,7 @@ rtk proxy git diff --check
 Build/QEMU de referência: os dois workflows em `.github/workflows/`.
 Verificar o SHA do run antes de atribuir sucesso a alterações novas.
 
-## Trabalho desta sessão
+## Histórico da etapa CR3 (já publicada)
 
 - Documento criado primeiro, conforme pedido do usuário.
 - Implementado localmente `process_address_space_cr3_probe`: dentro do self-test
@@ -87,11 +91,51 @@ Verificar o SHA do run antes de atribuir sucesso a alterações novas.
   Build nativo: compilação dos módulos passou, mas link EFI falhou:
   `kernel__storage__fat32_path.o: undefined reference to memset`.
   GCC encontrado pelo compilador em `tools/w64devkit/bin/gcc.exe`, embora fora
-  do PATH. Não afirmar build completo nem validação QEMU desta alteração.
+  do PATH. Falha do toolchain local; os builds/QEMU Linux de `8f9050d` passaram.
   Saída separada: `build/cr3-probe/BOOTX64.EFI`, manifest
   `build/cr3-probe.manifest.json`. Não confundir com imagem anterior de CI.
 - Nenhum suporte Ring 3/syscall/SMP foi adicionado nesta etapa. Próximo passo:
   prover/verificar as primitivas freestanding exigidas pelo GCC (`memset` é a
   referência não resolvida observada; não mascarar erro nem adicionar libc ao
   kernel), repetir link e validar boot/QEMU antes de avançar para lifetime/PID/TID e
-  contexto de processo. Mudanças desta sessão ainda sem commit/push.
+  contexto de processo. A etapa CR3 foi publicada pelo usuário em `8f9050d`.
+
+## Etapa atual — registro de processos (alterações locais)
+
+- Implementado `kernel/src/process/registry.sotlas`: 16 slots BSP, PID 0
+  reservado, PIDs monotônicos sem wrap/reuso, ownership privado das raízes.
+- APIs kernel-only: `process_create`, `process_destroy`, `process_retain`,
+  `process_release`. Todas preservam IF; não são APIs de syscall.
+- Destruição exige zero referências e sucesso de `process_address_space_destroy`
+  (este também rejeita raiz ativa ou folhas user presentes).
+- Self-test de boot: enche os slots, recusa tabela cheia, bloqueia destruição
+  com referência, rejeita underflow e PID antigo, reutiliza slot com PID novo,
+  verifica devolução da contagem de páginas PMM ao valor inicial.
+- Integrado após a prova CR3 e antes de `scheduler_initialize`. O gate comum
+  dos dois workflows exige `BAKEN:PROCESS_REGISTRY_READY`; o marker só é
+  emitido depois de ativação bem-sucedida. Ainda sem prova QEMU deste patch.
+- `tests/test_process_registry.py`: contratos estáticos complementares; não
+  confundir com execução do self-test em hardware.
+- Grafo: 127 módulos. Rodada intermediária: 995 testes passaram.
+- Corrigida a referência local ausente a `memset`: suporte ABI freestanding
+  em `tools/sotlas_compile/runtime/memory.c`, compilado pelo driver modular.
+  Implementa `memset`, `memcpy`, `memmove`, `memcmp` por bytes voláteis para
+  evitar chamadas recursivas geradas pelo otimizador. Não vincula libc ao EFI.
+- `tests/test_freestanding_memory.py` compila e executa essas funções com GCC;
+  prova de limites, retorno, overlap e comparação unsigned passou localmente.
+- Build EFI local após essa correção: **sucesso, 129 objetos / 127 módulos**,
+  saída `build/process-registry/BOOTX64.EFI`. A falha `memset` está resolvida
+  nesse build. Nenhum QEMU local foi executado.
+- Atualizado `tests/test_sotlas_resolver.py`: exige o objeto ABI adicional e
+  o bootloader explicitamente. **Suíte final: 996 testes passaram em 62,249 s**.
+  `git diff --check` passou; imagem identificada como PE x86-64 / EFI application.
+- Ainda pendente: vincular referências ao scheduler/reaper e executar processos
+  de usuário. Não confundir registro de processos com Ring 3 funcional.
+- Limitação de criação: a raiz ativa deve ser a raiz supervisor do kernel;
+  antes de criar processos a partir de outro processo será necessário fixar
+  uma raiz canônica do kernel em vez de copiar a raiz corrente.
+- Próxima implementação: vínculo thread–PID retido antes de publicar thread,
+  liberação após execução/reaper, contexto CR3/TSS por processo, depois Ring 3.
+  FPU/SIMD, syscalls, loader userspace e SMP continuam pendentes.
+- Alterações desta etapa ainda sem commit/push. Publicar e acompanhar ambos os
+  workflows no SHA novo antes de afirmar validação runtime do registro.

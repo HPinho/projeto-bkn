@@ -677,6 +677,18 @@ def build_modular(entry: Path, output: Path | None = None) -> dict:
         compiled_objects.append(obj)
 
 
+    # GCC may emit memory ABI calls even for freestanding aggregate operations.
+    # Supply byte-only implementations instead of linking a hosted libc.
+    memory_src = Path(__file__).resolve().parent / "runtime" / "memory.c"
+    memory_obj = obj_dir / "sotlas_freestanding_memory.o"
+    res = subprocess.run(
+        [str(gcc), *common_flags, str(memory_src), "-o", str(memory_obj)],
+        capture_output=True, text=True, env=env,
+    )
+    if res.returncode != 0:
+        raise SotlasError(f"falha ao compilar runtime freestanding: {res.stderr}")
+    compiled_objects.append(memory_obj)
+
     # Compila o bootloader UEFI Sotlas.
     bootloader_src = root / "boot" / "uefi_bootloader.sotlas"
     if bootloader_src.exists():
