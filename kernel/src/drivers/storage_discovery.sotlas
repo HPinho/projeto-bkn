@@ -1,6 +1,7 @@
-// Baken OS — discovery PCI e bring-up AHCI nativo.
-// O boot normal registra AHCI após IDENTIFY/capacidade sem depender da fixture.
-// A certificação LBA 1023/1024 é tentada depois e nunca invalida o disco normal.
+// Baken OS — discovery PCI e bring-up de storage nativo.
+// O boot normal prefere AHCI quando ele se torna um BlockDevice utilizável.
+// Sem AHCI utilizável, NVMe é inicializado e publicado pela mesma API nativa.
+// Certificações destrutivas de fixture continuam best-effort e guardadas.
 
 module kernel::drivers::storage_discovery;
 
@@ -11,6 +12,7 @@ import kernel::memory::dma::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::ahci_runtime::*;
 import kernel::drivers::ahci_block_read::*;
+import kernel::drivers::nvme::*;
 import kernel::storage::block_device::*;
 
 pub const PCI_CLASS_MASS_STORAGE: u8 = 0x01;
@@ -71,6 +73,21 @@ fn storage_candidate_kind(dev: *const PciDevice) -> u32 {
         if (*dev).subclass == PCI_SUBCLASS_NVM && (*dev).prog_if == PCI_PROGIF_NVME { return STORAGE_CONTROLLER_NVME; }
         if (*dev).subclass == PCI_SUBCLASS_SATA && (*dev).prog_if == PCI_PROGIF_AHCI { return STORAGE_CONTROLLER_AHCI; }
         return STORAGE_CONTROLLER_NONE;
+    }
+}
+
+@system
+fn storage_select_candidate(index: u32, dev: *const PciDevice, kind: u32) -> bool {
+    unsafe {
+        if dev == (null as *const PciDevice) || kind == STORAGE_CONTROLLER_NONE { return false; }
+        STORAGE_CANDIDATE.kind = kind; STORAGE_CANDIDATE.pci_index = index;
+        STORAGE_CANDIDATE.bus = (*dev).bus; STORAGE_CANDIDATE.slot = (*dev).slot; STORAGE_CANDIDATE.func = (*dev).func;
+        STORAGE_CANDIDATE.vendor_id = (*dev).vendor_id; STORAGE_CANDIDATE.device_id = (*dev).device_id;
+        STORAGE_CANDIDATE.command_before_driver = (*dev).command;
+        if kind == STORAGE_CONTROLLER_AHCI { STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[5].base_address; }
+        else if kind == STORAGE_CONTROLLER_NVME { STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address; }
+        else { STORAGE_CANDIDATE.abar_or_mmio_base = 0; return false; }
+        return STORAGE_CANDIDATE.abar_or_mmio_base != 0;
     }
 }
 
@@ -204,6 +221,31 @@ fn storage_register_ahci_block_device() -> bool {
 }
 
 @system
+fn storage_register_nvme_block_device() -> bool {
+    unsafe {
+        STORAGE_BLOCK_DEVICE_READY = false; STORAGE_GENERIC_BLOCK_IO_READY = false;
+        if STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_NVME || STORAGE_CANDIDATE.abar_or_mmio_base == 0 { return false; }
+    }
+    if !nvme_initialize_first() { return false; }
+    unsafe {
+        let last_lba = nvme_last_lba();
+        let context = nvme_context();
+        if last_lba == 0 || context == 0 || context != STORAGE_CANDIDATE.abar_or_mmio_base { return false; }
+        if !block_device_register_native(BLOCK_DEVICE_NVME, STORAGE_CANDIDATE.pci_index, 512, last_lba, true, true) { return false; }
+        if !block_device_bind_driver_context(context) { block_device_reset_registry(); return false; }
+        if !block_device_has_native_target() || !block_device_has_writable_native_target() ||
+           block_device_kind() != BLOCK_DEVICE_NVME || block_device_index() != STORAGE_CANDIDATE.pci_index ||
+           block_device_block_size() != 512 || block_device_last_lba() != last_lba ||
+           block_device_driver_context() != context {
+            block_device_reset_registry(); return false;
+        }
+        STORAGE_BLOCK_DEVICE_READY = true;
+        x86_serial_write_stage_marker('k' as u8);
+        return true;
+    }
+}
+
+@system
 fn storage_block_io_zero(base: *mut u8) -> bool {
     if base == (null as *mut u8) { return false; }
     unsafe { let mut offset: u64 = 0; while offset < AHCI_READ_SECTOR_SIZE { *(((base as usize) + (offset as usize)) as *mut u8) = 0; offset += 1; } }
@@ -275,27 +317,52 @@ pub fn storage_discovery_scan() -> u32 {
         block_device_reset_registry();
         let post_cutover = active_page_tables_is_ready();
         let count = pci_get_device_count();
+
+        // Antes do cutover, discovery só identifica o primeiro candidato e não
+        // programa o driver. Mantemos o contrato usado pelo installer/bootstrap.
+        if !post_cutover {
+            for mut index in 0..count {
+                let dev = pci_get_device(index);
+                let kind = storage_candidate_kind(dev);
+                if kind == STORAGE_CONTROLLER_NONE { continue; }
+                if !storage_select_candidate(index, dev, kind) { return STORAGE_CONTROLLER_NONE; }
+                if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
+                return kind;
+            }
+            return STORAGE_CONTROLLER_NONE;
+        }
+
+        // Primeiro tenta publicar um AHCI realmente utilizável. Uma falha não
+        // impede o fallback NVMe, mas evitamos reciclar o runtime AHCI em outro HBA.
         for mut index in 0..count {
             let dev = pci_get_device(index);
             let kind = storage_candidate_kind(dev);
-            if kind == STORAGE_CONTROLLER_NONE { continue; }
-            if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }
-            STORAGE_CANDIDATE.kind = kind; STORAGE_CANDIDATE.pci_index = index;
-            STORAGE_CANDIDATE.bus = (*dev).bus; STORAGE_CANDIDATE.slot = (*dev).slot; STORAGE_CANDIDATE.func = (*dev).func;
-            STORAGE_CANDIDATE.vendor_id = (*dev).vendor_id; STORAGE_CANDIDATE.device_id = (*dev).device_id;
-            STORAGE_CANDIDATE.command_before_driver = (*dev).command;
-            if kind == STORAGE_CONTROLLER_AHCI { STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[5].base_address; }
-            else { STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address; }
-            if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
-            if !post_cutover { return kind; }
-            if !storage_reset_ahci_after_probe() || !storage_prepare_ahci_dma_after_reset() ||
-               !storage_identify_ahci_after_dma() || !storage_prepare_ahci_capacity_after_identify() ||
-               !storage_register_ahci_block_device() { return STORAGE_CONTROLLER_NONE; }
-            // Certificação é best-effort para o boot normal. Na fixture do CI,
-            // ela define STORAGE_GENERIC_BLOCK_IO_READY e produz os marcadores.
-            if storage_certify_ahci_fixture() { STORAGE_GENERIC_BLOCK_IO_READY = true; }
-            return STORAGE_CONTROLLER_AHCI;
+            if kind != STORAGE_CONTROLLER_AHCI { continue; }
+            if !storage_select_candidate(index, dev, kind) { break; }
+            if storage_probe_mmio_after_cutover() && storage_reset_ahci_after_probe() &&
+               storage_prepare_ahci_dma_after_reset() && storage_identify_ahci_after_dma() &&
+               storage_prepare_ahci_capacity_after_identify() && storage_register_ahci_block_device() {
+                // Certificação é best-effort para o boot normal. Na fixture do CI,
+                // ela define STORAGE_GENERIC_BLOCK_IO_READY e produz os marcadores.
+                if storage_certify_ahci_fixture() { STORAGE_GENERIC_BLOCK_IO_READY = true; }
+                return STORAGE_CONTROLLER_AHCI;
+            }
+            block_device_reset_registry();
+            break;
         }
+
+        // Sem AHCI utilizável, a primeira controladora NVMe passa pelo driver
+        // nativo completo e é publicada na mesma Block Device API.
+        for mut index in 0..count {
+            let dev = pci_get_device(index);
+            let kind = storage_candidate_kind(dev);
+            if kind != STORAGE_CONTROLLER_NVME { continue; }
+            if !storage_select_candidate(index, dev, kind) { return STORAGE_CONTROLLER_NONE; }
+            if !storage_probe_mmio_after_cutover() || !storage_register_nvme_block_device() { return STORAGE_CONTROLLER_NONE; }
+            return STORAGE_CONTROLLER_NVME;
+        }
+
+        STORAGE_CANDIDATE.kind = STORAGE_CONTROLLER_NONE; STORAGE_CANDIDATE.abar_or_mmio_base = 0;
         return STORAGE_CONTROLLER_NONE;
     }
 }
