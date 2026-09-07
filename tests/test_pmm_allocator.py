@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Guardrails do PMM bitmap-backed pós-ExitBootServices."""
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,9 +31,10 @@ class PmmAllocatorTests(unittest.TestCase):
             "pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64",
             "pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64",
             "pmm_allocator_commit_allocation(region, base, count)",
+            "pmm_bitmap_find_free_run(&PMM_REGION_BITMAPS[region], count)",
         ):
             self.assertIn(token, self.alloc)
-        self.assertGreaterEqual(self.alloc.count("pmm_allocator_find_run(region, count"), 3)
+        self.assertGreaterEqual(self.alloc.count("pmm_allocator_find_run(region, count"), 2)
 
     def test_arbitrary_free_rejects_double_and_partial_free(self):
         body = self.alloc.split("pub fn pmm_free_pages(base: u64, count: u64) -> bool", 1)[1]
@@ -101,8 +103,9 @@ class PmmAllocatorTests(unittest.TestCase):
 
     def test_allocator_has_no_uefi_or_host_heap_dependency(self):
         code = "\n".join(line.split("//", 1)[0] for line in self.alloc.splitlines())
-        for token in ("BootServices->", "AllocatePages", "AllocatePool", "malloc(", "free("):
+        for token in ("BootServices->", "AllocatePages", "AllocatePool"):
             self.assertNotIn(token, code)
+        self.assertIsNone(re.search(r"(?<![A-Za-z0-9_])(?:malloc|free)\s*\(", code))
 
 
 if __name__ == "__main__":

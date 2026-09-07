@@ -51,9 +51,28 @@ class FoundationAuditRegressionTests(unittest.TestCase):
         pmm = PMM.read_text(encoding="utf-8")
         dma = DMA.read_text(encoding="utf-8")
         self.assertIn("pub fn pmm_alloc_pages_constrained(", pmm)
+
+        helper = pmm.split("fn pmm_allocator_find_run(", 1)[1]
+        helper = helper.split("fn pmm_allocator_any_free_page", 1)[0]
+        for token in (
+            "let last = end - 1",
+            "last <= max_address",
+            "if boundary != 0",
+            "base / boundary == last / boundary",
+            "pmm_allocator_run_is_free(region, page, count)",
+        ):
+            self.assertIn(token, helper)
+
         constrained = pmm.split("pub fn pmm_alloc_pages_constrained(", 1)[1]
-        self.assertIn("last > max_address", constrained)
-        self.assertIn("aligned / boundary != last / boundary", constrained)
+        constrained = constrained.split("pub fn pmm_free_pages", 1)[0]
+        find = constrained.index(
+            "pmm_allocator_find_run(region, count, alignment, max_address, boundary)"
+        )
+        commit = constrained.index(
+            "pmm_allocator_commit_allocation(region, base, count)"
+        )
+        self.assertLess(find, commit)
+
         body = dma.split("pub fn dma_alloc_for_device", 1)[1]
         self.assertIn("pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)", body)
         self.assertNotIn("let mut buffer = dma_alloc(size, alignment)", body)

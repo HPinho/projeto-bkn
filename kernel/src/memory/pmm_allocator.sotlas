@@ -181,7 +181,10 @@ fn pmm_allocator_find_run(region: u64, count: u64, alignment: u64,
             let last = end - 1;
             let aligned = (base & (alignment - 1)) == 0;
             let address_ok = last <= max_address;
-            let boundary_ok = boundary == 0 || base / boundary == last / boundary;
+            let mut boundary_ok = true;
+            if boundary != 0 {
+                boundary_ok = base / boundary == last / boundary;
+            }
             if aligned && address_ok && boundary_ok &&
                pmm_allocator_run_is_free(region, page, count) {
                 return base;
@@ -271,9 +274,12 @@ pub fn pmm_alloc_pages(count: u64) -> u64 {
         if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
         let mut region: u64 = 0;
         while region < PMM_ALLOCATOR.active_region_count {
-            let base = pmm_allocator_find_run(region, count, BAKEN_PAGE_SIZE,
-                                              PMM_PHYSICAL_ADDRESS_MAX, 0);
-            if base != 0 {
+            let first = pmm_bitmap_find_free_run(&PMM_REGION_BITMAPS[region], count);
+            if first != 0 {
+                let offset = first * BAKEN_PAGE_SIZE;
+                if offset / BAKEN_PAGE_SIZE != first { return 0; }
+                let base = PMM_REGION_BASES[region] + offset;
+                if base < PMM_REGION_BASES[region] { return 0; }
                 if pmm_allocator_commit_allocation(region, base, count) { return base; }
                 return 0;
             }
