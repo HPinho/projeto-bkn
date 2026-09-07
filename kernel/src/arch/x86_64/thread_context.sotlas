@@ -10,7 +10,10 @@ import kernel::arch::x86_64::gdt::*;
 
 pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 19;
 pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 152;
-pub const X86_KERNEL_THREAD_ENTRY_STACK_BIAS: u64 = 8;
+pub const X86_KERNEL_THREAD_RETURN_SLOT_BYTES: u64 = 8;
+pub const X86_KERNEL_THREAD_HOME_SPACE_BYTES: u64 = 32;
+pub const X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES: u64 =
+    X86_KERNEL_THREAD_RETURN_SLOT_BYTES + X86_KERNEL_THREAD_HOME_SPACE_BYTES;
 pub const X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202;
 
 @repr(C)
@@ -46,18 +49,27 @@ pub fn x86_kernel_thread_frame_address_valid(frame_address: u64) -> bool {
 pub fn x86_kernel_thread_prepare_frame(stack_top: u64, entry_rip: u64) -> u64 {
     if stack_top == 0 || entry_rip == 0 { return 0; }
 
-    // Uma função Win64 é normalmente alcançada após CALL, portanto entra com
-    // RSP = 8 (mod 16). IRETQ não empilha return address; reservamos 8 bytes no
-    // topo para reproduzir a mesma condição de ABI para a thread inicial.
+    // ABI Win64: uma função normalmente entra após CALL com RSP = 8 (mod 16).
+    // Além do return address de 8 bytes, o caller fornece 32 bytes de home/shadow
+    // space acima dele. IRETQ não cria nenhum dos dois, então reservamos os 40
+    // bytes no topo da stack antes do frame de IRQ inicial. Isso impede que uma
+    // função recém-criada use home space fora da stack que lhe pertence.
     let aligned_top = stack_top & 0xFFFFFFFFFFFFFFF0;
-    if aligned_top <= X86_KERNEL_THREAD_ENTRY_STACK_BIAS { return 0; }
-    let entry_stack = aligned_top - X86_KERNEL_THREAD_ENTRY_STACK_BIAS;
+    if aligned_top <= X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES { return 0; }
+    let entry_stack = aligned_top - X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES;
+    if (entry_stack & 0x0F) != 8 { return 0; }
     if entry_stack <= X86_KERNEL_THREAD_FRAME_BYTES { return 0; }
     let frame_address = entry_stack - X86_KERNEL_THREAD_FRAME_BYTES;
     if !x86_kernel_thread_frame_address_valid(frame_address) { return 0; }
 
     let frame = frame_address as *mut X86KernelThreadFrame;
+    let synthetic_return = entry_stack as *mut u64;
     unsafe {
+        // Se uma entry marcada como thread retornar antes de termos thread_exit,
+        // RET cairá em zero e produzirá uma exceção terminal em vez de saltar
+        // para memória arbitrária. O reaper/trampoline substituirá isso depois.
+        (*synthetic_return) = 0;
+
         (*frame).r15 = 0;
         (*frame).r14 = 0;
         (*frame).r13 = 0;
