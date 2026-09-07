@@ -118,6 +118,36 @@ static inline void __scheduler_yield_interrupt(void) {
     __asm__ __volatile__("int $0x43" : : : "memory");
 }
 
+/* Primitivas BSP para transições atômicas de wait queue. Não restauramos todos
+ * os RFLAGS a partir de memória: somente preservamos IF, que é o estado que a
+ * seção crítica precisa controlar. */
+static inline bool __interrupts_enabled(void) {
+    uint64_t flags;
+    __asm__ __volatile__("pushfq; popq %0" : "=r"(flags) : : "memory");
+    return (flags & (1ull << 9)) != 0;
+}
+
+static inline uint64_t __irq_save_disable(void) {
+    uint64_t flags;
+    __asm__ __volatile__("pushfq; popq %0; cli" : "=r"(flags) : : "memory");
+    return flags;
+}
+
+static inline void __irq_restore(uint64_t flags) {
+    if (flags & (1ull << 9)) {
+        __asm__ __volatile__("sti" : : : "memory");
+    } else {
+        __asm__ __volatile__("cli" : : : "memory");
+    }
+}
+
+/* O shadow arquitetural de STI impede IRQ mascarável entre STI e a instrução
+ * imediatamente seguinte. O INT 0x43 portanto publica o frame bloqueado antes
+ * de qualquer wakeup assíncrono poder observar uma janela intermediária. */
+static inline void __scheduler_block_switch(void) {
+    __asm__ __volatile__("sti\n\tint $0x43" : : : "memory", "cc");
+}
+
 static inline uint32_t __mmio_read32(uint64_t address) {
     uint32_t value = *(volatile uint32_t *)(uintptr_t)address;
     __asm__ __volatile__("" : : : "memory");
@@ -183,6 +213,16 @@ static inline uint64_t __scheduler_exit_probe_entry_address(void) {
 extern void sotlas_x86_scheduler_idle_entry(void);
 static inline uint64_t __scheduler_idle_entry_address(void) {
     return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_idle_entry;
+}
+
+extern void sotlas_x86_scheduler_wait_probe_entry(void);
+static inline uint64_t __scheduler_wait_probe_entry_address(void) {
+    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wait_probe_entry;
+}
+
+extern void sotlas_x86_scheduler_wake_probe_entry(void);
+static inline uint64_t __scheduler_wake_probe_entry_address(void) {
+    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wake_probe_entry;
 }
 
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
@@ -381,7 +421,13 @@ def install(bootstrap) -> None:
         "__scheduler_thread_trampoline_address": Function("__scheduler_thread_trampoline_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_exit_probe_entry_address": Function("__scheduler_exit_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__scheduler_wait_probe_entry_address": Function("__scheduler_wait_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__scheduler_wake_probe_entry_address": Function("__scheduler_wake_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_yield_interrupt": Function("__scheduler_yield_interrupt", [], Type("void"), [], public=True, attributes=["@system"]),
+        "__scheduler_block_switch": Function("__scheduler_block_switch", [], Type("void"), [], public=True, attributes=["@system"]),
+        "__interrupts_enabled": Function("__interrupts_enabled", [], Type("bool"), [], public=True, attributes=["@system"]),
+        "__irq_save_disable": Function("__irq_save_disable", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__irq_restore": Function("__irq_restore", [("flags", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
         "__pat_install_wc": Function("__pat_install_wc", [], Type("bool"), [], public=True, attributes=["@system"]),
