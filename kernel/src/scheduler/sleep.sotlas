@@ -1,0 +1,215 @@
+// Baken OS — sleep de kernel threads baseado no tick periódico do LAPIC.
+//
+// Não há busy-wait: a thread publica seu deadline e passa a BLOCKED sob IF=0.
+// O IRQ de timer acorda apenas deadlines vencidos. O handoff usa a mesma
+// sequência atômica STI+INT 0x43 das wait queues, mantendo o contrato BSP.
+
+module kernel::scheduler::sleep;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::scheduler::core::*;
+
+pub const SCHEDULER_SLEEP_CAPACITY: usize = 8;
+pub const SCHEDULER_SLEEP_MAX_TICK: u64 = 0xFFFFFFFFFFFFFFFF;
+pub const SCHEDULER_SLEEP_INVALID_SLOT: usize = SCHEDULER_SLEEP_CAPACITY;
+
+static mut SCHEDULER_SLEEP_THREAD_IDS: [u64; SCHEDULER_SLEEP_CAPACITY] = [0; SCHEDULER_SLEEP_CAPACITY];
+static mut SCHEDULER_SLEEP_WAKE_TICKS: [u64; SCHEDULER_SLEEP_CAPACITY] = [0; SCHEDULER_SLEEP_CAPACITY];
+static mut SCHEDULER_SLEEP_ACTIVE: [bool; SCHEDULER_SLEEP_CAPACITY] = [false; SCHEDULER_SLEEP_CAPACITY];
+static mut SCHEDULER_SLEEP_CURRENT_TICK: u64 = 0;
+static mut SLEEP_BLOCKED_MARKED: bool = false;
+static mut SLEEP_WAKE_MARKED: bool = false;
+static mut SLEEP_RESUME_MARKED: bool = false;
+
+@system
+fn sleep_write_blocked_marker_once() -> void {
+    unsafe {
+        if SLEEP_BLOCKED_MARKED { return; }
+        SLEEP_BLOCKED_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 20] = [
+        66, 65, 75, 69, 78, 58, 83, 76, 69, 69,
+        80, 95, 66, 76, 79, 67, 75, 69, 68, 10
+    ];
+    let mut index: usize = 0;
+    while index < 20 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+fn sleep_write_wake_marker_once() -> void {
+    unsafe {
+        if SLEEP_WAKE_MARKED { return; }
+        SLEEP_WAKE_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 17] = [
+        66, 65, 75, 69, 78, 58, 83, 76, 69,
+        69, 80, 95, 87, 65, 75, 69, 10
+    ];
+    let mut index: usize = 0;
+    while index < 17 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+fn sleep_write_resume_marker_once() -> void {
+    unsafe {
+        if SLEEP_RESUME_MARKED { return; }
+        SLEEP_RESUME_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 19] = [
+        66, 65, 75, 69, 78, 58, 83, 76, 69, 69,
+        80, 95, 82, 69, 83, 85, 77, 69, 10
+    ];
+    let mut index: usize = 0;
+    while index < 19 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+fn scheduler_sleep_find_free_locked() -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_SLEEP_CAPACITY {
+            if !SCHEDULER_SLEEP_ACTIVE[slot] { return slot; }
+            slot += 1;
+        }
+    }
+    return SCHEDULER_SLEEP_INVALID_SLOT;
+}
+
+@system
+fn scheduler_sleep_find_thread_locked(thread_id: u64) -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < SCHEDULER_SLEEP_CAPACITY {
+            if SCHEDULER_SLEEP_ACTIVE[slot] &&
+               SCHEDULER_SLEEP_THREAD_IDS[slot] == thread_id {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return SCHEDULER_SLEEP_INVALID_SLOT;
+}
+
+@system
+fn scheduler_sleep_clear_locked(slot: usize) -> void {
+    if slot >= SCHEDULER_SLEEP_CAPACITY { return; }
+    unsafe {
+        SCHEDULER_SLEEP_ACTIVE[slot] = false;
+        SCHEDULER_SLEEP_THREAD_IDS[slot] = 0;
+        SCHEDULER_SLEEP_WAKE_TICKS[slot] = 0;
+    }
+}
+
+@system
+pub fn scheduler_sleep_tick_count() -> u64 {
+    let flags = x86_irq_save_disable();
+    let mut tick: u64 = 0;
+    unsafe { tick = SCHEDULER_SLEEP_CURRENT_TICK; }
+    x86_irq_restore(flags);
+    return tick;
+}
+
+@system
+pub fn scheduler_sleep_ticks(ticks: u64) -> bool {
+    if ticks == 0 || !scheduler_is_active() || !x86_interrupts_enabled() {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    let thread_id = scheduler_current_thread_id();
+    if scheduler_sleep_find_thread_locked(thread_id) != SCHEDULER_SLEEP_INVALID_SLOT {
+        x86_irq_restore(flags);
+        return false;
+    }
+
+    let mut now: u64 = 0;
+    unsafe { now = SCHEDULER_SLEEP_CURRENT_TICK; }
+    if ticks > SCHEDULER_SLEEP_MAX_TICK - now {
+        x86_irq_restore(flags);
+        return false;
+    }
+    let wake_tick = now + ticks;
+    let slot = scheduler_sleep_find_free_locked();
+    if slot == SCHEDULER_SLEEP_INVALID_SLOT {
+        x86_irq_restore(flags);
+        return false;
+    }
+
+    unsafe {
+        SCHEDULER_SLEEP_THREAD_IDS[slot] = thread_id;
+        SCHEDULER_SLEEP_WAKE_TICKS[slot] = wake_tick;
+        SCHEDULER_SLEEP_ACTIVE[slot] = true;
+    }
+    if !scheduler_block_current() {
+        scheduler_sleep_clear_locked(slot);
+        x86_irq_restore(flags);
+        return false;
+    }
+
+    sleep_write_blocked_marker_once();
+    x86_scheduler_block_switch();
+
+    // A retomada válida só pode ocorrer após o IRQ de timer limpar este slot e
+    // mover a thread BLOCKED para READY. Um wake externo prematuro falha fechado.
+    let verify_flags = x86_irq_save_disable();
+    let remaining_slot = scheduler_sleep_find_thread_locked(thread_id);
+    let mut resume_tick: u64 = 0;
+    unsafe { resume_tick = SCHEDULER_SLEEP_CURRENT_TICK; }
+    if remaining_slot != SCHEDULER_SLEEP_INVALID_SLOT {
+        scheduler_sleep_clear_locked(remaining_slot);
+        x86_irq_restore(verify_flags);
+        x86_irq_restore(flags);
+        return false;
+    }
+    let deadline_met = resume_tick >= wake_tick;
+    x86_irq_restore(verify_flags);
+    x86_irq_restore(flags);
+    if !deadline_met { return false; }
+
+    sleep_write_resume_marker_once();
+    return true;
+}
+
+// Chamado pelo IRQ periódico com IF=0 e depois do EOI do LAPIC. `tick` vem do
+// contador monotônico de IRQs do kernel; nenhum relógio de firmware participa.
+@system
+pub fn scheduler_sleep_on_timer_tick(tick: u64) -> u64 {
+    unsafe {
+        if tick > SCHEDULER_SLEEP_CURRENT_TICK {
+            SCHEDULER_SLEEP_CURRENT_TICK = tick;
+        }
+    }
+
+    let mut woken: u64 = 0;
+    let mut slot: usize = 0;
+    while slot < SCHEDULER_SLEEP_CAPACITY {
+        let mut active: bool = false;
+        let mut wake_tick: u64 = 0;
+        let mut thread_id: u64 = 0;
+        unsafe {
+            active = SCHEDULER_SLEEP_ACTIVE[slot];
+            wake_tick = SCHEDULER_SLEEP_WAKE_TICKS[slot];
+            thread_id = SCHEDULER_SLEEP_THREAD_IDS[slot];
+        }
+        if active && tick >= wake_tick && scheduler_wake_thread(thread_id) {
+            scheduler_sleep_clear_locked(slot);
+            woken += 1;
+        }
+        slot += 1;
+    }
+    if woken != 0 { sleep_write_wake_marker_once(); }
+    return woken;
+}

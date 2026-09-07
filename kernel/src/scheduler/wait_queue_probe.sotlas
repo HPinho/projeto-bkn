@@ -1,8 +1,8 @@
-// Baken OS — prova dinâmica de wait queue para o bring-up do scheduler.
+// Baken OS — prova dinâmica de wait queue e sleep para o bring-up do scheduler.
 //
 // Uma kernel thread real bloqueia na fila; o bootstrap volta a executar, acorda
-// essa thread e cede novamente a CPU. A prova só fecha depois que a thread
-// retoma exatamente após o INT 0x43 e o reaper resolve sua stack.
+// essa thread e cede novamente a CPU. Depois da retomada, a mesma thread dorme
+// por ticks reais do LAPIC. A prova só fecha após deadline, retorno e reaper.
 
 module kernel::scheduler::wait_queue_probe;
 
@@ -10,8 +10,10 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::wait_queue::*;
+import kernel::scheduler::sleep::*;
 
 pub const SCHEDULER_WAIT_PROBE_SPIN_LIMIT: u64 = 10000000;
+pub const SCHEDULER_SLEEP_PROBE_TICKS: u64 = 3;
 
 static mut WAIT_PROBE_QUEUE: KernelWaitQueue = KernelWaitQueue {
     thread_ids: [0; KERNEL_WAIT_QUEUE_CAPACITY],
@@ -24,6 +26,7 @@ static mut WAIT_PROBE_REAP_BASE: u64 = 0;
 static mut WAIT_PROBE_STARTED: bool = false;
 static mut WAIT_PROBE_WOKEN: bool = false;
 static mut WAIT_PROBE_RESUMED: bool = false;
+static mut WAIT_PROBE_SLEEP_COMPLETE: bool = false;
 static mut WAIT_RESUME_MARKED: bool = false;
 
 @system
@@ -50,6 +53,12 @@ pub fn sotlas_x86_scheduler_wait_probe_entry() -> void {
     if scheduler_wait_queue_sleep(&mut WAIT_PROBE_QUEUE) {
         unsafe { WAIT_PROBE_RESUMED = true; }
         wait_probe_write_resume_marker_once();
+
+        // Segunda certificação na mesma thread: não pode prosseguir por spin.
+        // O IRQ periódico deve acordá-la somente após três ticks completos.
+        if scheduler_sleep_ticks(SCHEDULER_SLEEP_PROBE_TICKS) {
+            unsafe { WAIT_PROBE_SLEEP_COMPLETE = true; }
+        }
     }
 }
 
@@ -72,6 +81,7 @@ pub fn scheduler_wait_probe_start() -> bool {
         WAIT_PROBE_THREAD_ID = 0;
         WAIT_PROBE_WOKEN = false;
         WAIT_PROBE_RESUMED = false;
+        WAIT_PROBE_SLEEP_COMPLETE = false;
         WAIT_RESUME_MARKED = false;
     }
     if !kernel_wait_queue_init(&mut WAIT_PROBE_QUEUE) { return false; }
@@ -115,7 +125,7 @@ pub fn scheduler_wait_probe_wait_complete() -> bool {
     let mut spins: u64 = 0;
     while spins < SCHEDULER_WAIT_PROBE_SPIN_LIMIT {
         unsafe {
-            if WAIT_PROBE_RESUMED && WAIT_PROBE_WOKEN &&
+            if WAIT_PROBE_RESUMED && WAIT_PROBE_WOKEN && WAIT_PROBE_SLEEP_COMPLETE &&
                scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1 {
                 return true;
             }

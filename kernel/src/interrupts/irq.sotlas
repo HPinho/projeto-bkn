@@ -13,6 +13,7 @@ import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::i8042::*;
 import kernel::scheduler::core::*;
+import kernel::scheduler::sleep::*;
 
 pub const IRQ_VECTOR_TIMER: u16 = 0x40;
 pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
@@ -111,6 +112,9 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         if timer_count <= 3 {
             x86_serial_write_hex32_marker('T' as u8, timer_count as u32);
         }
+        // Deadlines de sleep são publicados sob IF=0. O próprio tick pode tornar
+        // a thread READY antes da política normal escolher o próximo frame.
+        scheduler_sleep_on_timer_tick(timer_count);
         return scheduler_on_timer_interrupt(frame_address);
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
