@@ -1,0 +1,127 @@
+// Baken OS — prova dinâmica de wait queue para o bring-up do scheduler.
+//
+// Uma kernel thread real bloqueia na fila; o bootstrap volta a executar, acorda
+// essa thread e cede novamente a CPU. A prova só fecha depois que a thread
+// retoma exatamente após o INT 0x43 e o reaper resolve sua stack.
+
+module kernel::scheduler::wait_queue_probe;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::scheduler::core::*;
+import kernel::scheduler::wait_queue::*;
+
+pub const SCHEDULER_WAIT_PROBE_SPIN_LIMIT: u64 = 10000000;
+
+static mut WAIT_PROBE_QUEUE: KernelWaitQueue = KernelWaitQueue {
+    thread_ids: [0; KERNEL_WAIT_QUEUE_CAPACITY],
+    head: 0,
+    tail: 0,
+    count: 0
+};
+static mut WAIT_PROBE_THREAD_ID: u64 = 0;
+static mut WAIT_PROBE_REAP_BASE: u64 = 0;
+static mut WAIT_PROBE_STARTED: bool = false;
+static mut WAIT_PROBE_WOKEN: bool = false;
+static mut WAIT_PROBE_RESUMED: bool = false;
+static mut WAIT_RESUME_MARKED: bool = false;
+
+@system
+fn wait_probe_write_resume_marker_once() -> void {
+    unsafe {
+        if WAIT_RESUME_MARKED { return; }
+        WAIT_RESUME_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 18] = [
+        66, 65, 75, 69, 78, 58, 87, 65, 73,
+        84, 95, 82, 69, 83, 85, 77, 69, 10
+    ];
+    let mut index: usize = 0;
+    while index < 18 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+@export
+pub fn sotlas_x86_scheduler_wait_probe_entry() -> void {
+    if scheduler_wait_queue_sleep(&mut WAIT_PROBE_QUEUE) {
+        unsafe { WAIT_PROBE_RESUMED = true; }
+        wait_probe_write_resume_marker_once();
+    }
+}
+
+// Mantido exportado como ponto de prova adicional do backend. O cenário atual
+// usa o bootstrap como waker para provar que uma thread diferente acorda a fila.
+@system
+@export
+pub fn sotlas_x86_scheduler_wake_probe_entry() -> void {
+    if scheduler_wait_queue_wake_one(&mut WAIT_PROBE_QUEUE) {
+        unsafe { WAIT_PROBE_WOKEN = true; }
+    }
+}
+
+@system
+pub fn scheduler_wait_probe_start() -> bool {
+    if !scheduler_is_active() { return false; }
+    unsafe {
+        if WAIT_PROBE_STARTED { return false; }
+        WAIT_PROBE_REAP_BASE = scheduler_reap_count();
+        WAIT_PROBE_THREAD_ID = 0;
+        WAIT_PROBE_WOKEN = false;
+        WAIT_PROBE_RESUMED = false;
+        WAIT_RESUME_MARKED = false;
+    }
+    if !kernel_wait_queue_init(&mut WAIT_PROBE_QUEUE) { return false; }
+
+    let entry = x86_scheduler_wait_probe_entry_address();
+    if entry == 0 { return false; }
+    let thread_id = scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    if thread_id == 0 { return false; }
+    unsafe {
+        WAIT_PROBE_THREAD_ID = thread_id;
+        WAIT_PROBE_STARTED = true;
+    }
+    return true;
+}
+
+@system
+pub fn scheduler_wait_probe_blocked() -> bool {
+    unsafe {
+        if !WAIT_PROBE_STARTED || WAIT_PROBE_THREAD_ID == 0 || WAIT_PROBE_RESUMED {
+            return false;
+        }
+    }
+    return kernel_wait_queue_count(&mut WAIT_PROBE_QUEUE) == 1;
+}
+
+@system
+pub fn scheduler_wait_probe_wake() -> bool {
+    if !scheduler_wait_probe_blocked() { return false; }
+    if !scheduler_wait_queue_wake_one(&mut WAIT_PROBE_QUEUE) { return false; }
+    unsafe { WAIT_PROBE_WOKEN = true; }
+    return true;
+}
+
+@system
+pub fn scheduler_wait_probe_resumed() -> bool {
+    unsafe { return WAIT_PROBE_RESUMED && WAIT_PROBE_WOKEN; }
+}
+
+@system
+pub fn scheduler_wait_probe_wait_complete() -> bool {
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_WAIT_PROBE_SPIN_LIMIT {
+        unsafe {
+            if WAIT_PROBE_RESUMED && WAIT_PROBE_WOKEN &&
+               scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1 {
+                return true;
+            }
+        }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
