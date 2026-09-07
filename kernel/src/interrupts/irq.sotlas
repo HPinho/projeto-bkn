@@ -17,6 +17,7 @@ import kernel::scheduler::core::*;
 pub const IRQ_VECTOR_TIMER: u16 = 0x40;
 pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
 pub const IRQ_VECTOR_MOUSE: u16 = 0x42;
+pub const IRQ_VECTOR_RESCHEDULE: u16 = 0x43;
 pub const IRQ_VECTOR_SPURIOUS: u16 = 0xFF;
 
 static mut IRQ_IDT_READY: bool = false;
@@ -40,6 +41,7 @@ pub fn irq_prepare_idt() -> bool {
     if !irq_install_gate(IRQ_VECTOR_TIMER) { return false; }
     if !irq_install_gate(IRQ_VECTOR_KEYBOARD) { return false; }
     if !irq_install_gate(IRQ_VECTOR_MOUSE) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_RESCHEDULE) { return false; }
     if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
     unsafe { IRQ_IDT_READY = true; }
     return true;
@@ -88,6 +90,12 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         unsafe { IRQ_SPURIOUS_COUNT += 1; }
         // Vetor espúrio do LAPIC não recebe EOI.
         return frame_address;
+    }
+
+    if vector == IRQ_VECTOR_RESCHEDULE as u64 {
+        // Interrupção de software CPL0: compartilha o motor real de seleção de
+        // frame do scheduler, mas não representa uma fonte LAPIC e nunca recebe EOI.
+        return scheduler_on_timer_interrupt(frame_address);
     }
 
     if vector == IRQ_VECTOR_TIMER as u64 {
