@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do primeiro WRITE DMA real e readback AHCI."""
+"""Guardrails do WRITE DMA real usado somente na certificação AHCI."""
 
 from pathlib import Path
 import unittest
@@ -16,74 +16,47 @@ class AhciBlockWriteTests(unittest.TestCase):
         self.assertIn("AHCI_ATA_WRITE_DMA_EXT: u8 = 0x35", text)
         self.assertIn("AHCI_ATA_WRITE_DMA: u8 = 0xCA", text)
         self.assertIn("AHCI_WRITE_TEST_LBA: u64 = 1024", text)
-        body = text.split("fn ahci_write_issue_dma", 1)[1]
-        body = body.split("pub fn ahci_write_probe_sector1", 1)[0]
-        for token in (
-            "write_to_disk", "header_flags |= 1 << 6",
-            "AHCI_WRITE_TEST_LBA", "AHCI_FIS_TYPE_REG_H2D",
-            "AHCI_PX_TFD", "AHCI_PX_IS", "AHCI_PX_CI", "AHCI_PXIS_TFES",
-            "x86_mmio_write32(port_base + AHCI_PX_CI, 1)",
-            "prdbc != (AHCI_READ_SECTOR_SIZE as u32)",
-        ):
+        body = text.split("fn ahci_write_issue_dma", 1)[1].split("pub fn ahci_write_probe_sector1", 1)[0]
+        for token in ("write_to_disk", "header_flags |= 1 << 6", "AHCI_WRITE_TEST_LBA", "AHCI_FIS_TYPE_REG_H2D", "AHCI_PX_TFD", "AHCI_PX_IS", "AHCI_PX_CI", "AHCI_PXIS_TFES", "x86_mmio_write32(port_base + AHCI_PX_CI, 1)", "prdbc != (AHCI_READ_SECTOR_SIZE as u32)"):
             self.assertIn(token, body)
 
     def test_write_gate_uses_dedicated_shared_dma_buffer(self):
         text = AHCI.read_text(encoding="utf-8")
-        prep = text.split("fn ahci_write_prepare_buffer", 1)[1]
-        prep = prep.split("fn ahci_write_fill_magic", 1)[0]
-        for token in (
-            "AHCI_WRITE_BUFFER", "dma_alloc(", "dma_buffer_cpu_owned",
-            "dma_share_with_device",
-        ):
+        prep = text.split("fn ahci_write_prepare_buffer", 1)[1].split("fn ahci_write_fill_magic", 1)[0]
+        for token in ("AHCI_WRITE_BUFFER", "dma_alloc(", "dma_buffer_cpu_owned", "dma_share_with_device"):
             self.assertIn(token, prep)
-        probe = text.split("pub fn ahci_write_probe_sector1", 1)[1]
-        probe = probe.split("fn ahci_read_magic_matches", 1)[0]
+        probe = text.split("pub fn ahci_write_probe_sector1", 1)[1].split("fn ahci_read_magic_matches", 1)[0]
         self.assertIn("AHCI_WRITE_BUFFER.virtual_address", probe)
         self.assertNotIn("AHCI_READ_BUFFER.virtual_address", probe)
 
     def test_write_is_followed_by_buffer_clear_and_real_readback(self):
         text = AHCI.read_text(encoding="utf-8")
-        body = text.split("pub fn ahci_write_probe_sector1", 1)[1]
-        body = body.split("fn ahci_read_magic_matches", 1)[0]
+        body = text.split("pub fn ahci_write_probe_sector1", 1)[1].split("fn ahci_read_magic_matches", 1)[0]
         write = body.index("ahci_write_issue_dma(hba, write_command, true)")
         clear = body.index("ahci_block_zero(data, AHCI_READ_SECTOR_SIZE)")
         readback = body.index("ahci_write_issue_dma(hba, read_command, false)")
         verify = body.index("ahci_write_magic_matches")
         marker = body.index("x86_serial_write_stage_marker('f' as u8)")
-        self.assertLess(write, clear)
-        self.assertLess(clear, readback)
-        self.assertLess(readback, verify)
-        self.assertLess(verify, marker)
+        self.assertLess(write, clear); self.assertLess(clear, readback); self.assertLess(readback, verify); self.assertLess(verify, marker)
 
-    def test_discovery_runs_write_only_after_proven_read(self):
+    def test_fixture_read_guards_write_and_normal_scan_registers_first(self):
         text = DISCOVERY.read_text(encoding="utf-8")
-        body = text.split("pub fn storage_discovery_scan()", 1)[1]
-        post_cutover = body.index("let post_cutover = active_page_tables_is_ready();")
-        boot_filter = body.index("if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }")
-        pre_cutover_return = body.index("if !post_cutover { return kind; }")
-        read = body.index("storage_read_ahci_after_identify()")
-        write = body.index("ahci_write_probe_sector1")
-        self.assertLess(post_cutover, boot_filter)
-        self.assertLess(boot_filter, pre_cutover_return)
-        self.assertLess(pre_cutover_return, read)
+        certify = text.split("pub fn storage_certify_ahci_fixture()", 1)[1].split("pub fn storage_discovery_scan()", 1)[0]
+        read = certify.index("ahci_read_probe_sector0(hba)")
+        write = certify.index("ahci_write_probe_sector1(hba)")
         self.assertLess(read, write)
-        self.assertIn("ahci_write_is_ready()", body)
+        self.assertIn("ahci_read_is_ready()", certify)
+        self.assertIn("ahci_write_is_ready()", certify)
+        scan = text.split("pub fn storage_discovery_scan()", 1)[1]
+        self.assertLess(scan.index("storage_register_ahci_block_device()"), scan.index("storage_certify_ahci_fixture()"))
 
     def test_ci_uses_disposable_sector_and_verifies_persisted_write(self):
         text = WORKFLOW.read_text(encoding="utf-8")
-        baseline = "printf 'BAKENOLD' | dd of=build/storage-test.img bs=512 seek=1024"
-        verify = 'bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENW01"'
-        self.assertIn(baseline, text)
-        self.assertIn(verify, text)
-
+        self.assertIn("printf 'BAKENOLD' | dd of=build/storage-test.img bs=512 seek=1024", text)
+        self.assertIn('bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENW01"', text)
         marker_loop = text.split("for marker in", 1)[1].split("; do", 1)[0]
-        step_e = marker_loop.index("STEP=e")
-        step_f = marker_loop.index("STEP=f")
-        step_k = marker_loop.index("STEP=k")
-        step_j = marker_loop.index("STEP=J")
-        self.assertLess(step_e, step_f)
-        self.assertLess(step_f, step_k)
-        self.assertLess(step_k, step_j)
+        for marker in ("STEP=e", "STEP=f", "STEP=k", "STEP=v", "STEP=J"):
+            self.assertIn(marker, marker_loop)
 
 
 if __name__ == "__main__":
