@@ -2,7 +2,7 @@
 
 ## Objetivo
 
-O Baken OS deve ser um sistema operacional x86-64 bare-metal próprio. Python é ferramenta de compilação/build/teste; UEFI é apenas bootstrap; Sotlas é compilado para código nativo; depois do handoff o kernel Baken assume memória, interrupções, barramentos, entrada, armazenamento e gráficos.
+O Baken OS é um sistema operacional x86-64 bare-metal próprio. Python é ferramenta de compilação/build/teste; **UEFI é apenas bootstrap**; Sotlas é compilado para código nativo; depois do handoff o kernel Baken assume memória, interrupções, barramentos, entrada, armazenamento e gráficos.
 
 ```text
 Sotlas source
@@ -12,145 +12,32 @@ Sotlas source
     -> hardware
 ```
 
-A regra central é:
+A regra central permanece:
 
 > O compilador não desenha o sistema operacional. Ele apenas permite que o sistema operacional exista.
 
-## Marcos já implementados nesta migração
+## Fronteira UEFI
 
-- `BakenBootInfo v2` versionado, preservando temporariamente o prefixo legado;
-- coleta real de `GetMemoryMap`, `descriptor_size` e `descriptor_version`;
-- localização real da ACPI RSDP por GUID completa;
-- inventário PMM do Memory Map sem alocar páginas enquanto Boot Services ainda vivem;
-- enumeração PCI por `0xCF8/0xCFC` em modo somente leitura;
-- leitura de BARs sem sizing destrutivo por `0xFFFFFFFF` durante varredura global;
-- nenhuma habilitação automática de Bus Master/I/O Space durante discovery;
-- backend GOP identificado corretamente como rasterização por CPU;
-- remoção da escrita cega de `IA32_PAT` no driver de display;
-- guardrails de testes para impedir regressão dessas fronteiras.
+`BOOTX64.EFI` possui somente responsabilidades de bootstrap:
 
-Ainda não estão implementados e não devem ser simulados:
+1. localizar/configurar GOP e registrar o framebuffer;
+2. localizar ACPI RSDP;
+3. reservar arena de page tables e stack de transição;
+4. registrar a imagem carregada;
+5. obter o Memory Map final;
+6. construir as page tables de transição a partir do mapa que produz o `MapKey`;
+7. executar `ExitBootServices()` com retry correto;
+8. trocar para stack Baken e transferir controle para `sotlas_x86_post_cutover_entry`.
 
-- `ExitBootServices()` antes do kernel normal;
-- PMM allocator ativo;
-- VMM/page tables próprias;
-- mapping PAT/WC real do framebuffer;
-- GDT/IDT/TSS próprios carregados pelo kernel;
-- APIC/IOAPIC e interrupções nativas completas;
-- USB xHCI/HID e I2C-HID completos;
-- NVMe/AHCI nativos na rota normal;
-- command submission real para GPU.
+Depois de `ExitBootServices()`, nenhum Boot Service ou Runtime Service pode ser chamado novamente. O kernel não depende de Pointer Protocol, Block I/O UEFI, timers/eventos UEFI ou `EFI_SYSTEM_TABLE`.
 
-## Fronteiras obrigatórias
+O framebuffer descoberto por GOP continua utilizável como recurso físico, mas seu mapping e política de cache são responsabilidade do VMM/PAT Baken.
 
-### Python
+## BootInfo alvo
 
-`tools/sotlas_compile/` pertence ao host. Pode implementar lexer, parser, AST, análise semântica, IR, lowering, ABI, backend x86-64, linker orchestration e intrínsecos de baixo nível.
+`BakenBootInfo v2` mantém 192 bytes por estabilidade ABI. Os offsets 48..79, que historicamente transportavam ponteiros de firmware, agora são reservas zeradas (`reserved_abi_0..3`).
 
-Não pode implementar wallpaper, dock, cursor, janelas, installer, OOBE, shimmer, compositor, drivers ou lógica específica de dispositivos.
-
-### UEFI
-
-`BOOTX64.EFI` deve ter somente responsabilidades de bootstrap:
-
-1. localizar/carregar o kernel;
-2. obter GOP e registrar endereço físico, tamanho, pitch e formato do framebuffer;
-3. obter `GetMemoryMap`;
-4. localizar ACPI RSDP;
-5. opcionalmente coletar SMBIOS e outros descritores passivos;
-6. construir `BakenBootInfo` somente com dados estáveis após o handoff;
-7. executar `ExitBootServices()` com retry correto se o map key mudar;
-8. transferir controle para `baken_kernel_main`.
-
-Depois de `ExitBootServices()`, o kernel não deve depender de `EFI_SIMPLE_POINTER_PROTOCOL`, `EFI_ABSOLUTE_POINTER_PROTOCOL`, `EFI_BLOCK_IO_PROTOCOL`, timers UEFI, eventos UEFI ou outras interfaces de Boot Services.
-
-O framebuffer descoberto pelo GOP pode continuar sendo usado porque seu endereço físico é conhecido, mas seu mapeamento e política de cache passam a ser responsabilidade do VMM/PAT do Baken.
-
-### Kernel
-
-O kernel é responsável por GDT/IDT/TSS/exceções, PMM/VMM/heap/DMA, PAT, ACPI/APIC/IOAPIC/timers, PCI/PCIe, scheduler, input HAL, storage e Graphics API/compositor/backends.
-
-### UI
-
-Installer, OOBE, desktop, dock, janelas, animações e widgets devem existir em Sotlas e consumir APIs do Baken. Eles não acessam GOP, MSR, PCI ou MMIO diretamente.
-
-## Estado transitório atual
-
-A árvore ainda possui dívida de migração no bootloader. Pointer Protocol, Block I/O e SystemTable atravessam o handoff, e o kernel ainda roda antes do corte final de `ExitBootServices()`.
-
-Essas pontes são legado transitório, não arquitetura final. Nenhuma nova funcionalidade pode depender delas.
-
-A remoção deve ocorrer em ordem segura:
-
-1. implementar entrada nativa suficiente para substituir pointer UEFI;
-2. implementar block device nativo suficiente para substituir Block I/O UEFI;
-3. completar PMM/VMM e preservar o mapa de memória;
-4. estabilizar o BootInfo bare-metal;
-5. executar `ExitBootServices()` antes de `baken_kernel_main`;
-6. remover os campos e caminhos de runtime UEFI restantes.
-
-## Marco implementado: BakenBootInfo v2 + Memory Map + ACPI
-
-O `BakenBootInfo v2` já está implementado como envelope de transição, com validação no ponto de entrada Sotlas.
-
-O bootloader coleta um snapshot real do UEFI Memory Map usando a negociação de tamanho com `EFI_BUFFER_TOO_SMALL`, aloca um buffer com folga e registra `memory_descriptor_size` e `memory_descriptor_version`.
-
-Ele também localiza a ACPI RSDP por GUID completa, preferindo ACPI 2.0 e usando 1.0 como fallback. Framebuffer, pixel format, versão, tamanho e flags do handoff também são preenchidos.
-
-O kernel valida versão, tamanho mínimo, framebuffer, dimensões e pitch antes de inicializar a sessão gráfica.
-
-Como o runtime ainda usa Boot Services depois da entrada do kernel, esse snapshot **não é ainda o memory map final associado ao map key do ExitBootServices**. O map final será recapturado imediatamente antes do cutover.
-
-## BakenBootInfo v2 — envelope de transição
-
-Para evitar quebrar o ABI do runtime atual, o v2 preserva os primeiros 80 bytes do layout legado e adiciona depois metadados necessários ao futuro handoff bare-metal:
-
-```text
-legacy-compatible prefix (temporário)
-├── framebuffer
-├── memory map pointer/size
-├── SystemTable            [LEGADO]
-├── Pointer Protocol       [LEGADO]
-├── Block I/O              [LEGADO]
-└── Install target BlockIO [LEGADO]
-
-v2 extension
-├── version
-├── struct_size
-├── flags
-├── memory_descriptor_size
-├── memory_descriptor_version
-├── pixel_format
-└── acpi_rsdp
-```
-
-Ele **não é o contrato final**. Depois que input, timer e storage nativos substituírem as pontes de firmware, um ABI limpo removerá os ponteiros UEFI e será usado somente depois de `ExitBootServices()`.
-
-## BootInfo alvo pós-cutover
-
-```text
-BakenBootInfo
-├── version
-├── struct_size
-├── flags
-├── framebuffer
-│   ├── physical_base
-│   ├── byte_size
-│   ├── width
-│   ├── height
-│   ├── pixels_per_scanline
-│   └── pixel_format
-├── memory_map
-│   ├── address
-│   ├── size
-│   ├── descriptor_size
-│   └── descriptor_version
-├── acpi_rsdp
-├── kernel image metadata
-└── initrd/system image metadata
-```
-
-Não fazem parte do BootInfo final:
+Não fazem parte do contrato executável pós-cutover:
 
 ```text
 EFI_SYSTEM_TABLE*
@@ -160,184 +47,142 @@ EFI_BLOCK_IO_PROTOCOL*
 EFI_BOOT_SERVICES*
 ```
 
+O contexto nativo `PostCutoverContext` contém apenas dados estáveis necessários depois do corte: CR3 raiz, stack, framebuffer, snapshot final de memória, ACPI RSDP e metadados da arena de page tables.
+
+O snapshot recebido do bootstrap preserva o layout POD de 40 bytes do descritor para estabilidade binária, mas a API interna do kernel usa nomenclatura Baken (`BootMemoryDescriptor`, `BAKEN_BOOT_MEMORY_*`, `boot_memory_*`).
+
 ## Fundação x86-64
 
-A ordem de inicialização deve evoluir para:
+A sequência canônica implementada é:
 
 ```text
-kernel_entry
-    -> early serial/debug
-    -> GDT/TSS
-    -> IDT/exceptions
-    -> PMM
-    -> VMM/page tables próprias
-    -> PAT/cache policy
-    -> ACPI
-    -> LAPIC/IOAPIC
-    -> timers
-    -> scheduler
-    -> PCI/PCIe
-    -> DMA
-    -> drivers
-    -> compositor
-    -> desktop shell
+UEFI bootstrap
+    -> final Memory Map / MapKey
+    -> page tables de transição + W^X + guard stack
+    -> ExitBootServices()
+    -> stack switch
+    -> CR3 Baken
+    -> GDT/TSS/IDT
+    -> PMM allocator
+    -> VMM / active page tables
+    -> ACPI / MADT
+    -> LAPIC / IOAPIC
+    -> IRQs
+    -> LAPIC timer live
+    -> PCI / DMA / drivers nativos
+    -> PAT/WC framebuffer
+    -> Baken native runtime
 ```
 
-UEFI já entrega a CPU x86-64 em long mode em uma inicialização UEFI normal; o trabalho do Baken é assumir o controle desse ambiente e estabelecer suas próprias tabelas, descritores e políticas.
+### Núcleo obrigatório
 
-### Pré-requisito do backend Sotlas para GDT/IDT/TSS
+As seguintes invariantes são fail-closed: se falharem, o kernel não possui um ambiente seguro para continuar:
 
-O compilador canônico ainda precisa de lowering explícito para instruções privilegiadas que não podem ser representadas como funções comuns: `lgdt`, `lidt`, `ltr`, leitura de `CR2`, `invlpg` e operações de controle de paginação relacionadas.
+- contexto pós-cutover válido;
+- CR3/page tables próprias;
+- GDT/TSS/IDT;
+- PMM allocator e VMM;
+- ACPI/MADT;
+- LAPIC/IOAPIC e infraestrutura de IRQ;
+- timer nativo funcional;
+- mapping PAT/WC válido do framebuffer antes do runtime gráfico.
 
-Essas operações devem ser intrínsecos do backend x86-64, com assinatura Sotlas estável e emissão de instrução real. Elas **não** serão implementadas como lógica visual, strings de assembly escondidas em módulos de UI ou stubs que apenas retornam sucesso.
+### Hardware opcional e certificação
 
-Somente depois desses intrínsecos existirem e tiverem testes de codegen os módulos GDT/IDT/TSS serão conectados à entrada do kernel.
+PS/2, xHCI/USB HID e um controlador/storage específico são backends de hardware, não pré-condições universais para existir um kernel válido. O boot normal tenta esses backends sem bloquear indefinidamente só porque um dispositivo não está presente.
 
-## PMM
-
-O estágio atual é um **inventário**, não um allocator. Ele interpreta descritores UEFI reais, contabiliza regiões convencionais, ACPI e MMIO e identifica limites físicos.
-
-Enquanto `BAKEN_BOOT_INFO_FLAG_UEFI_BRIDGE_ACTIVE` existir, `EfiConventionalMemory` não pode ser entregue como página livre pelo PMM: Boot Services ainda podem consumir essa memória.
-
-`pmm_alloc_page`/`pmm_free_page` só serão ativados depois do cutover, usando o último Memory Map válido obtido imediatamente antes de `ExitBootServices()`.
-
-## Memória e PAT
-
-O framebuffer deve ser mapeado como Write-Combining quando suportado. Não basta escrever `IA32_PAT`: a entrada PAT correta deve ser selecionada pelos bits PAT/PCD/PWT das page tables.
+A certificação de CI é deliberadamente mais rigorosa. O marcador:
 
 ```text
-normal RAM / backbuffer = WB
-framebuffer GOP         = WC
-MMIO                     = UC, salvo exigência explícita do dispositivo
+BAKEN:BARE_METAL_READY
 ```
 
-O `display_driver` não escreve `IA32_PAT`. Ele só poderá registrar `framebuffer_wc_active=true` depois que o VMM tiver instalado e confirmado o mapping correto.
+só é emitido quando a fixture QEMU prova toda a cadeia configurada: timer, teclado, xHCI/USB HID, AHCI, Block Device, GPT redundante, MBR/FAT32, NVMe e PAT/WC.
 
-## ACPI e interrupções
+Portanto `BAKEN:BARE_METAL_READY` significa **fundação completa comprovada na fixture**, não simplesmente “o desktop começou”.
 
-ACPI deve fornecer pelo menos RSDP/XSDT, MADT, MCFG e FADT, expandindo depois para DSDT/SSDT e AML.
+## Memória
 
-O IOAPIC não deve assumir mapeamento fixo de IRQ legado:
+O kernel possui PMM allocator pós-`ExitBootServices()` e VMM ativo sobre as page tables próprias. O mapa final é consumido como dados do handoff, sem reentrada em firmware.
+
+Política de cache:
 
 ```text
-MADT -> Interrupt Source Override -> GSI -> IOAPIC -> vetor IDT
+RAM/backbuffer = WB
+framebuffer    = WC
+MMIO           = UC salvo exigência explícita do dispositivo
 ```
 
-## PCI / PCIe
+O framebuffer WC é instalado pelo caminho de page tables/PAT do kernel e não pelo driver de display de forma isolada.
 
-A enumeração global PCI é somente leitura:
+## ACPI, interrupções e timer
 
-```text
-pci_scan_all()
- -> Vendor/Device/Class
- -> Header Type
- -> Command atual
- -> BAR base/flags atuais
-```
+ACPI fornece o inventário de plataforma; MADT alimenta LAPIC/IOAPIC e roteamento de interrupções. O kernel carrega IDT própria e habilita interrupções somente depois das estruturas necessárias estarem válidas.
 
-Durante discovery ela não habilita Bus Master, I/O Space ou Memory Space e não dimensiona BARs escrevendo `0xFFFFFFFF`. Cada driver deve solicitar explicitamente somente os command bits que utiliza, depois de validar recursos, DMA e MMIO.
+O timer pós-cutover é nativo e comprovado por IRQ real. Não há espera baseada em `Stall()` ou evento UEFI.
 
-PCIe ECAM será adicionado a partir da tabela ACPI MCFG.
+## PCI, DMA e USB
 
-## Input
+A enumeração PCI global é conservadora. Drivers habilitam explicitamente somente command bits que realmente precisam, após validar MMIO e recursos.
 
-```text
-i8042/PS2 ----\
-USB HID -------+-> Input HAL -> Event Normalizer -> Ring Buffer -> Window Manager
-I2C-HID -------/
-```
+DMA é alocado pelo PMM e compartilhado explicitamente com dispositivos. xHCI possui caminho nativo de reset, rings, event ring, commands, enumeration, EP0 e HID Interrupt IN.
 
-PS/2 é um backend, não garantia universal de touchpad. Notebooks modernos podem exigir ACPI + I2C + HID-over-I2C.
-
-## Graphics Architecture
-
-```text
-Desktop / Apps
-    -> Baken Graphics API
-    -> Compositor / Rasterizer
-    -> Graphics Device HAL
-       -> software framebuffer backend
-       -> VirtIO-GPU
-       -> driver Intel nativo posterior
-```
-
-O backend GOP atual é software e deve reportar `is_hardware_accelerated=false`. Encontrar uma GPU por PCI não promove o backend.
-
-O backend universal inicial usa backbuffer WB, `DamageRegion` com múltiplos retângulos e cópia apenas das regiões alteradas para framebuffer WC depois que o VMM/PAT estiver ativo.
-
-PCI discovery e BAR mapping apenas descobrem a GPU. Aceleração real exige driver específico com MMIO, memória/contexts, queues/rings, command buffers, fences e present/scanout.
+PS/2 e USB HID são backends independentes do Input HAL; xHCI não depende da existência de teclado PS/2.
 
 ## Storage
 
-```text
-NVMe/AHCI
- -> Block Device API
- -> GPT
- -> filesystem
- -> installer
-```
+A pilha nativa possui AHCI, NVMe e Block Device API, com GPT/MBR/FAT32 acima da camada de bloco.
 
-GPT e FAT32 devem ser calculados dinamicamente a partir do tamanho lógico de bloco e do volume real.
+Os probes destrutivos de certificação só escrevem depois de reconhecer a assinatura específica da fixture de teste. Mídia comum não deve ser tratada como dispositivo de certificação.
 
-A leitura GPT fixa de 512 bytes ainda presente no bootloader é compatibilidade temporária da mídia atual e não deve migrar para a camada storage nativa.
-
-## Scheduler e DMA
-
-xHCI, NVMe, VirtIO e GPUs dependem de DMA. Deve existir API central de DMA com endereço virtual, endereço físico, tamanho e alinhamento.
-
-Input, storage, compositor e USB não devem permanecer em um único polling loop; a evolução inclui kernel threads, ready queue, sleep queue, timer e context switch.
-
-## Ordem de implementação
+A evolução de produto deve manter separados:
 
 ```text
-0. Sotlas compiler/backend e intrínsecos confiáveis
-1. BootInfo v2 + GetMemoryMap + ACPI handoff            [IMPLEMENTADO]
-2. PMM inventory                                       [IMPLEMENTADO]
-3. PCI discovery read-only                             [IMPLEMENTADO]
-4. intrínsecos x86-64 para GDT/IDT/TSS                 [PRÓXIMO]
-5. GDT/IDT/TSS/exceptions
-6. PMM allocator pós-cutover + VMM/heap/PAT
-7. ACPI/APIC/IOAPIC/timers
-8. scheduler + PCIe ECAM + DMA
-9. framebuffer/backbuffer/DamageRegion/compositor
-10. i8042 + Input HAL
-11. xHCI + USB HID
-12. AHCI/NVMe + Block API
-13. GPT/FAT32 + installer real
-14. AML + I2C-HID
-15. VirtIO-GPU
-16. Intel GPU nativa
-17. ExitBootServices cutover + remoção final das pontes UEFI
+boot normal: descoberta/inicialização tolerante à ausência de backends
+certificação: probes rigorosos e reproduzíveis sobre mídia conhecida
 ```
 
-## Testes arquiteturais
+## Gráficos e UI
 
-A suíte deve garantir:
+Installer, OOBE, desktop, dock, janelas, animações e widgets pertencem a Sotlas e consomem APIs do Baken. Não acessam GOP, UEFI, PCI ou MMIO como atalhos de UI.
 
-- `compiler.py`/`bootstrap.py` sem UI específica;
-- ausência da antiga ponte monolítica;
-- layout/versionamento de `BakenBootInfo`;
-- metadados de Memory Map e ACPI no v2;
-- PMM sem allocator enquanto a ponte UEFI existir;
-- PCI scan sem habilitação automática de dispositivos;
-- BAR discovery sem sizing destrutivo;
-- backend GOP sem aceleração GPU fictícia;
-- ausência de escrita cega de PAT no display;
-- ausência de novos consumidores das pontes UEFI;
-- PAT/PTE encoding, VMM, ACPI, DamageRegion, ring buffers, GPT/CRC32 e FAT32 conforme entrarem na rota;
-- boot pós-`ExitBootServices()` no momento do cutover.
+O backend framebuffer é software até existir um driver GPU real. Descoberta PCI de uma GPU não equivale a aceleração.
 
-## Critério de conclusão
+## Compilador Sotlas
+
+`tools/sotlas_compile/` pertence ao host e pode implementar lexer, parser, AST, análise semântica, IR, lowering, ABI, backend x86-64, link orchestration e intrínsecos arquiteturais.
+
+Ele não pode implementar wallpaper, dock, cursor, janelas, installer, OOBE, compositor ou lógica específica de dispositivos.
+
+Python, MinGW, QEMU, OVMF e GitHub Actions são dependências de desenvolvimento/build/teste, não dependências de runtime do kernel. Self-hosting do compilador é um marco futuro separado.
+
+## Auditoria e critérios de regressão
+
+A suíte deve impedir:
+
+- retorno de `baken_efi_*`, `uefi_*`, `Efi*`, `EFI_*`, Boot/Runtime Services no grafo pós-cutover;
+- reintrodução da antiga ponte `baken_runtime.sotlas` ou `cutover_plan.sotlas`;
+- UI específica dentro do compilador;
+- transporte de Pointer Protocol/Block I/O pelo loader;
+- ativação fictícia de GPU;
+- PAT/WC sem page-table encoding real;
+- storage/USB simulados que apenas retornam sucesso;
+- regressão da ordem de ativação CPU -> memória -> ACPI -> interrupções -> timer -> runtime.
+
+O auditor `tools/scripts/audit_post_cutover.py` percorre o grafo direto alcançável a partir das entradas pós-cutover e falha para símbolos de firmware. Chamadas opacas no limite dos intrínsecos x86 continuam sujeitas a revisão explícita.
+
+## Critério de conclusão da fundação
+
+A fundação x86-64 é considerada fechada quando o head atual da `main` comprova simultaneamente:
 
 ```text
-Firmware UEFI
- -> BOOTX64.EFI
- -> GOP + Memory Map + ACPI + kernel load
- -> ExitBootServices()
- -> Baken kernel
- -> Baken drivers
- -> Baken compositor
- -> Desktop Shell
+Test Suite                    PASS
+Sotlas modular graph          PASS
+Native kernel build           PASS
+UEFI ISO build                PASS
+QEMU post-cutover boot        PASS
+BAKEN:BARE_METAL_READY        PRESENT
+zero firmware reentry audit   PASS
 ```
 
-sem dependência de serviços UEFI para input, storage, temporização ou lógica de desktop.
+Depois desse ponto, scheduler/multitarefa, heap de propósito geral mais sofisticado, AML/I2C-HID, rede, áudio, drivers GPU e expansão da UI são **camadas seguintes do sistema**, não pré-requisitos para declarar a fundação bare-metal concluída.
