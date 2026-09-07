@@ -12,6 +12,7 @@ pub const IDT_VECTOR_COUNT: usize = 256;
 pub const IDT_EXCEPTION_COUNT: u16 = 32;
 pub const IDT_GATE_INTERRUPT: u8 = 0x8E;
 pub const IDT_GATE_TRAP: u8 = 0x8F;
+pub const IDT_GATE_USER_INTERRUPT: u8 = 0xEE;
 
 pub const IDT_VECTOR_NMI: u16 = 2;
 pub const IDT_VECTOR_BREAKPOINT: u16 = 3;
@@ -108,6 +109,20 @@ pub fn idt_set_irq_gate(vector: u16, handler: u64) -> bool {
         GDT_KERNEL_CODE_SELECTOR,
         0,
         IDT_GATE_INTERRUPT
+    );
+}
+
+// Gate de software explicitamente acessível de CPL3. O handler continua em
+// código de kernel (selector 0x08); somente a autorização DPL muda para 3.
+@system
+pub fn idt_set_user_irq_gate(vector: u16, handler: u64) -> bool {
+    if vector < IDT_EXCEPTION_COUNT || vector >= IDT_VECTOR_COUNT as u16 { return false; }
+    return idt_set_gate(
+        vector,
+        handler,
+        GDT_KERNEL_CODE_SELECTOR,
+        0,
+        IDT_GATE_USER_INTERRUPT
     );
 }
 

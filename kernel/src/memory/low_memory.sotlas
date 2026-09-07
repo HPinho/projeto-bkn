@@ -1,0 +1,63 @@
+// Baken OS — reserva explícita de uma página de memória baixa para bootstrap SMP.
+//
+// O PMM geral deliberadamente não publica páginas abaixo de 1 MiB. Esta unidade
+// usa o snapshot final do mapa de memória apenas para escolher uma página que o
+// firmware declarou EfiConventionalMemory. A página escolhida permanece
+// reservada até desligamento, pois o trampoline/GDT podem continuar referenciados
+// por CPUs secundárias estacionadas.
+
+module kernel::memory::low_memory;
+
+import kernel::memory::pmm::*;
+import kernel::arch::x86_64::paging::*;
+
+pub const LOW_MEMORY_SMP_MIN: u64 = 0x00010000;
+pub const LOW_MEMORY_SMP_LIMIT: u64 = 0x000A0000;
+
+static mut LOW_MEMORY_SMP_TRAMPOLINE: u64 = 0;
+
+@system
+pub fn low_memory_claim_smp_trampoline_page() -> u64 {
+    unsafe {
+        if LOW_MEMORY_SMP_TRAMPOLINE != 0 { return LOW_MEMORY_SMP_TRAMPOLINE; }
+    }
+    if !pmm_inventory_is_valid() { return 0; }
+
+    let mut best: u64 = 0;
+    let mut ordinal: u64 = 0;
+    let descriptor_limit = pmm_get_descriptor_count();
+    while ordinal < descriptor_limit {
+        let region = pmm_get_conventional_region(ordinal);
+        if !region.valid { break; }
+        ordinal += 1;
+        if region.base == 0 || region.page_count == 0 { continue; }
+
+        let bytes = region.page_count * BAKEN_PAGE_SIZE;
+        if bytes / BAKEN_PAGE_SIZE != region.page_count { return 0; }
+        let region_end = region.base + bytes;
+        if region_end <= region.base { return 0; }
+
+        let mut usable_start = region.base;
+        if usable_start < LOW_MEMORY_SMP_MIN { usable_start = LOW_MEMORY_SMP_MIN; }
+        usable_start = x86_page_align_up(usable_start);
+
+        let mut usable_end = region_end;
+        if usable_end > LOW_MEMORY_SMP_LIMIT { usable_end = LOW_MEMORY_SMP_LIMIT; }
+        if usable_end <= usable_start || usable_end < BAKEN_PAGE_SIZE { continue; }
+
+        let candidate_limit = usable_end - BAKEN_PAGE_SIZE;
+        let candidate = x86_page_align_down(candidate_limit);
+        if candidate < usable_start || candidate < LOW_MEMORY_SMP_MIN { continue; }
+        if candidate + BAKEN_PAGE_SIZE > usable_end { continue; }
+        if candidate > best { best = candidate; }
+    }
+
+    if best == 0 || !x86_page_aligned(best) || best >= LOW_MEMORY_SMP_LIMIT { return 0; }
+    unsafe { LOW_MEMORY_SMP_TRAMPOLINE = best; }
+    return best;
+}
+
+@system
+pub fn low_memory_smp_trampoline_page() -> u64 {
+    unsafe { return LOW_MEMORY_SMP_TRAMPOLINE; }
+}

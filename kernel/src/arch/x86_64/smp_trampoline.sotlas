@@ -1,0 +1,128 @@
+// Baken OS — trampoline físico INIT/SIPI para Application Processors x86-64.
+//
+// O blob começa em real mode, carrega uma GDT mínima, habilita PAE + EFER.LME
+// + EFER.NXE, instala o CR3 já pertencente ao Baken e entra em long mode. Em
+// seguida publica o flag de online e salta para a rotina idle nativa do kernel.
+
+module kernel::arch::x86_64::smp_trampoline;
+
+import kernel::memory::direct_map::*;
+import kernel::arch::x86_64::paging::*;
+
+pub const SMP_TRAMPOLINE_BYTES: usize = 166;
+pub const SMP_TRAMPOLINE_PAGE_BYTES: usize = 4096;
+pub const SMP_TRAMPOLINE_GDTR_OFFSET: usize = 0x0B;
+pub const SMP_TRAMPOLINE_CR3_LOAD_OFFSET: usize = 0x19;
+pub const SMP_TRAMPOLINE_LONG_JUMP_OFFSET: usize = 0x3C;
+pub const SMP_TRAMPOLINE_STACK_OFFSET: usize = 0x4E;
+pub const SMP_TRAMPOLINE_READY_OFFSET: usize = 0x60;
+pub const SMP_TRAMPOLINE_IDLE_OFFSET: usize = 0x73;
+pub const SMP_TRAMPOLINE_CR3_VALUE_OFFSET: usize = 0x80;
+pub const SMP_TRAMPOLINE_GDT_OFFSET: usize = 0x88;
+pub const SMP_TRAMPOLINE_GDT_POINTER_OFFSET: usize = 0xA0;
+pub const SMP_TRAMPOLINE_GDT_BASE_OFFSET: usize = 0xA2;
+pub const SMP_TRAMPOLINE_LONG_MODE_OFFSET: u64 = 0x42;
+
+static mut SMP_TRAMPOLINE_TEMPLATE: [u8; SMP_TRAMPOLINE_BYTES] = [
+    250, 252, 140, 200, 142, 216, 142, 192, 15, 1, 22, 0, 0, 15, 32, 224,
+    102, 131, 200, 32, 15, 34, 224, 102, 161, 0, 0, 15, 34, 216, 102, 185,
+    128, 0, 0, 192, 15, 50, 102, 13, 0, 9, 0, 0, 15, 48, 15, 32,
+    192, 102, 13, 1, 0, 0, 128, 15, 34, 192, 102, 234, 0, 0, 0, 0,
+    8, 0, 102, 184, 16, 0, 142, 216, 142, 192, 142, 208, 72, 188, 34, 34,
+    34, 34, 17, 17, 17, 17, 72, 131, 228, 240, 72, 131, 236, 40, 72, 184,
+    68, 68, 68, 68, 51, 51, 51, 51, 199, 0, 1, 0, 0, 0, 15, 174,
+    240, 72, 184, 102, 102, 102, 102, 85, 85, 85, 85, 255, 224, 15, 31, 0,
+    119, 119, 119, 119, 144, 15, 31, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    255, 255, 0, 0, 0, 154, 175, 0, 255, 255, 0, 0, 0, 146, 207, 0,
+    23, 0, 136, 136, 136, 136
+];
+
+@system
+fn smp_trampoline_write_u16(base: *mut u8, offset: usize, value: u16) -> void {
+    unsafe {
+        base[offset] = (value & 0xFF) as u8;
+        base[offset + 1] = ((value >> 8) & 0xFF) as u8;
+    }
+}
+
+@system
+fn smp_trampoline_write_u32(base: *mut u8, offset: usize, value: u32) -> void {
+    unsafe {
+        let mut index: usize = 0;
+        while index < 4 {
+            base[offset + index] = ((value >> ((index as u32) * 8)) & 0xFF) as u8;
+            index += 1;
+        }
+    }
+}
+
+@system
+fn smp_trampoline_write_u64(base: *mut u8, offset: usize, value: u64) -> void {
+    unsafe {
+        let mut index: usize = 0;
+        while index < 8 {
+            base[offset + index] = ((value >> ((index as u64) * 8)) & 0xFF) as u8;
+            index += 1;
+        }
+    }
+}
+
+@system
+pub fn smp_trampoline_vector(physical: u64) -> u8 {
+    if physical == 0 || physical >= 0x00100000 || !x86_page_aligned(physical) { return 0; }
+    let vector = physical >> 12;
+    if vector == 0 || vector > 0xFF { return 0; }
+    return vector as u8;
+}
+
+@system
+pub fn smp_trampoline_build(physical: u64,
+                            root_physical: u64,
+                            stack_top: u64,
+                            ready_address: u64,
+                            idle_entry: u64) -> bool {
+    if smp_trampoline_vector(physical) == 0 { return false; }
+    if root_physical == 0 || !x86_page_aligned(root_physical) || root_physical > 0xFFFFFFFF { return false; }
+    if stack_top == 0 || (stack_top & 15) != 0 || ready_address == 0 || idle_entry == 0 { return false; }
+    if physical + SMP_TRAMPOLINE_PAGE_BYTES as u64 > 0x00100000 { return false; }
+
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 { return false; }
+    let base = virtual_address as *mut u8;
+
+    unsafe {
+        let mut index: usize = 0;
+        while index < SMP_TRAMPOLINE_PAGE_BYTES {
+            base[index] = 0;
+            index += 1;
+        }
+        index = 0;
+        while index < SMP_TRAMPOLINE_BYTES {
+            base[index] = SMP_TRAMPOLINE_TEMPLATE[index];
+            index += 1;
+        }
+    }
+
+    smp_trampoline_write_u16(base, SMP_TRAMPOLINE_GDTR_OFFSET,
+                             SMP_TRAMPOLINE_GDT_POINTER_OFFSET as u16);
+    smp_trampoline_write_u16(base, SMP_TRAMPOLINE_CR3_LOAD_OFFSET,
+                             SMP_TRAMPOLINE_CR3_VALUE_OFFSET as u16);
+    smp_trampoline_write_u32(base, SMP_TRAMPOLINE_LONG_JUMP_OFFSET,
+                             (physical + SMP_TRAMPOLINE_LONG_MODE_OFFSET) as u32);
+    smp_trampoline_write_u64(base, SMP_TRAMPOLINE_STACK_OFFSET, stack_top);
+    smp_trampoline_write_u64(base, SMP_TRAMPOLINE_READY_OFFSET, ready_address);
+    smp_trampoline_write_u64(base, SMP_TRAMPOLINE_IDLE_OFFSET, idle_entry);
+    smp_trampoline_write_u32(base, SMP_TRAMPOLINE_CR3_VALUE_OFFSET, root_physical as u32);
+    smp_trampoline_write_u32(base, SMP_TRAMPOLINE_GDT_BASE_OFFSET,
+                             (physical + SMP_TRAMPOLINE_GDT_OFFSET as u64) as u32);
+    __dma_fence();
+
+    unsafe {
+        if base[SMP_TRAMPOLINE_GDTR_OFFSET] != 0xA0 ||
+           base[SMP_TRAMPOLINE_CR3_LOAD_OFFSET] != 0x80 ||
+           base[SMP_TRAMPOLINE_CR3_VALUE_OFFSET] != (root_physical & 0xFF) as u8 {
+            return false;
+        }
+    }
+    return true;
+}

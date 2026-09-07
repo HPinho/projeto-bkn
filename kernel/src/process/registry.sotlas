@@ -1,10 +1,11 @@
 // Registro BSP de processos: ownership das tabelas e lifetime por referências.
 // PID 0 é reservado ao kernel. Não expõe cópias owning de ProcessAddressSpace.
-// IRQ-off é exclusão apenas local; este módulo ainda não suporta SMP.
+// IRQ-off é exclusão local; SMP só poderá remover esta limitação com locks reais.
 module kernel::process::registry;
 
 import kernel::process::address_space::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::pmm_allocator::*;
 
@@ -15,10 +16,8 @@ pub const PROCESS_ID_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
 static mut PROCESS_IDS: [u64; PROCESS_SLOT_COUNT] = [0; PROCESS_SLOT_COUNT];
 static mut PROCESS_REFERENCES: [u64; PROCESS_SLOT_COUNT] = [0; PROCESS_SLOT_COUNT];
 static mut PROCESS_SPACES: [ProcessAddressSpace; PROCESS_SLOT_COUNT] = [
-    ProcessAddressSpace {
-        table_base_physical: 0, root_physical: 0, user_pdpt_physical: 0,
-        user_pd_physical: 0, user_pt_physical: 0, valid: false
-    }; PROCESS_SLOT_COUNT
+    ProcessAddressSpace { table_base_physical: 0, root_physical: 0, user_pdpt_physical: 0,
+        user_pd_physical: 0, user_pt_physical: 0, valid: false }; PROCESS_SLOT_COUNT
 ];
 static mut PROCESS_NEXT_ID: u64 = 1;
 static mut PROCESS_REGISTRY_READY: bool = false;
@@ -39,7 +38,6 @@ fn process_find_locked(pid: u64) -> usize {
 @system
 fn process_create_locked() -> u64 {
     unsafe {
-        // Não permitir wrap nem reciclar a identidade de um processo morto.
         if PROCESS_NEXT_ID == 0 || PROCESS_NEXT_ID == PROCESS_ID_MAX { return 0; }
         let mut slot: usize = 0;
         while slot < PROCESS_SLOT_COUNT {
@@ -65,7 +63,6 @@ fn process_destroy_locked(pid: u64) -> bool {
     if slot == PROCESS_INVALID_SLOT { return false; }
     unsafe {
         if PROCESS_REFERENCES[slot] != 0 { return false; }
-        // Também rejeita raiz ativa e tabelas com páginas user ainda mapeadas.
         if !process_address_space_destroy(&mut PROCESS_SPACES[slot]) { return false; }
         PROCESS_IDS[slot] = 0;
     }
@@ -94,8 +91,6 @@ fn process_release_locked(pid: u64) -> bool {
     return true;
 }
 
-// APIs kernel-only. Uma futura thread deve reter antes de publicar o vínculo e
-// liberar apenas no reaper, depois de deixar de executar sob a raiz do processo.
 @system
 pub fn process_create() -> u64 {
     let flags = x86_irq_save_disable();
@@ -122,8 +117,15 @@ pub fn process_retain(pid: u64) -> bool {
 }
 
 @system
+pub fn process_release(pid: u64) -> bool {
+    let flags = x86_irq_save_disable();
+    let result = process_release_locked(pid);
+    x86_irq_restore(flags);
+    return result;
+}
+
+@system
 pub fn process_borrow_root(pid: u64) -> u64 {
-    // Borrow válido apenas enquanto o chamador mantiver uma referência.
     let flags = x86_irq_save_disable();
     let slot = process_find_locked(pid);
     let mut root: u64 = 0;
@@ -137,11 +139,77 @@ pub fn process_borrow_root(pid: u64) -> u64 {
 }
 
 @system
-pub fn process_release(pid: u64) -> bool {
+pub fn process_reference_count(pid: u64) -> u64 {
     let flags = x86_irq_save_disable();
-    let result = process_release_locked(pid);
+    let slot = process_find_locked(pid);
+    let mut count: u64 = 0;
+    unsafe { if slot != PROCESS_INVALID_SLOT { count = PROCESS_REFERENCES[slot]; } }
+    x86_irq_restore(flags);
+    return count;
+}
+
+@system
+pub fn process_current_id() -> u64 {
+    let root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+    let flags = x86_irq_save_disable();
+    let mut pid: u64 = 0;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < PROCESS_SLOT_COUNT {
+            if PROCESS_IDS[slot] != 0 && PROCESS_SPACES[slot].valid &&
+               PROCESS_SPACES[slot].root_physical == root {
+                pid = PROCESS_IDS[slot];
+                break;
+            }
+            slot += 1;
+        }
+    }
+    x86_irq_restore(flags);
+    return pid;
+}
+
+@system
+pub fn process_user_pte(pid: u64, address: u64) -> u64 {
+    let flags = x86_irq_save_disable();
+    let slot = process_find_locked(pid);
+    let mut pte: u64 = 0;
+    unsafe {
+        if slot != PROCESS_INVALID_SLOT {
+            pte = process_address_space_user_pte(&PROCESS_SPACES[slot], address);
+        }
+    }
+    x86_irq_restore(flags);
+    return pte;
+}
+
+@system
+pub fn process_map_user_page(pid: u64, address: u64, physical: u64,
+                             writable: bool, executable: bool) -> bool {
+    let flags = x86_irq_save_disable();
+    let slot = process_find_locked(pid);
+    let mut result = false;
+    unsafe {
+        if slot != PROCESS_INVALID_SLOT {
+            result = process_address_space_map_user_page(&mut PROCESS_SPACES[slot], address,
+                                                         physical, writable, executable);
+        }
+    }
     x86_irq_restore(flags);
     return result;
+}
+
+@system
+pub fn process_unmap_user_page(pid: u64, address: u64) -> u64 {
+    let flags = x86_irq_save_disable();
+    let slot = process_find_locked(pid);
+    let mut physical: u64 = 0;
+    unsafe {
+        if slot != PROCESS_INVALID_SLOT {
+            physical = process_address_space_unmap_user_page(&mut PROCESS_SPACES[slot], address);
+        }
+    }
+    x86_irq_restore(flags);
+    return physical;
 }
 
 @system
@@ -149,8 +217,7 @@ fn process_registry_self_test_locked() -> bool {
     let before = pmm_allocator_allocated_pages();
     let mut ids: [u64; PROCESS_SLOT_COUNT] = [0; PROCESS_SLOT_COUNT];
     let mut slot: usize = 0;
-    let mut passed: bool = true;
-    // Provar capacidade real, IDs distintos e falha sem alocar quando cheio.
+    let mut passed = true;
     while slot < PROCESS_SLOT_COUNT {
         ids[slot] = process_create_locked();
         if ids[slot] == 0 { passed = false; break; }
@@ -158,10 +225,7 @@ fn process_registry_self_test_locked() -> bool {
         slot += 1;
     }
     let unexpected = process_create_locked();
-    if unexpected != 0 {
-        passed = false;
-        process_destroy_locked(unexpected);
-    }
+    if unexpected != 0 { passed = false; process_destroy_locked(unexpected); }
     if passed {
         let first = ids[0];
         if process_release_locked(first) { passed = false; }
@@ -171,11 +235,9 @@ fn process_registry_self_test_locked() -> bool {
         if !process_destroy_locked(first) { passed = false; }
         ids[0] = process_create_locked();
         if ids[0] == 0 || ids[0] <= ids[PROCESS_SLOT_COUNT - 1] { passed = false; }
-        if process_retain_locked(first) || process_release_locked(first) ||
-           process_destroy_locked(first) { passed = false; }
+        if process_retain_locked(first) || process_release_locked(first) || process_destroy_locked(first) { passed = false; }
         if process_retain_locked(0) || process_destroy_locked(0) { passed = false; }
     }
-    // Cleanup inclusive em falhas parciais, sem resetar o contador de PID.
     slot = 0;
     while slot < PROCESS_SLOT_COUNT {
         if ids[slot] != 0 && !process_destroy_locked(ids[slot]) { passed = false; }
@@ -200,7 +262,9 @@ pub fn process_registry_activate() -> bool {
 @system
 pub fn process_registry_emit_ready_marker() -> bool {
     unsafe { if !PROCESS_REGISTRY_READY { return false; } }
-    let marker: [u8; 29] = [66, 65, 75, 69, 78, 58, 80, 82, 79, 67, 69, 83, 83, 95, 82, 69, 71, 73, 83, 84, 82, 89, 95, 82, 69, 65, 68, 89, 10];
+    let marker: [u8; 29] = [
+        66,65,75,69,78,58,80,82,79,67,69,83,83,95,82,69,71,73,83,84,82,89,95,82,69,65,68,89,10
+    ];
     let mut index: usize = 0;
     while index < 29 {
         if !x86_serial_write_byte(marker[index]) { return false; }

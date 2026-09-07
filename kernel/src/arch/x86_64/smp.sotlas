@@ -1,0 +1,286 @@
+// Baken OS — base SMP x86-64: descoberta MADT + INIT/SIPI + APs em long mode.
+//
+// Esta fase não habilita scheduler multicore. Cada AP recebe stack própria,
+// entra no mesmo CR3 do kernel, publica presença em memória compartilhada e
+// permanece estacionado no idle nativo com interrupções desabilitadas. Isso
+// estabelece uma fundação SMP real sem introduzir corridas no scheduler BSP.
+
+module kernel::arch::x86_64::smp;
+
+import kernel::acpi::madt::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::arch::x86_64::timer::*;
+import kernel::arch::x86_64::smp_trampoline::*;
+import kernel::interrupts::lapic::*;
+import kernel::memory::active_page_tables::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::low_memory::*;
+import kernel::memory::pmm_allocator::*;
+
+pub const SMP_MAX_CPUS: usize = 32;
+pub const SMP_AP_STACK_PAGES: u64 = 4;
+pub const SMP_INIT_ASSERT_US: u64 = 10000;
+pub const SMP_INIT_DEASSERT_US: u64 = 200;
+pub const SMP_SIPI_GAP_US: u64 = 200;
+pub const SMP_AP_READY_TIMEOUT_US: u64 = 100000;
+
+static mut SMP_AP_READY: [u32; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
+static mut SMP_AP_STACK_PHYSICAL: [u64; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
+static mut SMP_READY: bool = false;
+static mut SMP_ONLINE_CPUS: u32 = 0;
+static mut SMP_STARTED_APS: u32 = 0;
+static mut SMP_TRAMPOLINE_PHYSICAL: u64 = 0;
+
+@system
+fn smp_ready_address(index: usize) -> u64 {
+    if index >= SMP_MAX_CPUS { return 0; }
+    unsafe {
+        let flag: *mut u32 = &mut SMP_AP_READY[index];
+        return flag as u64;
+    }
+}
+
+@system
+fn smp_wait_ap_ready(ready_address: u64, timeout_us: u64) -> bool {
+    if ready_address == 0 || timeout_us == 0 || !x86_timer_is_calibrated() { return false; }
+    let cycles_per_us = x86_timer_cycles_per_us();
+    if cycles_per_us == 0 { return false; }
+    let target = timeout_us * cycles_per_us;
+    if target / cycles_per_us != timeout_us { return false; }
+    let start = x86_timer_read_tsc();
+    loop {
+        if x86_mmio_read32(ready_address) == 1 { return true; }
+        let now = x86_timer_read_tsc();
+        if now >= start && now - start >= target { return false; }
+        x86_cpu_pause();
+    }
+}
+
+@system
+fn smp_release_unstarted_stack(stack_physical: u64) -> void {
+    if stack_physical == 0 { return; }
+    pmm_free_pages(stack_physical, SMP_AP_STACK_PAGES);
+}
+
+@system
+fn smp_start_one_ap(index: usize,
+                    apic_id: u8,
+                    root_physical: u64,
+                    trampoline_physical: u64,
+                    idle_entry: u64) -> bool {
+    if index >= SMP_MAX_CPUS || apic_id == lapic_id() { return false; }
+    let stack_physical = pmm_alloc_pages(SMP_AP_STACK_PAGES);
+    if stack_physical == 0 { return false; }
+    let stack_virtual = direct_map_virtual_address(stack_physical);
+    if stack_virtual == 0 {
+        smp_release_unstarted_stack(stack_physical);
+        return false;
+    }
+    let stack_bytes = SMP_AP_STACK_PAGES * 4096;
+    if stack_bytes / 4096 != SMP_AP_STACK_PAGES {
+        smp_release_unstarted_stack(stack_physical);
+        return false;
+    }
+    let stack_top = stack_virtual + stack_bytes;
+    if stack_top <= stack_virtual || (stack_top & 15) != 0 {
+        smp_release_unstarted_stack(stack_physical);
+        return false;
+    }
+
+    let ready_address = smp_ready_address(index);
+    if ready_address == 0 {
+        smp_release_unstarted_stack(stack_physical);
+        return false;
+    }
+    x86_mmio_write32(ready_address, 0);
+    __dma_fence();
+
+    if !smp_trampoline_build(trampoline_physical, root_physical, stack_top,
+                             ready_address, idle_entry) {
+        smp_release_unstarted_stack(stack_physical);
+        return false;
+    }
+    let vector = smp_trampoline_vector(trampoline_physical);
+    if vector == 0 {
+        smp_release_unstarted_stack(stack_physical);
+        return false;
+    }
+
+    // Depois do primeiro INIT a stack não é mais liberada em caminhos de erro:
+    // um SIPI tardio ainda poderia fazer o AP observá-la.
+    unsafe { SMP_AP_STACK_PHYSICAL[index] = stack_physical; }
+    if !lapic_send_init_assert(apic_id) { return false; }
+    x86_timer_spin_wait_us(SMP_INIT_ASSERT_US);
+    if !lapic_send_init_deassert(apic_id) { return false; }
+    x86_timer_spin_wait_us(SMP_INIT_DEASSERT_US);
+
+    if !lapic_send_startup(apic_id, vector) { return false; }
+    x86_timer_spin_wait_us(SMP_SIPI_GAP_US);
+    if x86_mmio_read32(ready_address) != 1 {
+        if !lapic_send_startup(apic_id, vector) { return false; }
+    }
+    if !smp_wait_ap_ready(ready_address, SMP_AP_READY_TIMEOUT_US) { return false; }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn smp_initialize_base() -> bool {
+    unsafe { if SMP_READY { return true; } }
+    if !madt_is_ready() || !lapic_is_ready() || !active_page_tables_is_ready() ||
+       !pmm_allocator_is_active() { return false; }
+
+    let irq_flags = x86_irq_save_disable();
+    let cpu_count = madt_cpu_count();
+    if cpu_count == 0 || cpu_count > SMP_MAX_CPUS as u32 {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+
+    // Primeira passagem: valida topologia e descobre se existe AP habilitado.
+    let bsp_apic_id = lapic_id();
+    let mut bsp_seen = false;
+    let mut ap_targets: u32 = 0;
+    let mut index: u32 = 0;
+    while index < cpu_count {
+        let cpu = madt_cpu(index);
+        if cpu == (null as *const MadtCpu) {
+            x86_irq_restore(irq_flags);
+            return false;
+        }
+        let mut apic_id: u8 = 0;
+        let mut enabled = false;
+        unsafe {
+            apic_id = (*cpu).apic_id;
+            enabled = (*cpu).enabled;
+        }
+        if apic_id == bsp_apic_id {
+            if bsp_seen {
+                x86_irq_restore(irq_flags);
+                return false;
+            }
+            bsp_seen = true;
+        } else if enabled {
+            ap_targets += 1;
+        }
+        index += 1;
+    }
+    if !bsp_seen {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+
+    // Uniprocessador legítimo não precisa reservar low-memory nem instalar uma
+    // identidade executável desnecessária.
+    if ap_targets == 0 {
+        unsafe {
+            SMP_ONLINE_CPUS = 1;
+            SMP_STARTED_APS = 0;
+            SMP_READY = true;
+        }
+        x86_irq_restore(irq_flags);
+        return true;
+    }
+
+    if !x86_timer_is_calibrated() && !x86_timer_calibrate_from_acpi_pm() {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+    let root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+    if root == 0 || !x86_page_aligned(root) || root > 0xFFFFFFFF {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+    let trampoline = low_memory_claim_smp_trampoline_page();
+    if trampoline == 0 || !active_page_tables_map_ram_identity_4k(trampoline, false, true) {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+    let idle_entry = x86_scheduler_idle_entry_address();
+    if idle_entry == 0 {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+
+    let mut online: u32 = 1;
+    let mut started: u32 = 0;
+    index = 0;
+    while index < cpu_count {
+        let cpu = madt_cpu(index);
+        if cpu == (null as *const MadtCpu) {
+            x86_irq_restore(irq_flags);
+            return false;
+        }
+        let mut apic_id: u8 = 0;
+        let mut enabled = false;
+        unsafe {
+            apic_id = (*cpu).apic_id;
+            enabled = (*cpu).enabled;
+        }
+        if apic_id != bsp_apic_id && enabled {
+            if !smp_start_one_ap(index as usize, apic_id, root, trampoline, idle_entry) {
+                x86_irq_restore(irq_flags);
+                return false;
+            }
+            online += 1;
+            started += 1;
+        }
+        index += 1;
+    }
+    if started != ap_targets {
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+
+    unsafe {
+        SMP_TRAMPOLINE_PHYSICAL = trampoline;
+        SMP_ONLINE_CPUS = online;
+        SMP_STARTED_APS = started;
+        SMP_READY = true;
+    }
+    x86_irq_restore(irq_flags);
+    return true;
+}
+
+@system
+pub fn smp_is_ready() -> bool { unsafe { return SMP_READY; } }
+
+@system
+pub fn smp_online_cpu_count() -> u32 { unsafe { return SMP_ONLINE_CPUS; } }
+
+@system
+pub fn smp_started_ap_count() -> u32 { unsafe { return SMP_STARTED_APS; } }
+
+@system
+pub fn smp_trampoline_physical() -> u64 { unsafe { return SMP_TRAMPOLINE_PHYSICAL; } }
+
+@system
+fn smp_write_marker(bytes: *const u8, length: usize) -> bool {
+    if bytes == (null as *const u8) || length == 0 || !x86_serial_is_ready() { return false; }
+    let mut index: usize = 0;
+    unsafe {
+        while index < length {
+            if !x86_serial_write_byte(bytes[index]) { return false; }
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn smp_emit_ready_markers() -> bool {
+    if !smp_is_ready() { return false; }
+    let base_marker: [u8; 21] = [
+        66,65,75,69,78,58,83,77,80,95,66,65,83,69,95,82,69,65,68,89,10
+    ];
+    if !smp_write_marker(&base_marker[0], 21) { return false; }
+    if smp_started_ap_count() != 0 {
+        let ap_marker: [u8; 20] = [
+            66,65,75,69,78,58,83,77,80,95,65,80,95,79,78,76,73,78,69,10
+        ];
+        if !smp_write_marker(&ap_marker[0], 20) { return false; }
+    }
+    return true;
+}

@@ -1,0 +1,86 @@
+// Baken OS — primeira ABI de syscall CPL3.
+//
+// Entrada usa INT 0x43 com gate DPL3. O dispatcher só aceita frames cujo CS
+// possui RPL=3. Ponteiros nunca são desreferenciados diretamente: passam por
+// user_copy e pelos PTEs da address space corrente.
+
+module kernel::syscall::dispatch;
+
+import kernel::arch::x86_64::thread_context::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::process::registry::*;
+import kernel::process::user_copy::*;
+
+pub const SYSCALL_WRITE_SERIAL: u64 = 1;
+pub const SYSCALL_EXIT: u64 = 2;
+pub const SYSCALL_GETPID: u64 = 3;
+pub const SYSCALL_ACTION_RETURN: u32 = 0;
+pub const SYSCALL_ACTION_EXIT: u32 = 1;
+pub const SYSCALL_ERROR: u64 = 0xFFFFFFFFFFFFFFFF;
+pub const SYSCALL_COPY_CHUNK: usize = 64;
+pub const SYSCALL_WRITE_LIMIT: u64 = 4096;
+
+static mut SYSCALL_COUNT: u64 = 0;
+static mut SYSCALL_EXIT_COUNT: u64 = 0;
+static mut SYSCALL_LAST_EXIT_CODE: u64 = 0;
+
+@system
+fn syscall_write_serial(pid: u64, user_address: u64, length: u64) -> u64 {
+    if length > SYSCALL_WRITE_LIMIT { return SYSCALL_ERROR; }
+    if !user_range_valid(user_address, length) { return SYSCALL_ERROR; }
+    let mut buffer: [u8; SYSCALL_COPY_CHUNK] = [0; SYSCALL_COPY_CHUNK];
+    let mut copied: u64 = 0;
+    while copied < length {
+        let remaining = length - copied;
+        let mut chunk = remaining;
+        if chunk > SYSCALL_COPY_CHUNK as u64 { chunk = SYSCALL_COPY_CHUNK as u64; }
+        if !user_copy_from(pid, user_address + copied, &mut buffer[0], chunk) { return SYSCALL_ERROR; }
+        let mut index: u64 = 0;
+        while index < chunk {
+            if !x86_serial_write_byte(buffer[index as usize]) { return SYSCALL_ERROR; }
+            index += 1;
+        }
+        copied += chunk;
+    }
+    return copied;
+}
+
+@system
+pub fn syscall_dispatch_frame(frame_address: u64) -> u32 {
+    if !x86_saved_frame_is_user(frame_address) { return SYSCALL_ACTION_RETURN; }
+    let pid = process_current_id();
+    if pid == 0 {
+        x86_saved_frame_set_result(frame_address, SYSCALL_ERROR);
+        return SYSCALL_ACTION_RETURN;
+    }
+    let number = x86_saved_frame_syscall_number(frame_address);
+    unsafe { SYSCALL_COUNT += 1; }
+
+    if number == SYSCALL_WRITE_SERIAL {
+        let result = syscall_write_serial(pid, x86_saved_frame_arg0(frame_address),
+                                          x86_saved_frame_arg1(frame_address));
+        x86_saved_frame_set_result(frame_address, result);
+        return SYSCALL_ACTION_RETURN;
+    }
+    if number == SYSCALL_GETPID {
+        x86_saved_frame_set_result(frame_address, pid);
+        return SYSCALL_ACTION_RETURN;
+    }
+    if number == SYSCALL_EXIT {
+        unsafe {
+            SYSCALL_LAST_EXIT_CODE = x86_saved_frame_arg0(frame_address);
+            SYSCALL_EXIT_COUNT += 1;
+        }
+        x86_saved_frame_set_result(frame_address, 0);
+        return SYSCALL_ACTION_EXIT;
+    }
+    x86_saved_frame_set_result(frame_address, SYSCALL_ERROR);
+    return SYSCALL_ACTION_RETURN;
+}
+
+@system
+pub fn syscall_count() -> u64 { unsafe { return SYSCALL_COUNT; } }
+@system
+pub fn syscall_exit_count() -> u64 { unsafe { return SYSCALL_EXIT_COUNT; } }
+@system
+pub fn syscall_last_exit_code() -> u64 { unsafe { return SYSCALL_LAST_EXIT_CODE; } }
