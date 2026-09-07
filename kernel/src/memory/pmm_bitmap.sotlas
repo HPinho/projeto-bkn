@@ -62,7 +62,12 @@ pub fn pmm_bitmap_mark(bitmap: *mut PmmBitmap, page: u64, used: bool) -> bool {
         let byte_index = page / 8;
         let mask: u8 = (1 as u8) << (page % 8);
         if used { (*bitmap).storage[byte_index] = (*bitmap).storage[byte_index] | mask; }
-        else { (*bitmap).storage[byte_index] = (*bitmap).storage[byte_index] & !mask; }
+        else {
+            // `!` em Sotlas é negação lógica. Para liberar somente esta página,
+            // o bitmap precisa do complemento bit a bit do mask.
+            let clear_mask: u8 = ~mask;
+            (*bitmap).storage[byte_index] = (*bitmap).storage[byte_index] & clear_mask;
+        }
         return true;
     }
 }

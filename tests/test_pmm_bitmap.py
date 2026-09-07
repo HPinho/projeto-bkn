@@ -25,6 +25,15 @@ class PmmBitmapTests(unittest.TestCase):
         self.assertIn("while page < (*bitmap).page_count", text)
         self.assertIn("if run == count { return start; }", text)
 
+    def test_clear_preserves_neighbor_page_bits(self):
+        text = BITMAP.read_text(encoding="utf-8")
+        body = text.split("pub fn pmm_bitmap_mark", 1)[1].split(
+            "pub fn pmm_bitmap_find_free_run", 1
+        )[0]
+        self.assertIn("let clear_mask: u8 = ~mask;", body)
+        self.assertIn("& clear_mask", body)
+        self.assertNotIn("& !mask", body)
+
     def test_bitmap_is_registered_in_kernel_graph(self):
         self.assertIn("import kernel::memory::pmm_bitmap::*;", MAIN.read_text(encoding="utf-8"))
 
