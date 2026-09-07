@@ -18,6 +18,7 @@ import kernel::drivers::ps2_mouse::*;
 import kernel::drivers::ps2_keyboard::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::process::address_space::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::yield::*;
 import kernel::scheduler::diagnostics::*;
@@ -214,6 +215,13 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
                                height: u32, pixels_per_scanline: u32) -> ! {
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
+
+    // Kernel-core gate separado da fundação de hardware: duas raízes CR3 são
+    // construídas e comparadas sem trocar a raiz ativa nem entrar em CPL3.
+    if !process_address_space_activate_foundation() ||
+       !process_address_space_is_ready() ||
+       !process_address_space_self_test_passed() { loop {} }
+    if !process_address_space_emit_ready_marker() { loop {} }
 
     // A fundação já deixou o LAPIC timer ativo. O bring-up prova em sequência:
     // preempção, run queue, yield voluntário, exit/reaper e uma wait queue real

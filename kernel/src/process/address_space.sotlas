@@ -1,0 +1,389 @@
+// Baken OS — fundação de address spaces isolados para processos x86-64.
+//
+// Esta etapa NÃO entra em Ring 3 e NÃO troca CR3. Ela constrói raízes independentes
+// em RAM real do PMM, herda somente mappings supervisor do kernel e materializa uma
+// subárvore user exclusiva. Assim a política de isolamento pode ser provada antes
+// de introduzir transições CPL3/SYSCALL.
+
+module kernel::process::address_space;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::kernel_heap::*;
+import kernel::memory::page_table_arena::*;
+import kernel::memory::page_table_writer::*;
+import kernel::memory::pmm::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::memory::vmm::*;
+
+// PML4 slot 64. Deliberadamente separado do VMM_RUNTIME_BASE (slot 128) e do
+// direct-map alto (slot 256). A janela inicial de 2 MiB cabe em uma única PT.
+pub const PROCESS_USER_BASE: u64 = 0x0000200000000000;
+pub const PROCESS_USER_WINDOW_SIZE: u64 = 0x00200000;
+pub const PROCESS_USER_PML4_INDEX: u16 = 64;
+pub const PROCESS_ADDRESS_SPACE_TABLE_PAGES: u64 = 4;
+pub const PROCESS_ADDRESS_SPACE_PT_ENTRIES: u16 = 512;
+
+pub struct ProcessAddressSpace {
+    pub table_base_physical: u64;
+    pub root_physical: u64;
+    pub user_pdpt_physical: u64;
+    pub user_pd_physical: u64;
+    pub user_pt_physical: u64;
+    pub valid: bool;
+}
+
+static mut PROCESS_ADDRESS_SPACE_READY: bool = false;
+static mut PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED: bool = false;
+
+@system
+pub fn process_address_space_invalid() -> ProcessAddressSpace {
+    return ProcessAddressSpace {
+        table_base_physical: 0,
+        root_physical: 0,
+        user_pdpt_physical: 0,
+        user_pd_physical: 0,
+        user_pt_physical: 0,
+        valid: false
+    };
+}
+
+@system
+fn process_address_space_page(physical: u64) -> PageTablePage {
+    if physical == 0 || !x86_page_aligned(physical) { return page_table_page_invalid(); }
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 || !x86_page_aligned(virtual_address) {
+        return page_table_page_invalid();
+    }
+    return PageTablePage {
+        physical_address: physical,
+        virtual_address: virtual_address,
+        valid: true
+    };
+}
+
+@system
+fn process_address_space_root(space: *const ProcessAddressSpace) -> PageTablePage {
+    if space == (null as *const ProcessAddressSpace) { return page_table_page_invalid(); }
+    unsafe {
+        if !(*space).valid { return page_table_page_invalid(); }
+        return process_address_space_page((*space).root_physical);
+    }
+}
+
+@system
+fn process_address_space_user_pt(space: *const ProcessAddressSpace) -> PageTablePage {
+    if space == (null as *const ProcessAddressSpace) { return page_table_page_invalid(); }
+    unsafe {
+        if !(*space).valid { return page_table_page_invalid(); }
+        return process_address_space_page((*space).user_pt_physical);
+    }
+}
+
+@system
+fn process_address_space_current_root() -> PageTablePage {
+    let physical = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+    return process_address_space_page(physical);
+}
+
+@system
+pub fn process_address_space_user_address_valid(address: u64) -> bool {
+    if address < PROCESS_USER_BASE || !x86_page_aligned(address) { return false; }
+    let offset = address - PROCESS_USER_BASE;
+    return offset < PROCESS_USER_WINDOW_SIZE;
+}
+
+@system
+pub fn process_address_space_valid(space: *const ProcessAddressSpace) -> bool {
+    if space == (null as *const ProcessAddressSpace) { return false; }
+    unsafe {
+        if !(*space).valid || (*space).table_base_physical == 0 ||
+           (*space).root_physical != (*space).table_base_physical { return false; }
+        if (*space).user_pdpt_physical != (*space).table_base_physical + X86_PAGE_SIZE ||
+           (*space).user_pd_physical != (*space).table_base_physical + (2 * X86_PAGE_SIZE) ||
+           (*space).user_pt_physical != (*space).table_base_physical + (3 * X86_PAGE_SIZE) {
+            return false;
+        }
+        if !x86_page_aligned((*space).root_physical) ||
+           !x86_page_aligned((*space).user_pdpt_physical) ||
+           !x86_page_aligned((*space).user_pd_physical) ||
+           !x86_page_aligned((*space).user_pt_physical) { return false; }
+    }
+    return true;
+}
+
+@system
+fn process_address_space_copy_kernel_root(destination: PageTablePage,
+                                          source: PageTablePage) -> bool {
+    if !page_table_page_writable(destination) || !page_table_page_writable(source) { return false; }
+    let mut index: u16 = 0;
+    while index < PROCESS_ADDRESS_SPACE_PT_ENTRIES {
+        let entry = page_table_read_entry(source, index);
+        if index == PROCESS_USER_PML4_INDEX {
+            // O slot é propriedade exclusiva da address space. Não escondemos
+            // mapping pré-existente do kernel sob uma nova subárvore user.
+            if x86_pte_present(entry) { return false; }
+        } else {
+            // Tudo que é herdado permanece supervisor-only. Uma raiz ativa com
+            // USER fora do slot reservado falha fechada em vez de propagar acesso.
+            if x86_pte_present(entry) && (entry & X86_PTE_USER) != 0 { return false; }
+            if !page_table_write_entry(destination, index, entry) { return false; }
+        }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn process_address_space_link_user_tree(root: PageTablePage,
+                                        pdpt: PageTablePage,
+                                        pd: PageTablePage,
+                                        pt: PageTablePage) -> bool {
+    if !page_table_page_writable(root) || !page_table_page_writable(pdpt) ||
+       !page_table_page_writable(pd) || !page_table_page_writable(pt) { return false; }
+    if x86_pml4_index(PROCESS_USER_BASE) != PROCESS_USER_PML4_INDEX ||
+       x86_pdpt_index(PROCESS_USER_BASE) != 0 || x86_pd_index(PROCESS_USER_BASE) != 0 {
+        return false;
+    }
+
+    let link_flags = X86_PTE_PRESENT | X86_PTE_WRITABLE | X86_PTE_USER;
+    let root_entry = x86_pte_make(pdpt.physical_address, link_flags);
+    let pdpt_entry = x86_pte_make(pd.physical_address, link_flags);
+    let pd_entry = x86_pte_make(pt.physical_address, link_flags);
+    if root_entry == 0 || pdpt_entry == 0 || pd_entry == 0 { return false; }
+    if !page_table_write_entry(root, PROCESS_USER_PML4_INDEX, root_entry) { return false; }
+    if !page_table_write_entry(pdpt, 0, pdpt_entry) { return false; }
+    if !page_table_write_entry(pd, 0, pd_entry) { return false; }
+    return true;
+}
+
+@system
+pub fn process_address_space_create() -> ProcessAddressSpace {
+    if !pmm_allocator_is_active() || !vmm_is_active() ||
+       vmm_direct_map_base() != BAKEN_DIRECT_MAP_BASE { return process_address_space_invalid(); }
+
+    let source_root = process_address_space_current_root();
+    if !page_table_page_writable(source_root) { return process_address_space_invalid(); }
+
+    let table_base = pmm_alloc_pages(PROCESS_ADDRESS_SPACE_TABLE_PAGES);
+    if table_base == 0 { return process_address_space_invalid(); }
+    let root = process_address_space_page(table_base);
+    let pdpt = process_address_space_page(table_base + X86_PAGE_SIZE);
+    let pd = process_address_space_page(table_base + (2 * X86_PAGE_SIZE));
+    let pt = process_address_space_page(table_base + (3 * X86_PAGE_SIZE));
+    if !root.valid || !pdpt.valid || !pd.valid || !pt.valid {
+        pmm_free_pages(table_base, PROCESS_ADDRESS_SPACE_TABLE_PAGES);
+        return process_address_space_invalid();
+    }
+    if !page_table_zero(root) || !page_table_zero(pdpt) ||
+       !page_table_zero(pd) || !page_table_zero(pt) {
+        pmm_free_pages(table_base, PROCESS_ADDRESS_SPACE_TABLE_PAGES);
+        return process_address_space_invalid();
+    }
+    if !process_address_space_copy_kernel_root(root, source_root) ||
+       !process_address_space_link_user_tree(root, pdpt, pd, pt) {
+        pmm_free_pages(table_base, PROCESS_ADDRESS_SPACE_TABLE_PAGES);
+        return process_address_space_invalid();
+    }
+
+    let space = ProcessAddressSpace {
+        table_base_physical: table_base,
+        root_physical: root.physical_address,
+        user_pdpt_physical: pdpt.physical_address,
+        user_pd_physical: pd.physical_address,
+        user_pt_physical: pt.physical_address,
+        valid: true
+    };
+    if !process_address_space_valid(&space) {
+        pmm_free_pages(table_base, PROCESS_ADDRESS_SPACE_TABLE_PAGES);
+        return process_address_space_invalid();
+    }
+    return space;
+}
+
+@system
+pub fn process_address_space_pml4_entry(space: *const ProcessAddressSpace,
+                                        index: u16) -> u64 {
+    if !process_address_space_valid(space) || index >= PROCESS_ADDRESS_SPACE_PT_ENTRIES { return 0; }
+    return page_table_read_entry(process_address_space_root(space), index);
+}
+
+@system
+pub fn process_address_space_user_pte(space: *const ProcessAddressSpace,
+                                      address: u64) -> u64 {
+    if !process_address_space_valid(space) || !process_address_space_user_address_valid(address) {
+        return 0;
+    }
+    return page_table_read_entry(process_address_space_user_pt(space), x86_pt_index(address));
+}
+
+@system
+pub fn process_address_space_map_user_page(space: *mut ProcessAddressSpace,
+                                           address: u64,
+                                           physical: u64,
+                                           writable: bool,
+                                           executable: bool) -> bool {
+    if space == (null as *mut ProcessAddressSpace) ||
+       !process_address_space_valid(space as *const ProcessAddressSpace) ||
+       !process_address_space_user_address_valid(address) || physical == 0 ||
+       !x86_page_aligned(physical) || (writable && executable) { return false; }
+    if x86_pte_present(process_address_space_user_pte(space as *const ProcessAddressSpace, address)) {
+        return false;
+    }
+    let mut flags = X86_PTE_PRESENT | X86_PTE_USER;
+    if writable { flags |= X86_PTE_WRITABLE; }
+    if !executable { flags |= X86_PTE_NX; }
+    let desired = x86_pte_make(physical, flags);
+    if desired == 0 { return false; }
+    return page_table_write_entry(process_address_space_user_pt(space as *const ProcessAddressSpace),
+                                  x86_pt_index(address), desired);
+}
+
+@system
+pub fn process_address_space_unmap_user_page(space: *mut ProcessAddressSpace,
+                                             address: u64) -> u64 {
+    if space == (null as *mut ProcessAddressSpace) ||
+       !process_address_space_valid(space as *const ProcessAddressSpace) ||
+       !process_address_space_user_address_valid(address) { return 0; }
+    let pt = process_address_space_user_pt(space as *const ProcessAddressSpace);
+    let index = x86_pt_index(address);
+    let old = page_table_read_entry(pt, index);
+    if !x86_pte_present(old) { return 0; }
+    if !page_table_write_entry(pt, index, 0) { return 0; }
+    return x86_pte_address(old);
+}
+
+@system
+fn process_address_space_user_empty(space: *const ProcessAddressSpace) -> bool {
+    if !process_address_space_valid(space) { return false; }
+    let pt = process_address_space_user_pt(space);
+    let mut index: u16 = 0;
+    while index < PROCESS_ADDRESS_SPACE_PT_ENTRIES {
+        if x86_pte_present(page_table_read_entry(pt, index)) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn process_address_space_destroy(space: *mut ProcessAddressSpace) -> bool {
+    if space == (null as *mut ProcessAddressSpace) ||
+       !process_address_space_valid(space as *const ProcessAddressSpace) { return false; }
+    unsafe {
+        if ((*space).root_physical == (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK)) { return false; }
+    }
+    if !process_address_space_user_empty(space as *const ProcessAddressSpace) { return false; }
+    unsafe {
+        let base = (*space).table_base_physical;
+        if !pmm_free_pages(base, PROCESS_ADDRESS_SPACE_TABLE_PAGES) { return false; }
+        (*space) = process_address_space_invalid();
+    }
+    return true;
+}
+
+@system
+fn process_address_space_self_test() -> bool {
+    let before = pmm_allocator_allocated_pages();
+    let mut first = process_address_space_create();
+    if !process_address_space_valid(&first) { return false; }
+    let mut second = process_address_space_create();
+    if !process_address_space_valid(&second) || second.root_physical == first.root_physical {
+        return false;
+    }
+
+    let first_frame = pmm_alloc_page();
+    let second_frame = pmm_alloc_page();
+    if first_frame == 0 || second_frame == 0 || first_frame == second_frame { return false; }
+
+    if !process_address_space_map_user_page(&mut first, PROCESS_USER_BASE, first_frame, true, false) ||
+       !process_address_space_map_user_page(&mut second, PROCESS_USER_BASE, second_frame, true, false) {
+        return false;
+    }
+    let first_pte = process_address_space_user_pte(&first, PROCESS_USER_BASE);
+    let second_pte = process_address_space_user_pte(&second, PROCESS_USER_BASE);
+    let required = X86_PTE_PRESENT | X86_PTE_USER | X86_PTE_WRITABLE | X86_PTE_NX;
+    if (first_pte & required) != required || (second_pte & required) != required ||
+       x86_pte_address(first_pte) != first_frame || x86_pte_address(second_pte) != second_frame {
+        return false;
+    }
+
+    // Mesmo VA, backing frames distintos e conteúdo independente.
+    let first_virtual = direct_map_virtual_address(first_frame);
+    let second_virtual = direct_map_virtual_address(second_frame);
+    if first_virtual == 0 || second_virtual == 0 || first_virtual == second_virtual { return false; }
+    unsafe {
+        *(first_virtual as *mut u64) = 0x1111222233334444;
+        *(second_virtual as *mut u64) = 0xAAAABBBBCCCCDDDD;
+        if *(first_virtual as *const u64) != 0x1111222233334444 ||
+           *(second_virtual as *const u64) != 0xAAAABBBBCCCCDDDD { return false; }
+    }
+
+    // O direct-map herdado é compartilhado entre raízes, mas nunca user-accessible.
+    let kernel_index = x86_pml4_index(BAKEN_DIRECT_MAP_BASE);
+    let first_kernel = process_address_space_pml4_entry(&first, kernel_index);
+    let second_kernel = process_address_space_pml4_entry(&second, kernel_index);
+    if !x86_pte_present(first_kernel) || first_kernel != second_kernel ||
+       (first_kernel & X86_PTE_USER) != 0 { return false; }
+    let first_user_root = process_address_space_pml4_entry(&first, PROCESS_USER_PML4_INDEX);
+    let second_user_root = process_address_space_pml4_entry(&second, PROCESS_USER_PML4_INDEX);
+    if !x86_pte_present(first_user_root) || !x86_pte_present(second_user_root) ||
+       (first_user_root & X86_PTE_USER) == 0 || (second_user_root & X86_PTE_USER) == 0 ||
+       x86_pte_address(first_user_root) == x86_pte_address(second_user_root) { return false; }
+
+    if process_address_space_unmap_user_page(&mut first, PROCESS_USER_BASE) != first_frame ||
+       process_address_space_unmap_user_page(&mut second, PROCESS_USER_BASE) != second_frame {
+        return false;
+    }
+    if !process_address_space_destroy(&mut first) || !process_address_space_destroy(&mut second) {
+        return false;
+    }
+    if !pmm_free_pages(first_frame, 1) || !pmm_free_pages(second_frame, 1) { return false; }
+    return pmm_allocator_allocated_pages() == before;
+}
+
+@system
+pub fn process_address_space_activate_foundation() -> bool {
+    unsafe {
+        PROCESS_ADDRESS_SPACE_READY = false;
+        PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED = false;
+    }
+    if !kernel_heap_is_active() || !kernel_heap_self_test_passed() ||
+       !pmm_allocator_is_active() || !vmm_is_active() { return false; }
+
+    // Ainda BSP-only. IRQ-off protege PMM/page-table metadata contra qualquer
+    // handler futuro que venha a ganhar alocação antes do scheduler existir.
+    let flags = x86_irq_save_disable();
+    let passed = process_address_space_self_test();
+    x86_irq_restore(flags);
+    if !passed { return false; }
+    unsafe {
+        PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED = true;
+        PROCESS_ADDRESS_SPACE_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn process_address_space_is_ready() -> bool { unsafe { return PROCESS_ADDRESS_SPACE_READY; } }
+
+@system
+pub fn process_address_space_self_test_passed() -> bool {
+    unsafe { return PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED; }
+}
+
+// Prova nominal independente de formatação/heap: BAKEN:PROCESS_ISOLATION_READY.
+@system
+pub fn process_address_space_emit_ready_marker() -> bool {
+    let marker: [u8; 30] = [
+        66, 65, 75, 69, 78, 58, 80, 82, 79, 67, 69, 83, 83, 95, 73,
+        83, 79, 76, 65, 84, 73, 79, 78, 95, 82, 69, 65, 68, 89, 10
+    ];
+    let mut index: usize = 0;
+    while index < 30 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
