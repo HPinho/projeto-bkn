@@ -1,0 +1,151 @@
+// Baken OS — contexto FPU/SSE por thread x86-64.
+//
+// FXSAVE/FXRSTOR são usados diretamente pela CPU; não há libc, runtime externo
+// nem estado compartilhado entre threads. O armazenamento é fixo durante o
+// bring-up para que a IRQ nunca aloque memória.
+
+module kernel::arch::x86_64::fpu;
+
+import kernel::arch::x86_64::serial::*;
+
+pub const FPU_STATE_BYTES: usize = 512;
+pub const FPU_CONTEXT_SLOTS: usize = 16;
+pub const FPU_INVALID_SLOT: usize = FPU_CONTEXT_SLOTS;
+
+@repr(C)
+@align(16)
+pub struct FxState {
+    pub bytes: [u8; FPU_STATE_BYTES];
+}
+
+static mut FPU_STATES: [FxState; FPU_CONTEXT_SLOTS] = [
+    FxState { bytes: [0; FPU_STATE_BYTES] };
+    FPU_CONTEXT_SLOTS
+];
+static mut FPU_THREAD_IDS: [u64; FPU_CONTEXT_SLOTS] = [0; FPU_CONTEXT_SLOTS];
+static mut FPU_VALID: [bool; FPU_CONTEXT_SLOTS] = [false; FPU_CONTEXT_SLOTS];
+static mut FPU_READY: bool = false;
+static mut FPU_SELF_TEST_PASSED: bool = false;
+
+@system
+fn fpu_find_slot(thread_id: u64) -> usize {
+    if thread_id == 0 { return 0; }
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < FPU_CONTEXT_SLOTS {
+            if FPU_VALID[slot] && FPU_THREAD_IDS[slot] == thread_id { return slot; }
+            slot += 1;
+        }
+    }
+    return FPU_INVALID_SLOT;
+}
+
+@system
+fn fpu_allocate_slot(thread_id: u64) -> usize {
+    let existing = fpu_find_slot(thread_id);
+    if existing != FPU_INVALID_SLOT { return existing; }
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < FPU_CONTEXT_SLOTS {
+            if !FPU_VALID[slot] {
+                FPU_THREAD_IDS[slot] = thread_id;
+                FPU_VALID[slot] = true;
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return FPU_INVALID_SLOT;
+}
+
+@system
+fn fpu_state_address(slot: usize) -> u64 {
+    unsafe {
+        if slot >= FPU_CONTEXT_SLOTS { return 0; }
+        let state: *const FxState = &FPU_STATES[slot];
+        let address = state as u64;
+        if (address & 15) != 0 { return 0; }
+        return address;
+    }
+}
+
+@system
+pub fn fpu_initialize() -> bool {
+    unsafe {
+        if FPU_READY { return FPU_SELF_TEST_PASSED; }
+    }
+    if !__fpu_supported() { return false; }
+    __fpu_enable();
+    if !__fpu_round_trip_test() { return false; }
+    let slot = fpu_allocate_slot(0);
+    if slot == FPU_INVALID_SLOT { return false; }
+    let address = fpu_state_address(slot);
+    if address == 0 { return false; }
+    __fxsave(address);
+    unsafe {
+        FPU_SELF_TEST_PASSED = true;
+        FPU_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn fpu_save_thread(thread_id: u64) -> bool {
+    unsafe { if !FPU_READY { return false; } }
+    let slot = fpu_allocate_slot(thread_id);
+    if slot == FPU_INVALID_SLOT { return false; }
+    let address = fpu_state_address(slot);
+    if address == 0 { return false; }
+    __fxsave(address);
+    return true;
+}
+
+@system
+pub fn fpu_restore_thread(thread_id: u64) -> bool {
+    unsafe { if !FPU_READY { return false; } }
+    let mut slot = fpu_find_slot(thread_id);
+    if slot == FPU_INVALID_SLOT {
+        slot = fpu_allocate_slot(thread_id);
+        if slot == FPU_INVALID_SLOT { return false; }
+        __fpu_reset();
+        let initial_address = fpu_state_address(slot);
+        if initial_address == 0 { return false; }
+        __fxsave(initial_address);
+    }
+    let address = fpu_state_address(slot);
+    if address == 0 { return false; }
+    __fxrstor(address);
+    return true;
+}
+
+@system
+pub fn fpu_release_thread(thread_id: u64) -> bool {
+    if thread_id == 0 { return false; }
+    let slot = fpu_find_slot(thread_id);
+    if slot == FPU_INVALID_SLOT { return true; }
+    unsafe {
+        FPU_THREAD_IDS[slot] = 0;
+        FPU_VALID[slot] = false;
+        let mut index: usize = 0;
+        while index < FPU_STATE_BYTES {
+            FPU_STATES[slot].bytes[index] = 0;
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn fpu_is_ready() -> bool { unsafe { return FPU_READY && FPU_SELF_TEST_PASSED; } }
+
+@system
+pub fn fpu_emit_ready_marker() -> bool {
+    if !fpu_is_ready() { return false; }
+    let marker: [u8; 24] = [66,65,75,69,78,58,70,80,85,95,67,79,78,84,69,88,84,95,82,69,65,68,89,10];
+    let mut index: usize = 0;
+    while index < 24 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}

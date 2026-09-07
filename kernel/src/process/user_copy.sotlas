@@ -1,0 +1,101 @@
+// Baken OS — cópias seguras entre kernel e address spaces de usuário.
+//
+// Nunca desreferencia um VA de usuário sob o CR3 do kernel. Cada página é
+// validada pelo PTE do processo e acessada somente pelo direct-map supervisor.
+// Isso mantém a política explícita mesmo quando a thread chamadora troca CR3.
+
+module kernel::process::user_copy;
+
+import kernel::arch::x86_64::paging::*;
+import kernel::memory::direct_map::*;
+import kernel::process::address_space::*;
+import kernel::process::registry::*;
+
+@system
+pub fn user_range_valid(address: u64, length: u64) -> bool {
+    if length == 0 { return true; }
+    if address < PROCESS_USER_BASE { return false; }
+    let end = address + length;
+    if end <= address { return false; }
+    let limit = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE;
+    if limit <= PROCESS_USER_BASE { return false; }
+    return end <= limit;
+}
+
+@system
+fn user_copy_page_pte(pid: u64, address: u64, writing_user: bool) -> u64 {
+    let page = x86_page_align_down(address);
+    if page == 0 { return 0; }
+    let pte = process_user_pte(pid, page);
+    if !x86_pte_present(pte) || (pte & X86_PTE_USER) == 0 { return 0; }
+    if writing_user && (pte & X86_PTE_WRITABLE) == 0 { return 0; }
+    return pte;
+}
+
+@system
+pub fn user_copy_from(pid: u64, user_source: u64,
+                      kernel_destination: *mut u8, length: u64) -> bool {
+    if kernel_destination == (null as *mut u8) { return length == 0; }
+    if !user_range_valid(user_source, length) { return false; }
+
+    let mut copied: u64 = 0;
+    while copied < length {
+        let current = user_source + copied;
+        if current < user_source { return false; }
+        let pte = user_copy_page_pte(pid, current, false);
+        if pte == 0 { return false; }
+        let physical_page = x86_pte_address(pte);
+        let direct = direct_map_virtual_address(physical_page);
+        if direct == 0 { return false; }
+        let page_offset = current & (X86_PAGE_SIZE - 1);
+        let mut chunk = X86_PAGE_SIZE - page_offset;
+        let remaining = length - copied;
+        if chunk > remaining { chunk = remaining; }
+
+        unsafe {
+            let mut index: u64 = 0;
+            while index < chunk {
+                let source = (direct + page_offset + index) as *const u8;
+                let destination = ((kernel_destination as u64) + copied + index) as *mut u8;
+                *destination = *source;
+                index += 1;
+            }
+        }
+        copied += chunk;
+    }
+    return true;
+}
+
+@system
+pub fn user_copy_to(pid: u64, user_destination: u64,
+                    kernel_source: *const u8, length: u64) -> bool {
+    if kernel_source == (null as *const u8) { return length == 0; }
+    if !user_range_valid(user_destination, length) { return false; }
+
+    let mut copied: u64 = 0;
+    while copied < length {
+        let current = user_destination + copied;
+        if current < user_destination { return false; }
+        let pte = user_copy_page_pte(pid, current, true);
+        if pte == 0 { return false; }
+        let physical_page = x86_pte_address(pte);
+        let direct = direct_map_virtual_address(physical_page);
+        if direct == 0 { return false; }
+        let page_offset = current & (X86_PAGE_SIZE - 1);
+        let mut chunk = X86_PAGE_SIZE - page_offset;
+        let remaining = length - copied;
+        if chunk > remaining { chunk = remaining; }
+
+        unsafe {
+            let mut index: u64 = 0;
+            while index < chunk {
+                let source = ((kernel_source as u64) + copied + index) as *const u8;
+                let destination = (direct + page_offset + index) as *mut u8;
+                *destination = *source;
+                index += 1;
+            }
+        }
+        copied += chunk;
+    }
+    return true;
+}

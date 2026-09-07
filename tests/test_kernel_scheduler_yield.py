@@ -5,6 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 YIELD = ROOT / "kernel/src/scheduler/yield.sotlas"
 CPU = ROOT / "kernel/src/arch/x86_64/cpu.sotlas"
 IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
+IDT = ROOT / "kernel/src/arch/x86_64/idt.sotlas"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
 DIAG = ROOT / "kernel/src/scheduler/diagnostics.sotlas"
 INTRINSICS = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
@@ -25,12 +26,15 @@ class KernelSchedulerYieldTests(unittest.TestCase):
         self.assertIn('"int $0x43"', intrinsics)
         self.assertIn('"__scheduler_yield_interrupt": Function(', intrinsics)
 
-    def test_reschedule_vector_has_own_idt_gate_and_backend_stub(self):
+    def test_reschedule_vector_has_user_callable_idt_gate_and_backend_stub(self):
         irq = IRQ.read_text(encoding="utf-8")
+        idt = IDT.read_text(encoding="utf-8")
         intrinsics = INTRINSICS.read_text(encoding="utf-8")
 
         self.assertIn("IRQ_VECTOR_RESCHEDULE: u16 = 0x43", irq)
-        self.assertIn("irq_install_gate(IRQ_VECTOR_RESCHEDULE)", irq)
+        self.assertIn("irq_install_user_gate(IRQ_VECTOR_RESCHEDULE)", irq)
+        self.assertIn("IDT_GATE_USER_INTERRUPT: u8 = 0xEE", idt)
+        self.assertIn("pub fn idt_set_user_irq_gate", idt)
         self.assertIn("SOTLAS_X86_IRQ_STUB(67)", intrinsics)
         self.assertIn("case 67: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_67;", intrinsics)
 
