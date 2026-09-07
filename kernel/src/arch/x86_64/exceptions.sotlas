@@ -9,8 +9,10 @@ module kernel::arch::x86_64::exceptions;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
+import kernel::arch::x86_64::thread_context::*;
 
 pub const EXCEPTION_VECTOR_COUNT: u16 = 32;
+pub const EXCEPTION_GENERAL_PROTECTION: u64 = 13;
 pub const EXCEPTION_PAGE_FAULT: u64 = 14;
 
 pub const PAGE_FAULT_PRESENT: u64 = 1;
@@ -156,6 +158,13 @@ pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> void {
     // transforma um freeze silencioso em diagnóstico verificável no QEMU.
     // BAKEN:HEX=E:XXXXXXXX, onde E identifica o vetor de exceção.
     x86_serial_write_hex32_marker('E' as u8, unsafe { LAST_EXCEPTION.vector as u32 });
+
+    // Durante o bring-up do scheduler, um #GP no primeiro IRETQ precisa ser
+    // distinguido de corrupção aleatória. O dump lê o último frame sintético
+    // preparado e não o modifica: F=frame, K=R10, N=R11, R=RIP, S=CS, L=RFLAGS.
+    if unsafe { LAST_EXCEPTION.vector == EXCEPTION_GENERAL_PROTECTION } {
+        x86_kernel_thread_dump_last_prepared_frame();
+    }
 
     // Primeira ABI de excecao e deliberadamente terminal. Nenhum IRETQ e
     // permitido ate preservarmos todos os GPRs e validarmos RSP/SS/CPL/IST.

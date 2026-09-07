@@ -10,6 +10,7 @@ module kernel::arch::x86_64::thread_context;
 
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
 
 pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 19;
 pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 152;
@@ -41,10 +42,42 @@ pub struct X86KernelThreadFrame {
     pub rflags: u64;
 }
 
+// Durante o bring-up mantemos somente o endereço do último frame sintético
+// preparado. Antes da primeira troca bootstrap -> idle este é precisamente o
+// frame que o IRQ common tentará restaurar por IRETQ. O diagnóstico não altera
+// o frame e não participa da política do scheduler.
+static mut X86_KERNEL_THREAD_LAST_PREPARED_FRAME: u64 = 0;
+
 @system
 pub fn x86_kernel_thread_frame_address_valid(frame_address: u64) -> bool {
     if frame_address == 0 { return false; }
     return (frame_address & 7) == 0;
+}
+
+@system
+pub fn x86_kernel_thread_last_prepared_frame() -> u64 {
+    unsafe { return X86_KERNEL_THREAD_LAST_PREPARED_FRAME; }
+}
+
+// Dump fail-safe sem formatação/heap: cada tag usa o marcador hexadecimal já
+// validado pelo bring-up. O objetivo é saber se RIP/CS/RFLAGS foram corrompidos
+// entre prepare_frame() e o IRETQ que dispara #GP.
+@system
+pub fn x86_kernel_thread_dump_last_prepared_frame() -> bool {
+    let frame_address = x86_kernel_thread_last_prepared_frame();
+    if !x86_kernel_thread_frame_address_valid(frame_address) { return false; }
+    let frame = frame_address as *const X86KernelThreadFrame;
+    if frame == (null as *const X86KernelThreadFrame) { return false; }
+
+    unsafe {
+        if !x86_serial_write_hex32_marker('F' as u8, frame_address as u32) { return false; }
+        if !x86_serial_write_hex32_marker('K' as u8, (*frame).r10 as u32) { return false; }
+        if !x86_serial_write_hex32_marker('N' as u8, (*frame).r11 as u32) { return false; }
+        if !x86_serial_write_hex32_marker('R' as u8, (*frame).rip as u32) { return false; }
+        if !x86_serial_write_hex32_marker('S' as u8, (*frame).cs as u32) { return false; }
+        if !x86_serial_write_hex32_marker('L' as u8, (*frame).rflags as u32) { return false; }
+    }
+    return true;
 }
 
 @system
@@ -83,6 +116,7 @@ pub fn x86_kernel_thread_prepare_frame(stack_top: u64, entry_rip: u64) -> u64 {
         (*frame).rip = trampoline_rip;
         (*frame).cs = GDT_KERNEL_CODE_SELECTOR as u64;
         (*frame).rflags = X86_KERNEL_THREAD_INITIAL_RFLAGS;
+        X86_KERNEL_THREAD_LAST_PREPARED_FRAME = frame_address;
     }
     return frame_address;
 }
