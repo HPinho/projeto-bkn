@@ -1,7 +1,8 @@
 // Baken OS — Local APIC xAPIC pós-cutover.
 //
 // Só opera depois que a página MMIO indicada pela MADT foi mapeada UC. O modo
-// x2APIC é recusado nesta fase; nenhum IRQ é habilitado aqui.
+// x2APIC é recusado nesta fase. Além de EOI/LVT, esta unidade expõe somente o
+// subconjunto ICR necessário ao bring-up INIT/SIPI de processadores secundários.
 
 module kernel::interrupts::lapic;
 
@@ -17,6 +18,8 @@ pub const LAPIC_REG_ID: u64 = 0x020;
 pub const LAPIC_REG_VERSION: u64 = 0x030;
 pub const LAPIC_REG_EOI: u64 = 0x0B0;
 pub const LAPIC_REG_SVR: u64 = 0x0F0;
+pub const LAPIC_REG_ICR_LOW: u64 = 0x300;
+pub const LAPIC_REG_ICR_HIGH: u64 = 0x310;
 pub const LAPIC_REG_LVT_TIMER: u64 = 0x320;
 pub const LAPIC_REG_LVT_THERMAL: u64 = 0x330;
 pub const LAPIC_REG_LVT_PERF: u64 = 0x340;
@@ -27,6 +30,11 @@ pub const LAPIC_REG_LVT_ERROR: u64 = 0x370;
 pub const LAPIC_LVT_MASKED: u32 = 1 << 16;
 pub const LAPIC_SVR_ENABLE: u32 = 1 << 8;
 pub const LAPIC_SPURIOUS_VECTOR: u32 = 0xFF;
+pub const LAPIC_ICR_DELIVERY_STATUS: u32 = 1 << 12;
+pub const LAPIC_ICR_INIT_ASSERT: u32 = 0x0000C500;
+pub const LAPIC_ICR_INIT_DEASSERT: u32 = 0x00008500;
+pub const LAPIC_ICR_STARTUP: u32 = 0x00000600;
+pub const LAPIC_ICR_SPIN_LIMIT: u64 = 1000000;
 
 static mut LAPIC_READY: bool = false;
 static mut LAPIC_BASE: u64 = 0;
@@ -105,6 +113,44 @@ pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
 
 @system
 pub fn lapic_id() -> u8 { unsafe { return LAPIC_ID; } }
+
+@system
+pub fn lapic_wait_icr_idle(spin_limit: u64) -> bool {
+    if !lapic_is_ready() || spin_limit == 0 { return false; }
+    let mut spins: u64 = 0;
+    while spins < spin_limit {
+        if (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) == 0 {
+            return true;
+        }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn lapic_send_icr(destination_apic_id: u8, command: u32) -> bool {
+    if !lapic_wait_icr_idle(LAPIC_ICR_SPIN_LIMIT) { return false; }
+    lapic_write(LAPIC_REG_ICR_HIGH, (destination_apic_id as u32) << 24);
+    lapic_write(LAPIC_REG_ICR_LOW, command);
+    return lapic_wait_icr_idle(LAPIC_ICR_SPIN_LIMIT);
+}
+
+@system
+pub fn lapic_send_init_assert(destination_apic_id: u8) -> bool {
+    return lapic_send_icr(destination_apic_id, LAPIC_ICR_INIT_ASSERT);
+}
+
+@system
+pub fn lapic_send_init_deassert(destination_apic_id: u8) -> bool {
+    return lapic_send_icr(destination_apic_id, LAPIC_ICR_INIT_DEASSERT);
+}
+
+@system
+pub fn lapic_send_startup(destination_apic_id: u8, vector: u8) -> bool {
+    if vector == 0 { return false; }
+    return lapic_send_icr(destination_apic_id, LAPIC_ICR_STARTUP | (vector as u32));
+}
 
 @system
 pub fn lapic_eoi() -> void {

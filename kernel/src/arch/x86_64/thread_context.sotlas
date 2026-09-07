@@ -1,10 +1,8 @@
-// Baken OS — contexto de thread CPL0 compatível com o frame real de IRQ x86-64.
+// Baken OS — contexto x86-64 unificado para kernel threads e threads CPL3.
 //
-// O scheduler usa o frame salvo pelo IRQ como unidade de retomada. Para uma
-// thread nova, o mesmo shape carrega um contrato de primeira entrada explícito:
-// R10 = topo da stack, R11 = entry Sotlas e RIP = trampoline nativo. Em 64-bit
-// mode o hardware empilha SS:RSP em todo interrupt e IRETQ os desempilha mesmo
-// ao retornar para CPL0; por isso o frame sintético também precisa desses campos.
+// O scheduler usa o frame salvo pelo IRQ como unidade de retomada. O layout
+// coincide com o common stub: 15 GPRs, vetor e o frame arquitetural IRETQ.
+// Quando a origem é CPL3, o hardware fornece também RSP/SS, totalizando 21 qwords.
 
 module kernel::arch::x86_64::thread_context;
 
@@ -14,9 +12,8 @@ import kernel::arch::x86_64::serial::*;
 
 pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 21;
 pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 168;
-// Primeira entrada deliberadamente começa com IF=0. O IRETQ restaura uma
-// SS:RSP CPL0 válida; o trampoline reafirma RSP e só então executa STI.
 pub const X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x2;
+pub const X86_USER_THREAD_INITIAL_RFLAGS: u64 = 0x202;
 pub const X86_KERNEL_THREAD_STACK_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0;
 
 @repr(C)
@@ -44,10 +41,6 @@ pub struct X86KernelThreadFrame {
     pub ss: u64;
 }
 
-// Durante o bring-up mantemos somente o endereço do último frame sintético
-// preparado. Antes da primeira troca bootstrap -> idle este é precisamente o
-// frame que o IRQ common tentará restaurar por IRETQ. O diagnóstico não altera
-// o frame e não participa da política do scheduler.
 static mut X86_KERNEL_THREAD_LAST_PREPARED_FRAME: u64 = 0;
 
 @system
@@ -61,9 +54,55 @@ pub fn x86_kernel_thread_last_prepared_frame() -> u64 {
     unsafe { return X86_KERNEL_THREAD_LAST_PREPARED_FRAME; }
 }
 
-// Dump fail-safe sem formatação/heap: cada tag usa o marcador hexadecimal já
-// validado pelo bring-up. Além do trio RIP/CS/RFLAGS, P/D registram o RSP/SS
-// arquitetural que o IRETQ consumirá antes de entrar no trampoline.
+@system
+pub fn x86_saved_frame(frame_address: u64) -> *mut X86KernelThreadFrame {
+    if !x86_kernel_thread_frame_address_valid(frame_address) {
+        return null as *mut X86KernelThreadFrame;
+    }
+    return frame_address as *mut X86KernelThreadFrame;
+}
+
+@system
+pub fn x86_saved_frame_cs(frame_address: u64) -> u64 {
+    let frame = x86_saved_frame(frame_address);
+    if frame == (null as *mut X86KernelThreadFrame) { return 0; }
+    unsafe { return (*frame).cs; }
+}
+
+@system
+pub fn x86_saved_frame_is_user(frame_address: u64) -> bool {
+    return (x86_saved_frame_cs(frame_address) & 3) == 3;
+}
+
+@system
+pub fn x86_saved_frame_syscall_number(frame_address: u64) -> u64 {
+    let frame = x86_saved_frame(frame_address);
+    if frame == (null as *mut X86KernelThreadFrame) { return 0xFFFFFFFFFFFFFFFF; }
+    unsafe { return (*frame).rax; }
+}
+
+@system
+pub fn x86_saved_frame_arg0(frame_address: u64) -> u64 {
+    let frame = x86_saved_frame(frame_address);
+    if frame == (null as *mut X86KernelThreadFrame) { return 0; }
+    unsafe { return (*frame).rdi; }
+}
+
+@system
+pub fn x86_saved_frame_arg1(frame_address: u64) -> u64 {
+    let frame = x86_saved_frame(frame_address);
+    if frame == (null as *mut X86KernelThreadFrame) { return 0; }
+    unsafe { return (*frame).rsi; }
+}
+
+@system
+pub fn x86_saved_frame_set_result(frame_address: u64, value: u64) -> bool {
+    let frame = x86_saved_frame(frame_address);
+    if frame == (null as *mut X86KernelThreadFrame) { return false; }
+    unsafe { (*frame).rax = value; }
+    return true;
+}
+
 @system
 pub fn x86_kernel_thread_dump_last_prepared_frame() -> bool {
     let frame_address = x86_kernel_thread_last_prepared_frame();
@@ -85,43 +124,63 @@ pub fn x86_kernel_thread_dump_last_prepared_frame() -> bool {
 }
 
 @system
+fn x86_thread_zero_frame(frame: *mut X86KernelThreadFrame) -> bool {
+    if frame == (null as *mut X86KernelThreadFrame) { return false; }
+    unsafe {
+        (*frame).r15 = 0; (*frame).r14 = 0; (*frame).r13 = 0; (*frame).r12 = 0;
+        (*frame).r11 = 0; (*frame).r10 = 0; (*frame).r9 = 0; (*frame).r8 = 0;
+        (*frame).rdi = 0; (*frame).rsi = 0; (*frame).rbp = 0; (*frame).rbx = 0;
+        (*frame).rdx = 0; (*frame).rcx = 0; (*frame).rax = 0; (*frame).vector = 0;
+        (*frame).rip = 0; (*frame).cs = 0; (*frame).rflags = 0; (*frame).rsp = 0; (*frame).ss = 0;
+    }
+    return true;
+}
+
+@system
 pub fn x86_kernel_thread_prepare_frame(stack_top: u64, entry_rip: u64) -> u64 {
     if stack_top == 0 || entry_rip == 0 { return 0; }
-
     let aligned_top = stack_top & X86_KERNEL_THREAD_STACK_ALIGNMENT_MASK;
     if aligned_top <= X86_KERNEL_THREAD_FRAME_BYTES { return 0; }
     let trampoline_rip = x86_scheduler_thread_trampoline_address();
     if trampoline_rip == 0 { return 0; }
-
     let frame_address = aligned_top - X86_KERNEL_THREAD_FRAME_BYTES;
     if !x86_kernel_thread_frame_address_valid(frame_address) { return 0; }
-
     let frame = frame_address as *mut X86KernelThreadFrame;
+    if !x86_thread_zero_frame(frame) { return 0; }
     unsafe {
-        (*frame).r15 = 0;
-        (*frame).r14 = 0;
-        (*frame).r13 = 0;
-        (*frame).r12 = 0;
-        // Primeira ativação: o trampoline consome estes registradores antes de
-        // qualquer operação de stack. Depois da primeira preempção, ambos viram
-        // registradores normais salvos/restaurados pelo IRQ common.
         (*frame).r11 = entry_rip;
         (*frame).r10 = aligned_top;
-        (*frame).r9 = 0;
-        (*frame).r8 = 0;
-        (*frame).rdi = 0;
-        (*frame).rsi = 0;
-        (*frame).rbp = 0;
-        (*frame).rbx = 0;
-        (*frame).rdx = 0;
-        (*frame).rcx = 0;
-        (*frame).rax = 0;
-        (*frame).vector = 0;
         (*frame).rip = trampoline_rip;
         (*frame).cs = GDT_KERNEL_CODE_SELECTOR as u64;
         (*frame).rflags = X86_KERNEL_THREAD_INITIAL_RFLAGS;
         (*frame).rsp = aligned_top;
         (*frame).ss = GDT_KERNEL_DATA_SELECTOR as u64;
+        X86_KERNEL_THREAD_LAST_PREPARED_FRAME = frame_address;
+    }
+    return frame_address;
+}
+
+// Constrói o primeiro frame de uma thread CPL3 em uma kernel-entry stack.
+// Código e stack de usuário já devem ter sido validados/mapeados pelo loader.
+@system
+pub fn x86_user_thread_prepare_frame(kernel_stack_top: u64,
+                                     user_entry: u64,
+                                     user_stack_top: u64) -> u64 {
+    if kernel_stack_top == 0 || user_entry == 0 || user_stack_top == 0 { return 0; }
+    if (GDT_USER_CODE_SELECTOR & 3) != 3 || (GDT_USER_DATA_SELECTOR & 3) != 3 { return 0; }
+    let kernel_top = kernel_stack_top & X86_KERNEL_THREAD_STACK_ALIGNMENT_MASK;
+    let user_top = user_stack_top & X86_KERNEL_THREAD_STACK_ALIGNMENT_MASK;
+    if kernel_top <= X86_KERNEL_THREAD_FRAME_BYTES || user_top == 0 { return 0; }
+    let frame_address = kernel_top - X86_KERNEL_THREAD_FRAME_BYTES;
+    if !x86_kernel_thread_frame_address_valid(frame_address) { return 0; }
+    let frame = frame_address as *mut X86KernelThreadFrame;
+    if !x86_thread_zero_frame(frame) { return 0; }
+    unsafe {
+        (*frame).rip = user_entry;
+        (*frame).cs = GDT_USER_CODE_SELECTOR as u64;
+        (*frame).rflags = X86_USER_THREAD_INITIAL_RFLAGS;
+        (*frame).rsp = user_top;
+        (*frame).ss = GDT_USER_DATA_SELECTOR as u64;
         X86_KERNEL_THREAD_LAST_PREPARED_FRAME = frame_address;
     }
     return frame_address;

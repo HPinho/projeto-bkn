@@ -108,6 +108,46 @@ pub fn active_runtime_unmap(address: u64) -> bool {
     return true;
 }
 
+// Mapping identidade de RAM usado por bootstrap arquitetural (ex.: trampoline
+// SIPI). A escrita do conteúdo ocorre pelo direct-map supervisor; portanto a
+// identidade pode ser publicada diretamente RX e nunca precisa ficar W+X.
+@system
+pub fn active_page_tables_map_ram_identity_4k(physical_address: u64,
+                                               writable: bool,
+                                               executable: bool) -> bool {
+    if !active_page_tables_is_ready() || physical_address == 0 ||
+       !x86_page_aligned(physical_address) || (writable && executable) { return false; }
+
+    let mut flags = X86_PTE_PRESENT;
+    if writable { flags |= X86_PTE_WRITABLE; }
+    if !executable { flags |= X86_PTE_NX; }
+    let desired = x86_pte_make(physical_address, flags);
+    if desired == 0 { return false; }
+
+    let leaf = active_runtime_leaf(physical_address);
+    if leaf.valid {
+        let current = page_table_read_entry(leaf, x86_pt_index(physical_address));
+        if x86_pte_present(current) {
+            if x86_pte_address(current) != physical_address { return false; }
+            if !page_table_write_entry(leaf, x86_pt_index(physical_address), desired) { return false; }
+            x86_invlpg(physical_address);
+            return true;
+        }
+    }
+
+    unsafe {
+        if !page_table_map_4k(
+            &mut ACTIVE_PAGE_TABLE_ARENA,
+            ACTIVE_PAGE_TABLE_ROOT,
+            physical_address,
+            physical_address,
+            flags
+        ) { return false; }
+    }
+    x86_invlpg(physical_address);
+    return true;
+}
+
 // Only convert the existing identity framebuffer mappings, never RAM aliases.
 // PAT selection alone is not a benchmark or proof of effective MTRR policy.
 @system

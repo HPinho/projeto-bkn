@@ -7,7 +7,6 @@ freestanding mínimos, que o GCC reduz para instruções reais da CPU.
 
 from __future__ import annotations
 
-
 _MARKER = "/* SOTLAS_X86_64_PRIVILEGED_INTRINSICS */"
 
 _C_INTRINSICS = r'''
@@ -77,6 +76,52 @@ static inline void __invlpg(uint64_t address) {
     __asm__ __volatile__("invlpg (%0)" : : "r"((uintptr_t)address) : "memory");
 }
 
+static inline uint64_t __current_rsp(void) {
+    uint64_t value;
+    __asm__ __volatile__("mov %%rsp, %0" : "=r"(value));
+    return value;
+}
+
+static inline bool __fpu_supported(void) {
+    uint32_t a = 1, b, c, d;
+    __asm__ __volatile__("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    return (d & (1u << 24)) != 0 && (d & (1u << 25)) != 0;
+}
+
+static inline void __fpu_enable(void) {
+    uint64_t cr0, cr4;
+    __asm__ __volatile__("mov %%cr0,%0; mov %%cr4,%1" : "=r"(cr0), "=r"(cr4));
+    cr0 &= ~(1ull << 2);
+    cr0 |= (1ull << 1);
+    cr4 |= (1ull << 9) | (1ull << 10);
+    __asm__ __volatile__("mov %0,%%cr0; mov %1,%%cr4; fninit"
+                         : : "r"(cr0), "r"(cr4) : "memory");
+}
+
+static inline void __fpu_reset(void) {
+    __asm__ __volatile__("fninit" : : : "memory");
+}
+
+static inline void __fxsave(uint64_t address) {
+    __asm__ __volatile__("fxsave64 (%0)" : : "r"((uintptr_t)address) : "memory");
+}
+
+static inline void __fxrstor(uint64_t address) {
+    __asm__ __volatile__("fxrstor64 (%0)" : : "r"((uintptr_t)address) : "memory");
+}
+
+static inline bool __fpu_round_trip_test(void) {
+    struct __attribute__((aligned(16))) { unsigned char bytes[512]; } before, changed, observed;
+    __asm__ __volatile__("fxsave64 %0" : "=m"(before) : : "memory");
+    for (unsigned i = 0; i < 512; ++i) changed.bytes[i] = before.bytes[i];
+    uint32_t *mxcsr = (uint32_t *)(void *)(changed.bytes + 24);
+    *mxcsr = (*mxcsr & ~(3u << 13)) | (1u << 13);
+    __asm__ __volatile__("fxrstor64 %0" : : "m"(changed) : "memory");
+    __asm__ __volatile__("fxsave64 %0" : "=m"(observed) : : "memory");
+    __asm__ __volatile__("fxrstor64 %0" : : "m"(before) : "memory");
+    return (*(uint32_t *)(void *)(observed.bytes + 24) & (3u << 13)) == (1u << 13);
+}
+
 static inline void __dma_fence(void) {
     __asm__ __volatile__("mfence" : : : "memory");
 }
@@ -112,15 +157,10 @@ static inline void __cpu_pause(void) {
     __asm__ __volatile__("pause");
 }
 
-/* Yield síncrono CPL0. O vetor 0x43 é um interrupt gate dedicado de software;
- * o frame salvo é idêntico ao do timer e o retorno continua sendo IRETQ. */
 static inline void __scheduler_yield_interrupt(void) {
     __asm__ __volatile__("int $0x43" : : : "memory");
 }
 
-/* Primitivas BSP para transições atômicas de wait queue. Não restauramos todos
- * os RFLAGS a partir de memória: somente preservamos IF, que é o estado que a
- * seção crítica precisa controlar. */
 static inline bool __interrupts_enabled(void) {
     uint64_t flags;
     __asm__ __volatile__("pushfq; popq %0" : "=r"(flags) : : "memory");
@@ -141,9 +181,6 @@ static inline void __irq_restore(uint64_t flags) {
     }
 }
 
-/* O shadow arquitetural de STI impede IRQ mascarável entre STI e a instrução
- * imediatamente seguinte. O INT 0x43 portanto publica o frame bloqueado antes
- * de qualquer wakeup assíncrono poder observar uma janela intermediária. */
 static inline void __scheduler_block_switch(void) {
     __asm__ __volatile__("sti\n\tint $0x43" : : : "memory", "cc");
 }
@@ -175,17 +212,19 @@ __stack_switch_to_post_cutover(uint64_t stack_top, uint64_t argument) {
     );
 }
 
-/*
- * Entrada canônica de uma nova kernel thread.
- *
- * IRETQ não é CALL e a primeira ativação não deve depender do RSP residual do
- * frame sintético. O frame entrega R10 = stack_top e R11 = entry RIP. A thread
- * entra com IF=0; o trampoline restaura RSP sem tocar memória, alinha a stack,
- * fornece os 32 bytes de shadow space e só então executa STI. O interrupt shadow
- * de STI garante que a CALL imediatamente seguinte complete antes de um IRQ ser
- * aceito. Se a entry retornar, o retorno normal é convertido em thread_exit;
- * uma kernel thread nunca cai acidentalmente fora do scheduler.
- */
+__attribute__((naked, noreturn, used)) static void
+__enter_user(uint64_t entry, uint64_t user_stack) {
+    __asm__(
+        "cli\n\t"
+        "pushq $0x23\n\t"
+        "pushq %rdx\n\t"
+        "pushq $0x202\n\t"
+        "pushq $0x1b\n\t"
+        "pushq %rcx\n\t"
+        "iretq\n\t"
+    );
+}
+
 extern void sotlas_x86_scheduler_thread_exit(void);
 __attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline(void) {
     __asm__(
@@ -204,29 +243,18 @@ __attribute__((naked, noreturn, used)) static void __scheduler_thread_trampoline
 static inline uint64_t __scheduler_thread_trampoline_address(void) {
     return (uint64_t)(uintptr_t)&__scheduler_thread_trampoline;
 }
-
 extern void sotlas_x86_scheduler_exit_probe_entry(void);
-static inline uint64_t __scheduler_exit_probe_entry_address(void) {
-    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_exit_probe_entry;
-}
-
+static inline uint64_t __scheduler_exit_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_exit_probe_entry; }
 extern void sotlas_x86_scheduler_idle_entry(void);
-static inline uint64_t __scheduler_idle_entry_address(void) {
-    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_idle_entry;
-}
-
+static inline uint64_t __scheduler_idle_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_idle_entry; }
 extern void sotlas_x86_scheduler_wait_probe_entry(void);
-static inline uint64_t __scheduler_wait_probe_entry_address(void) {
-    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wait_probe_entry;
-}
-
+static inline uint64_t __scheduler_wait_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wait_probe_entry; }
 extern void sotlas_x86_scheduler_wake_probe_entry(void);
-static inline uint64_t __scheduler_wake_probe_entry_address(void) {
-    return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wake_probe_entry;
-}
+static inline uint64_t __scheduler_wake_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wake_probe_entry; }
+extern void sotlas_x86_userspace_bootstrap_entry(void);
+static inline uint64_t __userspace_bootstrap_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_userspace_bootstrap_entry; }
 
 extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
-
 __attribute__((naked, used)) static void __sotlas_x86_exception_common(void) {
     __asm__(
         "movq %rsp, %rcx\n\t"
@@ -243,12 +271,10 @@ __attribute__((naked, used)) static void __sotlas_x86_exception_common(void) {
     __attribute__((naked, unused)) static void __sotlas_x86_isr_##n(void) { \
         __asm__("pushq $0\n\tpushq $" #n "\n\tjmp __sotlas_x86_exception_common"); \
     }
-
 #define SOTLAS_X86_ISR_ERR(n) \
     __attribute__((naked, unused)) static void __sotlas_x86_isr_##n(void) { \
         __asm__("pushq $" #n "\n\tjmp __sotlas_x86_exception_common"); \
     }
-
 SOTLAS_X86_ISR_NOERR(0)
 SOTLAS_X86_ISR_NOERR(1)
 SOTLAS_X86_ISR_NOERR(2)
@@ -281,7 +307,6 @@ SOTLAS_X86_ISR_NOERR(28)
 SOTLAS_X86_ISR_ERR(29)
 SOTLAS_X86_ISR_ERR(30)
 SOTLAS_X86_ISR_NOERR(31)
-
 #undef SOTLAS_X86_ISR_NOERR
 #undef SOTLAS_X86_ISR_ERR
 
@@ -323,11 +348,6 @@ static inline uint64_t __exception_stub_address(uint16_t vector) {
     }
 }
 
-/*
- * IRQ externo em CPL0. Cada stub empilha o vetor; o common salva todos os GPRs,
- * chama Sotlas sob a ABI Win64 e restaura o frame que o dispatcher selecionar.
- * Isso permite preempção sem uma segunda pilha de contexto artificial.
- */
 extern uint64_t sotlas_x86_irq_dispatch(uint64_t vector, uint64_t frame_address);
 __attribute__((naked, used)) static void __sotlas_x86_irq_common(void) {
     __asm__(
@@ -381,13 +401,11 @@ __attribute__((naked, used)) static void __sotlas_x86_irq_common(void) {
     __attribute__((naked, unused)) static void __sotlas_x86_irq_##n(void) { \
         __asm__("pushq $" #n "\n\tjmp __sotlas_x86_irq_common"); \
     }
-
 SOTLAS_X86_IRQ_STUB(64)
 SOTLAS_X86_IRQ_STUB(65)
 SOTLAS_X86_IRQ_STUB(66)
 SOTLAS_X86_IRQ_STUB(67)
 SOTLAS_X86_IRQ_STUB(255)
-
 #undef SOTLAS_X86_IRQ_STUB
 
 static inline uint64_t __irq_stub_address(uint16_t vector) {
@@ -423,6 +441,7 @@ def install(bootstrap) -> None:
         "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_wait_probe_entry_address": Function("__scheduler_wait_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_wake_probe_entry_address": Function("__scheduler_wake_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__userspace_bootstrap_entry_address": Function("__userspace_bootstrap_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_yield_interrupt": Function("__scheduler_yield_interrupt", [], Type("void"), [], public=True, attributes=["@system"]),
         "__scheduler_block_switch": Function("__scheduler_block_switch", [], Type("void"), [], public=True, attributes=["@system"]),
         "__interrupts_enabled": Function("__interrupts_enabled", [], Type("bool"), [], public=True, attributes=["@system"]),
@@ -437,6 +456,14 @@ def install(bootstrap) -> None:
         "__mmio_write32": Function("__mmio_write32", [("address", Type("u64")), ("value", Type("u32"))], Type("void"), [], public=True, attributes=["@system"]),
         "__exception_stub_address": Function("__exception_stub_address", [("vector", Type("u16"))], Type("u64"), [], public=True, attributes=["@system"]),
         "__irq_stub_address": Function("__irq_stub_address", [("vector", Type("u16"))], Type("u64"), [], public=True, attributes=["@system"]),
+        "__current_rsp": Function("__current_rsp", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__enter_user": Function("__enter_user", [("entry", Type("u64")), ("user_stack", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__fpu_supported": Function("__fpu_supported", [], Type("bool"), [], public=True, attributes=["@system"]),
+        "__fpu_enable": Function("__fpu_enable", [], Type("void"), [], public=True, attributes=["@system"]),
+        "__fpu_reset": Function("__fpu_reset", [], Type("void"), [], public=True, attributes=["@system"]),
+        "__fxsave": Function("__fxsave", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__fxrstor": Function("__fxrstor", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
+        "__fpu_round_trip_test": Function("__fpu_round_trip_test", [], Type("bool"), [], public=True, attributes=["@system"]),
     }
     bootstrap.BUILTIN_FUNCTIONS.update(builtins)
 

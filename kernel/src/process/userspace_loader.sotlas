@@ -1,0 +1,243 @@
+// Baken OS — loader userspace mínimo, nativo e W^X.
+// Materializa um programa de prova em frames PMM antes de publicar os PTEs.
+// Código USER+RX; dados USER+R+NX; stack USER+RW+NX; guard page não mapeada.
+module kernel::process::userspace_loader;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::arch::x86_64::tss::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::process::address_space::*;
+import kernel::process::registry::*;
+import kernel::scheduler::core::*;
+import kernel::scheduler::yield::*;
+import kernel::syscall::dispatch::*;
+
+pub const USERSPACE_CODE_ADDRESS: u64 = PROCESS_USER_BASE;
+pub const USERSPACE_DATA_ADDRESS: u64 = PROCESS_USER_BASE + 0x1000;
+pub const USERSPACE_STACK_GUARD: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE - 0x2000;
+pub const USERSPACE_STACK_ADDRESS: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE - 0x1000;
+pub const USERSPACE_STACK_TOP: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE;
+pub const USERSPACE_PROBE_CODE_BYTES: usize = 39;
+pub const USERSPACE_PROBE_DATA_BYTES: usize = 20;
+
+static mut USERSPACE_PID: u64 = 0;
+static mut USERSPACE_TID: u64 = 0;
+static mut USERSPACE_CODE_FRAME: u64 = 0;
+static mut USERSPACE_DATA_FRAME: u64 = 0;
+static mut USERSPACE_STACK_FRAME: u64 = 0;
+static mut USERSPACE_STARTED: bool = false;
+static mut USERSPACE_FINISHED: bool = false;
+
+@system
+fn userspace_zero_frame(physical: u64) -> bool {
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 { return false; }
+    unsafe {
+        let mut index: u64 = 0;
+        while index < X86_PAGE_SIZE {
+            *((virtual_address + index) as *mut u8) = 0;
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn userspace_materialize_probe(code_physical: u64, data_physical: u64) -> bool {
+    let code_virtual = direct_map_virtual_address(code_physical);
+    let data_virtual = direct_map_virtual_address(data_physical);
+    if code_virtual == 0 || data_virtual == 0 { return false; }
+    // mov rax,1; movabs rdi,0x0000200000001000; mov rsi,20; int 43h;
+    // mov rax,2; xor edi,edi; int 43h; ud2.
+    let code: [u8; USERSPACE_PROBE_CODE_BYTES] = [
+        72,199,192,1,0,0,0,
+        72,191,0,16,0,0,0,32,0,0,
+        72,199,198,20,0,0,0,
+        205,67,
+        72,199,192,2,0,0,0,
+        49,255,205,67,15,11
+    ];
+    let data: [u8; USERSPACE_PROBE_DATA_BYTES] = [
+        66,65,75,69,78,58,82,73,78,71,51,95,69,78,84,69,82,69,68,10
+    ];
+    unsafe {
+        let mut index: usize = 0;
+        while index < USERSPACE_PROBE_CODE_BYTES {
+            *((code_virtual + index as u64) as *mut u8) = code[index];
+            index += 1;
+        }
+        index = 0;
+        while index < USERSPACE_PROBE_DATA_BYTES {
+            *((data_virtual + index as u64) as *mut u8) = data[index];
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn userspace_release_frames(code: u64, data: u64, stack: u64) -> bool {
+    let mut ok = true;
+    if code != 0 && !pmm_free_pages(code, 1) { ok = false; }
+    if data != 0 && !pmm_free_pages(data, 1) { ok = false; }
+    if stack != 0 && !pmm_free_pages(stack, 1) { ok = false; }
+    return ok;
+}
+
+@system
+fn userspace_teardown_mapping(pid: u64, code: u64, data: u64, stack: u64) -> bool {
+    let mapped_code = process_unmap_user_page(pid, USERSPACE_CODE_ADDRESS);
+    let mapped_data = process_unmap_user_page(pid, USERSPACE_DATA_ADDRESS);
+    let mapped_stack = process_unmap_user_page(pid, USERSPACE_STACK_ADDRESS);
+    let release_code = if mapped_code != 0 { mapped_code } else { code };
+    let release_data = if mapped_data != 0 { mapped_data } else { data };
+    let release_stack = if mapped_stack != 0 { mapped_stack } else { stack };
+    let released = userspace_release_frames(release_code, release_data, release_stack);
+    let destroyed = process_destroy(pid);
+    return released && destroyed;
+}
+
+@system
+@export
+pub fn sotlas_x86_userspace_bootstrap_entry() -> ! {
+    let pid = process_current_id();
+    unsafe {
+        if pid == 0 || pid != USERSPACE_PID { loop { x86_cpu_pause(); } }
+    }
+    let current_rsp = __current_rsp();
+    if current_rsp > 0xFFFFFFFFFFFFFFD7 { loop { x86_cpu_pause(); } }
+    // Scheduler trampoline: stack_top - 32 bytes de home space - return address.
+    let kernel_stack_top = (current_rsp + 40) & 0xFFFFFFFFFFFFFFF0;
+    if !tss_set_rsp0(kernel_stack_top) { loop { x86_cpu_pause(); } }
+    __enter_user(USERSPACE_CODE_ADDRESS, USERSPACE_STACK_TOP);
+    loop { x86_cpu_pause(); }
+}
+
+@system
+pub fn userspace_loader_start_probe() -> bool {
+    unsafe { if USERSPACE_STARTED { return false; } }
+    let pid = process_create();
+    if pid == 0 { return false; }
+    let code = pmm_alloc_page();
+    let data = pmm_alloc_page();
+    let stack = pmm_alloc_page();
+    if code == 0 || data == 0 || stack == 0 {
+        userspace_release_frames(code, data, stack);
+        process_destroy(pid);
+        return false;
+    }
+    if !userspace_zero_frame(code) || !userspace_zero_frame(data) ||
+       !userspace_zero_frame(stack) || !userspace_materialize_probe(code, data) {
+        userspace_release_frames(code, data, stack);
+        process_destroy(pid);
+        return false;
+    }
+    // Sem janela W+X: os bytes já estão prontos quando as folhas são publicadas.
+    if !process_map_user_page(pid, USERSPACE_CODE_ADDRESS, code, false, true) ||
+       !process_map_user_page(pid, USERSPACE_DATA_ADDRESS, data, false, false) ||
+       !process_map_user_page(pid, USERSPACE_STACK_ADDRESS, stack, true, false) {
+        userspace_teardown_mapping(pid, code, data, stack);
+        return false;
+    }
+    if process_user_pte(pid, USERSPACE_STACK_GUARD) != 0 {
+        userspace_teardown_mapping(pid, code, data, stack);
+        return false;
+    }
+    let code_pte = process_user_pte(pid, USERSPACE_CODE_ADDRESS);
+    let data_pte = process_user_pte(pid, USERSPACE_DATA_ADDRESS);
+    let stack_pte = process_user_pte(pid, USERSPACE_STACK_ADDRESS);
+    if (code_pte & (X86_PTE_PRESENT | X86_PTE_USER | X86_PTE_WRITABLE | X86_PTE_NX)) !=
+       (X86_PTE_PRESENT | X86_PTE_USER) ||
+       (data_pte & (X86_PTE_PRESENT | X86_PTE_USER | X86_PTE_WRITABLE | X86_PTE_NX)) !=
+       (X86_PTE_PRESENT | X86_PTE_USER | X86_PTE_NX) ||
+       (stack_pte & (X86_PTE_PRESENT | X86_PTE_USER | X86_PTE_WRITABLE | X86_PTE_NX)) !=
+       (X86_PTE_PRESENT | X86_PTE_USER | X86_PTE_WRITABLE | X86_PTE_NX) {
+        userspace_teardown_mapping(pid, code, data, stack);
+        return false;
+    }
+    let entry = __userspace_bootstrap_entry_address();
+    if entry == 0 {
+        userspace_teardown_mapping(pid, code, data, stack);
+        return false;
+    }
+    unsafe {
+        USERSPACE_PID = pid;
+        USERSPACE_CODE_FRAME = code;
+        USERSPACE_DATA_FRAME = data;
+        USERSPACE_STACK_FRAME = stack;
+    }
+    let tid = scheduler_create_process_thread(pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    if tid == 0 {
+        unsafe { USERSPACE_PID = 0; }
+        userspace_teardown_mapping(pid, code, data, stack);
+        return false;
+    }
+    unsafe {
+        USERSPACE_TID = tid;
+        USERSPACE_STARTED = true;
+    }
+    return true;
+}
+
+@system
+pub fn userspace_loader_wait_probe() -> bool {
+    unsafe { if !USERSPACE_STARTED || USERSPACE_PID == 0 { return false; } }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
+        unsafe {
+            if process_reference_count(USERSPACE_PID) == 0 && syscall_exit_count() != 0 {
+                return true;
+            }
+        }
+        if !scheduler_yield() { return false; }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn userspace_loader_finish_probe() -> bool {
+    unsafe {
+        if !USERSPACE_STARTED || USERSPACE_PID == 0 ||
+           process_reference_count(USERSPACE_PID) != 0 { return false; }
+        if syscall_last_exit_code() != 0 { return false; }
+        let code = process_unmap_user_page(USERSPACE_PID, USERSPACE_CODE_ADDRESS);
+        let data = process_unmap_user_page(USERSPACE_PID, USERSPACE_DATA_ADDRESS);
+        let stack = process_unmap_user_page(USERSPACE_PID, USERSPACE_STACK_ADDRESS);
+        if code != USERSPACE_CODE_FRAME || data != USERSPACE_DATA_FRAME ||
+           stack != USERSPACE_STACK_FRAME { return false; }
+        if process_user_pte(USERSPACE_PID, USERSPACE_STACK_GUARD) != 0 { return false; }
+        if !userspace_release_frames(code, data, stack) { return false; }
+        if !process_destroy(USERSPACE_PID) { return false; }
+        USERSPACE_FINISHED = true;
+        USERSPACE_PID = 0;
+    }
+    return true;
+}
+
+@system
+fn userspace_emit(marker: *const u8, length: usize) -> bool {
+    if marker == (null as *const u8) { return false; }
+    unsafe {
+        let mut index: usize = 0;
+        while index < length {
+            if !x86_serial_write_byte(marker[index]) { return false; }
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn userspace_loader_emit_ready_markers() -> bool {
+    unsafe { if !USERSPACE_FINISHED { return false; } }
+    let ring3: [u8; 18] = [66,65,75,69,78,58,82,73,78,71,51,95,82,69,65,68,89,10];
+    let syscall: [u8; 20] = [66,65,75,69,78,58,83,89,83,67,65,76,76,95,82,69,65,68,89,10];
+    let copy: [u8; 22] = [66,65,75,69,78,58,85,83,69,82,95,67,79,80,89,95,82,69,65,68,89,10];
+    let loader: [u8; 29] = [66,65,75,69,78,58,85,83,69,82,83,80,65,67,69,95,76,79,65,68,69,82,95,82,69,65,68,89,10];
+    return userspace_emit(&ring3[0], 18) && userspace_emit(&syscall[0], 20) &&
+           userspace_emit(&copy[0], 22) && userspace_emit(&loader[0], 29);
+}
