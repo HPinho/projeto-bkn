@@ -3,7 +3,8 @@
 // O scheduler usa o frame salvo pelo IRQ como unidade de retomada. Para uma
 // thread nova, o mesmo shape carrega um contrato de primeira entrada explícito:
 // R10 = topo da stack, R11 = entry Sotlas e RIP = trampoline nativo. O trampoline
-// restaura RSP antes de tocar memória e só então faz uma CALL ABI-correta.
+// restaura RSP antes de tocar memória, habilita IRQs só depois de a stack estar
+// válida e então faz uma CALL ABI-correta.
 
 module kernel::arch::x86_64::thread_context;
 
@@ -12,7 +13,9 @@ import kernel::arch::x86_64::cpu::*;
 
 pub const X86_KERNEL_THREAD_FRAME_QWORDS: u64 = 19;
 pub const X86_KERNEL_THREAD_FRAME_BYTES: u64 = 152;
-pub const X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202;
+// Primeira entrada deliberadamente começa com IF=0. O trampoline restaura RSP
+// e executa STI somente depois de a stack e o shadow space estarem válidos.
+pub const X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x2;
 pub const X86_KERNEL_THREAD_STACK_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0;
 
 @repr(C)
