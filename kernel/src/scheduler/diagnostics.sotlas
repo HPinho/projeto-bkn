@@ -34,3 +34,17 @@ pub fn scheduler_diag_run_queue_created() -> void {
         index += 1;
     }
 }
+
+@system
+pub fn scheduler_diag_yield_round_trip() -> void {
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 23] = [
+        66, 65, 75, 69, 78, 58, 89, 73, 69, 76, 68, 95,
+        82, 79, 85, 78, 68, 95, 84, 82, 73, 80, 10
+    ];
+    let mut index: usize = 0;
+    while index < 23 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
