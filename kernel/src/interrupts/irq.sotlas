@@ -11,6 +11,7 @@ import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::i8042::*;
+import kernel::scheduler::core::*;
 
 pub const IRQ_VECTOR_TIMER: u16 = 0x40;
 pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
@@ -81,17 +82,18 @@ pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
 
 @system
 @export
-pub fn sotlas_x86_irq_dispatch(vector: u64) -> void {
+pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
     if vector == IRQ_VECTOR_SPURIOUS as u64 {
         unsafe { IRQ_SPURIOUS_COUNT += 1; }
         // Vetor espúrio do LAPIC não recebe EOI.
-        return;
+        return frame_address;
     }
 
     if vector == IRQ_VECTOR_TIMER as u64 {
         unsafe { IRQ_TIMER_COUNT += 1; }
+        // O LAPIC recebe EOI antes de potencialmente retomarmos outra thread.
         lapic_eoi();
-        return;
+        return scheduler_on_timer_interrupt(frame_address);
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
         // ISR nunca inicializa/reconfigura o i8042. O caminho abaixo só drena
@@ -99,15 +101,16 @@ pub fn sotlas_x86_irq_dispatch(vector: u64) -> void {
         i8042_drain_irq_output();
         unsafe { IRQ_KEYBOARD_COUNT += 1; }
         lapic_eoi();
-        return;
+        return frame_address;
     }
     if vector == IRQ_VECTOR_MOUSE as u64 {
         i8042_drain_irq_output();
         unsafe { IRQ_MOUSE_COUNT += 1; }
         lapic_eoi();
-        return;
+        return frame_address;
     }
 
     // Nenhum gate desconhecido deve apontar para este dispatcher.
     // Falha fechada: não envia EOI para uma fonte que não reconhecemos.
+    return frame_address;
 }
