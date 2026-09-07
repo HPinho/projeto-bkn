@@ -4,6 +4,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CORE = ROOT / "kernel/src/scheduler/core.sotlas"
 THREAD = ROOT / "kernel/src/scheduler/thread.sotlas"
+STACK_CACHE = ROOT / "kernel/src/scheduler/stack_cache.sotlas"
 FRAME = ROOT / "kernel/src/arch/x86_64/thread_context.sotlas"
 IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
 CPU = ROOT / "kernel/src/arch/x86_64/cpu.sotlas"
@@ -112,16 +113,17 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("scheduler_find_next_ready_normal", text)
         self.assertIn("scheduler_select_slot", text)
 
-    def test_generic_kernel_thread_creation_owns_pmm_backed_stack(self):
+    def test_generic_kernel_thread_creation_reuses_or_allocates_owned_stack(self):
         text = CORE.read_text(encoding="utf-8")
         create = text.split("pub fn scheduler_create_kernel_thread", 1)[1]
         create = create.split("pub fn scheduler_block_current", 1)[0]
         self.assertIn("scheduler_find_free_dynamic_slot()", create)
+        self.assertIn("scheduler_stack_cache_take(stack_pages)", create)
         self.assertIn("pmm_alloc_pages(stack_pages)", create)
         self.assertIn("direct_map_virtual_address(stack_physical)", create)
         self.assertIn("x86_kernel_thread_prepare_frame(stack_top, entry_rip)", create)
+        self.assertIn("scheduler_return_unpublished_stack", create)
         self.assertIn("KERNEL_THREAD_READY", create)
-        self.assertGreaterEqual(create.count("pmm_free_pages_lifo(stack_physical, stack_pages)"), 4)
 
     def test_terminated_slots_are_not_reused_before_reaper(self):
         text = CORE.read_text(encoding="utf-8")
@@ -131,6 +133,36 @@ class KernelSchedulerTests(unittest.TestCase):
         condition = finder.split("if SCHEDULER_THREADS[slot].state", 1)[1]
         condition = condition.split("{", 1)[0]
         self.assertNotIn("KERNEL_THREAD_TERMINATED", condition)
+
+    def test_stack_cache_transfers_ownership_without_firmware_or_heap(self):
+        text = STACK_CACHE.read_text(encoding="utf-8")
+        for token in (
+            "SCHEDULER_STACK_CACHE_CAPACITY",
+            "scheduler_stack_cache_reset()",
+            "scheduler_stack_cache_put(base: u64, pages: u64)",
+            "scheduler_stack_cache_take(pages: u64)",
+            "scheduler_stack_cache_count()",
+        ):
+            self.assertIn(token, text)
+        code = "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+        for forbidden in ("BootServices", "AllocatePages", "malloc(", "free("):
+            self.assertNotIn(forbidden, code)
+
+    def test_reaper_never_frees_current_stack_and_has_safe_cache_fallback(self):
+        text = CORE.read_text(encoding="utf-8")
+        reaper = text.split("fn scheduler_reap_terminated_noncurrent", 1)[1]
+        reaper = reaper.split("pub fn scheduler_initialize", 1)[0]
+        self.assertIn("let current = SCHEDULER_CURRENT_SLOT", reaper)
+        self.assertIn("slot != current", reaper)
+        self.assertIn("KERNEL_THREAD_TERMINATED", reaper)
+        lifo = reaper.index("pmm_free_pages_lifo(stack_base, stack_pages)")
+        cache = reaper.index("scheduler_stack_cache_put(stack_base, stack_pages)")
+        clear = reaper.index("SCHEDULER_THREADS[slot] = kernel_thread_empty(0)")
+        self.assertLess(lifo, cache)
+        self.assertLess(cache, clear)
+        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_REAPED = true", reaper)
+        self.assertIn("scheduler_write_thread_reap_marker_once()", reaper)
+        self.assertIn("scheduler_write_stack_release_marker_once()", reaper)
 
     def test_block_and_wake_are_explicit_thread_state_transitions(self):
         text = CORE.read_text(encoding="utf-8")
@@ -164,7 +196,15 @@ class KernelSchedulerTests(unittest.TestCase):
         idle_pick = body.index("scheduler_select_slot(SCHEDULER_IDLE_SLOT, frame_address)", normal_pick)
         self.assertLess(normal_pick, idle_pick)
 
-    def test_scheduler_round_trip_and_run_queue_probe_are_required_before_runtime(self):
+    def test_reaper_runs_from_masked_timer_path_after_current_frame_is_saved(self):
+        text = CORE.read_text(encoding="utf-8")
+        body = text.split("pub fn scheduler_on_timer_interrupt", 1)[1]
+        save = body.index("SCHEDULER_THREADS[current].saved_frame = frame_address")
+        reap = body.index("scheduler_reap_terminated_noncurrent()")
+        self.assertLess(save, reap)
+        self.assertIn("Executado somente dentro do IRQ de timer", text)
+
+    def test_scheduler_round_trip_run_queue_and_reaper_are_required_before_runtime(self):
         text = RUNTIME.read_text(encoding="utf-8")
         body = text.split("pub fn baken_native_kernel_run", 1)[1]
         self.assertIn("x86_cli_raw();", body)
@@ -173,10 +213,12 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("scheduler_wait_first_round_trip()", body)
         self.assertIn("scheduler_start_run_queue_probe()", body)
         self.assertIn("scheduler_wait_run_queue_probe()", body)
+        self.assertIn("scheduler_wait_reaper_probe()", body)
         self.assertLess(body.index("scheduler_wait_first_round_trip()"), body.index("scheduler_start_run_queue_probe()"))
-        self.assertLess(body.index("scheduler_wait_run_queue_probe()"), body.index("display_init("))
+        self.assertLess(body.index("scheduler_wait_run_queue_probe()"), body.index("scheduler_wait_reaper_probe()"))
+        self.assertLess(body.index("scheduler_wait_reaper_probe()"), body.index("display_init("))
 
-    def test_run_queue_probe_is_a_real_returning_thread_with_terminated_state(self):
+    def test_run_queue_probe_is_a_real_returning_thread_with_terminated_or_reaped_state(self):
         text = CORE.read_text(encoding="utf-8")
         cpu = CPU.read_text(encoding="utf-8")
         intrinsics = INTRINSICS.read_text(encoding="utf-8")
@@ -198,9 +240,14 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("current_terminated", irq_path)
         self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true", irq_path)
         wait = text.split("pub fn scheduler_wait_run_queue_probe", 1)[1]
+        wait = wait.split("pub fn scheduler_wait_reaper_probe", 1)[0]
         self.assertIn("scheduler_thread_is_terminated(SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID)", wait)
+        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_REAPED", wait)
+        reap_wait = text.split("pub fn scheduler_wait_reaper_probe", 1)[1]
+        self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_REAPED", reap_wait)
+        self.assertIn("SCHEDULER_REAP_COUNT != 0", reap_wait)
 
-    def test_qemu_gate_requires_round_trip_dynamic_thread_and_exit_proof(self):
+    def test_qemu_gate_requires_round_trip_dynamic_thread_exit_and_reap_proof(self):
         text = NVME_WORKFLOW.read_text(encoding="utf-8")
         for marker in (
             "BAKEN:SCHEDULER_SWITCH",
@@ -208,6 +255,8 @@ class KernelSchedulerTests(unittest.TestCase):
             "BAKEN:RUN_QUEUE_CREATED",
             "BAKEN:RUN_QUEUE_SWITCH",
             "BAKEN:THREAD_EXIT",
+            "BAKEN:THREAD_REAP",
+            "BAKEN:STACK_RELEASE",
         ):
             with self.subTest(marker=marker):
                 self.assertIn(f"grep -Fq '{marker}'", text)
