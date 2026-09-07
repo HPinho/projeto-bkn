@@ -1,11 +1,9 @@
-// Baken OS — discovery PCI, probe MMIO, reset, DMA, IDENTIFY e I/O AHCI real.
+// Baken OS — discovery PCI e bring-up AHCI nativo.
 //
-// A enumeração começa read-only. Pós-cutover, o caminho de boot/sistema escolhe
-// explicitamente AHCI, que é o backend que já publica a Block Device usada por
-// GPT/FAT. NVMe continua descobrível antes do cutover e é inicializado depois
-// por seu gate nativo independente; a ordem PCI nunca decide o disco de sistema.
-// Para AHCI, o HBA é resetado com IE=0, a arena DMA é programada, IDENTIFY é
-// executado, LBA 1023 é lido e LBA 1024 é escrito/lido no disco descartável.
+// A enumeração começa read-only. Pós-cutover, o caminho normal inicializa AHCI,
+// executa IDENTIFY, descobre capacidade e publica a Block Device sem depender de
+// conteúdo específico do CI e sem escrever mídia. Os probes de LBA 1023/1024
+// pertencem exclusivamente à certificação explícita da fixture.
 
 module kernel::drivers::storage_discovery;
 
@@ -69,8 +67,11 @@ static mut STORAGE_MMIO_READY: bool = false;
 static mut STORAGE_AHCI_RESET_READY: bool = false;
 static mut STORAGE_AHCI_DMA_READY: bool = false;
 static mut STORAGE_AHCI_IDENTIFY_READY: bool = false;
+// Este flag significa que o READ específico da fixture foi comprovado; não é a
+// disponibilidade do I/O genérico do disco.
 static mut STORAGE_AHCI_READ_READY: bool = false;
 static mut STORAGE_BLOCK_DEVICE_READY: bool = false;
+// Este flag é a prova read/write da fixture, usada pelo gate de certificação.
 static mut STORAGE_GENERIC_BLOCK_IO_READY: bool = false;
 static mut STORAGE_MMIO_REG0: u32 = 0;
 static mut STORAGE_MMIO_REG1: u32 = 0;
@@ -236,8 +237,10 @@ fn storage_identify_ahci_after_dma() -> bool {
     }
 }
 
+// O caminho normal precisa apenas do IDENTIFY/capacidade. Não lê assinatura e
+// não escreve nenhum LBA da mídia.
 @system
-fn storage_read_ahci_after_identify() -> bool {
+fn storage_prepare_ahci_capacity_after_identify() -> bool {
     unsafe {
         STORAGE_AHCI_READ_READY = false;
         STORAGE_BLOCK_DEVICE_READY = false;
@@ -245,12 +248,11 @@ fn storage_read_ahci_after_identify() -> bool {
         if !STORAGE_AHCI_IDENTIFY_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI {
             return false;
         }
-        if !ahci_parse_identify_capacity() || !ahci_capacity_is_ready() { return false; }
-        if !ahci_read_probe_sector0(STORAGE_CANDIDATE.abar_or_mmio_base) ||
-           !ahci_read_is_ready() { return false; }
-        STORAGE_AHCI_READ_READY = true;
-        return true;
     }
+    if !ahci_parse_identify_capacity() || !ahci_capacity_is_ready() || ahci_total_sectors() == 0 {
+        return false;
+    }
+    return true;
 }
 
 @system
@@ -258,7 +260,7 @@ fn storage_register_ahci_block_device() -> bool {
     unsafe {
         STORAGE_BLOCK_DEVICE_READY = false;
         STORAGE_GENERIC_BLOCK_IO_READY = false;
-        if !STORAGE_AHCI_READ_READY || !ahci_write_is_ready() ||
+        if !STORAGE_AHCI_IDENTIFY_READY || !ahci_runtime_is_ready() || !ahci_capacity_is_ready() ||
            STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI { return false; }
 
         let total_sectors = ahci_total_sectors();
@@ -352,6 +354,25 @@ fn storage_prove_generic_block_io() -> bool {
     return true;
 }
 
+// Certificação explícita da mídia conhecida do CI. Só chega à escrita depois
+// de reconhecer BAKENR01 no LBA de leitura, portanto uma mídia comum não é
+// tratada como fixture por engano.
+@system
+pub fn storage_certify_ahci_fixture() -> bool {
+    unsafe {
+        STORAGE_AHCI_READ_READY = false;
+        STORAGE_GENERIC_BLOCK_IO_READY = false;
+        if !STORAGE_BLOCK_DEVICE_READY || STORAGE_CANDIDATE.kind != STORAGE_CONTROLLER_AHCI ||
+           STORAGE_CANDIDATE.abar_or_mmio_base == 0 { return false; }
+    }
+    if !ahci_read_probe_sector0(unsafe { STORAGE_CANDIDATE.abar_or_mmio_base }) ||
+       !ahci_read_is_ready() { return false; }
+    unsafe { STORAGE_AHCI_READ_READY = true; }
+    if !ahci_write_probe_sector1(unsafe { STORAGE_CANDIDATE.abar_or_mmio_base }) ||
+       !ahci_write_is_ready() { return false; }
+    return storage_prove_generic_block_io();
+}
+
 @system
 pub fn storage_discovery_scan() -> u32 {
     unsafe {
@@ -373,9 +394,9 @@ pub fn storage_discovery_scan() -> u32 {
             let kind = storage_candidate_kind(dev);
             if kind == STORAGE_CONTROLLER_NONE { continue; }
 
-            // O sistema de arquivos da cadeia de boot depende da Block Device
-            // AHCI já comprovada. Não tocar no MMIO NVMe aqui também evita que a
-            // enumeração PCI altere qual controlador recebe STEP=a.
+            // A rota normal de boot atualmente publica AHCI como block device.
+            // NVMe possui inicialização nativa independente e será integrado ao
+            // seletor de boot sem reutilizar os probes de certificação.
             if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }
 
             STORAGE_CANDIDATE.kind = kind;
@@ -393,21 +414,13 @@ pub fn storage_discovery_scan() -> u32 {
                 STORAGE_CANDIDATE.abar_or_mmio_base = (*dev).bars[0].base_address;
             }
             if !storage_probe_mmio_after_cutover() { return STORAGE_CONTROLLER_NONE; }
-            // Pre-cutover discovery permanece estritamente read-only e pode
-            // relatar AHCI ou NVMe. A posse real do boot target só ocorre depois.
             if !post_cutover { return kind; }
 
             if !storage_reset_ahci_after_probe() { return STORAGE_CONTROLLER_NONE; }
             if !storage_prepare_ahci_dma_after_reset() { return STORAGE_CONTROLLER_NONE; }
             if !storage_identify_ahci_after_dma() { return STORAGE_CONTROLLER_NONE; }
-            if !storage_read_ahci_after_identify() { return STORAGE_CONTROLLER_NONE; }
-            if !ahci_write_probe_sector1(STORAGE_CANDIDATE.abar_or_mmio_base) ||
-               !ahci_write_is_ready() { return STORAGE_CONTROLLER_NONE; }
+            if !storage_prepare_ahci_capacity_after_identify() { return STORAGE_CONTROLLER_NONE; }
             if !storage_register_ahci_block_device() { return STORAGE_CONTROLLER_NONE; }
-            if !storage_prove_generic_block_io() {
-                block_device_reset_registry();
-                return STORAGE_CONTROLLER_NONE;
-            }
             return STORAGE_CONTROLLER_AHCI;
         }
         return STORAGE_CONTROLLER_NONE;
