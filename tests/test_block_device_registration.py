@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails da publicação AHCI na Block Device API."""
+"""Guardrails da publicação AHCI/NVMe na Block Device API."""
 
 from pathlib import Path
 import unittest
@@ -18,24 +18,28 @@ class BlockDeviceRegistrationTests(unittest.TestCase):
         for token in ("BLOCK_DEVICE_AHCI", "BLOCK_DEVICE_NVME", "block_size == 0", "last_lba == 0", "!io_ready", "BLOCK_NATIVE_IO_READY = true"):
             self.assertIn(token, body)
 
-    def test_ahci_registration_occurs_before_fixture_certification(self):
+    def test_ahci_registration_precedes_fixture_and_nvme_fallback(self):
         text = DISCOVERY.read_text(encoding="utf-8")
         scan = text.split("pub fn storage_discovery_scan()", 1)[1]
         post_cutover = scan.index("let post_cutover = active_page_tables_is_ready();")
-        boot_filter = scan.index("if post_cutover && kind != STORAGE_CONTROLLER_AHCI { continue; }")
-        pre_cutover_return = scan.index("if !post_cutover { return kind; }")
+        pre_cutover = scan.index("if !post_cutover {")
+        ahci_filter = scan.index("if kind != STORAGE_CONTROLLER_AHCI { continue; }")
         capacity = scan.index("storage_prepare_ahci_capacity_after_identify()")
         register = scan.index("storage_register_ahci_block_device()")
         certify = scan.index("storage_certify_ahci_fixture()")
-        self.assertLess(post_cutover, boot_filter)
-        self.assertLess(boot_filter, pre_cutover_return)
-        self.assertLess(pre_cutover_return, capacity)
+        nvme_filter = scan.index("if kind != STORAGE_CONTROLLER_NVME { continue; }")
+        nvme_register = scan.index("storage_register_nvme_block_device()")
+        self.assertLess(post_cutover, pre_cutover)
+        self.assertLess(pre_cutover, ahci_filter)
+        self.assertLess(ahci_filter, capacity)
         self.assertLess(capacity, register)
         self.assertLess(register, certify)
+        self.assertLess(certify, nvme_filter)
+        self.assertLess(nvme_filter, nvme_register)
 
     def test_registration_uses_identify_capacity_not_ci_probe_flags(self):
         text = DISCOVERY.read_text(encoding="utf-8")
-        body = text.split("fn storage_register_ahci_block_device()", 1)[1].split("fn storage_block_io_zero", 1)[0]
+        body = text.split("fn storage_register_ahci_block_device()", 1)[1].split("fn storage_register_nvme_block_device", 1)[0]
         for token in (
             "STORAGE_AHCI_IDENTIFY_READY", "ahci_runtime_is_ready()", "ahci_capacity_is_ready()", "ahci_total_sectors()",
             "let last_lba = total_sectors - 1", "block_device_register_native(BLOCK_DEVICE_AHCI", "AHCI_READ_SECTOR_SIZE as u32",
@@ -46,6 +50,18 @@ class BlockDeviceRegistrationTests(unittest.TestCase):
             self.assertIn(token, body)
         self.assertNotIn("ahci_write_is_ready()", body)
         self.assertNotIn("AHCI_WRITE_TEST_LBA", body)
+
+    def test_nvme_registration_uses_native_driver_capacity_and_context(self):
+        text = DISCOVERY.read_text(encoding="utf-8")
+        body = text.split("fn storage_register_nvme_block_device()", 1)[1].split("fn storage_block_io_zero", 1)[0]
+        for token in (
+            "STORAGE_CONTROLLER_NVME", "nvme_initialize_first()", "nvme_last_lba()", "nvme_context()",
+            "block_device_register_native(BLOCK_DEVICE_NVME, STORAGE_CANDIDATE.pci_index, 512, last_lba, true, true)",
+            "block_device_bind_driver_context(context)", "block_device_kind() != BLOCK_DEVICE_NVME",
+            "block_device_index() != STORAGE_CANDIDATE.pci_index", "block_device_driver_context() != context",
+            "STORAGE_BLOCK_DEVICE_READY = true",
+        ):
+            self.assertIn(token, body)
 
     def test_scan_resets_registry_before_each_discovery(self):
         text = DISCOVERY.read_text(encoding="utf-8")
