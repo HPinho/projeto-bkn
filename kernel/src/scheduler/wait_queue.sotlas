@@ -1,0 +1,214 @@
+// Baken OS — wait queues BSP do scheduler.
+//
+// A fila e a transição RUNNING -> BLOCKED são publicadas com IF=0. O handoff
+// final usa uma única sequência x86 `sti; int 0x43`: o interrupt shadow de STI
+// fecha a janela de lost wakeup antes do frame bloqueado entrar no scheduler.
+// Esta implementação é deliberadamente single-core/BSP; SMP exigirá lock real.
+
+module kernel::scheduler::wait_queue;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::scheduler::core::*;
+
+pub const KERNEL_WAIT_QUEUE_CAPACITY: usize = 8;
+
+@repr(C)
+pub struct KernelWaitQueue {
+    pub thread_ids: [u64; KERNEL_WAIT_QUEUE_CAPACITY];
+    pub head: usize;
+    pub tail: usize;
+    pub count: usize;
+}
+
+static mut WAIT_BLOCKED_MARKED: bool = false;
+static mut WAIT_WAKE_MARKED: bool = false;
+
+@system
+fn wait_queue_write_blocked_marker_once() -> void {
+    unsafe {
+        if WAIT_BLOCKED_MARKED { return; }
+        WAIT_BLOCKED_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 19] = [
+        66, 65, 75, 69, 78, 58, 87, 65, 73, 84,
+        95, 66, 76, 79, 67, 75, 69, 68, 10
+    ];
+    let mut index: usize = 0;
+    while index < 19 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+fn wait_queue_write_wake_marker_once() -> void {
+    unsafe {
+        if WAIT_WAKE_MARKED { return; }
+        WAIT_WAKE_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 16] = [
+        66, 65, 75, 69, 78, 58, 87, 65,
+        73, 84, 95, 87, 65, 75, 69, 10
+    ];
+    let mut index: usize = 0;
+    while index < 16 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+pub fn kernel_wait_queue_empty() -> KernelWaitQueue {
+    return KernelWaitQueue {
+        thread_ids: [0; KERNEL_WAIT_QUEUE_CAPACITY],
+        head: 0,
+        tail: 0,
+        count: 0
+    };
+}
+
+@system
+pub fn kernel_wait_queue_init(queue: *mut KernelWaitQueue) -> bool {
+    if queue == (null as *mut KernelWaitQueue) { return false; }
+    unsafe {
+        (*queue).thread_ids = [0; KERNEL_WAIT_QUEUE_CAPACITY];
+        (*queue).head = 0;
+        (*queue).tail = 0;
+        (*queue).count = 0;
+    }
+    return true;
+}
+
+@system
+pub fn kernel_wait_queue_count(queue: *mut KernelWaitQueue) -> usize {
+    if queue == (null as *mut KernelWaitQueue) { return 0; }
+    let flags = x86_irq_save_disable();
+    let mut count: usize = 0;
+    unsafe { count = (*queue).count; }
+    x86_irq_restore(flags);
+    return count;
+}
+
+@system
+fn wait_queue_push_locked(queue: *mut KernelWaitQueue, thread_id: u64) -> bool {
+    unsafe {
+        if (*queue).count >= KERNEL_WAIT_QUEUE_CAPACITY { return false; }
+        let tail = (*queue).tail;
+        (*queue).thread_ids[tail] = thread_id;
+        (*queue).tail = (tail + 1) % KERNEL_WAIT_QUEUE_CAPACITY;
+        (*queue).count += 1;
+    }
+    return true;
+}
+
+@system
+fn wait_queue_rollback_push_locked(queue: *mut KernelWaitQueue) -> void {
+    unsafe {
+        if (*queue).count == 0 { return; }
+        let tail = if (*queue).tail == 0 {
+            KERNEL_WAIT_QUEUE_CAPACITY - 1
+        } else {
+            (*queue).tail - 1
+        };
+        (*queue).tail = tail;
+        (*queue).thread_ids[tail] = 0;
+        (*queue).count -= 1;
+    }
+}
+
+@system
+fn wait_queue_pop_locked(queue: *mut KernelWaitQueue) -> u64 {
+    unsafe {
+        if (*queue).count == 0 { return 0; }
+        let head = (*queue).head;
+        let thread_id = (*queue).thread_ids[head];
+        (*queue).thread_ids[head] = 0;
+        (*queue).head = (head + 1) % KERNEL_WAIT_QUEUE_CAPACITY;
+        (*queue).count -= 1;
+        return thread_id;
+    }
+}
+
+@system
+pub fn scheduler_wait_queue_sleep(queue: *mut KernelWaitQueue) -> bool {
+    if queue == (null as *mut KernelWaitQueue) || !scheduler_is_active() {
+        return false;
+    }
+
+    // Dormir com IF originalmente limpo esconderia um contrato de lock do
+    // chamador. Falhamos fechado em vez de reabilitar IRQs silenciosamente.
+    if !x86_interrupts_enabled() { return false; }
+
+    let flags = x86_irq_save_disable();
+    let thread_id = scheduler_current_thread_id();
+    if !wait_queue_push_locked(queue, thread_id) {
+        x86_irq_restore(flags);
+        return false;
+    }
+    if !scheduler_block_current() {
+        wait_queue_rollback_push_locked(queue);
+        x86_irq_restore(flags);
+        return false;
+    }
+
+    wait_queue_write_blocked_marker_once();
+
+    // Não separar STI de INT 0x43 aqui. A sequência pertence ao backend para
+    // que o shadow de STI feche arquiteturalmente a janela de lost wakeup.
+    x86_scheduler_block_switch();
+
+    // IRETQ já restaurou IF=1 do frame do INT; mantemos explicitamente o
+    // contrato original para tornar a API correta se o backend evoluir.
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn scheduler_wait_queue_wake_one(queue: *mut KernelWaitQueue) -> bool {
+    if queue == (null as *mut KernelWaitQueue) || !scheduler_is_active() {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    while true {
+        unsafe {
+            if (*queue).count == 0 {
+                x86_irq_restore(flags);
+                return false;
+            }
+        }
+        let thread_id = wait_queue_pop_locked(queue);
+        if scheduler_wake_thread(thread_id) {
+            wait_queue_write_wake_marker_once();
+            x86_irq_restore(flags);
+            return true;
+        }
+        // ID obsoleto não pode manter a fila presa; continua drenando sob IF=0.
+    }
+    return false;
+}
+
+@system
+pub fn scheduler_wait_queue_wake_all(queue: *mut KernelWaitQueue) -> u64 {
+    if queue == (null as *mut KernelWaitQueue) || !scheduler_is_active() {
+        return 0;
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut woken: u64 = 0;
+    while true {
+        unsafe {
+            if (*queue).count == 0 { break; }
+        }
+        let thread_id = wait_queue_pop_locked(queue);
+        if scheduler_wake_thread(thread_id) {
+            woken += 1;
+        }
+    }
+    if woken != 0 { wait_queue_write_wake_marker_once(); }
+    x86_irq_restore(flags);
+    return woken;
+}
