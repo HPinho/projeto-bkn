@@ -43,6 +43,16 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("GDT_KERNEL_CODE_SELECTOR as u64", text)
         self.assertIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202", text)
 
+    def test_new_thread_entry_reserves_full_win64_home_space(self):
+        text = FRAME.read_text(encoding="utf-8")
+        self.assertIn("X86_KERNEL_THREAD_RETURN_SLOT_BYTES: u64 = 8", text)
+        self.assertIn("X86_KERNEL_THREAD_HOME_SPACE_BYTES: u64 = 32", text)
+        self.assertIn("X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES", text)
+        self.assertIn("let entry_stack = aligned_top - X86_KERNEL_THREAD_ENTRY_RESERVE_BYTES", text)
+        self.assertIn("if (entry_stack & 0x0F) != 8", text)
+        self.assertIn("let synthetic_return = entry_stack as *mut u64", text)
+        self.assertIn("(*synthetic_return) = 0", text)
+
     def test_irq_backend_can_restore_dispatcher_selected_frame(self):
         text = INTRINSICS.read_text(encoding="utf-8")
         self.assertIn(
@@ -139,9 +149,16 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("KERNEL_THREAD_BLOCKED", irq_path)
         self.assertIn("SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true", irq_path)
 
-    def test_qemu_gate_requires_real_scheduler_switch(self):
+    def test_qemu_gate_requires_round_trip_and_dynamic_thread_proof(self):
         text = NVME_WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("grep -Fq 'BAKEN:SCHEDULER_SWITCH'", text)
+        for marker in (
+            "BAKEN:SCHEDULER_SWITCH",
+            "BAKEN:SCHEDULER_ROUND_TRIP",
+            "BAKEN:RUN_QUEUE_CREATED",
+            "BAKEN:RUN_QUEUE_SWITCH",
+        ):
+            with self.subTest(marker=marker):
+                self.assertIn(f"grep -Fq '{marker}'", text)
 
     def test_idle_entry_address_is_low_level_backend_helper(self):
         cpu = CPU.read_text(encoding="utf-8")
