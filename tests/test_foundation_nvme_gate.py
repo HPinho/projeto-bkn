@@ -64,6 +64,9 @@ class FoundationNvmeGateTests(unittest.TestCase):
         body = text.split("pub fn foundation_nvme_probe()", 1)[1]
         for token in (
             "nvme_initialize_first()",
+            "let active_nvme = block_device_has_native_target() && old_kind == BLOCK_DEVICE_NVME",
+            "old_last == nvme_last_lba() && old_context == nvme_context()",
+            "if !active_nvme {",
             "block_device_register_native(BLOCK_DEVICE_NVME, 0, 512, nvme_last_lba(), true, true)",
             "block_device_bind_driver_context(nvme_context())",
             "block_device_read_sector(1024, page.virtual_address)",
@@ -78,6 +81,7 @@ class FoundationNvmeGateTests(unittest.TestCase):
             "x86_serial_write_stage_marker(')' as u8)",
         ):
             self.assertIn(token, body)
+        self.assertGreaterEqual(body.count("if !active_nvme {"), 2)
 
     def test_sector_io_is_native_and_write_uses_fua(self):
         text = NVME.read_text(encoding="utf-8")
