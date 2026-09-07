@@ -1,0 +1,17 @@
+// Baken OS — yield voluntário de kernel thread.
+//
+// O yield não espera o próximo tick. Ele entra por um interrupt gate CPL0
+// dedicado e deixa o common x86 salvar/restaurar o mesmo frame real usado pela
+// preempção. Assim não há segunda representação artificial de contexto.
+
+module kernel::scheduler::yield;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::scheduler::core::*;
+
+@system
+pub fn scheduler_yield() -> bool {
+    if !scheduler_is_active() { return false; }
+    x86_scheduler_yield_interrupt();
+    return true;
+}
