@@ -41,7 +41,8 @@ class KernelSchedulerTests(unittest.TestCase):
         positions = [text.index(field) for field in fields]
         self.assertEqual(positions, sorted(positions))
         self.assertIn("GDT_KERNEL_CODE_SELECTOR as u64", text)
-        self.assertIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202", text)
+        self.assertIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x2", text)
+        self.assertNotIn("X86_KERNEL_THREAD_INITIAL_RFLAGS: u64 = 0x202", text)
 
     def test_new_thread_entry_uses_native_trampoline_and_explicit_stack_top(self):
         frame = FRAME.read_text(encoding="utf-8")
@@ -61,9 +62,11 @@ class KernelSchedulerTests(unittest.TestCase):
         trampoline = trampoline.split("static inline uint64_t __scheduler_thread_trampoline_address", 1)[0]
         restore = trampoline.index('"movq %r10, %rsp\\n\\t"')
         home = trampoline.index('"subq $32, %rsp\\n\\t"')
+        sti = trampoline.index('"sti\\n\\t"')
         call = trampoline.index('"call *%r11\\n\\t"')
         self.assertLess(restore, home)
-        self.assertLess(home, call)
+        self.assertLess(home, sti)
+        self.assertLess(sti, call)
 
     def test_irq_backend_can_restore_dispatcher_selected_frame(self):
         text = INTRINSICS.read_text(encoding="utf-8")
