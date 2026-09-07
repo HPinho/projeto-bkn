@@ -7,6 +7,7 @@
 module kernel::scheduler::core;
 
 import kernel::scheduler::thread::*;
+import kernel::scheduler::stack_cache::*;
 import kernel::arch::x86_64::thread_context::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
@@ -29,12 +30,16 @@ static mut SCHEDULER_ACTIVE: bool = false;
 static mut SCHEDULER_CURRENT_SLOT: usize = SCHEDULER_BOOT_SLOT;
 static mut SCHEDULER_NEXT_THREAD_ID: u64 = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
 static mut SCHEDULER_SWITCH_COUNT: u64 = 0;
+static mut SCHEDULER_REAP_COUNT: u64 = 0;
 static mut SCHEDULER_FIRST_SWITCH_MARKED: bool = false;
 static mut SCHEDULER_RUN_QUEUE_SWITCH_MARKED: bool = false;
 static mut SCHEDULER_THREAD_EXIT_MARKED: bool = false;
+static mut SCHEDULER_THREAD_REAP_MARKED: bool = false;
+static mut SCHEDULER_STACK_RELEASE_MARKED: bool = false;
 static mut SCHEDULER_BOOTSTRAP_PROBE_COMPLETE: bool = false;
 static mut SCHEDULER_RUN_QUEUE_PROBE_COMPLETE: bool = false;
 static mut SCHEDULER_RUN_QUEUE_PROBE_SELECTED: bool = false;
+static mut SCHEDULER_RUN_QUEUE_PROBE_REAPED: bool = false;
 static mut SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID: u64 = 0;
 
 static mut SCHEDULER_THREADS: [KernelThread; SCHEDULER_THREAD_SLOT_COUNT] = [
@@ -100,6 +105,42 @@ fn scheduler_write_thread_exit_marker_once() -> void {
     ];
     let mut index: usize = 0;
     while index < 18 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+fn scheduler_write_thread_reap_marker_once() -> void {
+    unsafe {
+        if SCHEDULER_THREAD_REAP_MARKED { return; }
+        SCHEDULER_THREAD_REAP_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 18] = [
+        66, 65, 75, 69, 78, 58, 84, 72, 82,
+        69, 65, 68, 95, 82, 69, 65, 80, 10
+    ];
+    let mut index: usize = 0;
+    while index < 18 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+fn scheduler_write_stack_release_marker_once() -> void {
+    unsafe {
+        if SCHEDULER_STACK_RELEASE_MARKED { return; }
+        SCHEDULER_STACK_RELEASE_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 20] = [
+        66, 65, 75, 69, 78, 58, 83, 84, 65, 67,
+        75, 95, 82, 69, 76, 69, 65, 83, 69, 10
+    ];
+    let mut index: usize = 0;
+    while index < 20 {
         if !x86_serial_write_byte(marker[index]) { return; }
         index += 1;
     }
@@ -210,21 +251,75 @@ fn scheduler_select_slot(slot: usize, fallback_frame: u64) -> u64 {
 }
 
 @system
+fn scheduler_return_unpublished_stack(base: u64, pages: u64, from_cache: bool) -> void {
+    if base == 0 || pages == 0 { return; }
+    if from_cache {
+        scheduler_stack_cache_put(base, pages);
+        return;
+    }
+    if !pmm_free_pages_lifo(base, pages) {
+        scheduler_stack_cache_put(base, pages);
+    }
+}
+
+// Executado somente dentro do IRQ de timer, com interrupções já mascaradas.
+// Nunca toca a stack da thread corrente. Primeiro tenta devolução física LIFO;
+// se não for possível, transfere ownership para o cache do scheduler.
+@system
+fn scheduler_reap_terminated_noncurrent() -> u64 {
+    let mut reaped: u64 = 0;
+    unsafe {
+        let current = SCHEDULER_CURRENT_SLOT;
+        let mut slot: usize = SCHEDULER_FIRST_DYNAMIC_SLOT;
+        while slot < SCHEDULER_THREAD_SLOT_COUNT {
+            if slot != current && SCHEDULER_THREADS[slot].state == KERNEL_THREAD_TERMINATED {
+                let thread_id = SCHEDULER_THREADS[slot].id;
+                let stack_base = SCHEDULER_THREADS[slot].stack_physical_base;
+                let stack_pages = SCHEDULER_THREADS[slot].stack_pages;
+                if stack_base != 0 && stack_pages != 0 {
+                    let released_to_pmm = pmm_free_pages_lifo(stack_base, stack_pages);
+                    if released_to_pmm {
+                        scheduler_write_stack_release_marker_once();
+                    } else if !scheduler_stack_cache_put(stack_base, stack_pages) {
+                        slot += 1;
+                        continue;
+                    }
+                    if thread_id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID {
+                        SCHEDULER_RUN_QUEUE_PROBE_REAPED = true;
+                    }
+                    SCHEDULER_THREADS[slot] = kernel_thread_empty(0);
+                    SCHEDULER_REAP_COUNT += 1;
+                    reaped += 1;
+                }
+            }
+            slot += 1;
+        }
+    }
+    if reaped != 0 { scheduler_write_thread_reap_marker_once(); }
+    return reaped;
+}
+
+@system
 pub fn scheduler_initialize() -> bool {
     unsafe {
         if SCHEDULER_ACTIVE { return true; }
         SCHEDULER_CURRENT_SLOT = SCHEDULER_BOOT_SLOT;
         SCHEDULER_NEXT_THREAD_ID = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
         SCHEDULER_SWITCH_COUNT = 0;
+        SCHEDULER_REAP_COUNT = 0;
         SCHEDULER_FIRST_SWITCH_MARKED = false;
         SCHEDULER_RUN_QUEUE_SWITCH_MARKED = false;
         SCHEDULER_THREAD_EXIT_MARKED = false;
+        SCHEDULER_THREAD_REAP_MARKED = false;
+        SCHEDULER_STACK_RELEASE_MARKED = false;
         SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = false;
         SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = false;
         SCHEDULER_RUN_QUEUE_PROBE_SELECTED = false;
+        SCHEDULER_RUN_QUEUE_PROBE_REAPED = false;
         SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID = 0;
     }
     scheduler_reset_thread_slots();
+    scheduler_stack_cache_reset();
 
     if !pmm_allocator_is_active() { return false; }
     let stack_physical = pmm_alloc_pages(SCHEDULER_IDLE_STACK_PAGES);
@@ -273,26 +368,30 @@ pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
     let slot = scheduler_find_free_dynamic_slot();
     if slot == SCHEDULER_INVALID_SLOT { return 0; }
 
-    let stack_physical = pmm_alloc_pages(stack_pages);
+    let mut stack_physical = scheduler_stack_cache_take(stack_pages);
+    let stack_from_cache = stack_physical != 0;
+    if stack_physical == 0 {
+        stack_physical = pmm_alloc_pages(stack_pages);
+    }
     if stack_physical == 0 { return 0; }
     let stack_virtual = direct_map_virtual_address(stack_physical);
     if stack_virtual == 0 {
-        pmm_free_pages_lifo(stack_physical, stack_pages);
+        scheduler_return_unpublished_stack(stack_physical, stack_pages, stack_from_cache);
         return 0;
     }
     let stack_bytes = stack_pages * 4096;
     if stack_bytes / 4096 != stack_pages {
-        pmm_free_pages_lifo(stack_physical, stack_pages);
+        scheduler_return_unpublished_stack(stack_physical, stack_pages, stack_from_cache);
         return 0;
     }
     let stack_top = stack_virtual + stack_bytes;
     if stack_top <= stack_virtual {
-        pmm_free_pages_lifo(stack_physical, stack_pages);
+        scheduler_return_unpublished_stack(stack_physical, stack_pages, stack_from_cache);
         return 0;
     }
     let initial_frame = x86_kernel_thread_prepare_frame(stack_top, entry_rip);
     if initial_frame == 0 {
-        pmm_free_pages_lifo(stack_physical, stack_pages);
+        scheduler_return_unpublished_stack(stack_physical, stack_pages, stack_from_cache);
         return 0;
     }
 
@@ -378,6 +477,11 @@ pub fn scheduler_switch_count() -> u64 {
 }
 
 @system
+pub fn scheduler_reap_count() -> u64 {
+    unsafe { return SCHEDULER_REAP_COUNT; }
+}
+
+@system
 pub fn scheduler_thread_count() -> u64 {
     let mut count: u64 = 0;
     unsafe {
@@ -416,6 +520,11 @@ pub fn scheduler_run_queue_probe_complete() -> bool {
 }
 
 @system
+pub fn scheduler_run_queue_probe_reaped() -> bool {
+    unsafe { return SCHEDULER_RUN_QUEUE_PROBE_REAPED; }
+}
+
+@system
 pub fn scheduler_start_run_queue_probe() -> bool {
     if !scheduler_is_active() || !scheduler_bootstrap_probe_complete() { return false; }
     unsafe {
@@ -431,6 +540,7 @@ pub fn scheduler_start_run_queue_probe() -> bool {
         SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID = thread_id;
         SCHEDULER_RUN_QUEUE_PROBE_SELECTED = false;
         SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = false;
+        SCHEDULER_RUN_QUEUE_PROBE_REAPED = false;
     }
     return true;
 }
@@ -445,6 +555,10 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
         let current = SCHEDULER_CURRENT_SLOT;
         if current >= SCHEDULER_THREAD_SLOT_COUNT { return frame_address; }
         SCHEDULER_THREADS[current].saved_frame = frame_address;
+
+        // Uma stack TERMINATED só é reapada quando outra thread já está usando
+        // a CPU. Assim nunca liberamos a stack que ainda sustenta este IRQ.
+        scheduler_reap_terminated_noncurrent();
 
         // Bootstrap proof: força exatamente um round-trip bootstrap -> idle ->
         // bootstrap antes de liberar a política normal da run queue.
@@ -462,7 +576,7 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
         }
 
         // Threads RUNNING voltam a READY em preempção normal. TERMINATED é
-        // preservado: o slot e a stack ficam aposentados até o reaper seguro.
+        // preservado até um IRQ posterior em outra thread executar o reaper.
         let current_id = SCHEDULER_THREADS[current].id;
         let current_terminated = SCHEDULER_THREADS[current].state == KERNEL_THREAD_TERMINATED;
         if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
@@ -517,9 +631,30 @@ pub fn scheduler_wait_run_queue_probe() -> bool {
     let mut spins: u64 = 0;
     while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
         unsafe {
+            let exited_or_reaped = scheduler_thread_is_terminated(SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID) ||
+                SCHEDULER_RUN_QUEUE_PROBE_REAPED;
             if SCHEDULER_RUN_QUEUE_PROBE_COMPLETE &&
                SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID != 0 &&
-               scheduler_thread_is_terminated(SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID) &&
+               exited_or_reaped &&
+               scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
+                return true;
+            }
+        }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+pub fn scheduler_wait_reaper_probe() -> bool {
+    if !scheduler_is_active() { return false; }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
+        unsafe {
+            if SCHEDULER_RUN_QUEUE_PROBE_COMPLETE &&
+               SCHEDULER_RUN_QUEUE_PROBE_REAPED &&
+               SCHEDULER_REAP_COUNT != 0 &&
                scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
                 return true;
             }
