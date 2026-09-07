@@ -21,6 +21,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::yield::*;
 import kernel::scheduler::diagnostics::*;
+import kernel::scheduler::wait_queue_probe::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -214,12 +215,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
 
-    // A fundação já deixou o LAPIC timer ativo. Inicializamos o scheduler com
-    // IRQs mascaradas, provamos bootstrap -> idle -> bootstrap e então criamos
-    // uma terceira thread CPL0 por meio da API genérica. O bootstrap entrega a
-    // CPU voluntariamente por INT 0x43; a thread retorna pelo trampoline, vira
-    // TERMINATED e um IRQ posterior em outra thread executa o reaper antes de
-    // liberar o runtime gráfico.
+    // A fundação já deixou o LAPIC timer ativo. O bring-up prova em sequência:
+    // preempção, run queue, yield voluntário, exit/reaper e uma wait queue real
+    // com enqueue+BLOCKED sob IF=0 e handoff atômico STI+INT 0x43.
     x86_cli_raw();
     let scheduler_ready = scheduler_initialize();
     x86_sti_raw();
@@ -235,6 +233,17 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     scheduler_diag_yield_round_trip();
     if !scheduler_wait_run_queue_probe() { loop {} }
     if !scheduler_wait_reaper_probe() { loop {} }
+
+    // Wait queue proof: a thread bloqueia e devolve a CPU ao bootstrap. O
+    // bootstrap confirma que ela está enfileirada, acorda exatamente um waiter
+    // e cede de novo; a thread deve retomar após o INT 0x43 e terminar limpa.
+    if !scheduler_wait_probe_start() { loop {} }
+    if !scheduler_yield() { loop {} }
+    if !scheduler_wait_probe_blocked() { loop {} }
+    if !scheduler_wait_probe_wake() { loop {} }
+    if !scheduler_yield() { loop {} }
+    if !scheduler_wait_probe_resumed() { loop {} }
+    if !scheduler_wait_probe_wait_complete() { loop {} }
 
     display_init(framebuffer, width, height, pixels_per_scanline);
     baken_native_bind_assets();
