@@ -176,8 +176,8 @@ fn ahci_block_io_issue(hba: u64, lba: u64, command: u8, write_to_disk: bool) -> 
 @system
 pub fn ahci_block_io_read_sector(hba: u64, lba: u64, output: *mut u8) -> bool {
     if output == (null as *mut u8) || hba == 0 { return false; }
-    // IDENTIFY + capacidade são o contrato de disponibilidade do I/O normal.
-    // `ahci_read_is_ready()` pertence somente ao probe de certificação da fixture.
+    // IDENTIFY + capacidade são o contrato de disponibilidade do I/O normal;
+    // o readiness específico da fixture pertence somente à certificação.
     if !ahci_runtime_is_ready() || !ahci_capacity_is_ready() || lba >= ahci_total_sectors() { return false; }
     if !ahci_block_io_prepare_buffer() { return false; }
 
