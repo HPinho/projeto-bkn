@@ -1,0 +1,189 @@
+// Baken OS — primeiro scheduler preemptivo real do kernel.
+//
+// Fase inicial deliberadamente pequena: duas threads CPL0, bootstrap + idle.
+// O timer entrega o frame real salvo pelo stub x86-64; o scheduler apenas escolhe
+// qual frame deve ser restaurado. Não há cópia artificial de registradores.
+
+module kernel::scheduler::core;
+
+import kernel::scheduler::thread::*;
+import kernel::arch::x86_64::thread_context::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::memory::direct_map::*;
+
+pub const SCHEDULER_BOOT_THREAD_ID: u64 = 0;
+pub const SCHEDULER_IDLE_THREAD_ID: u64 = 1;
+pub const SCHEDULER_IDLE_STACK_PAGES: u64 = 4;
+pub const SCHEDULER_ROUND_TRIP_SPIN_LIMIT: u64 = 10000000;
+
+static mut SCHEDULER_ACTIVE: bool = false;
+static mut SCHEDULER_CURRENT_THREAD_ID: u64 = SCHEDULER_BOOT_THREAD_ID;
+static mut SCHEDULER_SWITCH_COUNT: u64 = 0;
+static mut SCHEDULER_FIRST_SWITCH_MARKED: bool = false;
+static mut SCHEDULER_BOOT_THREAD: KernelThread = KernelThread {
+    id: SCHEDULER_BOOT_THREAD_ID,
+    state: KERNEL_THREAD_UNUSED,
+    reserved: 0,
+    saved_frame: 0,
+    stack_physical_base: 0,
+    stack_virtual_top: 0,
+    stack_pages: 0,
+    switch_count: 0
+};
+static mut SCHEDULER_IDLE_THREAD: KernelThread = KernelThread {
+    id: SCHEDULER_IDLE_THREAD_ID,
+    state: KERNEL_THREAD_UNUSED,
+    reserved: 0,
+    saved_frame: 0,
+    stack_physical_base: 0,
+    stack_virtual_top: 0,
+    stack_pages: 0,
+    switch_count: 0
+};
+
+@system
+fn scheduler_write_switch_marker_once() -> void {
+    unsafe {
+        if SCHEDULER_FIRST_SWITCH_MARKED { return; }
+        SCHEDULER_FIRST_SWITCH_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 23] = [
+        66, 65, 75, 69, 78, 58, 83, 67, 72, 69, 68, 85,
+        76, 69, 82, 95, 83, 87, 73, 84, 67, 72, 10
+    ];
+    let mut index: usize = 0;
+    while index < 23 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
+@export
+pub fn sotlas_x86_scheduler_idle_entry() -> ! {
+    loop {
+        x86_cpu_pause();
+    }
+}
+
+@system
+pub fn scheduler_initialize() -> bool {
+    unsafe {
+        if SCHEDULER_ACTIVE { return true; }
+        SCHEDULER_BOOT_THREAD = kernel_thread_bootstrap(SCHEDULER_BOOT_THREAD_ID);
+        SCHEDULER_IDLE_THREAD = kernel_thread_empty(SCHEDULER_IDLE_THREAD_ID);
+        SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_BOOT_THREAD_ID;
+        SCHEDULER_SWITCH_COUNT = 0;
+        SCHEDULER_FIRST_SWITCH_MARKED = false;
+    }
+
+    if !pmm_allocator_is_active() { return false; }
+    let stack_physical = pmm_alloc_pages(SCHEDULER_IDLE_STACK_PAGES);
+    if stack_physical == 0 { return false; }
+    let stack_virtual = direct_map_virtual_address(stack_physical);
+    if stack_virtual == 0 { return false; }
+    let stack_bytes = SCHEDULER_IDLE_STACK_PAGES * 4096;
+    if stack_bytes / 4096 != SCHEDULER_IDLE_STACK_PAGES { return false; }
+    let stack_top = stack_virtual + stack_bytes;
+    if stack_top <= stack_virtual { return false; }
+
+    let idle_entry = x86_scheduler_idle_entry_address();
+    if idle_entry == 0 { return false; }
+    let idle_frame = x86_kernel_thread_prepare_frame(stack_top, idle_entry);
+    if idle_frame == 0 { return false; }
+
+    unsafe {
+        SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_READY;
+        SCHEDULER_IDLE_THREAD.saved_frame = idle_frame;
+        SCHEDULER_IDLE_THREAD.stack_physical_base = stack_physical;
+        SCHEDULER_IDLE_THREAD.stack_virtual_top = stack_top;
+        SCHEDULER_IDLE_THREAD.stack_pages = SCHEDULER_IDLE_STACK_PAGES;
+        SCHEDULER_ACTIVE = true;
+    }
+    return true;
+}
+
+@system
+pub fn scheduler_is_active() -> bool {
+    unsafe { return SCHEDULER_ACTIVE; }
+}
+
+@system
+pub fn scheduler_current_thread_id() -> u64 {
+    unsafe { return SCHEDULER_CURRENT_THREAD_ID; }
+}
+
+@system
+pub fn scheduler_switch_count() -> u64 {
+    unsafe { return SCHEDULER_SWITCH_COUNT; }
+}
+
+@system
+pub fn scheduler_first_switch_observed() -> bool {
+    unsafe { return SCHEDULER_FIRST_SWITCH_MARKED; }
+}
+
+// Chamado somente do IRQ de timer com interrupções mascaradas pelo interrupt
+// gate. O retorno é o endereço do frame que __sotlas_x86_irq_common restaurará.
+@system
+pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
+    if frame_address == 0 || !scheduler_is_active() { return frame_address; }
+
+    unsafe {
+        if SCHEDULER_CURRENT_THREAD_ID == SCHEDULER_BOOT_THREAD_ID {
+            SCHEDULER_BOOT_THREAD.saved_frame = frame_address;
+            SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_READY;
+
+            if SCHEDULER_IDLE_THREAD.state == KERNEL_THREAD_READY &&
+               SCHEDULER_IDLE_THREAD.saved_frame != 0 {
+                SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_RUNNING;
+                SCHEDULER_IDLE_THREAD.switch_count += 1;
+                SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_IDLE_THREAD_ID;
+                SCHEDULER_SWITCH_COUNT += 1;
+                let resume = SCHEDULER_IDLE_THREAD.saved_frame;
+                scheduler_write_switch_marker_once();
+                return resume;
+            }
+
+            SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_RUNNING;
+            return frame_address;
+        }
+
+        if SCHEDULER_CURRENT_THREAD_ID == SCHEDULER_IDLE_THREAD_ID {
+            SCHEDULER_IDLE_THREAD.saved_frame = frame_address;
+            SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_READY;
+
+            if SCHEDULER_BOOT_THREAD.state == KERNEL_THREAD_READY &&
+               SCHEDULER_BOOT_THREAD.saved_frame != 0 {
+                SCHEDULER_BOOT_THREAD.state = KERNEL_THREAD_RUNNING;
+                SCHEDULER_BOOT_THREAD.switch_count += 1;
+                SCHEDULER_CURRENT_THREAD_ID = SCHEDULER_BOOT_THREAD_ID;
+                SCHEDULER_SWITCH_COUNT += 1;
+                return SCHEDULER_BOOT_THREAD.saved_frame;
+            }
+
+            SCHEDULER_IDLE_THREAD.state = KERNEL_THREAD_RUNNING;
+            return frame_address;
+        }
+    }
+
+    return frame_address;
+}
+
+@system
+pub fn scheduler_wait_first_round_trip() -> bool {
+    if !scheduler_is_active() { return false; }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
+        if scheduler_switch_count() >= 2 &&
+           scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
+            return true;
+        }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
