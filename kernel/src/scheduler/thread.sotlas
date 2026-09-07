@@ -1,0 +1,61 @@
+// Baken OS — estado mínimo de uma thread de kernel.
+//
+// Nesta primeira fase há somente a thread bootstrap e a idle thread. O formato
+// já separa identidade, estado, frame salvo e ownership da stack para permitir
+// evoluir depois para uma run queue geral sem alterar o frame x86-64.
+
+module kernel::scheduler::thread;
+
+pub const KERNEL_THREAD_UNUSED: u32 = 0;
+pub const KERNEL_THREAD_READY: u32 = 1;
+pub const KERNEL_THREAD_RUNNING: u32 = 2;
+pub const KERNEL_THREAD_BLOCKED: u32 = 3;
+pub const KERNEL_THREAD_TERMINATED: u32 = 4;
+
+@repr(C)
+pub struct KernelThread {
+    pub id: u64;
+    pub state: u32;
+    pub reserved: u32;
+    pub saved_frame: u64;
+    pub stack_physical_base: u64;
+    pub stack_virtual_top: u64;
+    pub stack_pages: u64;
+    pub switch_count: u64;
+}
+
+@system
+pub fn kernel_thread_empty(id: u64) -> KernelThread {
+    return KernelThread {
+        id: id,
+        state: KERNEL_THREAD_UNUSED,
+        reserved: 0,
+        saved_frame: 0,
+        stack_physical_base: 0,
+        stack_virtual_top: 0,
+        stack_pages: 0,
+        switch_count: 0
+    };
+}
+
+@system
+pub fn kernel_thread_bootstrap(id: u64) -> KernelThread {
+    let mut thread = kernel_thread_empty(id);
+    thread.state = KERNEL_THREAD_RUNNING;
+    return thread;
+}
+
+@system
+pub fn kernel_thread_runnable(thread: *const KernelThread) -> bool {
+    if thread == (null as *const KernelThread) { return false; }
+    unsafe {
+        return (*thread).state == KERNEL_THREAD_READY ||
+               (*thread).state == KERNEL_THREAD_RUNNING;
+    }
+}
+
+@system
+pub fn kernel_thread_has_resume_frame(thread: *const KernelThread) -> bool {
+    if thread == (null as *const KernelThread) { return false; }
+    unsafe { return (*thread).saved_frame != 0; }
+}
