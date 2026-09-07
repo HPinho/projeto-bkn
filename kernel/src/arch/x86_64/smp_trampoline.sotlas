@@ -1,8 +1,8 @@
-// Baken OS — trampoline físico INIT/SIPI para Application Processors x86-64.
+// Baken OS — trampoline fisico INIT/SIPI para Application Processors x86-64.
 //
-// O blob começa em real mode, carrega uma GDT mínima, habilita PAE + EFER.LME
-// + EFER.NXE, instala o CR3 já pertencente ao Baken e entra em long mode. Em
-// seguida publica o flag de online e salta para a rotina idle nativa do kernel.
+// O blob comeca em real mode, carrega uma GDT minima, habilita PAE + EFER.LME
+// + EFER.NXE, instala o CR3 ja pertencente ao Baken e entra em long mode. Em
+// seguida publica o flag de entrada e salta para a entry runtime per-CPU.
 
 module kernel::arch::x86_64::smp_trampoline;
 
@@ -80,10 +80,10 @@ pub fn smp_trampoline_build(physical: u64,
                             root_physical: u64,
                             stack_top: u64,
                             ready_address: u64,
-                            idle_entry: u64) -> bool {
+                            ap_entry: u64) -> bool {
     if smp_trampoline_vector(physical) == 0 { return false; }
     if root_physical == 0 || !x86_page_aligned(root_physical) || root_physical > 0xFFFFFFFF { return false; }
-    if stack_top == 0 || (stack_top & 15) != 0 || ready_address == 0 || idle_entry == 0 { return false; }
+    if stack_top == 0 || (stack_top & 15) != 0 || ready_address == 0 || ap_entry == 0 { return false; }
     if physical + SMP_TRAMPOLINE_PAGE_BYTES as u64 > 0x00100000 { return false; }
 
     let virtual_address = direct_map_virtual_address(physical);
@@ -111,7 +111,7 @@ pub fn smp_trampoline_build(physical: u64,
                              (physical + SMP_TRAMPOLINE_LONG_MODE_OFFSET) as u32);
     smp_trampoline_write_u64(base, SMP_TRAMPOLINE_STACK_OFFSET, stack_top);
     smp_trampoline_write_u64(base, SMP_TRAMPOLINE_READY_OFFSET, ready_address);
-    smp_trampoline_write_u64(base, SMP_TRAMPOLINE_IDLE_OFFSET, idle_entry);
+    smp_trampoline_write_u64(base, SMP_TRAMPOLINE_IDLE_OFFSET, ap_entry);
     smp_trampoline_write_u32(base, SMP_TRAMPOLINE_CR3_VALUE_OFFSET, root_physical as u32);
     smp_trampoline_write_u32(base, SMP_TRAMPOLINE_GDT_BASE_OFFSET,
                              (physical + SMP_TRAMPOLINE_GDT_OFFSET as u64) as u32);

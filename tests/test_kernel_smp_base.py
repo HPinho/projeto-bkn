@@ -65,23 +65,26 @@ class KernelSmpBaseTests(unittest.TestCase):
         # 66 0d 00 09 00 00 == OR EAX, 0x900 (EFER.LME | EFER.NXE).
         self.assertIn("102, 13, 0, 9, 0, 0", text)
 
-    def test_ap_uses_private_stack_and_parks_before_multicore_scheduler(self):
+    def test_ap_uses_private_stack_and_enters_per_cpu_runtime(self):
         text = SMP.read_text(encoding="utf-8")
         for token in (
             "SMP_AP_STACK_PAGES: u64 = 4",
             "pmm_alloc_pages(SMP_AP_STACK_PAGES)",
-            "x86_scheduler_idle_entry_address()",
+            "x86_smp_ap_runtime_entry_address()",
+            "sotlas_x86_smp_ap_runtime_entry",
             "lapic_send_init_assert(apic_id)",
             "lapic_send_init_deassert(apic_id)",
             "lapic_send_startup(apic_id, vector)",
             "smp_wait_ap_ready(ready_address, SMP_AP_READY_TIMEOUT_US)",
-            "started != ap_targets",
+            "smp_wait_ap_ready(runtime_ready_address, SMP_AP_RUNTIME_TIMEOUT_US)",
+            "started != ap_targets || runtime_ready != ap_targets",
         ):
             self.assertIn(token, text)
         self.assertNotIn("scheduler_initialize", text)
         self.assertNotIn("scheduler_on_timer_interrupt", text)
+        self.assertNotIn("x86_sti_raw()", text)
 
-    def test_runtime_brings_aps_up_before_process_scheduler_and_fpu_publication(self):
+    def test_runtime_brings_aps_up_before_process_scheduler_and_bsp_fpu_publication(self):
         text = RUNTIME.read_text(encoding="utf-8")
         body = text.split("pub fn baken_native_kernel_run", 1)[1]
         smp = body.index("smp_initialize_base()")
@@ -93,12 +96,13 @@ class KernelSmpBaseTests(unittest.TestCase):
         self.assertLess(smp, scheduler)
         self.assertIn("smp_emit_ready_markers()", body)
 
-    def test_ci_proves_two_cpu_ap_entry_not_only_madt_enumeration(self):
+    def test_ci_proves_two_cpu_runtime_not_only_madt_enumeration(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("-machine q35 -smp 2", workflow)
         self.assertIn("BAKEN:SMP_AP_ONLINE", workflow)
+        self.assertIn("BAKEN:SMP_AP_RUNTIME_READY", workflow)
         self.assertIn("BAKEN:SMP_BASE_READY", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_AP_ONLINE'", workflow)
+        self.assertIn("grep -Fq 'BAKEN:SMP_AP_RUNTIME_READY'", workflow)
 
     def test_standard_smoke_requires_smp_base_even_on_uniprocessor(self):
         smoke = SMOKE.read_text(encoding="utf-8")

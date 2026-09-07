@@ -1,7 +1,7 @@
-// Baken OS — calibração do Local APIC timer sem habilitar IRQs.
+// Baken OS — calibracao do Local APIC timer sem habilitar IRQs.
 //
-// Usa o ACPI PM Timer (System I/O) como referência nativa. A calibração e a
-// programação periódica permanecem mascaradas; desmascarar é uma etapa separada.
+// Usa o ACPI PM Timer como referencia no BSP. APs reutilizam o valor calibrado
+// para programar o proprio timer local ainda mascarado; nao repetem calibracao.
 
 module kernel::interrupts::lapic_timer;
 
@@ -100,6 +100,22 @@ pub fn lapic_timer_is_ready() -> bool { unsafe { return LAPIC_TIMER_READY; } }
 
 @system
 pub fn lapic_timer_ticks_per_ms() -> u32 { unsafe { return LAPIC_TIMER_TICKS_PER_MS; } }
+
+// Programa o timer local do CPU atual com a calibracao do BSP, mas mantem a
+// fonte de IRQ mascarada ate a futura ativacao do scheduler multicore.
+@system
+pub fn lapic_timer_prepare_current_cpu_masked() -> bool {
+    if !lapic_timer_is_ready() || !lapic_is_ready() { return false; }
+    let ticks = lapic_timer_ticks_per_ms();
+    if ticks == 0 { return false; }
+    lapic_timer_write(LAPIC_TIMER_REG_DIVIDE, LAPIC_TIMER_DIVIDE_BY_16);
+    lapic_timer_write(
+        LAPIC_REG_LVT_TIMER,
+        LAPIC_TIMER_MASKED | LAPIC_TIMER_PERIODIC | (IRQ_VECTOR_TIMER as u32)
+    );
+    lapic_timer_write(LAPIC_TIMER_REG_INITIAL_COUNT, ticks);
+    return lapic_timer_read(LAPIC_TIMER_REG_INITIAL_COUNT) == ticks;
+}
 
 @system
 pub fn lapic_timer_unmask_periodic() -> bool {

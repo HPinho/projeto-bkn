@@ -1,8 +1,8 @@
 // Baken OS - x86_64 Global Descriptor Table foundation.
 //
-// Este modulo constroi uma GDT concreta em memoria. O carregamento por LGDT
-// fica separado ate o backend Sotlas possuir um intrinseco privilegiado
-// canonico e testado.
+// O BSP preserva a GDT historica. APs recebem slices independentes de GDT para
+// que cada CPU possa carregar um descritor TSS proprio sem reescrever a tabela
+// observada pelas demais CPUs.
 
 module kernel::arch::x86_64::gdt;
 
@@ -21,6 +21,10 @@ pub const GDT_USER_CODE_SELECTOR: u16 = 0x1B;
 pub const GDT_USER_DATA_SELECTOR: u16 = 0x23;
 pub const GDT_TSS_SELECTOR: u16 = 0x28;
 
+pub const GDT_CPU_SLOT_COUNT: usize = 32;
+pub const GDT_AP_ENTRY_COUNT: usize = 248;
+pub const GDT_INVALID_AP_OFFSET: usize = GDT_AP_ENTRY_COUNT;
+
 @repr(C)
 @packed
 pub struct DescriptorTablePointer {
@@ -28,8 +32,13 @@ pub struct DescriptorTablePointer {
     pub base: u64;
 }
 
+// Mantido como storage canonico do BSP para preservar o caminho pos-cutover.
 static mut GDT_ENTRIES: [u64; GDT_ENTRY_COUNT] = [0; GDT_ENTRY_COUNT];
 static mut GDT_PREPARED: bool = false;
+
+// Slots 1..31 usam storage independente. 31 * 8 = 248 entradas.
+static mut GDT_AP_ENTRIES: [u64; GDT_AP_ENTRY_COUNT] = [0; GDT_AP_ENTRY_COUNT];
+static mut GDT_AP_PREPARED: [bool; GDT_CPU_SLOT_COUNT] = [false; GDT_CPU_SLOT_COUNT];
 
 @system
 pub fn gdt_make_code_descriptor(dpl: u8) -> u64 {
@@ -46,6 +55,12 @@ pub fn gdt_make_data_descriptor(dpl: u8) -> u64 {
 }
 
 @system
+fn gdt_ap_offset(cpu_slot: usize) -> usize {
+    if cpu_slot == 0 || cpu_slot >= GDT_CPU_SLOT_COUNT { return GDT_INVALID_AP_OFFSET; }
+    return (cpu_slot - 1) * GDT_ENTRY_COUNT;
+}
+
+@system
 pub fn gdt_prepare() -> void {
     unsafe {
         GDT_ENTRIES[GDT_NULL_INDEX] = 0;
@@ -57,6 +72,28 @@ pub fn gdt_prepare() -> void {
         GDT_ENTRIES[GDT_TSS_HIGH_INDEX] = 0;
         GDT_PREPARED = true;
     }
+}
+
+@system
+pub fn gdt_prepare_for_cpu(cpu_slot: usize) -> bool {
+    if cpu_slot >= GDT_CPU_SLOT_COUNT { return false; }
+    if cpu_slot == 0 {
+        gdt_prepare();
+        return gdt_is_prepared();
+    }
+    let offset = gdt_ap_offset(cpu_slot);
+    if offset == GDT_INVALID_AP_OFFSET || offset + GDT_ENTRY_COUNT > GDT_AP_ENTRY_COUNT { return false; }
+    unsafe {
+        GDT_AP_ENTRIES[offset + GDT_NULL_INDEX] = 0;
+        GDT_AP_ENTRIES[offset + GDT_KERNEL_CODE_INDEX] = gdt_make_code_descriptor(0);
+        GDT_AP_ENTRIES[offset + GDT_KERNEL_DATA_INDEX] = gdt_make_data_descriptor(0);
+        GDT_AP_ENTRIES[offset + GDT_USER_CODE_INDEX] = gdt_make_code_descriptor(3);
+        GDT_AP_ENTRIES[offset + GDT_USER_DATA_INDEX] = gdt_make_data_descriptor(3);
+        GDT_AP_ENTRIES[offset + GDT_TSS_LOW_INDEX] = 0;
+        GDT_AP_ENTRIES[offset + GDT_TSS_HIGH_INDEX] = 0;
+        GDT_AP_PREPARED[cpu_slot] = true;
+    }
+    return true;
 }
 
 @system
@@ -75,8 +112,43 @@ pub fn gdt_set_tss_descriptor(base: u64, limit: u32) -> void {
 }
 
 @system
+pub fn gdt_set_tss_descriptor_for_cpu(cpu_slot: usize, base: u64, limit: u32) -> bool {
+    if cpu_slot >= GDT_CPU_SLOT_COUNT || base == 0 { return false; }
+    if cpu_slot == 0 {
+        if !gdt_is_prepared() { return false; }
+        gdt_set_tss_descriptor(base, limit);
+        return true;
+    }
+    let offset = gdt_ap_offset(cpu_slot);
+    if offset == GDT_INVALID_AP_OFFSET || offset + GDT_ENTRY_COUNT > GDT_AP_ENTRY_COUNT { return false; }
+    unsafe {
+        if !GDT_AP_PREPARED[cpu_slot] { return false; }
+    }
+    let mut low: u64 = 0;
+    low = low | ((limit as u64) & 0xFFFF);
+    low = low | ((base & 0xFFFFFF) << 16);
+    low = low | ((0x89 as u64) << 40);
+    low = low | ((((limit as u64) >> 16) & 0x0F) << 48);
+    low = low | (((base >> 24) & 0xFF) << 56);
+    unsafe {
+        GDT_AP_ENTRIES[offset + GDT_TSS_LOW_INDEX] = low;
+        GDT_AP_ENTRIES[offset + GDT_TSS_HIGH_INDEX] = (base >> 32) & 0xFFFFFFFF;
+    }
+    return true;
+}
+
+@system
 pub fn gdt_base() -> *const u64 {
     unsafe { return &GDT_ENTRIES[0]; }
+}
+
+@system
+pub fn gdt_base_for_cpu(cpu_slot: usize) -> *const u64 {
+    if cpu_slot >= GDT_CPU_SLOT_COUNT { return null as *const u64; }
+    if cpu_slot == 0 { return gdt_base(); }
+    let offset = gdt_ap_offset(cpu_slot);
+    if offset == GDT_INVALID_AP_OFFSET { return null as *const u64; }
+    unsafe { return &GDT_AP_ENTRIES[offset]; }
 }
 
 @system
@@ -87,4 +159,11 @@ pub fn gdt_limit() -> u16 {
 @system
 pub fn gdt_is_prepared() -> bool {
     unsafe { return GDT_PREPARED; }
+}
+
+@system
+pub fn gdt_is_prepared_for_cpu(cpu_slot: usize) -> bool {
+    if cpu_slot >= GDT_CPU_SLOT_COUNT { return false; }
+    if cpu_slot == 0 { return gdt_is_prepared(); }
+    unsafe { return GDT_AP_PREPARED[cpu_slot]; }
 }

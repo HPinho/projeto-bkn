@@ -1,13 +1,16 @@
 // Baken OS - x86_64 Task State Segment foundation.
 //
-// A TSS em long mode fornece RSP0 e ISTs para transições de privilégio e
-// exceções críticas. RSP0 pode ser trocado para a kernel-entry stack da thread
-// CPL3 corrente; ISTs permanecem dedicadas e independentes do scheduler.
+// A TSS em long mode fornece RSP0 e ISTs para transicoes de privilegio e
+// excecoes criticas. O BSP preserva a TSS historica; cada AP recebe uma TSS
+// independente com emergency stacks proprias, evitando compartilhar TR/TSS.
 
 module kernel::arch::x86_64::tss;
 
 pub const TSS_STACK_QWORDS: usize = 2049;
 pub const TSS_STACK_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0;
+pub const TSS_CPU_SLOT_COUNT: usize = 32;
+pub const TSS_AP_IST_STACK_QWORDS: usize = 513;
+pub const TSS_AP_IST_STORAGE_QWORDS: usize = 16416;
 
 @repr(C)
 @packed
@@ -29,6 +32,7 @@ pub struct Tss64 {
     pub io_map_base: u16;
 }
 
+// BSP storage canonico.
 static mut TSS: Tss64 = Tss64 {
     reserved0: 0, rsp0: 0, rsp1: 0, rsp2: 0, reserved1: 0,
     ist1: 0, ist2: 0, ist3: 0, ist4: 0, ist5: 0, ist6: 0, ist7: 0,
@@ -40,10 +44,33 @@ static mut NMI_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
 static mut MACHINE_CHECK_STACK: [u64; TSS_STACK_QWORDS] = [0; TSS_STACK_QWORDS];
 static mut TSS_PREPARED: bool = false;
 
+// AP storage. O indice coincide com o CPU slot SMP; slot 0 fica reservado ao BSP.
+static mut AP_TSS: [Tss64; TSS_CPU_SLOT_COUNT] = [
+    Tss64 {
+        reserved0: 0, rsp0: 0, rsp1: 0, rsp2: 0, reserved1: 0,
+        ist1: 0, ist2: 0, ist3: 0, ist4: 0, ist5: 0, ist6: 0, ist7: 0,
+        reserved2: 0, reserved3: 0, io_map_base: 0,
+    };
+    TSS_CPU_SLOT_COUNT
+];
+static mut AP_DOUBLE_FAULT_STACKS: [u64; TSS_AP_IST_STORAGE_QWORDS] = [0; TSS_AP_IST_STORAGE_QWORDS];
+static mut AP_NMI_STACKS: [u64; TSS_AP_IST_STORAGE_QWORDS] = [0; TSS_AP_IST_STORAGE_QWORDS];
+static mut AP_MACHINE_CHECK_STACKS: [u64; TSS_AP_IST_STORAGE_QWORDS] = [0; TSS_AP_IST_STORAGE_QWORDS];
+static mut AP_TSS_PREPARED: [bool; TSS_CPU_SLOT_COUNT] = [false; TSS_CPU_SLOT_COUNT];
+
+@system
+fn tss_stack_top_words(base: *const u64, qwords: usize) -> u64 {
+    if base == (null as *const u64) || qwords == 0 { return 0; }
+    let bytes: u64 = (qwords as u64) * 8;
+    if bytes / 8 != qwords as u64 { return 0; }
+    let address = base as u64;
+    if address + bytes < address { return 0; }
+    return ((address + bytes) & TSS_STACK_ALIGNMENT_MASK);
+}
+
 @system
 pub fn tss_stack_top(base: *const u64) -> u64 {
-    let bytes: u64 = (TSS_STACK_QWORDS as u64) * 8;
-    return (((base as u64) + bytes) & TSS_STACK_ALIGNMENT_MASK);
+    return tss_stack_top_words(base, TSS_STACK_QWORDS);
 }
 
 @system
@@ -69,8 +96,51 @@ pub fn tss_prepare_default_stacks() -> void {
     }
 }
 
-// Só altera RSP0. O caller deve fornecer o topo de uma stack supervisor
-// pertencente à thread que será retomada em CPL3.
+// Prepara TSS/IST de um CPU slot. APs usam a stack de bootstrap como RSP0
+// inicial; o scheduler troca RSP0 ao retomar uma thread CPL3.
+@system
+pub fn tss_prepare_for_cpu(cpu_slot: usize, kernel_rsp0: u64) -> bool {
+    if cpu_slot >= TSS_CPU_SLOT_COUNT || kernel_rsp0 == 0 || (kernel_rsp0 & 15) != 0 { return false; }
+    if cpu_slot == 0 {
+        unsafe {
+            if !TSS_PREPARED { tss_prepare_default_stacks(); }
+        }
+        return tss_set_rsp0(kernel_rsp0);
+    }
+
+    let offset = cpu_slot * TSS_AP_IST_STACK_QWORDS;
+    if offset + TSS_AP_IST_STACK_QWORDS > TSS_AP_IST_STORAGE_QWORDS { return false; }
+    unsafe {
+        let df_base: *const u64 = &AP_DOUBLE_FAULT_STACKS[offset];
+        let nmi_base: *const u64 = &AP_NMI_STACKS[offset];
+        let mc_base: *const u64 = &AP_MACHINE_CHECK_STACKS[offset];
+        let df_top = tss_stack_top_words(df_base, TSS_AP_IST_STACK_QWORDS);
+        let nmi_top = tss_stack_top_words(nmi_base, TSS_AP_IST_STACK_QWORDS);
+        let mc_top = tss_stack_top_words(mc_base, TSS_AP_IST_STACK_QWORDS);
+        if df_top == 0 || nmi_top == 0 || mc_top == 0 { return false; }
+
+        AP_TSS[cpu_slot].reserved0 = 0;
+        AP_TSS[cpu_slot].rsp0 = kernel_rsp0;
+        AP_TSS[cpu_slot].rsp1 = 0;
+        AP_TSS[cpu_slot].rsp2 = 0;
+        AP_TSS[cpu_slot].reserved1 = 0;
+        AP_TSS[cpu_slot].ist1 = df_top;
+        AP_TSS[cpu_slot].ist2 = nmi_top;
+        AP_TSS[cpu_slot].ist3 = mc_top;
+        AP_TSS[cpu_slot].ist4 = 0;
+        AP_TSS[cpu_slot].ist5 = 0;
+        AP_TSS[cpu_slot].ist6 = 0;
+        AP_TSS[cpu_slot].ist7 = 0;
+        AP_TSS[cpu_slot].reserved2 = 0;
+        AP_TSS[cpu_slot].reserved3 = 0;
+        AP_TSS[cpu_slot].io_map_base = 104;
+        AP_TSS_PREPARED[cpu_slot] = true;
+    }
+    return true;
+}
+
+// So altera RSP0. O caller deve fornecer o topo de uma stack supervisor
+// pertencente a thread que sera retomada em CPL3.
 @system
 pub fn tss_set_rsp0(kernel_rsp0: u64) -> bool {
     if kernel_rsp0 == 0 || (kernel_rsp0 & 15) != 0 { return false; }
@@ -82,15 +152,50 @@ pub fn tss_set_rsp0(kernel_rsp0: u64) -> bool {
 }
 
 @system
+pub fn tss_set_rsp0_for_cpu(cpu_slot: usize, kernel_rsp0: u64) -> bool {
+    if cpu_slot >= TSS_CPU_SLOT_COUNT || kernel_rsp0 == 0 || (kernel_rsp0 & 15) != 0 { return false; }
+    if cpu_slot == 0 { return tss_set_rsp0(kernel_rsp0); }
+    unsafe {
+        if !AP_TSS_PREPARED[cpu_slot] { return false; }
+        AP_TSS[cpu_slot].rsp0 = kernel_rsp0;
+        return AP_TSS[cpu_slot].rsp0 == kernel_rsp0;
+    }
+}
+
+@system
 pub fn tss_base() -> u64 { unsafe { let ptr: *const Tss64 = &TSS; return ptr as u64; } }
+
+@system
+pub fn tss_base_for_cpu(cpu_slot: usize) -> u64 {
+    if cpu_slot >= TSS_CPU_SLOT_COUNT { return 0; }
+    if cpu_slot == 0 { return tss_base(); }
+    unsafe { let ptr: *const Tss64 = &AP_TSS[cpu_slot]; return ptr as u64; }
+}
+
 @system
 pub fn tss_limit() -> u32 { return 103; }
 @system
 pub fn tss_size() -> u32 { return 104; }
 @system
 pub fn tss_is_prepared() -> bool { unsafe { return TSS_PREPARED; } }
+
+@system
+pub fn tss_is_prepared_for_cpu(cpu_slot: usize) -> bool {
+    if cpu_slot >= TSS_CPU_SLOT_COUNT { return false; }
+    if cpu_slot == 0 { return tss_is_prepared(); }
+    unsafe { return AP_TSS_PREPARED[cpu_slot]; }
+}
+
 @system
 pub fn tss_rsp0() -> u64 { unsafe { return TSS.rsp0; } }
+
+@system
+pub fn tss_rsp0_for_cpu(cpu_slot: usize) -> u64 {
+    if cpu_slot >= TSS_CPU_SLOT_COUNT { return 0; }
+    if cpu_slot == 0 { return tss_rsp0(); }
+    unsafe { return AP_TSS[cpu_slot].rsp0; }
+}
+
 @system
 pub fn tss_ist1_double_fault() -> u64 { unsafe { return TSS.ist1; } }
 @system
