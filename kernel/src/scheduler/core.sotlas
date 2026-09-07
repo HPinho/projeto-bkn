@@ -31,6 +31,7 @@ static mut SCHEDULER_NEXT_THREAD_ID: u64 = SCHEDULER_FIRST_DYNAMIC_THREAD_ID;
 static mut SCHEDULER_SWITCH_COUNT: u64 = 0;
 static mut SCHEDULER_FIRST_SWITCH_MARKED: bool = false;
 static mut SCHEDULER_RUN_QUEUE_SWITCH_MARKED: bool = false;
+static mut SCHEDULER_THREAD_EXIT_MARKED: bool = false;
 static mut SCHEDULER_BOOTSTRAP_PROBE_COMPLETE: bool = false;
 static mut SCHEDULER_RUN_QUEUE_PROBE_COMPLETE: bool = false;
 static mut SCHEDULER_RUN_QUEUE_PROBE_SELECTED: bool = false;
@@ -87,11 +88,37 @@ fn scheduler_write_run_queue_marker_once() -> void {
 }
 
 @system
+fn scheduler_write_thread_exit_marker_once() -> void {
+    unsafe {
+        if SCHEDULER_THREAD_EXIT_MARKED { return; }
+        SCHEDULER_THREAD_EXIT_MARKED = true;
+    }
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 18] = [
+        66, 65, 75, 69, 78, 58, 84, 72, 82,
+        69, 65, 68, 95, 69, 88, 73, 84, 10
+    ];
+    let mut index: usize = 0;
+    while index < 18 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+@system
 @export
 pub fn sotlas_x86_scheduler_idle_entry() -> ! {
     loop {
         x86_cpu_pause();
     }
+}
+
+// Entry mínima usada pela certificação da run queue. O retorno é intencional:
+// o trampoline deve convertê-lo em sotlas_x86_scheduler_thread_exit().
+@system
+@export
+pub fn sotlas_x86_scheduler_exit_probe_entry() -> void {
+    return;
 }
 
 @system
@@ -112,8 +139,9 @@ fn scheduler_find_free_dynamic_slot() -> usize {
     unsafe {
         let mut slot: usize = SCHEDULER_FIRST_DYNAMIC_SLOT;
         while slot < SCHEDULER_THREAD_SLOT_COUNT {
-            if SCHEDULER_THREADS[slot].state == KERNEL_THREAD_UNUSED ||
-               SCHEDULER_THREADS[slot].state == KERNEL_THREAD_TERMINATED {
+            // TERMINATED ainda possui stack física e metadados de ownership.
+            // O slot só volta a UNUSED depois de um reaper seguro.
+            if SCHEDULER_THREADS[slot].state == KERNEL_THREAD_UNUSED {
                 return slot;
             }
             slot += 1;
@@ -190,6 +218,7 @@ pub fn scheduler_initialize() -> bool {
         SCHEDULER_SWITCH_COUNT = 0;
         SCHEDULER_FIRST_SWITCH_MARKED = false;
         SCHEDULER_RUN_QUEUE_SWITCH_MARKED = false;
+        SCHEDULER_THREAD_EXIT_MARKED = false;
         SCHEDULER_BOOTSTRAP_PROBE_COMPLETE = false;
         SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = false;
         SCHEDULER_RUN_QUEUE_PROBE_SELECTED = false;
@@ -301,6 +330,36 @@ pub fn scheduler_wake_thread(thread_id: u64) -> bool {
 }
 
 @system
+pub fn scheduler_terminate_current() -> bool {
+    unsafe {
+        if !SCHEDULER_ACTIVE ||
+           SCHEDULER_CURRENT_SLOT < SCHEDULER_FIRST_DYNAMIC_SLOT ||
+           SCHEDULER_CURRENT_SLOT >= SCHEDULER_THREAD_SLOT_COUNT {
+            return false;
+        }
+        if SCHEDULER_THREADS[SCHEDULER_CURRENT_SLOT].state != KERNEL_THREAD_RUNNING {
+            return false;
+        }
+        SCHEDULER_THREADS[SCHEDULER_CURRENT_SLOT].state = KERNEL_THREAD_TERMINATED;
+    }
+    scheduler_write_thread_exit_marker_once();
+    return true;
+}
+
+@system
+@export
+pub fn sotlas_x86_scheduler_thread_exit() -> ! {
+    // Nunca liberamos a stack corrente aqui: ela ainda está ativa até o próximo
+    // IRQ escolher outro frame. O reaper posterior será responsável pelo reclaim.
+    x86_cli_raw();
+    if !scheduler_terminate_current() {
+        loop { x86_cpu_pause(); }
+    }
+    x86_sti_raw();
+    loop { x86_cpu_pause(); }
+}
+
+@system
 pub fn scheduler_is_active() -> bool {
     unsafe { return SCHEDULER_ACTIVE; }
 }
@@ -335,6 +394,13 @@ pub fn scheduler_thread_count() -> u64 {
 }
 
 @system
+pub fn scheduler_thread_is_terminated(thread_id: u64) -> bool {
+    let slot = scheduler_find_thread_slot(thread_id);
+    if slot == SCHEDULER_INVALID_SLOT { return false; }
+    unsafe { return SCHEDULER_THREADS[slot].state == KERNEL_THREAD_TERMINATED; }
+}
+
+@system
 pub fn scheduler_first_switch_observed() -> bool {
     unsafe { return SCHEDULER_FIRST_SWITCH_MARKED; }
 }
@@ -357,7 +423,7 @@ pub fn scheduler_start_run_queue_probe() -> bool {
             return SCHEDULER_RUN_QUEUE_PROBE_COMPLETE;
         }
     }
-    let entry = x86_scheduler_idle_entry_address();
+    let entry = x86_scheduler_exit_probe_entry_address();
     if entry == 0 { return false; }
     let thread_id = scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
     if thread_id == 0 { return false; }
@@ -395,15 +461,11 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
             return frame_address;
         }
 
-        // A thread de certificação da run queue usa a mesma entry idle, porém uma
-        // stack e um slot próprios. Após um quantum real ela é bloqueada, o que
-        // comprova que a seleção genérica consegue voltar à bootstrap.
+        // Threads RUNNING voltam a READY em preempção normal. TERMINATED é
+        // preservado: o slot e a stack ficam aposentados até o reaper seguro.
         let current_id = SCHEDULER_THREADS[current].id;
-        if current >= SCHEDULER_FIRST_DYNAMIC_SLOT &&
-           current_id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID &&
-           SCHEDULER_RUN_QUEUE_PROBE_SELECTED {
-            SCHEDULER_THREADS[current].state = KERNEL_THREAD_BLOCKED;
-        } else if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
+        let current_terminated = SCHEDULER_THREADS[current].state == KERNEL_THREAD_TERMINATED;
+        if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
             SCHEDULER_THREADS[current].state = KERNEL_THREAD_READY;
         }
 
@@ -414,6 +476,7 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
             let resume = scheduler_select_slot(next, frame_address);
             if current_id == SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID &&
                SCHEDULER_RUN_QUEUE_PROBE_SELECTED &&
+               current_terminated &&
                next == SCHEDULER_BOOT_SLOT {
                 SCHEDULER_RUN_QUEUE_PROBE_COMPLETE = true;
             }
@@ -453,9 +516,13 @@ pub fn scheduler_wait_run_queue_probe() -> bool {
     if !scheduler_is_active() { return false; }
     let mut spins: u64 = 0;
     while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
-        if scheduler_run_queue_probe_complete() &&
-           scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
-            return true;
+        unsafe {
+            if SCHEDULER_RUN_QUEUE_PROBE_COMPLETE &&
+               SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID != 0 &&
+               scheduler_thread_is_terminated(SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID) &&
+               scheduler_current_thread_id() == SCHEDULER_BOOT_THREAD_ID {
+                return true;
+            }
         }
         x86_cpu_pause();
         spins += 1;
