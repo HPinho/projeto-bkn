@@ -120,7 +120,7 @@ static EFI_STATUS baken_prepare_final_memory_map(EFI_BOOT_SERVICES *bs,
 
     UINTN capacity = required + descriptor_size * 32U + 8192U;
     void *buffer = NULL;
-    status = allocate_pool(EFI_LOADER_DATA, capacity, &buffer);
+    status = allocate_pool(UEFI_LOADER_DATA, capacity, &buffer);
     if (status != EFI_SUCCESS || !buffer) {
         return status == EFI_SUCCESS ? EFI_OUT_OF_RESOURCES : status;
     }
