@@ -19,6 +19,7 @@ import kernel::drivers::ps2_keyboard::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::scheduler::core::*;
+import kernel::scheduler::diagnostics::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -221,11 +222,14 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     let scheduler_ready = scheduler_initialize();
     x86_sti_raw();
     if !scheduler_ready || !scheduler_wait_first_round_trip() { loop {} }
+    scheduler_diag_round_trip();
 
     x86_cli_raw();
     let run_queue_ready = scheduler_start_run_queue_probe();
     x86_sti_raw();
-    if !run_queue_ready || !scheduler_wait_run_queue_probe() { loop {} }
+    if !run_queue_ready { loop {} }
+    scheduler_diag_run_queue_created();
+    if !scheduler_wait_run_queue_probe() { loop {} }
 
     display_init(framebuffer, width, height, pixels_per_scanline);
     baken_native_bind_assets();
