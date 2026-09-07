@@ -47,6 +47,14 @@ pub fn x86_stack_switch_to_post_cutover_raw(stack_top: u64, argument: u64) -> vo
 }
 
 @system
+pub fn x86_scheduler_idle_entry_address() -> u64 {
+    return __scheduler_idle_entry_address();
+}
+
+@system
+pub fn x86_cpu_pause() -> void { __cpu_pause(); }
+
+@system
 pub fn x86_invlpg(address: u64) -> void { __invlpg(address); }
 
 @system
