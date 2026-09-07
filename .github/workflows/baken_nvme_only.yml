@@ -103,8 +103,14 @@ jobs:
             echo '--- QEMU x86 interrupt/exception trace tail ---'
             tail -n 160 build/qemu-nvme-only-int.log
           fi
-          test "$injection_failed" -eq 0
-          test "$status" -eq 124
+          if test "$injection_failed" -ne 0; then
+            echo '::error::Não foi possível injetar a tecla no monitor QEMU NVMe-only.'
+            exit 1
+          fi
+          if test "$status" -ne 124; then
+            echo "::error::QEMU NVMe-only terminou com status ${status}; era esperado timeout controlado (124)."
+            exit 1
+          fi
 
           python3 tools/scripts/extend_foundation_fixture.py \
             build/nvme-only-test.img --verify build/qemu-nvme-only-serial.log
@@ -116,7 +122,7 @@ jobs:
             fi
             echo "::error::NVMe-only QEMU não alcançou ${marker}; consulte o artefato qemu-nvme-only-diagnostics."
             echo '--- últimos checkpoints BAKEN emitidos ---' >&2
-            grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-nvme-only-serial.log | tail -n 32 >&2 || true
+            grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-nvme-only-serial.log | tail -n 32 >&2
             exit 1
           }
           for marker in BAKEN:STEP=k BAKEN:STEP=) BAKEN:BARE_METAL_READY \

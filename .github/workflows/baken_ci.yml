@@ -254,8 +254,14 @@ jobs:
           if test -f build/qemu-serial.log; then
             cat build/qemu-serial.log
           fi
-          test "$injection_failed" -eq 0
-          test "$status" -eq 124
+          if test "$injection_failed" -ne 0; then
+            echo '::error::Não foi possível injetar a tecla no monitor QEMU.'
+            exit 1
+          fi
+          if ! test "$status" -eq 124; then
+            echo "::error::QEMU terminou com status ${status}; era esperado timeout controlado (124)."
+            exit 1
+          fi
           test "$(dd if=build/storage-test.img bs=512 skip=1024 count=1 status=none | head -c 8)" = "BAKENW01"
           test "$(dd if=build/storage-test.img bs=512 skip=1 count=1 status=none | head -c 8)" = "EFI PART"
           test "$(dd if=build/storage-test.img bs=512 skip="$storage_last_lba" count=1 status=none | head -c 8)" = "EFI PART"
@@ -378,7 +384,7 @@ jobs:
             fi
             echo "::error::QEMU não alcançou BAKEN:${marker}; consulte o artefato qemu-boot-diagnostics."
             echo '--- últimos checkpoints BAKEN emitidos ---' >&2
-            grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-serial.log | tail -n 32 >&2 || true
+            grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-serial.log | tail -n 32 >&2
             exit 1
           }
           for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N STEP=U STEP=S STEP=Y STEP=Z STEP=Q STEP=E STEP=F STEP=G STEP=H STEP=M STEP=L STEP=O STEP=W STEP=a STEP=b STEP=c STEP=d STEP=e STEP=f STEP=k STEP=v STEP=i STEP=n STEP=t STEP=y STEP=u STEP=z STEP=x STEP=o STEP=l STEP=_ STEP=m STEP=J; do
