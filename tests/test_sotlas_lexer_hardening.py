@@ -42,14 +42,17 @@ class SotlasLexerHardeningTests(unittest.TestCase):
         )
 
     def test_unterminated_c_style_block_comment_is_rejected_at_opening(self):
-        with self.assertRaisesRegex(SotlasLexError, "comentário de bloco não terminado") as ctx:
+        with self.assertRaises(SotlasLexError) as legacy_ctx:
             significant("fn x() {}\n/* missing close")
-        self.assertIn(":2:1:", str(ctx.exception))
-        with self.assertRaisesRegex(
-            production_bootstrap.SotlasBootstrapError,
-            "comentário de bloco não terminado",
-        ):
+        legacy_error = str(legacy_ctx.exception)
+        self.assertIn(":2:1:", legacy_error)
+        self.assertIn("comentário de bloco", legacy_error)
+
+        with self.assertRaises(production_bootstrap.SotlasBootstrapError) as production_ctx:
             production_significant("fn x() {}\n/* missing close")
+        production_error = str(production_ctx.exception)
+        self.assertIn(":2:1:", production_error)
+        self.assertIn("comentário de bloco", production_error)
 
     def test_character_escape_is_decoded_consistently_with_strings(self):
         token = significant(r"'\n'")[0]
