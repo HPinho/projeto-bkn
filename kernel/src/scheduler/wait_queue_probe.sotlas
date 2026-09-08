@@ -22,6 +22,7 @@ static mut WAIT_PROBE_QUEUE: KernelWaitQueue = KernelWaitQueue {
     count: 0
 };
 static mut WAIT_PROBE_THREAD_ID: u64 = 0;
+static mut WAIT_PROBE_WAKER_THREAD_ID: u64 = 0;
 static mut WAIT_PROBE_REAP_BASE: u64 = 0;
 static mut WAIT_PROBE_STARTED: bool = false;
 static mut WAIT_PROBE_WOKEN: bool = false;
@@ -79,6 +80,7 @@ pub fn scheduler_wait_probe_start() -> bool {
         if WAIT_PROBE_STARTED { return false; }
         WAIT_PROBE_REAP_BASE = scheduler_reap_count();
         WAIT_PROBE_THREAD_ID = 0;
+        WAIT_PROBE_WAKER_THREAD_ID = 0;
         WAIT_PROBE_WOKEN = false;
         WAIT_PROBE_RESUMED = false;
         WAIT_PROBE_SLEEP_COMPLETE = false;
@@ -88,10 +90,22 @@ pub fn scheduler_wait_probe_start() -> bool {
 
     let entry = x86_scheduler_wait_probe_entry_address();
     if entry == 0 { return false; }
-    let thread_id = scheduler_create_kernel_thread(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    // A fila desta etapa é BSP-only; não publicar a probe com afinidade ANY.
+    let thread_id = scheduler_create_kernel_thread_on_cpu(
+        entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES, 0
+    );
     if thread_id == 0 { return false; }
     unsafe {
         WAIT_PROBE_THREAD_ID = thread_id;
+    }
+    let wake_entry = x86_scheduler_wake_probe_entry_address();
+    if wake_entry == 0 { return false; }
+    let waker_id = scheduler_create_kernel_thread_on_cpu(
+        wake_entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES, 0
+    );
+    if waker_id == 0 { return false; }
+    unsafe {
+        WAIT_PROBE_WAKER_THREAD_ID = waker_id;
         WAIT_PROBE_STARTED = true;
     }
     return true;
@@ -126,7 +140,7 @@ pub fn scheduler_wait_probe_wait_complete() -> bool {
     while attempts < SCHEDULER_WAIT_PROBE_SPIN_LIMIT {
         unsafe {
             if WAIT_PROBE_RESUMED && WAIT_PROBE_WOKEN && WAIT_PROBE_SLEEP_COMPLETE &&
-               scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1 {
+               scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 2 {
                 return true;
             }
         }

@@ -15,7 +15,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
             "pub fn scheduler_block_current", 1
         )[0]
         for token in (
-            "cpu_slot == 0 || cpu_slot >= SCHEDULER_CPU_SLOT_COUNT",
+            "cpu_slot >= SCHEDULER_CPU_SLOT_COUNT",
             "SCHEDULER_CPU_REGISTERED[cpu_slot]",
             "let flags = x86_irq_save_disable();",
             "scheduler_create_process_thread(pid, entry_rip, stack_pages)",

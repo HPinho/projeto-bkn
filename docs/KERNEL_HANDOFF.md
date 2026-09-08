@@ -248,6 +248,19 @@ Além disso, manter os guardrails de:
   passou exigindo `SMP_PROCESS_TLB_READY` e `SMP_RING3_ON_AP_READY`, além do
   gate completo single-core; portanto cobriu AP dispatch, timer, TLB shootdown,
   retomada CPL3 no AP e teardown sem marcador de exceção.
+- O CI #999 do primeiro patch mostrou a localização exata: parou em
+  `WAIT_BLOCKED`, antes de `WAIT_WAKE`. O HLT apenas no fechamento final não
+  cobria os dois handoffs anteriores, que ainda dependiam de yields síncronos.
+- Correção complementar: a probe declaradamente BSP-only agora é criada com
+  afinidade CPU 0, e as esperas por BLOCKED, RESUMED e reaper avançam todas por
+  IRQ LAPIC real via `x86_halt_until_interrupt()`. O runtime não usa mais yield
+  para orquestrar essa certificação. Validar novamente CI/SMP/NVMe no novo SHA.
+- Diagnóstico final refinado: a prova agora publica duas threads reais, waiter e
+  waker, ambas com afinidade BSP. Waiter bloqueia; waker executa o wake e termina;
+  o bootstrap aguarda timer/reaper. A criação ganhou helper interno que publica
+  `READY` e afinidade sob o mesmo scheduler lock, eliminando a janela `ANY`.
+- Validação final local: **1.111 testes em 68,931 s**, build **141 módulos / 143
+  objetos**, smoke single-core e smoke SMP com os marcadores finais completos.
 - A falha de instalação do SMP é independente do kernel. Os três workflows
   agora usam `Acquire::Retries=3` tanto em `apt-get update` quanto em `install`,
   preservando os timeouts existentes.

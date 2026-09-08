@@ -502,7 +502,8 @@ pub fn scheduler_initialize() -> bool {
 }
 
 @system
-pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
+fn scheduler_create_kernel_thread_with_affinity(entry_rip: u64, stack_pages: u64,
+                                                 affinity: u32) -> u64 {
     if !scheduler_is_active() || entry_rip == 0 || stack_pages == 0 { return 0; }
     if scheduler_current_cpu_slot() != 0 { return 0; }
     unsafe { if SCHEDULER_NEXT_THREAD_ID == 0 || SCHEDULER_NEXT_THREAD_ID == 0xFFFFFFFFFFFFFFFF { return 0; } }
@@ -540,7 +541,9 @@ pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
         SCHEDULER_THREADS[slot].stack_virtual_top = stack_top;
         SCHEDULER_THREADS[slot].stack_pages = stack_pages;
         SCHEDULER_THREAD_OWNER_CPU[slot] = SCHEDULER_CPU_NONE;
-        SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY;
+        // Publicação READY e afinidade pertencem à mesma seção crítica: nenhum
+        // AP pode capturar a thread numa janela temporária como ANY.
+        SCHEDULER_THREAD_AFFINITY_CPU[slot] = affinity;
         scheduler_switch_unlock();
         x86_irq_restore(flags);
         return thread_id;
@@ -548,19 +551,21 @@ pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
 }
 
 @system
+pub fn scheduler_create_kernel_thread(entry_rip: u64, stack_pages: u64) -> u64 {
+    return scheduler_create_kernel_thread_with_affinity(
+        entry_rip, stack_pages, SCHEDULER_CPU_AFFINITY_ANY
+    );
+}
+
+@system
 pub fn scheduler_create_kernel_thread_on_cpu(entry_rip: u64, stack_pages: u64, cpu_slot: usize) -> u64 {
-    if cpu_slot == 0 || cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
-    unsafe { if !SCHEDULER_CPU_REGISTERED[cpu_slot] { return 0; } }
-    let flags = x86_irq_save_disable();
-    let tid = scheduler_create_kernel_thread(entry_rip, stack_pages);
-    if tid == 0 { x86_irq_restore(flags); return 0; }
-    if !scheduler_switch_lock() { x86_irq_restore(flags); return 0; }
-    let slot = scheduler_find_thread_slot(tid);
-    if slot == SCHEDULER_INVALID_SLOT { scheduler_switch_unlock(); x86_irq_restore(flags); return 0; }
-    unsafe { SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32; }
-    scheduler_switch_unlock();
-    x86_irq_restore(flags);
-    return tid;
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
+    unsafe {
+        if cpu_slot != 0 && !SCHEDULER_CPU_REGISTERED[cpu_slot] { return 0; }
+    }
+    return scheduler_create_kernel_thread_with_affinity(
+        entry_rip, stack_pages, cpu_slot as u32
+    );
 }
 
 @system

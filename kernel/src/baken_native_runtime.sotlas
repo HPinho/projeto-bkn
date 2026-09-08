@@ -215,11 +215,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !scheduler_finish_process_probe() { loop {} }
 
     if !scheduler_wait_probe_start() { loop {} }
+    // Um único yield inicia a cadeia waiter -> waker -> waiter. A thread waker
+    // faz o wake real; o bootstrap apenas aguarda timer/reaper ao retornar.
     if !scheduler_yield() { loop {} }
-    if !scheduler_wait_probe_blocked() { loop {} }
-    if !scheduler_wait_probe_wake() { loop {} }
-    if !scheduler_yield() { loop {} }
-    if !scheduler_wait_probe_resumed() { loop {} }
     if !scheduler_wait_probe_wait_complete() { loop {} }
 
     // Prova real CPL3 -> syscall -> exit -> reaper -> teardown do address space.

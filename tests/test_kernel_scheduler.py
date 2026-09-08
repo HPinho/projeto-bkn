@@ -121,7 +121,7 @@ class KernelSchedulerTests(unittest.TestCase):
 
     def test_generic_kernel_thread_creation_reuses_or_allocates_owned_stack(self):
         text = CORE.read_text(encoding="utf-8")
-        create = text.split("pub fn scheduler_create_kernel_thread", 1)[1]
+        create = text.split("fn scheduler_create_kernel_thread_with_affinity", 1)[1]
         create = create.split("pub fn scheduler_block_current", 1)[0]
         self.assertIn("scheduler_find_free_dynamic_slot()", create)
         self.assertIn("scheduler_stack_cache_take(stack_pages)", create)
@@ -130,6 +130,9 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("x86_kernel_thread_prepare_frame(stack_top, entry_rip)", create)
         self.assertIn("scheduler_return_unpublished_stack", create)
         self.assertIn("KERNEL_THREAD_READY", create)
+        wrapper = text.split("pub fn scheduler_create_kernel_thread(", 1)[1]
+        wrapper = wrapper.split("pub fn scheduler_create_kernel_thread_on_cpu", 1)[0]
+        self.assertIn("SCHEDULER_CPU_AFFINITY_ANY", wrapper)
 
     def test_terminated_slots_are_not_reused_before_reaper(self):
         text = CORE.read_text(encoding="utf-8")
