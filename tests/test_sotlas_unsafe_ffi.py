@@ -75,6 +75,32 @@ fn none() -> *mut u8 {
 """
         parse_check(source)
 
+    def test_raw_pointer_index_requires_unsafe(self):
+        source = """
+module contract::bad_pointer_index;
+@system
+fn read(data: *const u8) -> u8 {
+    return data[0];
+}
+"""
+        with self.assertRaisesRegex(
+            bootstrap.SotlasBootstrapError,
+            "indexação de ponteiro cru exige bloco unsafe explícito",
+        ):
+            parse_check(source)
+
+    def test_raw_pointer_index_expression_is_accepted_inside_unsafe_and_emitted(self):
+        source = """
+module contract::good_pointer_index;
+@system
+fn read(data: *const u8) -> u8 {
+    return unsafe { data[0] };
+}
+"""
+        module = parse_check(source)
+        c_text = bootstrap.emit_c(module, include_preamble=False)
+        self.assertIn("return data[0];", c_text)
+
     def test_safe_wrapper_may_call_system_abstraction(self):
         source = """
 module contract::system_wrapper;
