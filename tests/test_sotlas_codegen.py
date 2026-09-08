@@ -1,4 +1,8 @@
-"""Suíte de testes para o CodeGen C99 Sotlas."""
+"""Suíte de migração do CodeGen histórico Sotlas.
+
+O frontend exercitado aqui é explicitamente legado; a API pública compile_source
+e o CLI usam o frontend canônico em tools/sotlas_compile.
+"""
 import sys
 import unittest
 from pathlib import Path
@@ -6,11 +10,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from sotlas import compile_source
+from sotlas import compile_legacy_source as compile_source
 
 
 def codegen(src: str) -> str:
-    """Executa pipeline completo e retorna o C99 gerado."""
+    """Executa o pipeline histórico para testes de migração."""
     return compile_source(src, "<test>")
 
 
@@ -21,7 +25,6 @@ class TestCodegenPrelude(unittest.TestCase):
 
     def test_barecore_module_defines_types_inline(self):
         c = codegen("barecore;\nmodule hal::x; fn dummy() -> Void {}")
-        # barecore não inclui stdint — define os tipos diretamente
         self.assertNotIn("#include <stdint.h>", c)
         self.assertIn("typedef unsigned char", c)
         self.assertIn("typedef unsigned long long", c)
@@ -36,48 +39,24 @@ class TestCodegenPrimitiveTypes(unittest.TestCase):
         src = f"module x; struct T {{ var f: {st_type}; }}"
         return codegen(src)
 
-    def test_int8(self):
-        self.assertIn("int8_t", self._field_type("Int8"))
-
-    def test_uint8(self):
-        self.assertIn("uint8_t", self._field_type("UInt8"))
-
-    def test_int16(self):
-        self.assertIn("int16_t", self._field_type("Int16"))
-
-    def test_uint16(self):
-        self.assertIn("uint16_t", self._field_type("UInt16"))
-
-    def test_int32(self):
-        self.assertIn("int32_t", self._field_type("Int32"))
-
-    def test_uint32(self):
-        self.assertIn("uint32_t", self._field_type("UInt32"))
-
-    def test_int64(self):
-        self.assertIn("int64_t", self._field_type("Int64"))
-
-    def test_uint64(self):
-        self.assertIn("uint64_t", self._field_type("UInt64"))
-
-    def test_float32(self):
-        self.assertIn("float", self._field_type("Float32"))
-
-    def test_float64(self):
-        self.assertIn("double", self._field_type("Float64"))
-
-    def test_bool(self):
-        self.assertIn("uint8_t", self._field_type("Bool"))
+    def test_int8(self): self.assertIn("int8_t", self._field_type("Int8"))
+    def test_uint8(self): self.assertIn("uint8_t", self._field_type("UInt8"))
+    def test_int16(self): self.assertIn("int16_t", self._field_type("Int16"))
+    def test_uint16(self): self.assertIn("uint16_t", self._field_type("UInt16"))
+    def test_int32(self): self.assertIn("int32_t", self._field_type("Int32"))
+    def test_uint32(self): self.assertIn("uint32_t", self._field_type("UInt32"))
+    def test_int64(self): self.assertIn("int64_t", self._field_type("Int64"))
+    def test_uint64(self): self.assertIn("uint64_t", self._field_type("UInt64"))
+    def test_float32(self): self.assertIn("float", self._field_type("Float32"))
+    def test_float64(self): self.assertIn("double", self._field_type("Float64"))
+    def test_bool(self): self.assertIn("uint8_t", self._field_type("Bool"))
 
     def test_void_return(self):
         c = codegen("module x; fn f() -> Void { return; }")
         self.assertIn("void f(", c)
 
-    def test_usize(self):
-        self.assertIn("size_t", self._field_type("USize"))
-
-    def test_isize(self):
-        self.assertIn("ptrdiff_t", self._field_type("ISize"))
+    def test_usize(self): self.assertIn("size_t", self._field_type("USize"))
+    def test_isize(self): self.assertIn("ptrdiff_t", self._field_type("ISize"))
 
 
 class TestCodegenTopologyPointers(unittest.TestCase):
@@ -88,37 +67,31 @@ class TestCodegenTopologyPointers(unittest.TestCase):
         self.assertIn("uint32_t", c)
 
     def test_virtmap_volatile(self):
-        src = "module x; fn f(p: *virtmap UInt64) -> Void {}"
-        c = codegen(src)
+        c = codegen("module x; fn f(p: *virtmap UInt64) -> Void {}")
         self.assertIn("volatile", c)
 
     def test_portwire_volatile_and_io_attr(self):
-        src = "module x; fn f(p: *portwire UInt8) -> Void {}"
-        c = codegen(src)
+        c = codegen("module x; fn f(p: *portwire UInt8) -> Void {}")
         self.assertIn("volatile", c)
         self.assertIn("io_port", c)
 
     def test_voidzero_emits_void_ptr(self):
-        src = "module x; fn f(p: *voidzero) -> Void {}"
-        c = codegen(src)
+        c = codegen("module x; fn f(p: *voidzero) -> Void {}")
         self.assertIn("void*", c)
 
 
 class TestCodegenBitSlicing(unittest.TestCase):
     def test_slit_macro_expansion(self):
-        """base.slit[3..7] deve expandir para a expressão de máscara inline."""
         src = """module x;
         fn extract(reg: UInt32) -> UInt32 {
             let bits: UInt32 = reg.slit[3..7] as UInt32;
             return bits;
         }"""
         c = codegen(src)
-        # Deve conter deslocamento e máscara
         self.assertIn(">> (3)", c)
         self.assertIn("1ULL << ((7)-(3)+1)", c)
 
     def test_notch_expansion(self):
-        """base.notch[4] deve expandir para extração de bit isolado."""
         src = """module x;
         fn bit4(reg: UInt32) -> UInt32 {
             let b: UInt32 = reg.notch[4] as UInt32;
@@ -129,7 +102,6 @@ class TestCodegenBitSlicing(unittest.TestCase):
         self.assertIn("& 1ULL", c)
 
     def test_strand_emits_bswap(self):
-        """base.strand deve emitir __builtin_bswap64."""
         src = """module x;
         fn swap(val: UInt64) -> UInt64 {
             let swapped: UInt64 = val.strand as UInt64;
@@ -207,7 +179,6 @@ class TestCodegenClassVtable(unittest.TestCase):
         c = codegen(src)
         self.assertIn("ShapeVtable", c)
         self.assertIn("vtable", c)
-        # A vtable deve conter um ponteiro de função para area
         self.assertIn("area", c)
 
     def test_class_struct_contains_vtable_ptr(self):
@@ -233,8 +204,7 @@ class TestCodegenEmit(unittest.TestCase):
 
 class TestCodegenStructEnum(unittest.TestCase):
     def test_struct_emits_typedef(self):
-        src = "module x; pub struct Vec2 { var x: Int32; var y: Int32; }"
-        c = codegen(src)
+        c = codegen("module x; pub struct Vec2 { var x: Int32; var y: Int32; }")
         self.assertIn("typedef struct Vec2 Vec2", c)
 
     def test_enum_emits_cases(self):
@@ -250,8 +220,7 @@ class TestCodegenStructEnum(unittest.TestCase):
         self.assertIn("Color__Blue", c)
 
     def test_const_emits_static_const(self):
-        src = "module x; const MAX: UInt32 = 1024;"
-        c = codegen(src)
+        c = codegen("module x; const MAX: UInt32 = 1024;")
         self.assertIn("static const uint32_t MAX = 1024", c)
 
 
