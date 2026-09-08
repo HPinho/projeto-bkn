@@ -95,7 +95,7 @@ pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *c
     }
     let virtual_address = direct_map_virtual_address(context.memory_map_base);
     if virtual_address == 0 { return null as *const u8; }
-    return virtual_address as *const u8;
+    return unsafe { virtual_address as *const u8 };
 }
 
 @system
@@ -105,7 +105,7 @@ pub fn post_cutover_acpi_rsdp_virtual(context: *const PostCutoverContext) -> *co
     }
     let virtual_address = direct_map_virtual_address(context.acpi_rsdp);
     if virtual_address == 0 { return null as *const u8; }
-    return virtual_address as *const u8;
+    return unsafe { virtual_address as *const u8 };
 }
 
 @system
@@ -529,7 +529,7 @@ pub fn post_cutover_probe_backup_gpt_entries() -> bool {
 @system
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
-    let context = argument as *const PostCutoverContext;
+    let context = unsafe { argument as *const PostCutoverContext };
     let serial_ready = x86_serial_init();
     if serial_ready { x86_serial_write_stage_marker('B' as u8); }
 
@@ -657,7 +657,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
         if !x86_serial_write_bare_metal_ready_marker() { loop {} }
     }
 
-    baken_native_kernel_run(context.framebuffer_base as *mut u32,
+    baken_native_kernel_run(unsafe { context.framebuffer_base as *mut u32 },
                             context.screen_width,
                             context.screen_height,
                             context.pixels_per_scanline);
