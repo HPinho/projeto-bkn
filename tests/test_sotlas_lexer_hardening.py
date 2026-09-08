@@ -1,4 +1,4 @@
-"""Regression tests for strict Sotlas comment and character literal handling."""
+"""Regression tests for canonical Sotlas comment and character handling."""
 from pathlib import Path
 import sys
 import unittest
@@ -8,29 +8,48 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from sotlas.lexer import Lexer, SotlasLexError
 from sotlas.token_types import TK
+from sotlas_compile import bootstrap as production_bootstrap
 
 
 def significant(source: str):
     return [token for token in Lexer(source, "<lexer-hardening>").tokenize() if token.kind != TK.EOF]
 
 
+def production_significant(source: str):
+    return [
+        token for token in production_bootstrap.lex(source, "<lexer-hardening>")
+        if token.kind != "EOF"
+    ]
+
+
 class SotlasLexerHardeningTests(unittest.TestCase):
-    def test_c_style_block_comment_is_accepted(self):
+    def test_c_style_block_comment_is_canonical_in_both_frontends(self):
         tokens = significant("/* hardware note */ fn")
         self.assertEqual([token.kind for token in tokens], [TK.KW_FN])
+        production = production_significant("/* hardware note */ fn")
+        self.assertEqual([token.kind for token in production], ["fn"])
 
-    def test_pascal_style_block_comment_can_contain_parentheses(self):
-        tokens = significant("(* AP(1) waits for BSP *) fn")
-        self.assertEqual([token.kind for token in tokens], [TK.KW_FN])
+    def test_grouped_raw_dereference_is_never_a_pascal_comment(self):
+        tokens = significant("(*ptr).field")
+        self.assertEqual(
+            [token.kind for token in tokens],
+            [TK.LPAREN, TK.STAR, TK.IDENT, TK.RPAREN, TK.DOT, TK.IDENT],
+        )
+        production = production_significant("(*ptr).field")
+        self.assertEqual(
+            [token.kind for token in production],
+            ["(", "*", "IDENT", ")", ".", "IDENT"],
+        )
 
     def test_unterminated_c_style_block_comment_is_rejected_at_opening(self):
         with self.assertRaisesRegex(SotlasLexError, "comentário de bloco não terminado") as ctx:
             significant("fn x() {}\n/* missing close")
         self.assertIn(":2:1:", str(ctx.exception))
-
-    def test_unterminated_pascal_style_block_comment_is_rejected_at_opening(self):
-        with self.assertRaisesRegex(SotlasLexError, "comentário de bloco não terminado"):
-            significant("(* missing close")
+        with self.assertRaisesRegex(
+            production_bootstrap.SotlasBootstrapError,
+            "comentário de bloco não terminado",
+        ):
+            production_significant("fn x() {}\n/* missing close")
 
     def test_character_escape_is_decoded_consistently_with_strings(self):
         token = significant(r"'\n'")[0]
