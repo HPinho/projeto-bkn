@@ -30,10 +30,14 @@ class Lexer:
 
     Suporta:
       - Comentários de linha  // ...
-      - Comentários de bloco  /* ... */ e (* ... *)
+      - Comentários de bloco  /* ... */
       - Literais: inteiro, hexadecimal (0x), binário (0b), float, string, char
       - Todos os operadores e delimitadores da gramática Sotlas
       - Palavra-chave composta 'co-owned' resolvida em pós-processamento
+
+    A forma Pascal ``(* ... *)`` não faz parte da linguagem. Em Sotlas,
+    ``(*ptr)`` é sintaxe válida de desreferenciamento agrupado e portanto não
+    pode ser consumida lexicalmente como comentário.
     """
 
     def __init__(self, source: str, filename: str = "<stdin>") -> None:
@@ -74,14 +78,14 @@ class Lexer:
             self._col += 1
         return ch
 
-    def _skip_block_comment(self, opening: str, closing: str) -> None:
+    def _skip_block_comment(self) -> None:
         line, col = self._line, self._col
-        for _ in opening:
-            self._advance()
+        self._advance()  # /
+        self._advance()  # *
         while self._pos < len(self._src):
-            if self._src.startswith(closing, self._pos):
-                for _ in closing:
-                    self._advance()
+            if self._peek() == "*" and self._peek(1) == "/":
+                self._advance()
+                self._advance()
                 return
             self._advance()
         raise SotlasLexError("comentário de bloco não terminado", self._fn, line, col)
@@ -95,9 +99,7 @@ class Lexer:
                 while self._pos < len(self._src) and self._peek() != "\n":
                     self._advance()
             elif ch == "/" and self._peek(1) == "*":
-                self._skip_block_comment("/*", "*/")
-            elif ch == "(" and self._peek(1) == "*":
-                self._skip_block_comment("(*", "*)")
+                self._skip_block_comment()
             else:
                 break
 
