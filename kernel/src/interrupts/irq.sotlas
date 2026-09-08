@@ -1,4 +1,4 @@
-// Baken OS — fundacao de IRQs externos x86-64 + syscall CPL3 + IPI SMP.
+// Baken OS — fundacao de IRQs externos x86-64 + syscall CPL3 + IPIs SMP.
 module kernel::interrupts::irq;
 
 import kernel::arch::x86_64::cpu::*;
@@ -11,6 +11,7 @@ import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::i8042::*;
+import kernel::memory::tlb_shootdown::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::sleep::*;
 import kernel::syscall::dispatch::*;
@@ -20,18 +21,18 @@ pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
 pub const IRQ_VECTOR_MOUSE: u16 = 0x42;
 pub const IRQ_VECTOR_RESCHEDULE: u16 = 0x43;
 pub const IRQ_VECTOR_RESCHEDULE_IPI: u16 = 0x44;
+pub const IRQ_VECTOR_TLB_SHOOTDOWN_IPI: u16 = 0x45;
 pub const IRQ_VECTOR_SPURIOUS: u16 = 0xFF;
 
 static mut IRQ_IDT_READY: bool = false;
 static mut IRQ_ROUTES_READY: bool = false;
-// Clock monotonic global: somente o BSP incrementa este contador. APs possuem
-// contadores locais para preempcao e nunca avancam duas vezes o sleep clock.
 static mut IRQ_TIMER_COUNT: u64 = 0;
 static mut IRQ_CPU_TIMER_COUNT: [u64; SCHEDULER_CPU_SLOT_COUNT] = [0; SCHEDULER_CPU_SLOT_COUNT];
 static mut IRQ_KEYBOARD_COUNT: u64 = 0;
 static mut IRQ_MOUSE_COUNT: u64 = 0;
 static mut IRQ_SPURIOUS_COUNT: u64 = 0;
 static mut IRQ_RESCHEDULE_IPI_COUNT: u64 = 0;
+static mut IRQ_TLB_SHOOTDOWN_IPI_COUNT: u64 = 0;
 
 @system
 fn irq_install_gate(vector: u16) -> bool {
@@ -50,12 +51,13 @@ fn irq_install_user_gate(vector: u16) -> bool {
 @system
 pub fn irq_prepare_idt() -> bool {
     unsafe { IRQ_IDT_READY = false; }
-    if !idt_exceptions_ready() { return false; }
+    if !idt_exceptions_ready() || !tlb_shootdown_is_ready() { return false; }
     if !irq_install_gate(IRQ_VECTOR_TIMER) { return false; }
     if !irq_install_gate(IRQ_VECTOR_KEYBOARD) { return false; }
     if !irq_install_gate(IRQ_VECTOR_MOUSE) { return false; }
     if !irq_install_user_gate(IRQ_VECTOR_RESCHEDULE) { return false; }
     if !irq_install_gate(IRQ_VECTOR_RESCHEDULE_IPI) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_TLB_SHOOTDOWN_IPI) { return false; }
     if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
     unsafe { IRQ_IDT_READY = true; }
     return true;
@@ -76,52 +78,35 @@ pub fn irq_prepare_masked_ioapic_routes() -> bool {
     return true;
 }
 
-@system
-pub fn irq_idt_ready() -> bool { unsafe { return IRQ_IDT_READY; } }
-@system
-pub fn irq_routes_ready() -> bool { unsafe { return IRQ_ROUTES_READY; } }
-@system
-pub fn irq_timer_count() -> u64 { unsafe { return IRQ_TIMER_COUNT; } }
+@system pub fn irq_idt_ready() -> bool { unsafe { return IRQ_IDT_READY; } }
+@system pub fn irq_routes_ready() -> bool { unsafe { return IRQ_ROUTES_READY; } }
+@system pub fn irq_timer_count() -> u64 { unsafe { return IRQ_TIMER_COUNT; } }
 @system
 pub fn irq_timer_count_for_cpu(cpu_slot: usize) -> u64 {
     if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
     if cpu_slot == 0 { return irq_timer_count(); }
     unsafe { return IRQ_CPU_TIMER_COUNT[cpu_slot]; }
 }
-@system
-pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
-@system
-pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
-@system
-pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
-@system
-pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_COUNT; } }
+@system pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
+@system pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
+@system pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
+@system pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_COUNT; } }
+@system pub fn irq_tlb_shootdown_ipi_count() -> u64 { unsafe { return IRQ_TLB_SHOOTDOWN_IPI_COUNT; } }
 
-// Serializa a run queue e o storage FPU durante a troca. Isso impede que BSP e
-// AP publiquem/restaurem o mesmo slot de thread simultaneamente.
 @system
 fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     if !scheduler_switch_lock() { loop {} }
-
     let cpu_slot = scheduler_current_cpu_slot();
     let old_tid = scheduler_current_thread_id();
     let old_terminated = scheduler_thread_is_terminated(old_tid);
     if old_tid != 0 && fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
-
     let selected = scheduler_on_timer_interrupt(frame_address);
     let new_tid = scheduler_current_thread_id();
-
     if x86_saved_frame_is_user(selected) {
-        // Userspace em AP ainda nao faz parte desta fase. Fail-closed evita usar
-        // o TSS BSP em um processador secundario por acidente.
         if cpu_slot != 0 { loop {} }
         let kernel_rsp0 = selected + X86_KERNEL_THREAD_FRAME_BYTES;
-        if kernel_rsp0 <= selected || (kernel_rsp0 & 15) != 0 || !tss_set_rsp0(kernel_rsp0) {
-            loop {}
-        }
+        if kernel_rsp0 <= selected || (kernel_rsp0 & 15) != 0 || !tss_set_rsp0(kernel_rsp0) { loop {} }
     }
-
-    // Em AP idle, thread_id 0 significa "nenhuma thread", nao o boot thread BSP.
     if fpu_is_ready() && (cpu_slot == 0 || new_tid != 0) && !fpu_restore_thread(new_tid) { loop {} }
     if fpu_is_ready() && old_terminated && old_tid != 0 && old_tid != new_tid {
         if !fpu_release_thread(old_tid) { loop {} }
@@ -138,7 +123,6 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         return frame_address;
     }
 
-    // INT 0x43 permanece software-only: yield/syscall nao envia LAPIC EOI.
     if vector == IRQ_VECTOR_RESCHEDULE as u64 {
         if x86_saved_frame_is_user(frame_address) {
             let action = syscall_dispatch_frame(frame_address);
@@ -148,19 +132,25 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             }
             return frame_address;
         }
-        // Pre-FPU fallback preserva o caminho minimo do bring-up. Userspace so
-        // e publicado depois de fpu_initialize(), portanto CPL3 usa o helper.
         if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
 
-    // IPI 0x44 e hardware Local APIC: sempre reconhece a origem com EOI antes
-    // de entrar na selecao de contexto compartilhada.
     if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64 {
         unsafe { IRQ_RESCHEDULE_IPI_COUNT += 1; }
         lapic_eoi();
         if !fpu_is_ready() { loop {} }
         return irq_schedule_with_fpu(frame_address);
+    }
+
+    // IPI 0x45 não entra no scheduler: apenas invalida a página publicada e
+    // confirma a geração. EOI vem depois do INVLPG/ACK para manter a ordem.
+    if vector == IRQ_VECTOR_TLB_SHOOTDOWN_IPI as u64 {
+        unsafe { IRQ_TLB_SHOOTDOWN_IPI_COUNT += 1; }
+        let handled = tlb_shootdown_handle_ipi();
+        lapic_eoi();
+        if !handled { loop {} }
+        return frame_address;
     }
 
     if vector == IRQ_VECTOR_TIMER as u64 {
@@ -178,9 +168,7 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         }
         lapic_eoi();
         if bsp_clock {
-            if timer_count <= 3 {
-                x86_serial_write_hex32_marker('T' as u8, timer_count as u32);
-            }
+            if timer_count <= 3 { x86_serial_write_hex32_marker('T' as u8, timer_count as u32); }
             scheduler_sleep_on_timer_tick(timer_count);
         }
         if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }

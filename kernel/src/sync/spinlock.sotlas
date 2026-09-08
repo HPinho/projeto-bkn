@@ -23,14 +23,20 @@ pub fn spinlock_init(lock: *mut SpinLock) -> bool {
     return true;
 }
 
+// Tentativa única, necessária para locks cujo chamador não pode permanecer
+// com IRQs mascaradas enquanto aguarda outra CPU (ex.: page-table shootdown).
+@system
+pub fn spinlock_try_lock(lock: *mut SpinLock) -> bool {
+    if lock == (null as *mut SpinLock) { return false; }
+    let address = lock as u64;
+    return x86_atomic_exchange_u32(address, SPINLOCK_LOCKED) == SPINLOCK_UNLOCKED;
+}
+
 @system
 pub fn spinlock_lock(lock: *mut SpinLock) -> bool {
     if lock == (null as *mut SpinLock) { return false; }
-    let address = lock as u64;
     loop {
-        if x86_atomic_exchange_u32(address, SPINLOCK_LOCKED) == SPINLOCK_UNLOCKED {
-            return true;
-        }
+        if spinlock_try_lock(lock) { return true; }
         x86_cpu_pause();
     }
 }

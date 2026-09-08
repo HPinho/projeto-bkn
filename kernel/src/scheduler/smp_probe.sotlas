@@ -1,12 +1,8 @@
-// Baken OS — provas reais de dispatch e timer periodico em Application Processor.
+// Baken OS — provas reais de dispatch, timer periodico e TLB shootdown em AP.
 //
-// A primeira thread e criada/pinned enquanto APs ainda estao com IF=0. Depois o
-// BSP libera os APs, envia IPI 0x44, observa execucao no AP e usa um segundo IPI
-// para restaurar o idle frame. Somente apos essa prova uma segunda thread pinned
-// desmascara o LAPIC timer local; o IRQ 0x40 deve entao retirar a thread
-// terminada do AP sem ajuda de um novo IPI. Por fim, uma thread sem afinidade e
-// publicada com IRQs locais do BSP desabilitados: somente o timer do AP pode
-// captura-la da run queue compartilhada, provando dispatch SMP generico.
+// As tres provas historicas permanecem inalteradas. A quarta prova preenche o
+// TLB do AP com um frame, remapeia a mesma VA no BSP e exige que o IPI 0x45
+// invalide a entrada remota antes de liberar a segunda leitura.
 
 module kernel::scheduler::smp_probe;
 
@@ -16,36 +12,56 @@ import kernel::arch::x86_64::smp::*;
 import kernel::interrupts::irq::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::lapic_timer::*;
+import kernel::memory::active_page_tables::*;
+import kernel::memory::direct_map::*;
+import kernel::memory::pmm_allocator::*;
+import kernel::memory::tlb_shootdown::*;
 import kernel::scheduler::core::*;
 
 pub const SCHEDULER_SMP_PROBE_CPU_SLOT: usize = 1;
 pub const SCHEDULER_SMP_PROBE_SPIN_LIMIT: u64 = 10000000;
 pub const SCHEDULER_SMP_PROBE_MODE_THREAD: u32 = 1;
 pub const SCHEDULER_SMP_PROBE_MODE_TIMER: u32 = 2;
+pub const SCHEDULER_SMP_PROBE_MODE_TLB: u32 = 3;
+pub const SCHEDULER_SMP_TLB_ADDRESS: u64 = VMM_RUNTIME_BASE + 4096;
+pub const SCHEDULER_SMP_TLB_OLD_VALUE: u32 = 0x13572468;
+pub const SCHEDULER_SMP_TLB_NEW_VALUE: u32 = 0x24681357;
 
 static mut SCHEDULER_SMP_PROBE_EXECUTED: u32 = 0;
 static mut SCHEDULER_SMP_PROBE_CPU: u32 = 0xFFFFFFFF;
 static mut SCHEDULER_SMP_PROBE_MODE: u32 = 0;
 static mut SCHEDULER_SMP_TIMER_ENABLED: u32 = 0;
+static mut SCHEDULER_SMP_TLB_PRIMED: u32 = 0;
+static mut SCHEDULER_SMP_TLB_RELEASE: u32 = 0;
+static mut SCHEDULER_SMP_TLB_OBSERVED: u32 = 0;
 
 @system
 fn scheduler_smp_probe_executed_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_PROBE_EXECUTED; return value as u64; }
 }
-
 @system
 fn scheduler_smp_probe_cpu_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_PROBE_CPU; return value as u64; }
 }
-
 @system
 fn scheduler_smp_probe_mode_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_PROBE_MODE; return value as u64; }
 }
-
 @system
 fn scheduler_smp_timer_enabled_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TIMER_ENABLED; return value as u64; }
+}
+@system
+fn scheduler_smp_tlb_primed_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TLB_PRIMED; return value as u64; }
+}
+@system
+fn scheduler_smp_tlb_release_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TLB_RELEASE; return value as u64; }
+}
+@system
+fn scheduler_smp_tlb_observed_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TLB_OBSERVED; return value as u64; }
 }
 
 @system
@@ -68,8 +84,26 @@ pub fn sotlas_x86_scheduler_smp_probe_entry() -> void {
         __dma_fence();
         return;
     }
-    if mode != SCHEDULER_SMP_PROBE_MODE_THREAD { return; }
 
+    if mode == SCHEDULER_SMP_PROBE_MODE_TLB {
+        let primed_address = scheduler_smp_tlb_primed_address();
+        let release_address = scheduler_smp_tlb_release_address();
+        let observed_address = scheduler_smp_tlb_observed_address();
+        if primed_address == 0 || release_address == 0 || observed_address == 0 { return; }
+        if x86_mmio_read32(SCHEDULER_SMP_TLB_ADDRESS) != SCHEDULER_SMP_TLB_OLD_VALUE { return; }
+        __dma_fence();
+        x86_mmio_write32(primed_address, 1);
+        __dma_fence();
+        while x86_mmio_read32(release_address) != 1 { x86_cpu_pause(); }
+        if x86_mmio_read32(SCHEDULER_SMP_TLB_ADDRESS) == SCHEDULER_SMP_TLB_NEW_VALUE {
+            __dma_fence();
+            x86_mmio_write32(observed_address, 1);
+            __dma_fence();
+        }
+        return;
+    }
+
+    if mode != SCHEDULER_SMP_PROBE_MODE_THREAD { return; }
     let cpu_address = scheduler_smp_probe_cpu_address();
     let executed_address = scheduler_smp_probe_executed_address();
     if cpu_address == 0 || executed_address == 0 { return; }
@@ -148,45 +182,96 @@ fn scheduler_smp_probe_wait_timer_tick(cpu_slot: usize, before: u64) -> bool {
 }
 
 @system
-fn scheduler_smp_probe_emit_thread_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
-    let marker: [u8; 23] = [
-        66,65,75,69,78,58,83,77,80,95,84,72,82,69,65,68,95,79,78,95,65,80,10
-    ];
-    let mut index: usize = 0;
-    while index < 23 {
-        if !x86_serial_write_byte(marker[index]) { return false; }
-        index += 1;
+fn scheduler_smp_probe_wait_flag(address: u64) -> bool {
+    if address == 0 { return false; }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
+        __dma_fence();
+        if x86_mmio_read32(address) == 1 { return true; }
+        x86_cpu_pause();
+        spins += 1;
     }
-    return true;
+    return false;
 }
 
+@system
+fn scheduler_smp_probe_emit_thread_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 23] = [66,65,75,69,78,58,83,77,80,95,84,72,82,69,65,68,95,79,78,95,65,80,10];
+    let mut index: usize = 0;
+    while index < 23 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
+    return true;
+}
 @system
 fn scheduler_smp_probe_emit_timer_marker() -> bool {
     if !x86_serial_is_ready() { return false; }
-    let marker: [u8; 22] = [
-        66,65,75,69,78,58,83,77,80,95,84,73,77,69,82,95,79,78,95,65,80,10
-    ];
+    let marker: [u8; 22] = [66,65,75,69,78,58,83,77,80,95,84,73,77,69,82,95,79,78,95,65,80,10];
     let mut index: usize = 0;
-    while index < 22 {
-        if !x86_serial_write_byte(marker[index]) { return false; }
-        index += 1;
-    }
+    while index < 22 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
+    return true;
+}
+@system
+fn scheduler_smp_probe_emit_any_thread_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 27] = [66,65,75,69,78,58,83,77,80,95,65,78,89,95,84,72,82,69,65,68,95,79,78,95,65,80,10];
+    let mut index: usize = 0;
+    while index < 27 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
+    return true;
+}
+@system
+fn scheduler_smp_probe_emit_tlb_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 30] = [66,65,75,69,78,58,83,77,80,95,84,76,66,95,83,72,79,79,84,68,79,87,78,95,82,69,65,68,89,10];
+    let mut index: usize = 0;
+    while index < 30 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
     return true;
 }
 
 @system
-fn scheduler_smp_probe_emit_any_thread_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
-    let marker: [u8; 27] = [
-        66,65,75,69,78,58,83,77,80,95,65,78,89,95,84,72,82,69,65,68,95,79,78,95,65,80,10
-    ];
-    let mut index: usize = 0;
-    while index < 27 {
-        if !x86_serial_write_byte(marker[index]) { return false; }
-        index += 1;
+fn scheduler_smp_probe_run_tlb(apic_id: u8) -> bool {
+    if tlb_shootdown_active_ap_count() == 0 { return false; }
+    let first = pmm_alloc_page();
+    if first == 0 { return false; }
+    let second = pmm_alloc_page();
+    if second == 0 { pmm_free_pages(first, 1); return false; }
+    let first_virtual = direct_map_virtual_address(first);
+    let second_virtual = direct_map_virtual_address(second);
+    if first_virtual == 0 || second_virtual == 0 {
+        pmm_free_pages(second, 1); pmm_free_pages(first, 1); return false;
     }
-    return true;
+    x86_mmio_write32(first_virtual, SCHEDULER_SMP_TLB_OLD_VALUE);
+    x86_mmio_write32(second_virtual, SCHEDULER_SMP_TLB_NEW_VALUE);
+    __dma_fence();
+    if !active_runtime_map(SCHEDULER_SMP_TLB_ADDRESS, first, true, false) {
+        pmm_free_pages(second, 1); pmm_free_pages(first, 1); return false;
+    }
+    let primed_address = scheduler_smp_tlb_primed_address();
+    let release_address = scheduler_smp_tlb_release_address();
+    let observed_address = scheduler_smp_tlb_observed_address();
+    x86_mmio_write32(primed_address, 0);
+    x86_mmio_write32(release_address, 0);
+    x86_mmio_write32(observed_address, 0);
+    x86_mmio_write32(scheduler_smp_probe_mode_address(), SCHEDULER_SMP_PROBE_MODE_TLB);
+    __dma_fence();
+    let idle_epoch_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let entry = x86_scheduler_smp_probe_entry_address();
+    let thread_id = scheduler_create_kernel_thread_on_cpu(
+        entry,
+        SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
+        SCHEDULER_SMP_PROBE_CPU_SLOT
+    );
+    if thread_id == 0 { return false; }
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_flag(primed_address) { return false; }
+    if !active_runtime_remap(SCHEDULER_SMP_TLB_ADDRESS, second, true, false) { return false; }
+    x86_mmio_write32(release_address, 1);
+    __dma_fence();
+    if !scheduler_smp_probe_wait_flag(observed_address) { return false; }
+    if !scheduler_smp_probe_wait_terminated(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT) { return false; }
+    if !scheduler_smp_probe_wait_idle(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_epoch_before) { return false; }
+    if !active_runtime_unmap(SCHEDULER_SMP_TLB_ADDRESS) { return false; }
+    if !pmm_free_pages(second, 1) || !pmm_free_pages(first, 1) { return false; }
+    return scheduler_smp_probe_emit_tlb_marker();
 }
 
 @system
@@ -201,16 +286,13 @@ pub fn scheduler_smp_probe_run() -> bool {
     let cpu_address = scheduler_smp_probe_cpu_address();
     let mode_address = scheduler_smp_probe_mode_address();
     let timer_enabled_address = scheduler_smp_timer_enabled_address();
-    if executed_address == 0 || cpu_address == 0 || mode_address == 0 || timer_enabled_address == 0 {
-        return false;
-    }
+    if executed_address == 0 || cpu_address == 0 || mode_address == 0 || timer_enabled_address == 0 { return false; }
     x86_mmio_write32(executed_address, 0);
     x86_mmio_write32(cpu_address, 0xFFFFFFFF);
     x86_mmio_write32(mode_address, SCHEDULER_SMP_PROBE_MODE_THREAD);
     x86_mmio_write32(timer_enabled_address, 0);
     __dma_fence();
 
-    // Publica afinidade antes de permitir qualquer IRQ no AP.
     let idle_epoch_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
     let thread_id = scheduler_create_kernel_thread_on_cpu(
         entry,
@@ -226,18 +308,10 @@ pub fn scheduler_smp_probe_run() -> bool {
     if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
     if !scheduler_smp_probe_wait_executed(SCHEDULER_SMP_PROBE_CPU_SLOT) { return false; }
     if !scheduler_smp_probe_wait_terminated(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT) { return false; }
-
-    // Segundo IPI e parte da primeira prova: salva a stack TERMINATED, remove o
-    // ownership e retorna pelo frame idle original do AP.
     if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
-    if !scheduler_smp_probe_wait_idle(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_epoch_before) {
-        return false;
-    }
+    if !scheduler_smp_probe_wait_idle(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_epoch_before) { return false; }
     if !scheduler_smp_probe_emit_thread_marker() { return false; }
 
-    // Segunda prova: uma thread pinned desmascara o timer no proprio AP. Depois
-    // de retornar ela fica TERMINATED com IF=1; somente IRQ 0x40 pode tira-la da
-    // CPU e incrementar o idle epoch, sem um IPI de reschedule adicional.
     x86_mmio_write32(mode_address, SCHEDULER_SMP_PROBE_MODE_TIMER);
     x86_mmio_write32(timer_enabled_address, 0);
     __dma_fence();
@@ -252,16 +326,9 @@ pub fn scheduler_smp_probe_run() -> bool {
     if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
     if !scheduler_smp_probe_wait_timer_enabled() { return false; }
     if !scheduler_smp_probe_wait_timer_tick(SCHEDULER_SMP_PROBE_CPU_SLOT, timer_count_before) { return false; }
-    if !scheduler_smp_probe_wait_idle(
-        timer_thread_id,
-        SCHEDULER_SMP_PROBE_CPU_SLOT,
-        timer_idle_epoch_before
-    ) { return false; }
+    if !scheduler_smp_probe_wait_idle(timer_thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, timer_idle_epoch_before) { return false; }
     if !scheduler_smp_probe_emit_timer_marker() { return false; }
 
-    // Terceira prova: nenhuma afinidade e nenhum IPI. O BSP mascara seus IRQs
-    // para nao consumir a thread ANY; o timer periodico ja ativo no AP precisa
-    // encontra-la na run queue compartilhada, executa-la e devolve-la ao idle.
     x86_mmio_write32(executed_address, 0);
     x86_mmio_write32(cpu_address, 0xFFFFFFFF);
     x86_mmio_write32(mode_address, SCHEDULER_SMP_PROBE_MODE_THREAD);
@@ -272,24 +339,17 @@ pub fn scheduler_smp_probe_run() -> bool {
         entry,
         SCHEDULER_DEFAULT_THREAD_STACK_PAGES
     );
-    if any_thread_id == 0 {
-        x86_irq_restore(bsp_irq_flags);
-        return false;
-    }
+    if any_thread_id == 0 { x86_irq_restore(bsp_irq_flags); return false; }
     let any_executed = scheduler_smp_probe_wait_executed(SCHEDULER_SMP_PROBE_CPU_SLOT);
     let mut any_terminated = false;
     let mut any_idle = false;
-    if any_executed {
-        any_terminated = scheduler_smp_probe_wait_terminated(any_thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT);
-    }
+    if any_executed { any_terminated = scheduler_smp_probe_wait_terminated(any_thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT); }
     if any_terminated {
-        any_idle = scheduler_smp_probe_wait_idle(
-            any_thread_id,
-            SCHEDULER_SMP_PROBE_CPU_SLOT,
-            any_idle_epoch_before
-        );
+        any_idle = scheduler_smp_probe_wait_idle(any_thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, any_idle_epoch_before);
     }
     x86_irq_restore(bsp_irq_flags);
     if !any_executed || !any_terminated || !any_idle { return false; }
-    return scheduler_smp_probe_emit_any_thread_marker();
+    if !scheduler_smp_probe_emit_any_thread_marker() { return false; }
+
+    return scheduler_smp_probe_run_tlb(apic_id);
 }

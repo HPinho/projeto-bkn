@@ -14,18 +14,12 @@ INTRINSICS = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
 WORKFLOW = ROOT / ".github/workflows/baken_smp.yml"
 
-
 class KernelSmpSchedulerDispatchTests(unittest.TestCase):
     def test_spinlock_is_backed_by_real_x86_atomic_exchange(self):
         spin = SPIN.read_text(encoding="utf-8")
         cpu = CPU.read_text(encoding="utf-8")
         backend = INTRINSICS.read_text(encoding="utf-8")
-        for token in (
-            "pub struct SpinLock",
-            "x86_atomic_exchange_u32(address, SPINLOCK_LOCKED)",
-            "x86_cpu_pause()",
-            "x86_atomic_exchange_u32(address, SPINLOCK_UNLOCKED)",
-        ):
+        for token in ("pub struct SpinLock", "x86_atomic_exchange_u32(address, SPINLOCK_LOCKED)", "x86_cpu_pause()", "x86_atomic_exchange_u32(address, SPINLOCK_UNLOCKED)"):
             self.assertIn(token, spin)
         self.assertIn("pub fn x86_atomic_exchange_u32", cpu)
         self.assertIn("static inline uint32_t __atomic_exchange_u32", backend)
@@ -38,8 +32,8 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
         self.assertIn("IRQ_VECTOR_RESCHEDULE_IPI: u16 = 0x44", irq)
         self.assertIn("irq_install_gate(IRQ_VECTOR_RESCHEDULE_IPI)", irq)
         self.assertIn("SOTLAS_X86_IRQ_STUB(68)", backend)
-        self.assertIn("case 68: return", backend)
-        ipi = irq.split("if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64", 1)[1].split("if vector == IRQ_VECTOR_TIMER", 1)[0]
+        self.assertRegex(backend, r"case\s+68:\s*return")
+        ipi = irq.split("if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64", 1)[1].split("if vector == IRQ_VECTOR_TLB_SHOOTDOWN_IPI", 1)[0]
         self.assertIn("lapic_eoi();", ipi)
         self.assertIn("irq_schedule_with_fpu(frame_address)", ipi)
         software = irq.split("if vector == IRQ_VECTOR_RESCHEDULE as u64", 1)[1].split("if vector == IRQ_VECTOR_RESCHEDULE_IPI", 1)[0]
@@ -54,17 +48,7 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
 
     def test_scheduler_has_per_cpu_current_idle_and_thread_ownership(self):
         text = CORE.read_text(encoding="utf-8")
-        for token in (
-            "static mut SCHEDULER_LOCK: SpinLock",
-            "static mut SCHEDULER_CPU_CURRENT_SLOT",
-            "static mut SCHEDULER_CPU_IDLE_FRAME",
-            "static mut SCHEDULER_CPU_IDLE_EPOCH",
-            "static mut SCHEDULER_THREAD_OWNER_CPU",
-            "static mut SCHEDULER_THREAD_AFFINITY_CPU",
-            "pub fn scheduler_current_cpu_slot() -> usize",
-            "fn scheduler_on_secondary_interrupt",
-            "fn scheduler_select_slot_for_cpu",
-        ):
+        for token in ("static mut SCHEDULER_LOCK: SpinLock", "static mut SCHEDULER_CPU_CURRENT_SLOT", "static mut SCHEDULER_CPU_IDLE_FRAME", "static mut SCHEDULER_CPU_IDLE_EPOCH", "static mut SCHEDULER_THREAD_OWNER_CPU", "static mut SCHEDULER_THREAD_AFFINITY_CPU", "pub fn scheduler_current_cpu_slot() -> usize", "fn scheduler_on_secondary_interrupt", "fn scheduler_select_slot_for_cpu"):
             self.assertIn(token, text)
         self.assertIn("SCHEDULER_THREAD_OWNER_CPU[slot] == SCHEDULER_CPU_NONE", text)
 
@@ -73,8 +57,7 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
         reaper = text.split("fn scheduler_reap_terminated_noncurrent", 1)[1].split("pub fn scheduler_initialize", 1)[0]
         self.assertIn("let current = SCHEDULER_CURRENT_SLOT", reaper)
         self.assertIn("SCHEDULER_THREAD_OWNER_CPU[slot] == SCHEDULER_CPU_NONE", reaper)
-        self.assertLess(reaper.index("SCHEDULER_THREAD_OWNER_CPU[slot] == SCHEDULER_CPU_NONE"),
-                        reaper.index("pmm_free_pages_lifo(stack_base, stack_pages)"))
+        self.assertLess(reaper.index("SCHEDULER_THREAD_OWNER_CPU[slot] == SCHEDULER_CPU_NONE"), reaper.index("pmm_free_pages_lifo(stack_base, stack_pages)"))
 
     def test_ap_release_keeps_periodic_timer_masked(self):
         smp = SMP.read_text(encoding="utf-8")
@@ -90,14 +73,14 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
         text = PROBE.read_text(encoding="utf-8")
         create = text.index("scheduler_create_kernel_thread_on_cpu(")
         release = text.index("smp_release_aps_for_scheduler()")
-        first_ipi = text.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)")
-        second_ipi = text.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)", first_ipi + 1)
+        first_ipi = text.index("lapic_send_fixed(apic_id,IRQ_VECTOR_RESCHEDULE_IPI as u8)")
+        second_ipi = text.index("lapic_send_fixed(apic_id,IRQ_VECTOR_RESCHEDULE_IPI as u8)", first_ipi + 1)
         idle = text.index("scheduler_smp_probe_wait_idle", second_ipi)
         self.assertLess(create, release)
         self.assertLess(release, first_ipi)
         self.assertLess(first_ipi, second_ipi)
         self.assertLess(second_ipi, idle)
-        self.assertIn("scheduler_thread_owner_cpu(thread_id) == cpu_slot as u32", text)
+        self.assertIn("scheduler_thread_owner_cpu(thread_id) != cpu_slot as u32", text)
         marker_bytes = "66,65,75,69,78,58,83,77,80,95,84,72,82,69,65,68,95,79,78,95,65,80,10"
         self.assertIn(marker_bytes, text.replace(" ", ""))
 
@@ -112,7 +95,6 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
         self.assertIn("python3 tests/test_kernel_smp_scheduler_dispatch.py", workflow)
         self.assertIn("BAKEN:SMP_THREAD_ON_AP", workflow)
         self.assertIn("grep -Fq 'BAKEN:SMP_THREAD_ON_AP'", workflow)
-
 
 if __name__ == "__main__":
     unittest.main()

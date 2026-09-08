@@ -1,0 +1,88 @@
+// Baken OS — transporte xAPIC mínimo para IPIs arquiteturais globais.
+//
+// Este módulo conhece somente o MMIO/ICR do Local APIC. Ele não importa a
+// política de IRQ, scheduler ou page tables, evitando ciclos entre essas
+// camadas. O LAPIC principal publica a base já mapeada no bootstrap.
+module kernel::interrupts::xapic_ipi;
+
+import kernel::arch::x86_64::cpu::*;
+
+pub const XAPIC_IPI_REG_ID: u64 = 0x020;
+pub const XAPIC_IPI_REG_ICR_LOW: u64 = 0x300;
+pub const XAPIC_IPI_REG_ICR_HIGH: u64 = 0x310;
+pub const XAPIC_IPI_ICR_DELIVERY_STATUS: u32 = 1 << 12;
+pub const XAPIC_IPI_DEST_ALL_EXCLUDING_SELF: u32 = 3 << 18;
+pub const XAPIC_IPI_FIXED_VECTOR_MIN: u8 = 0x20;
+pub const XAPIC_IPI_FIXED_VECTOR_MAX: u8 = 0xFE;
+pub const XAPIC_IPI_SPIN_LIMIT: u64 = 1000000;
+
+static mut XAPIC_IPI_BASE: u64 = 0;
+static mut XAPIC_IPI_READY: bool = false;
+
+@system
+pub fn xapic_ipi_bind(base: u64) -> bool {
+    if base == 0 || (base & 0xFFF) != 0 { return false; }
+    unsafe {
+        if XAPIC_IPI_READY { return XAPIC_IPI_BASE == base; }
+        XAPIC_IPI_BASE = base;
+        XAPIC_IPI_READY = true;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn xapic_ipi_is_ready() -> bool { unsafe { return XAPIC_IPI_READY && XAPIC_IPI_BASE != 0; } }
+
+@system
+fn xapic_ipi_read(offset: u64) -> u32 {
+    unsafe {
+        if !XAPIC_IPI_READY || XAPIC_IPI_BASE == 0 { return 0; }
+        return x86_mmio_read32(XAPIC_IPI_BASE + offset);
+    }
+}
+
+@system
+fn xapic_ipi_write(offset: u64, value: u32) -> bool {
+    unsafe {
+        if !XAPIC_IPI_READY || XAPIC_IPI_BASE == 0 { return false; }
+        x86_mmio_write32(XAPIC_IPI_BASE + offset, value);
+    }
+    return true;
+}
+
+@system
+pub fn xapic_ipi_current_id() -> u8 {
+    if !xapic_ipi_is_ready() { return 0; }
+    return ((xapic_ipi_read(XAPIC_IPI_REG_ID) >> 24) & 0xFF) as u8;
+}
+
+@system
+fn xapic_ipi_wait_idle() -> bool {
+    if !xapic_ipi_is_ready() { return false; }
+    let mut spins: u64 = 0;
+    while spins < XAPIC_IPI_SPIN_LIMIT {
+        if (xapic_ipi_read(XAPIC_IPI_REG_ICR_LOW) & XAPIC_IPI_ICR_DELIVERY_STATUS) == 0 {
+            return true;
+        }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+// O destination shorthand 11b entrega a todos os Local APICs exceto o atual.
+// ICR_HIGH é zerado por clareza; com shorthand o destination field é ignorado.
+@system
+pub fn xapic_ipi_send_fixed_all_excluding_self(vector: u8) -> bool {
+    if vector < XAPIC_IPI_FIXED_VECTOR_MIN || vector > XAPIC_IPI_FIXED_VECTOR_MAX {
+        return false;
+    }
+    if !xapic_ipi_wait_idle() { return false; }
+    if !xapic_ipi_write(XAPIC_IPI_REG_ICR_HIGH, 0) { return false; }
+    if !xapic_ipi_write(
+        XAPIC_IPI_REG_ICR_LOW,
+        XAPIC_IPI_DEST_ALL_EXCLUDING_SELF | (vector as u32)
+    ) { return false; }
+    return xapic_ipi_wait_idle();
+}

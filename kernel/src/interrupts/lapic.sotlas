@@ -2,12 +2,13 @@
 //
 // So opera depois que a pagina MMIO indicada pela MADT foi mapeada UC. O modo
 // x2APIC e recusado nesta fase. Alem de EOI/LVT e ICR INIT/SIPI, APs podem
-// preparar o proprio Local APIC e receber IPIs de reschedule dedicados.
+// preparar o proprio Local APIC e receber IPIs arquiteturais dedicados.
 
 module kernel::interrupts::lapic;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::memory::active_page_tables::*;
+import kernel::interrupts::xapic_ipi::*;
 
 pub const IA32_APIC_BASE_MSR: u32 = 0x1B;
 pub const IA32_APIC_BASE_ENABLE: u64 = 1 << 11;
@@ -80,26 +81,19 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
         LAPIC_ID = 0;
     }
     if madt_base == 0 || (madt_base & 0xFFF) != 0 { return false; }
-
     let mut apic_base = x86_read_msr(IA32_APIC_BASE_MSR);
     if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }
-
     let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
     if msr_base != 0 && msr_base != madt_base { return false; }
     if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
-        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) |
-            madt_base | IA32_APIC_BASE_ENABLE;
+        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) | madt_base | IA32_APIC_BASE_ENABLE;
         x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
     }
-
     if !active_page_tables_map_mmio_identity_4k(madt_base) { return false; }
     unsafe { LAPIC_BASE = madt_base; }
-
     let version = x86_mmio_read32(madt_base + LAPIC_REG_VERSION);
     if (version & 0xFF) == 0 { return false; }
     let apic_id = ((x86_mmio_read32(madt_base + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
-
-    // Preserve o caminho BSP historico e seus guardrails de mascaramento.
     lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
@@ -107,7 +101,7 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
     lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
-
+    if !xapic_ipi_bind(madt_base) { return false; }
     unsafe {
         LAPIC_VERSION = version;
         LAPIC_ID = apic_id;
@@ -119,18 +113,15 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
 @system
 pub fn lapic_prepare_current_cpu_masked() -> bool {
     let base = lapic_base();
-    if !lapic_is_ready() || base == 0 { return false; }
-
+    if !lapic_is_ready() || base == 0 || !xapic_ipi_is_ready() { return false; }
     let mut apic_base = x86_read_msr(IA32_APIC_BASE_MSR);
     if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }
     let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
     if msr_base != 0 && msr_base != base { return false; }
     if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
-        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) |
-            base | IA32_APIC_BASE_ENABLE;
+        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) | base | IA32_APIC_BASE_ENABLE;
         x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
     }
-
     let version = x86_mmio_read32(base + LAPIC_REG_VERSION);
     if (version & 0xFF) == 0 { return false; }
     lapic_mask_local_vectors_at(base);
@@ -139,16 +130,12 @@ pub fn lapic_prepare_current_cpu_masked() -> bool {
 
 @system
 pub fn lapic_is_ready() -> bool { unsafe { return LAPIC_READY; } }
-
 @system
 pub fn lapic_base() -> u64 { unsafe { return LAPIC_BASE; } }
-
 @system
 pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
-
 @system
 pub fn lapic_id() -> u8 { unsafe { return LAPIC_ID; } }
-
 @system
 pub fn lapic_current_id() -> u8 {
     let base = lapic_base();
@@ -161,9 +148,7 @@ pub fn lapic_wait_icr_idle(spin_limit: u64) -> bool {
     if !lapic_is_ready() || spin_limit == 0 { return false; }
     let mut spins: u64 = 0;
     while spins < spin_limit {
-        if (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) == 0 {
-            return true;
-        }
+        if (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) == 0 { return true; }
         x86_cpu_pause();
         spins += 1;
     }
@@ -179,33 +164,21 @@ fn lapic_send_icr(destination_apic_id: u8, command: u32) -> bool {
 }
 
 @system
-pub fn lapic_send_init_assert(destination_apic_id: u8) -> bool {
-    return lapic_send_icr(destination_apic_id, LAPIC_ICR_INIT_ASSERT);
-}
-
+pub fn lapic_send_init_assert(destination_apic_id: u8) -> bool { return lapic_send_icr(destination_apic_id, LAPIC_ICR_INIT_ASSERT); }
 @system
-pub fn lapic_send_init_deassert(destination_apic_id: u8) -> bool {
-    return lapic_send_icr(destination_apic_id, LAPIC_ICR_INIT_DEASSERT);
-}
-
+pub fn lapic_send_init_deassert(destination_apic_id: u8) -> bool { return lapic_send_icr(destination_apic_id, LAPIC_ICR_INIT_DEASSERT); }
 @system
 pub fn lapic_send_startup(destination_apic_id: u8, vector: u8) -> bool {
     if vector == 0 { return false; }
     return lapic_send_icr(destination_apic_id, LAPIC_ICR_STARTUP | (vector as u32));
 }
-
-// Fixed-delivery IPI. Um vetor separado do INT 0x43 e obrigatorio porque IPIs
-// exigem EOI, enquanto o yield/syscall por software nao deve emitir EOI.
 @system
 pub fn lapic_send_fixed(destination_apic_id: u8, vector: u8) -> bool {
     if vector < LAPIC_FIXED_VECTOR_MIN || vector > LAPIC_FIXED_VECTOR_MAX { return false; }
     return lapic_send_icr(destination_apic_id, vector as u32);
 }
-
 @system
 pub fn lapic_eoi() -> void {
-    unsafe {
-        if !LAPIC_READY { return; }
-    }
+    unsafe { if !LAPIC_READY { return; } }
     lapic_write(LAPIC_REG_EOI, 0);
 }

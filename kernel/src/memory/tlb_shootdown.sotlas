@@ -1,0 +1,242 @@
+// Baken OS — shootdown de TLB SMP para mappings globais da raiz do kernel.
+//
+// Sem dependência de scheduler/SMP de alto nível: a topologia é registrada pelo
+// bring-up e o handler identifica a CPU pelo APIC ID. O caminho de interrupção
+// não aloca, não adquire locks e só executa INVLPG + acknowledgement volátil.
+module kernel::memory::tlb_shootdown;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::interrupts::xapic_ipi::*;
+import kernel::sync::spinlock::*;
+
+pub const TLB_SHOOTDOWN_VECTOR: u16 = 0x45;
+pub const TLB_SHOOTDOWN_MAX_CPUS: usize = 32;
+pub const TLB_SHOOTDOWN_SPIN_LIMIT: u64 = 10000000;
+
+static mut TLB_SHOOTDOWN_LOCK: SpinLock = SpinLock { state: 0 };
+static mut TLB_SHOOTDOWN_READY: bool = false;
+static mut TLB_SHOOTDOWN_CPU_REGISTERED: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false; TLB_SHOOTDOWN_MAX_CPUS];
+static mut TLB_SHOOTDOWN_CPU_ACTIVE: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false; TLB_SHOOTDOWN_MAX_CPUS];
+static mut TLB_SHOOTDOWN_CPU_APIC_ID: [u8; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
+static mut TLB_SHOOTDOWN_ADDRESS_LO: u32 = 0;
+static mut TLB_SHOOTDOWN_ADDRESS_HI: u32 = 0;
+static mut TLB_SHOOTDOWN_GENERATION: u32 = 0;
+static mut TLB_SHOOTDOWN_ACK: [u32; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
+
+@system
+fn tlb_u32_address(value: *mut u32) -> u64 { return value as u64; }
+
+@system
+pub fn tlb_shootdown_initialize() -> bool {
+    unsafe {
+        if TLB_SHOOTDOWN_READY { return true; }
+        if !spinlock_init(&mut TLB_SHOOTDOWN_LOCK) { return false; }
+        let mut slot: usize = 0;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            TLB_SHOOTDOWN_CPU_REGISTERED[slot] = false;
+            TLB_SHOOTDOWN_CPU_ACTIVE[slot] = false;
+            TLB_SHOOTDOWN_CPU_APIC_ID[slot] = 0;
+            TLB_SHOOTDOWN_ACK[slot] = 0;
+            slot += 1;
+        }
+        TLB_SHOOTDOWN_ADDRESS_LO = 0;
+        TLB_SHOOTDOWN_ADDRESS_HI = 0;
+        TLB_SHOOTDOWN_GENERATION = 0;
+        TLB_SHOOTDOWN_READY = true;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn tlb_shootdown_is_ready() -> bool { unsafe { return TLB_SHOOTDOWN_READY; } }
+
+@system
+pub fn tlb_shootdown_register_cpu(slot: usize, apic_id: u8) -> bool {
+    if !tlb_shootdown_is_ready() || slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
+    unsafe {
+        if TLB_SHOOTDOWN_CPU_REGISTERED[slot] {
+            return TLB_SHOOTDOWN_CPU_APIC_ID[slot] == apic_id;
+        }
+        let mut probe: usize = 0;
+        while probe < TLB_SHOOTDOWN_MAX_CPUS {
+            if TLB_SHOOTDOWN_CPU_REGISTERED[probe] && TLB_SHOOTDOWN_CPU_APIC_ID[probe] == apic_id {
+                return false;
+            }
+            probe += 1;
+        }
+        TLB_SHOOTDOWN_CPU_APIC_ID[slot] = apic_id;
+        TLB_SHOOTDOWN_CPU_REGISTERED[slot] = true;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn tlb_shootdown_activate_cpu(slot: usize) -> bool {
+    if !tlb_shootdown_is_ready() || slot == 0 || slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
+    unsafe {
+        if !TLB_SHOOTDOWN_CPU_REGISTERED[slot] { return false; }
+        TLB_SHOOTDOWN_CPU_ACTIVE[slot] = true;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn tlb_shootdown_active_ap_count() -> u32 {
+    let mut count: u32 = 0;
+    unsafe {
+        let mut slot: usize = 1;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_ACTIVE[slot] { count += 1; }
+            slot += 1;
+        }
+    }
+    return count;
+}
+
+@system
+fn tlb_shootdown_lock_irq() -> u64 {
+    if !tlb_shootdown_is_ready() { return 0; }
+    loop {
+        let flags = x86_irq_save_disable();
+        let mut acquired = false;
+        unsafe { acquired = spinlock_try_lock(&mut TLB_SHOOTDOWN_LOCK); }
+        if acquired { return flags; }
+        x86_irq_restore(flags);
+        x86_cpu_pause();
+    }
+}
+
+@system
+fn tlb_shootdown_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut TLB_SHOOTDOWN_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn tlb_shootdown_next_generation() -> u32 {
+    unsafe {
+        TLB_SHOOTDOWN_GENERATION += 1;
+        if TLB_SHOOTDOWN_GENERATION == 0 {
+            TLB_SHOOTDOWN_GENERATION = 1;
+            let mut slot: usize = 0;
+            while slot < TLB_SHOOTDOWN_MAX_CPUS {
+                TLB_SHOOTDOWN_ACK[slot] = 0;
+                slot += 1;
+            }
+        }
+        return TLB_SHOOTDOWN_GENERATION;
+    }
+}
+
+@system
+fn tlb_shootdown_publish(address: u64, generation: u32) -> void {
+    unsafe {
+        let lo: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_LO;
+        let hi: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_HI;
+        let gen: *mut u32 = &mut TLB_SHOOTDOWN_GENERATION;
+        x86_mmio_write32(tlb_u32_address(lo), address as u32);
+        x86_mmio_write32(tlb_u32_address(hi), (address >> 32) as u32);
+        __dma_fence();
+        x86_mmio_write32(tlb_u32_address(gen), generation);
+    }
+    __dma_fence();
+}
+
+@system
+fn tlb_shootdown_ack_value(slot: usize) -> u32 {
+    if slot >= TLB_SHOOTDOWN_MAX_CPUS { return 0; }
+    unsafe {
+        let ack: *mut u32 = &mut TLB_SHOOTDOWN_ACK[slot];
+        return x86_mmio_read32(tlb_u32_address(ack));
+    }
+}
+
+@system
+fn tlb_shootdown_wait_ack(generation: u32, expected: u32) -> bool {
+    if expected == 0 { return true; }
+    let mut spins: u64 = 0;
+    while spins < TLB_SHOOTDOWN_SPIN_LIMIT {
+        let mut matched: u32 = 0;
+        unsafe {
+            let mut slot: usize = 1;
+            while slot < TLB_SHOOTDOWN_MAX_CPUS {
+                if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_ACTIVE[slot] &&
+                   tlb_shootdown_ack_value(slot) == generation { matched += 1; }
+                slot += 1;
+            }
+        }
+        if matched == expected { return true; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn tlb_shootdown_slot_for_current_cpu() -> usize {
+    let apic_id = xapic_ipi_current_id();
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_APIC_ID[slot] == apic_id {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return TLB_SHOOTDOWN_MAX_CPUS;
+}
+
+// Deve ser chamado depois da publicação da PTE. Mappings globais do kernel são
+// compartilhados pelos address spaces, então INVLPG é executado em toda CPU
+// participante independentemente do CR3 corrente.
+@system
+pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
+    if !tlb_shootdown_is_ready() || !x86_page_aligned(address) { return false; }
+    let flags = tlb_shootdown_lock_irq();
+    if flags == 0 { return false; }
+    let expected = tlb_shootdown_active_ap_count();
+    let generation = tlb_shootdown_next_generation();
+    tlb_shootdown_publish(address, generation);
+    x86_invlpg(address);
+    if expected > 0 {
+        if !xapic_ipi_is_ready() ||
+           !xapic_ipi_send_fixed_all_excluding_self(TLB_SHOOTDOWN_VECTOR as u8) ||
+           !tlb_shootdown_wait_ack(generation, expected) {
+            tlb_shootdown_unlock_irq(flags);
+            return false;
+        }
+    }
+    tlb_shootdown_unlock_irq(flags);
+    return true;
+}
+
+@system
+pub fn tlb_shootdown_handle_ipi() -> bool {
+    if !tlb_shootdown_is_ready() { return false; }
+    let slot = tlb_shootdown_slot_for_current_cpu();
+    if slot == 0 || slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
+    unsafe {
+        if !TLB_SHOOTDOWN_CPU_ACTIVE[slot] { return false; }
+        let lo: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_LO;
+        let hi: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_HI;
+        let gen: *mut u32 = &mut TLB_SHOOTDOWN_GENERATION;
+        let address_lo = x86_mmio_read32(tlb_u32_address(lo)) as u64;
+        let address_hi = x86_mmio_read32(tlb_u32_address(hi)) as u64;
+        let generation = x86_mmio_read32(tlb_u32_address(gen));
+        let address = address_lo | (address_hi << 32);
+        if address == 0 || generation == 0 || !x86_page_aligned(address) { return false; }
+        x86_invlpg(address);
+        __dma_fence();
+        let ack: *mut u32 = &mut TLB_SHOOTDOWN_ACK[slot];
+        x86_mmio_write32(tlb_u32_address(ack), generation);
+    }
+    __dma_fence();
+    return true;
+}
