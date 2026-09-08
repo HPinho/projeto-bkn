@@ -1,9 +1,10 @@
-// Baken OS — provas reais de dispatch, timer, TLB shootdown e Ring 3 em AP.
+// Baken OS — provas reais de dispatch, timer, TLB e processo Ring 3 em AP.
 //
-// As provas históricas continuam isoladas. O modo Ring 3 usa a mesma kernel
-// thread pinned do probe SMP, mas publica um address space de processo real,
-// entra em CPL3 no CPU 1, executa write+exit via INT 0x43 e só finaliza depois
-// de retornar ao idle/kernel CR3, destruir o processo e restaurar o timer do AP.
+// O fechamento SMP usa uma process thread real: o scheduler publica PID/root,
+// carrega o CR3 no CPU 1, entra em CPL3 e deixa o LAPIC timer preemptar o frame
+// de usuário. O BSP só libera a continuação depois de observar um tick posterior
+// ao flag escrito em CPL3; o segundo flag/marker prova retorno a CPL3 antes do
+// syscall exit, reaper e teardown integral do address space.
 module kernel::scheduler::smp_probe;
 
 import kernel::arch::x86_64::cpu::*;
@@ -36,8 +37,12 @@ pub const SCHEDULER_SMP_RING3_CODE_ADDRESS: u64 = PROCESS_USER_BASE;
 pub const SCHEDULER_SMP_RING3_DATA_ADDRESS: u64 = PROCESS_USER_BASE + 0x1000;
 pub const SCHEDULER_SMP_RING3_STACK_ADDRESS: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE - 0x1000;
 pub const SCHEDULER_SMP_RING3_STACK_TOP: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE;
-pub const SCHEDULER_SMP_RING3_CODE_BYTES: usize = 39;
-pub const SCHEDULER_SMP_RING3_DATA_BYTES: usize = 22;
+pub const SCHEDULER_SMP_RING3_STARTED_OFFSET: u64 = 32;
+pub const SCHEDULER_SMP_RING3_RELEASE_OFFSET: u64 = 36;
+pub const SCHEDULER_SMP_RING3_RESUMED_OFFSET: u64 = 40;
+pub const SCHEDULER_SMP_RING3_RESUMED_MARKER_OFFSET: u64 = 64;
+pub const SCHEDULER_SMP_RING3_CODE_BYTES: usize = 94;
+pub const SCHEDULER_SMP_RING3_DATA_BYTES: usize = 94;
 
 static mut SCHEDULER_SMP_PROBE_EXECUTED: u32 = 0;
 static mut SCHEDULER_SMP_PROBE_CPU: u32 = 0xFFFFFFFF;
@@ -46,10 +51,7 @@ static mut SCHEDULER_SMP_TIMER_ENABLED: u32 = 0;
 static mut SCHEDULER_SMP_TLB_PRIMED: u32 = 0;
 static mut SCHEDULER_SMP_TLB_RELEASE: u32 = 0;
 static mut SCHEDULER_SMP_TLB_OBSERVED: u32 = 0;
-static mut SCHEDULER_SMP_RING3_ENTERED: u32 = 0;
 static mut SCHEDULER_SMP_RING3_CPU: u32 = 0xFFFFFFFF;
-static mut SCHEDULER_SMP_RING3_ROOT_LO: u32 = 0;
-static mut SCHEDULER_SMP_RING3_ROOT_HI: u32 = 0;
 static mut SCHEDULER_SMP_RING3_PID_LO: u32 = 0;
 static mut SCHEDULER_SMP_RING3_PID_HI: u32 = 0;
 
@@ -82,20 +84,8 @@ fn scheduler_smp_tlb_observed_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TLB_OBSERVED; return value as u64; }
 }
 @system
-fn scheduler_smp_ring3_entered_address() -> u64 {
-    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_ENTERED; return value as u64; }
-}
-@system
 fn scheduler_smp_ring3_cpu_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_CPU; return value as u64; }
-}
-@system
-fn scheduler_smp_ring3_root_lo_address() -> u64 {
-    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_ROOT_LO; return value as u64; }
-}
-@system
-fn scheduler_smp_ring3_root_hi_address() -> u64 {
-    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_ROOT_HI; return value as u64; }
 }
 @system
 fn scheduler_smp_ring3_pid_lo_address() -> u64 {
@@ -147,21 +137,16 @@ pub fn sotlas_x86_scheduler_smp_probe_entry() -> void {
 
     if mode == SCHEDULER_SMP_PROBE_MODE_RING3 {
         if cpu_slot != SCHEDULER_SMP_PROBE_CPU_SLOT { return; }
-        lapic_timer_mask();
-        let root = (x86_mmio_read32(scheduler_smp_ring3_root_lo_address()) as u64) |
-                   ((x86_mmio_read32(scheduler_smp_ring3_root_hi_address()) as u64) << 32);
         let expected_pid = (x86_mmio_read32(scheduler_smp_ring3_pid_lo_address()) as u64) |
                            ((x86_mmio_read32(scheduler_smp_ring3_pid_hi_address()) as u64) << 32);
-        if root == 0 || expected_pid == 0 || !x86_page_aligned(root) { return; }
-        if (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK) != root { x86_write_cr3_raw(root); }
-        if process_current_id() != expected_pid { return; }
+        if expected_pid == 0 || process_current_id() != expected_pid { return; }
+        let root = process_borrow_root(expected_pid);
+        if root == 0 || (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK) != root { return; }
         let current_rsp = __current_rsp();
         if current_rsp > 0xFFFFFFFFFFFFFFD7 { return; }
         let kernel_stack_top = (current_rsp + 40) & 0xFFFFFFFFFFFFFFF0;
         if !tss_set_rsp0_for_cpu(cpu_slot, kernel_stack_top) { return; }
         x86_mmio_write32(scheduler_smp_ring3_cpu_address(), cpu_slot as u32);
-        __dma_fence();
-        x86_mmio_write32(scheduler_smp_ring3_entered_address(), 1);
         __dma_fence();
         __enter_user(SCHEDULER_SMP_RING3_CODE_ADDRESS, SCHEDULER_SMP_RING3_STACK_TOP);
         loop { x86_cpu_pause(); }
@@ -259,6 +244,19 @@ fn scheduler_smp_probe_wait_flag(address: u64) -> bool {
 }
 
 @system
+fn scheduler_smp_probe_wait_process_reaped(pid: u64, reap_before: u64) -> bool {
+    if pid == 0 { return false; }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
+        __dma_fence();
+        if process_reference_count(pid) == 0 && scheduler_reap_count() > reap_before { return true; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
 fn scheduler_smp_probe_emit_thread_marker() -> bool {
     if !x86_serial_is_ready() { return false; }
     let marker: [u8; 23] = [66,65,75,69,78,58,83,77,80,95,84,72,82,69,65,68,95,79,78,95,65,80,10];
@@ -318,18 +316,31 @@ fn scheduler_smp_probe_materialize_ring3(code_physical: u64, data_physical: u64)
     let code_virtual = direct_map_virtual_address(code_physical);
     let data_virtual = direct_map_virtual_address(data_physical);
     if code_virtual == 0 || data_virtual == 0 { return false; }
-    // mov rax,1; movabs rdi,DATA; mov rsi,22; int 43h;
-    // mov rax,2; xor edi,edi; int 43h; ud2.
+    // User program:
+    // started=1; write("BAKEN:SMP_RING3_ON_AP\n"); while(!release) pause-by-load;
+    // resumed=1; write("BAKEN:SMP_RING3_RESUMED_ON_AP\n"); exit(0); ud2.
     let code: [u8; SCHEDULER_SMP_RING3_CODE_BYTES] = [
+        72,187,32,16,0,0,0,32,0,0,
+        199,3,1,0,0,0,
         72,199,192,1,0,0,0,
         72,191,0,16,0,0,0,32,0,0,
         72,199,198,22,0,0,0,
         205,67,
+        131,123,4,0,
+        116,250,
+        199,67,8,1,0,0,0,
+        72,199,192,1,0,0,0,
+        72,191,64,16,0,0,0,32,0,0,
+        72,199,198,30,0,0,0,
+        205,67,
         72,199,192,2,0,0,0,
         49,255,205,67,15,11
     ];
-    let data: [u8; SCHEDULER_SMP_RING3_DATA_BYTES] = [
+    let first: [u8; 22] = [
         66,65,75,69,78,58,83,77,80,95,82,73,78,71,51,95,79,78,95,65,80,10
+    ];
+    let resumed: [u8; 30] = [
+        66,65,75,69,78,58,83,77,80,95,82,73,78,71,51,95,82,69,83,85,77,69,68,95,79,78,95,65,80,10
     ];
     unsafe {
         let mut index: usize = 0;
@@ -338,8 +349,13 @@ fn scheduler_smp_probe_materialize_ring3(code_physical: u64, data_physical: u64)
             index += 1;
         }
         index = 0;
-        while index < SCHEDULER_SMP_RING3_DATA_BYTES {
-            *((data_virtual + index as u64) as *mut u8) = data[index];
+        while index < 22 {
+            *((data_virtual + index as u64) as *mut u8) = first[index];
+            index += 1;
+        }
+        index = 0;
+        while index < 30 {
+            *((data_virtual + SCHEDULER_SMP_RING3_RESUMED_MARKER_OFFSET + index as u64) as *mut u8) = resumed[index];
             index += 1;
         }
     }
@@ -347,79 +363,96 @@ fn scheduler_smp_probe_materialize_ring3(code_physical: u64, data_physical: u64)
 }
 
 @system
-fn scheduler_smp_probe_restore_ap_timer(apic_id: u8) -> bool {
-    let enabled_address = scheduler_smp_timer_enabled_address();
-    x86_mmio_write32(scheduler_smp_probe_mode_address(), SCHEDULER_SMP_PROBE_MODE_TIMER);
-    x86_mmio_write32(enabled_address, 0);
-    __dma_fence();
-    let before = irq_timer_count_for_cpu(SCHEDULER_SMP_PROBE_CPU_SLOT);
-    let idle_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
-    let entry = x86_scheduler_smp_probe_entry_address();
-    let tid = scheduler_create_kernel_thread_on_cpu(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
-                                                     SCHEDULER_SMP_PROBE_CPU_SLOT);
-    if tid == 0 { return false; }
-    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
-    if !scheduler_smp_probe_wait_timer_enabled() { return false; }
-    if !scheduler_smp_probe_wait_timer_tick(SCHEDULER_SMP_PROBE_CPU_SLOT, before) { return false; }
-    return scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before);
+fn scheduler_smp_probe_cleanup_unstarted_ring3(pid: u64, code: u64,
+                                               data: u64, stack: u64) -> bool {
+    let mapped_code = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS);
+    let mapped_data = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS);
+    let mapped_stack = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS);
+    let release_code = if mapped_code != 0 { mapped_code } else { code };
+    let release_data = if mapped_data != 0 { mapped_data } else { data };
+    let release_stack = if mapped_stack != 0 { mapped_stack } else { stack };
+    let mut released = true;
+    if release_code != 0 && !pmm_free_pages(release_code, 1) { released = false; }
+    if release_data != 0 && !pmm_free_pages(release_data, 1) { released = false; }
+    if release_stack != 0 && !pmm_free_pages(release_stack, 1) { released = false; }
+    return released && process_destroy(pid);
 }
 
 @system
 fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     let pid = process_create();
-    if pid == 0 || !process_retain(pid) { return false; }
-    let root = process_borrow_root(pid);
-    if root == 0 || !x86_page_aligned(root) { process_release(pid); process_destroy(pid); return false; }
-
+    if pid == 0 { return false; }
     let code = pmm_alloc_page();
     let data = pmm_alloc_page();
     let stack = pmm_alloc_page();
     if code == 0 || data == 0 || stack == 0 {
-        if code != 0 { pmm_free_pages(code, 1); }
-        if data != 0 { pmm_free_pages(data, 1); }
-        if stack != 0 { pmm_free_pages(stack, 1); }
-        process_release(pid); process_destroy(pid); return false;
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+        return false;
     }
     if !scheduler_smp_probe_zero_page(code) || !scheduler_smp_probe_zero_page(data) ||
        !scheduler_smp_probe_zero_page(stack) || !scheduler_smp_probe_materialize_ring3(code, data) {
-        pmm_free_pages(code, 1); pmm_free_pages(data, 1); pmm_free_pages(stack, 1);
-        process_release(pid); process_destroy(pid); return false;
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+        return false;
     }
     if !process_map_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS, code, false, true) ||
-       !process_map_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS, data, false, false) ||
+       !process_map_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS, data, true, false) ||
        !process_map_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS, stack, true, false) {
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
         return false;
     }
 
-    x86_mmio_write32(scheduler_smp_ring3_root_lo_address(), root as u32);
-    x86_mmio_write32(scheduler_smp_ring3_root_hi_address(), (root >> 32) as u32);
+    let data_virtual = direct_map_virtual_address(data);
+    if data_virtual == 0 {
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+        return false;
+    }
+    let started_address = data_virtual + SCHEDULER_SMP_RING3_STARTED_OFFSET;
+    let release_address = data_virtual + SCHEDULER_SMP_RING3_RELEASE_OFFSET;
+    let resumed_address = data_virtual + SCHEDULER_SMP_RING3_RESUMED_OFFSET;
+    x86_mmio_write32(started_address, 0);
+    x86_mmio_write32(release_address, 0);
+    x86_mmio_write32(resumed_address, 0);
     x86_mmio_write32(scheduler_smp_ring3_pid_lo_address(), pid as u32);
     x86_mmio_write32(scheduler_smp_ring3_pid_hi_address(), (pid >> 32) as u32);
-    x86_mmio_write32(scheduler_smp_ring3_entered_address(), 0);
     x86_mmio_write32(scheduler_smp_ring3_cpu_address(), 0xFFFFFFFF);
     x86_mmio_write32(scheduler_smp_probe_mode_address(), SCHEDULER_SMP_PROBE_MODE_RING3);
     __dma_fence();
 
     let syscall_before = syscall_count();
     let exit_before = syscall_exit_count();
+    let reap_before = scheduler_reap_count();
     let idle_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
     let entry = x86_scheduler_smp_probe_entry_address();
-    let tid = scheduler_create_kernel_thread_on_cpu(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
+    let tid = scheduler_create_process_thread_on_cpu(pid, entry,
+                                                     SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
                                                      SCHEDULER_SMP_PROBE_CPU_SLOT);
-    if tid == 0 { return false; }
+    if tid == 0 {
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+        return false;
+    }
+    if process_destroy(pid) { return false; }
     if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
-    if !scheduler_smp_probe_wait_flag(scheduler_smp_ring3_entered_address()) { return false; }
-    if !scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before) { return false; }
+    if !scheduler_smp_probe_wait_flag(started_address) { return false; }
     if x86_mmio_read32(scheduler_smp_ring3_cpu_address()) != SCHEDULER_SMP_PROBE_CPU_SLOT as u32 { return false; }
-    if syscall_count() < syscall_before + 2 || syscall_exit_count() <= exit_before { return false; }
+
+    // O contador é capturado somente depois do flag escrito em CPL3. Portanto o
+    // próximo incremento necessariamente ocorre enquanto a process thread ainda
+    // está viva; release permanece 0 e o programa de usuário não pode terminar.
+    let timer_after_user_start = irq_timer_count_for_cpu(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    if !scheduler_smp_probe_wait_timer_tick(SCHEDULER_SMP_PROBE_CPU_SLOT, timer_after_user_start) { return false; }
+    x86_mmio_write32(release_address, 1);
+    __dma_fence();
+    if !scheduler_smp_probe_wait_flag(resumed_address) { return false; }
+    if !scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before) { return false; }
+    if syscall_count() < syscall_before + 3 || syscall_exit_count() <= exit_before { return false; }
+    if !scheduler_smp_probe_wait_process_reaped(pid, reap_before) { return false; }
 
     let unmapped_code = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS);
     let unmapped_data = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS);
     let unmapped_stack = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS);
     if unmapped_code != code || unmapped_data != data || unmapped_stack != stack { return false; }
     if !pmm_free_pages(code, 1) || !pmm_free_pages(data, 1) || !pmm_free_pages(stack, 1) { return false; }
-    if !process_release(pid) || !process_destroy(pid) { return false; }
-    if !scheduler_smp_probe_restore_ap_timer(apic_id) { return false; }
+    if !process_destroy(pid) { return false; }
     return scheduler_smp_probe_emit_ring3_ready_marker();
 }
 

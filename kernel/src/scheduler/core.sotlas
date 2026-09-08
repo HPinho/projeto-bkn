@@ -584,6 +584,33 @@ pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u6
     return tid;
 }
 
+// Publica uma process thread no AP sem abrir uma janela READY com afinidade
+// incorreta. O wrapper mantém IF=0 no BSP enquanto a criação histórica fixa
+// temporariamente a thread em CPU0; APs não podem capturá-la antes do repin.
+@system
+pub fn scheduler_create_process_thread_on_cpu(pid: u64, entry_rip: u64,
+                                              stack_pages: u64, cpu_slot: usize) -> u64 {
+    if cpu_slot == 0 || cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
+    unsafe { if !SCHEDULER_CPU_REGISTERED[cpu_slot] { return 0; } }
+    let flags = x86_irq_save_disable();
+    let tid = scheduler_create_process_thread(pid, entry_rip, stack_pages);
+    if tid == 0 { x86_irq_restore(flags); return 0; }
+    if !scheduler_switch_lock() { loop { x86_cpu_pause(); } }
+    let slot = scheduler_find_thread_slot(tid);
+    if slot == SCHEDULER_INVALID_SLOT { loop { x86_cpu_pause(); } }
+    unsafe {
+        if SCHEDULER_THREADS[slot].process_id != pid ||
+           SCHEDULER_THREADS[slot].address_space_root == 0 ||
+           SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE {
+            loop { x86_cpu_pause(); }
+        }
+        SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32;
+    }
+    if !scheduler_switch_unlock() { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+    return tid;
+}
+
 @system
 pub fn scheduler_block_current() -> bool {
     let flags = x86_irq_save_disable();

@@ -46,7 +46,7 @@ jobs:
           python3 tools/scripts/create_uefi_iso.py
           test -s build/baken_os.iso
 
-      - name: Prove AP Dispatch, Timer Preemption, Generic Dispatch, TLB and Ring3
+      - name: Prove AP Dispatch, Timer, TLB and Preempted Ring3 Process
         timeout-minutes: 4
         shell: bash
         run: |
@@ -96,9 +96,10 @@ jobs:
           grep -Fq 'BAKEN:SMP_ANY_THREAD_ON_AP' build/qemu-smp-serial.log
           grep -Fq 'BAKEN:SMP_TLB_SHOOTDOWN_READY' build/qemu-smp-serial.log
           grep -Fxq 'BAKEN:SMP_RING3_ON_AP' build/qemu-smp-serial.log
+          grep -Fxq 'BAKEN:SMP_RING3_RESUMED_ON_AP' build/qemu-smp-serial.log
           grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
-            echo '::error::CPU exception reported during SMP/TLB/Ring3 proof.'
+            echo '::error::CPU exception reported during SMP/TLB/Ring3 preemption proof.'
             exit 1
           fi
           test "$found" -eq 1
