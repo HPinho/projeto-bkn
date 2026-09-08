@@ -16,6 +16,10 @@ pub const PLATFORM_DEVICE_STATE_CLAIMED: u32 = 2;
 pub const PLATFORM_DEVICE_STATE_ACTIVE: u32 = 3;
 pub const PLATFORM_DEVICE_STATE_FAILED: u32 = 4;
 pub const PLATFORM_DRIVER_NONE: u32 = 0;
+pub const PLATFORM_DRIVER_AHCI: u32 = 1;
+pub const PLATFORM_DRIVER_NVME: u32 = 2;
+pub const PLATFORM_DRIVER_XHCI: u32 = 3;
+pub const PLATFORM_DRIVER_DISPLAY: u32 = 4;
 
 @repr(C)
 pub struct PlatformDevice {

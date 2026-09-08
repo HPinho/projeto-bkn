@@ -1,0 +1,64 @@
+// Baken OS — primeiro bind real entre driver e catálogo platform.
+// O controlador já deve ter completado inicialização bare-metal; esta etapa
+// reconcilia ownership e só publica ACTIVE quando o BlockDevice também existe.
+module kernel::platform::storage_binding;
+
+import kernel::platform::device_catalog::*;
+import kernel::platform::inventory::*;
+import kernel::drivers::storage_discovery::*;
+import kernel::storage::block_device::*;
+import kernel::arch::x86_64::serial::*;
+
+static mut PLATFORM_STORAGE_BOUND: bool = false;
+static mut PLATFORM_STORAGE_DEVICE_INDEX: u32 = 0;
+static mut PLATFORM_STORAGE_DRIVER: u32 = PLATFORM_DRIVER_NONE;
+
+@system
+pub fn platform_storage_bind_active_driver() -> bool {
+    unsafe { if PLATFORM_STORAGE_BOUND { return true; } }
+    if !storage_generic_block_io_is_ready() || !block_device_has_native_target() { return false; }
+    let candidate = storage_discovery_candidate();
+    if candidate == (null as *const StorageControllerCandidate) { return false; }
+    let mut index: u32 = 0;
+    let mut kind: u32 = 0;
+    unsafe {
+        index = (*candidate).pci_index;
+        kind = (*candidate).kind;
+    }
+    let driver = if kind == STORAGE_CONTROLLER_AHCI {
+        PLATFORM_DRIVER_AHCI
+    } else if kind == STORAGE_CONTROLLER_NVME {
+        PLATFORM_DRIVER_NVME
+    } else {
+        PLATFORM_DRIVER_NONE
+    };
+    if driver == PLATFORM_DRIVER_NONE { return false; }
+    let snapshot = platform_device_snapshot(index);
+    if !snapshot.valid || snapshot.class_code != PLATFORM_PCI_CLASS_STORAGE { return false; }
+    if !platform_device_claim(index, driver) { return false; }
+    if !platform_device_set_state(index, driver, PLATFORM_DEVICE_STATE_ACTIVE) { return false; }
+    unsafe {
+        PLATFORM_STORAGE_DEVICE_INDEX = index;
+        PLATFORM_STORAGE_DRIVER = driver;
+        PLATFORM_STORAGE_BOUND = true;
+    }
+    return true;
+}
+
+@system
+pub fn platform_storage_is_bound() -> bool { unsafe { return PLATFORM_STORAGE_BOUND; } }
+
+@system
+pub fn platform_storage_emit_bound_marker() -> bool {
+    if !platform_storage_is_bound() { return false; }
+    let marker: [u8; 27] = [
+        66,65,75,69,78,58,83,84,79,82,65,71,69,95,68,82,73,86,69,82,
+        95,66,79,85,78,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 27 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
