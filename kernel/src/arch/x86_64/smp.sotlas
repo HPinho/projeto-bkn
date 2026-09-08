@@ -1,10 +1,9 @@
-// Baken OS — SMP x86-64: INIT/SIPI + runtime per-CPU seguro antes do scheduler multicore.
+// Baken OS — SMP x86-64: INIT/SIPI + runtime per-CPU + release controlado ao scheduler.
 //
-// Cada AP entra no mesmo CR3 do kernel, recebe stack, GDT e TSS proprias,
-// carrega a IDT compartilhada, habilita FPU/PAT no proprio core, prepara LAPIC
-// e timer local ainda mascarado e publica runtime-ready. Interrupcoes continuam
-// desabilitadas nos APs: a run queue permanece BSP-only ate existir locking e
-// ownership de thread por CPU.
+// Cada AP entra no CR3 do kernel, recebe stack/GDT/TSS proprias, carrega a IDT,
+// habilita FPU/PAT e prepara LAPIC/timer ainda mascarado. Depois publica
+// runtime-ready e permanece com IF=0 ate o BSP liberar explicitamente o AP para
+// receber IPIs do scheduler. O timer periodico do AP continua mascarado.
 
 module kernel::arch::x86_64::smp;
 
@@ -33,18 +32,22 @@ pub const SMP_INIT_DEASSERT_US: u64 = 200;
 pub const SMP_SIPI_GAP_US: u64 = 200;
 pub const SMP_AP_READY_TIMEOUT_US: u64 = 100000;
 pub const SMP_AP_RUNTIME_TIMEOUT_US: u64 = 100000;
+pub const SMP_AP_SCHEDULER_TIMEOUT_US: u64 = 100000;
 
 // Slot 0 e sempre o BSP. Slots 1..31 sao APs, independentemente da ordem MADT.
 static mut SMP_CPU_APIC_IDS: [u8; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
 static mut SMP_CPU_REGISTERED: [bool; SMP_MAX_CPUS] = [false; SMP_MAX_CPUS];
 static mut SMP_AP_READY: [u32; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
 static mut SMP_AP_RUNTIME_READY: [u32; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
+static mut SMP_AP_SCHEDULER_RELEASE: [u32; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
+static mut SMP_AP_SCHEDULER_ACTIVE: [u32; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
 static mut SMP_AP_STACK_PHYSICAL: [u64; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
 static mut SMP_AP_STACK_TOP: [u64; SMP_MAX_CPUS] = [0; SMP_MAX_CPUS];
 static mut SMP_READY: bool = false;
 static mut SMP_ONLINE_CPUS: u32 = 0;
 static mut SMP_STARTED_APS: u32 = 0;
 static mut SMP_RUNTIME_APS: u32 = 0;
+static mut SMP_SCHEDULER_APS: u32 = 0;
 static mut SMP_TRAMPOLINE_PHYSICAL: u64 = 0;
 
 @system
@@ -56,10 +59,13 @@ fn smp_reset_cpu_slots() -> void {
             SMP_CPU_REGISTERED[slot] = false;
             SMP_AP_READY[slot] = 0;
             SMP_AP_RUNTIME_READY[slot] = 0;
+            SMP_AP_SCHEDULER_RELEASE[slot] = 0;
+            SMP_AP_SCHEDULER_ACTIVE[slot] = 0;
             SMP_AP_STACK_PHYSICAL[slot] = 0;
             SMP_AP_STACK_TOP[slot] = 0;
             slot += 1;
         }
+        SMP_SCHEDULER_APS = 0;
     }
 }
 
@@ -90,19 +96,25 @@ fn smp_find_registered_cpu_slot(apic_id: u8) -> usize {
 @system
 fn smp_ready_address(slot: usize) -> u64 {
     if slot >= SMP_MAX_CPUS { return 0; }
-    unsafe {
-        let flag: *mut u32 = &mut SMP_AP_READY[slot];
-        return flag as u64;
-    }
+    unsafe { let flag: *mut u32 = &mut SMP_AP_READY[slot]; return flag as u64; }
 }
 
 @system
 fn smp_runtime_ready_address(slot: usize) -> u64 {
     if slot >= SMP_MAX_CPUS { return 0; }
-    unsafe {
-        let flag: *mut u32 = &mut SMP_AP_RUNTIME_READY[slot];
-        return flag as u64;
-    }
+    unsafe { let flag: *mut u32 = &mut SMP_AP_RUNTIME_READY[slot]; return flag as u64; }
+}
+
+@system
+fn smp_scheduler_release_address(slot: usize) -> u64 {
+    if slot == 0 || slot >= SMP_MAX_CPUS { return 0; }
+    unsafe { let flag: *mut u32 = &mut SMP_AP_SCHEDULER_RELEASE[slot]; return flag as u64; }
+}
+
+@system
+fn smp_scheduler_active_address(slot: usize) -> u64 {
+    if slot == 0 || slot >= SMP_MAX_CPUS { return 0; }
+    unsafe { let flag: *mut u32 = &mut SMP_AP_SCHEDULER_ACTIVE[slot]; return flag as u64; }
 }
 
 @system
@@ -127,14 +139,11 @@ fn smp_release_unstarted_stack(stack_physical: u64) -> void {
     pmm_free_pages(stack_physical, SMP_AP_STACK_PAGES);
 }
 
-// Entry executada no AP depois que o trampoline ja esta em long mode e sob o
-// CR3 Baken. Nao habilita interrupcoes nem toca o scheduler global.
 @system
 @export
 pub fn sotlas_x86_smp_ap_runtime_entry() -> ! {
     x86_cli_raw();
 
-    // Estado arquitetural por CPU que nao pode ser herdado do BSP.
     if !fpu_enable_current_cpu() { loop { x86_cpu_pause(); } }
     if !__pat_install_wc() { loop { x86_cpu_pause(); } }
     if !lapic_prepare_current_cpu_masked() { loop { x86_cpu_pause(); } }
@@ -161,25 +170,31 @@ pub fn sotlas_x86_smp_ap_runtime_entry() -> ! {
     if gdt_address == 0 || idt_address == 0 || !gdt_is_prepared_for_cpu(cpu_slot) || !idt_is_prepared() {
         loop { x86_cpu_pause(); }
     }
-    x86_gdt_activate_segments_raw(
-        gdt_address,
-        gdt_limit(),
-        GDT_KERNEL_CODE_SELECTOR,
-        GDT_KERNEL_DATA_SELECTOR
-    );
+    x86_gdt_activate_segments_raw(gdt_address, gdt_limit(), GDT_KERNEL_CODE_SELECTOR, GDT_KERNEL_DATA_SELECTOR);
     x86_ltr_raw(GDT_TSS_SELECTOR);
     x86_lidt_table_raw(idt_address, idt_limit());
 
+    // Continua mascarado nesta fase: AP so entra no scheduler por IPI 0x44.
     if !lapic_timer_prepare_current_cpu_masked() { loop { x86_cpu_pause(); } }
     if x86_interrupts_enabled() { loop { x86_cpu_pause(); } }
 
     let runtime_ready = smp_runtime_ready_address(cpu_slot);
-    if runtime_ready == 0 { loop { x86_cpu_pause(); } }
+    let release = smp_scheduler_release_address(cpu_slot);
+    let active = smp_scheduler_active_address(cpu_slot);
+    if runtime_ready == 0 || release == 0 || active == 0 { loop { x86_cpu_pause(); } }
     __dma_fence();
     x86_mmio_write32(runtime_ready, 1);
     __dma_fence();
 
-    // Fase atual: AP completamente preparado, mas ainda fora da run queue.
+    // O BSP so libera este ponto depois de scheduler/FPU/run-queue estarem prontos.
+    while x86_mmio_read32(release) != 1 { x86_cpu_pause(); }
+    if x86_interrupts_enabled() { loop { x86_cpu_pause(); } }
+    x86_mmio_write32(active, 1);
+    __dma_fence();
+    x86_sti_raw();
+
+    // Idle de AP: timer local ainda mascarado; IPI 0x44 fornece o primeiro frame
+    // arquitetural que o scheduler salva como idle frame deste processador.
     loop { x86_cpu_pause(); }
 }
 
@@ -193,26 +208,18 @@ fn smp_start_one_ap(cpu_slot: usize,
     let stack_physical = pmm_alloc_pages(SMP_AP_STACK_PAGES);
     if stack_physical == 0 { return false; }
     let stack_virtual = direct_map_virtual_address(stack_physical);
-    if stack_virtual == 0 {
-        smp_release_unstarted_stack(stack_physical);
-        return false;
-    }
+    if stack_virtual == 0 { smp_release_unstarted_stack(stack_physical); return false; }
     let stack_bytes = SMP_AP_STACK_PAGES * 4096;
-    if stack_bytes / 4096 != SMP_AP_STACK_PAGES {
-        smp_release_unstarted_stack(stack_physical);
-        return false;
-    }
+    if stack_bytes / 4096 != SMP_AP_STACK_PAGES { smp_release_unstarted_stack(stack_physical); return false; }
     let stack_top = stack_virtual + stack_bytes;
-    if stack_top <= stack_virtual || (stack_top & 15) != 0 {
-        smp_release_unstarted_stack(stack_physical);
-        return false;
-    }
+    if stack_top <= stack_virtual || (stack_top & 15) != 0 { smp_release_unstarted_stack(stack_physical); return false; }
 
     let ready_address = smp_ready_address(cpu_slot);
     let runtime_ready_address = smp_runtime_ready_address(cpu_slot);
-    if ready_address == 0 || runtime_ready_address == 0 {
-        smp_release_unstarted_stack(stack_physical);
-        return false;
+    let release_address = smp_scheduler_release_address(cpu_slot);
+    let active_address = smp_scheduler_active_address(cpu_slot);
+    if ready_address == 0 || runtime_ready_address == 0 || release_address == 0 || active_address == 0 {
+        smp_release_unstarted_stack(stack_physical); return false;
     }
     unsafe {
         SMP_AP_STACK_PHYSICAL[cpu_slot] = stack_physical;
@@ -220,25 +227,18 @@ fn smp_start_one_ap(cpu_slot: usize,
     }
     x86_mmio_write32(ready_address, 0);
     x86_mmio_write32(runtime_ready_address, 0);
+    x86_mmio_write32(release_address, 0);
+    x86_mmio_write32(active_address, 0);
     __dma_fence();
 
-    if !smp_trampoline_build(trampoline_physical, root_physical, stack_top,
-                             ready_address, ap_runtime_entry) {
-        unsafe {
-            SMP_AP_STACK_PHYSICAL[cpu_slot] = 0;
-            SMP_AP_STACK_TOP[cpu_slot] = 0;
-        }
-        smp_release_unstarted_stack(stack_physical);
-        return false;
+    if !smp_trampoline_build(trampoline_physical, root_physical, stack_top, ready_address, ap_runtime_entry) {
+        unsafe { SMP_AP_STACK_PHYSICAL[cpu_slot] = 0; SMP_AP_STACK_TOP[cpu_slot] = 0; }
+        smp_release_unstarted_stack(stack_physical); return false;
     }
     let vector = smp_trampoline_vector(trampoline_physical);
     if vector == 0 {
-        unsafe {
-            SMP_AP_STACK_PHYSICAL[cpu_slot] = 0;
-            SMP_AP_STACK_TOP[cpu_slot] = 0;
-        }
-        smp_release_unstarted_stack(stack_physical);
-        return false;
+        unsafe { SMP_AP_STACK_PHYSICAL[cpu_slot] = 0; SMP_AP_STACK_TOP[cpu_slot] = 0; }
+        smp_release_unstarted_stack(stack_physical); return false;
     }
 
     // Depois do primeiro INIT a stack nao e mais liberada em caminhos de erro:
@@ -247,7 +247,6 @@ fn smp_start_one_ap(cpu_slot: usize,
     x86_timer_spin_wait_us(SMP_INIT_ASSERT_US);
     if !lapic_send_init_deassert(apic_id) { return false; }
     x86_timer_spin_wait_us(SMP_INIT_DEASSERT_US);
-
     if !lapic_send_startup(apic_id, vector) { return false; }
     x86_timer_spin_wait_us(SMP_SIPI_GAP_US);
     if x86_mmio_read32(ready_address) != 1 {
@@ -267,78 +266,46 @@ pub fn smp_initialize_base() -> bool {
 
     let irq_flags = x86_irq_save_disable();
     let cpu_count = madt_cpu_count();
-    if cpu_count == 0 || cpu_count > SMP_MAX_CPUS as u32 {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if cpu_count == 0 || cpu_count > SMP_MAX_CPUS as u32 { x86_irq_restore(irq_flags); return false; }
 
     smp_reset_cpu_slots();
-
-    // Primeira passagem: valida topologia e descobre quantos APs estao habilitados.
     let bsp_apic_id = lapic_id();
     let mut bsp_seen = false;
     let mut ap_targets: u32 = 0;
     let mut index: u32 = 0;
     while index < cpu_count {
         let cpu = madt_cpu(index);
-        if cpu == (null as *const MadtCpu) {
-            x86_irq_restore(irq_flags);
-            return false;
-        }
+        if cpu == (null as *const MadtCpu) { x86_irq_restore(irq_flags); return false; }
         let mut apic_id: u8 = 0;
         let mut enabled = false;
-        unsafe {
-            apic_id = (*cpu).apic_id;
-            enabled = (*cpu).enabled;
-        }
+        unsafe { apic_id = (*cpu).apic_id; enabled = (*cpu).enabled; }
         if apic_id == bsp_apic_id {
-            if bsp_seen {
-                x86_irq_restore(irq_flags);
-                return false;
-            }
+            if bsp_seen { x86_irq_restore(irq_flags); return false; }
             bsp_seen = true;
-        } else if enabled {
-            ap_targets += 1;
-        }
+        } else if enabled { ap_targets += 1; }
         index += 1;
     }
-    if !bsp_seen || !smp_register_cpu_slot(0, bsp_apic_id) {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if !bsp_seen || !smp_register_cpu_slot(0, bsp_apic_id) { x86_irq_restore(irq_flags); return false; }
 
-    // Uniprocessador legitimo nao precisa reservar low-memory nem instalar uma
-    // identidade executavel desnecessaria.
     if ap_targets == 0 {
         unsafe {
             SMP_ONLINE_CPUS = 1;
             SMP_STARTED_APS = 0;
             SMP_RUNTIME_APS = 0;
+            SMP_SCHEDULER_APS = 0;
             SMP_READY = true;
         }
         x86_irq_restore(irq_flags);
         return true;
     }
 
-    if !x86_timer_is_calibrated() && !x86_timer_calibrate_from_acpi_pm() {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if !x86_timer_is_calibrated() && !x86_timer_calibrate_from_acpi_pm() { x86_irq_restore(irq_flags); return false; }
     let root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
-    if root == 0 || !x86_page_aligned(root) || root > 0xFFFFFFFF {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if root == 0 || !x86_page_aligned(root) || root > 0xFFFFFFFF { x86_irq_restore(irq_flags); return false; }
     let trampoline = low_memory_claim_smp_trampoline_page();
-    if trampoline == 0 || !active_page_tables_map_ram_identity_4k(trampoline, false, true) {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if trampoline == 0 || !active_page_tables_map_ram_identity_4k(trampoline, false, true) { x86_irq_restore(irq_flags); return false; }
     let ap_runtime_entry = x86_smp_ap_runtime_entry_address();
-    if ap_runtime_entry == 0 {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if ap_runtime_entry == 0 { x86_irq_restore(irq_flags); return false; }
 
     let mut online: u32 = 1;
     let mut started: u32 = 0;
@@ -347,43 +314,30 @@ pub fn smp_initialize_base() -> bool {
     index = 0;
     while index < cpu_count {
         let cpu = madt_cpu(index);
-        if cpu == (null as *const MadtCpu) {
-            x86_irq_restore(irq_flags);
-            return false;
-        }
+        if cpu == (null as *const MadtCpu) { x86_irq_restore(irq_flags); return false; }
         let mut apic_id: u8 = 0;
         let mut enabled = false;
-        unsafe {
-            apic_id = (*cpu).apic_id;
-            enabled = (*cpu).enabled;
-        }
+        unsafe { apic_id = (*cpu).apic_id; enabled = (*cpu).enabled; }
         if apic_id != bsp_apic_id && enabled {
             if cpu_slot >= SMP_MAX_CPUS || smp_find_registered_cpu_slot(apic_id) != SMP_INVALID_CPU_SLOT {
-                x86_irq_restore(irq_flags);
-                return false;
+                x86_irq_restore(irq_flags); return false;
             }
             if !smp_register_cpu_slot(cpu_slot, apic_id) ||
                !smp_start_one_ap(cpu_slot, apic_id, root, trampoline, ap_runtime_entry) {
-                x86_irq_restore(irq_flags);
-                return false;
+                x86_irq_restore(irq_flags); return false;
             }
-            online += 1;
-            started += 1;
-            runtime_ready += 1;
-            cpu_slot += 1;
+            online += 1; started += 1; runtime_ready += 1; cpu_slot += 1;
         }
         index += 1;
     }
-    if started != ap_targets || runtime_ready != ap_targets {
-        x86_irq_restore(irq_flags);
-        return false;
-    }
+    if started != ap_targets || runtime_ready != ap_targets { x86_irq_restore(irq_flags); return false; }
 
     unsafe {
         SMP_TRAMPOLINE_PHYSICAL = trampoline;
         SMP_ONLINE_CPUS = online;
         SMP_STARTED_APS = started;
         SMP_RUNTIME_APS = runtime_ready;
+        SMP_SCHEDULER_APS = 0;
         SMP_READY = true;
     }
     x86_irq_restore(irq_flags);
@@ -392,18 +346,70 @@ pub fn smp_initialize_base() -> bool {
 
 @system
 pub fn smp_is_ready() -> bool { unsafe { return SMP_READY; } }
-
 @system
 pub fn smp_online_cpu_count() -> u32 { unsafe { return SMP_ONLINE_CPUS; } }
-
 @system
 pub fn smp_started_ap_count() -> u32 { unsafe { return SMP_STARTED_APS; } }
-
 @system
 pub fn smp_runtime_ap_count() -> u32 { unsafe { return SMP_RUNTIME_APS; } }
-
+@system
+pub fn smp_scheduler_active_ap_count() -> u32 { unsafe { return SMP_SCHEDULER_APS; } }
 @system
 pub fn smp_trampoline_physical() -> u64 { unsafe { return SMP_TRAMPOLINE_PHYSICAL; } }
+
+@system
+pub fn smp_cpu_apic_id(cpu_slot: usize) -> u8 {
+    if cpu_slot >= SMP_MAX_CPUS { return 0; }
+    unsafe {
+        if !SMP_CPU_REGISTERED[cpu_slot] { return 0; }
+        return SMP_CPU_APIC_IDS[cpu_slot];
+    }
+}
+
+// Libera APs somente depois que o scheduler global ja possui lock/topologia.
+// O timer AP continua mascarado; IF=1 permite apenas os vetores ja instalados.
+@system
+pub fn smp_release_aps_for_scheduler() -> bool {
+    if !smp_is_ready() { return false; }
+    let expected = smp_runtime_ap_count();
+    if expected == 0 { return true; }
+
+    let flags = x86_irq_save_disable();
+    let mut slot: usize = 1;
+    let mut released: u32 = 0;
+    while slot < SMP_MAX_CPUS {
+        let mut registered = false;
+        unsafe { registered = SMP_CPU_REGISTERED[slot]; }
+        if registered {
+            let release = smp_scheduler_release_address(slot);
+            if release == 0 { x86_irq_restore(flags); return false; }
+            x86_mmio_write32(release, 1);
+            released += 1;
+        }
+        slot += 1;
+    }
+    __dma_fence();
+    if released != expected { x86_irq_restore(flags); return false; }
+
+    slot = 1;
+    let mut active: u32 = 0;
+    while slot < SMP_MAX_CPUS {
+        let mut registered = false;
+        unsafe { registered = SMP_CPU_REGISTERED[slot]; }
+        if registered {
+            let address = smp_scheduler_active_address(slot);
+            if !smp_wait_ap_ready(address, SMP_AP_SCHEDULER_TIMEOUT_US) {
+                x86_irq_restore(flags); return false;
+            }
+            active += 1;
+        }
+        slot += 1;
+    }
+    unsafe { SMP_SCHEDULER_APS = active; }
+    __dma_fence();
+    x86_irq_restore(flags);
+    return active == expected;
+}
 
 @system
 fn smp_write_marker(bytes: *const u8, length: usize) -> bool {
@@ -421,20 +427,14 @@ fn smp_write_marker(bytes: *const u8, length: usize) -> bool {
 @system
 pub fn smp_emit_ready_markers() -> bool {
     if !smp_is_ready() { return false; }
-    let base_marker: [u8; 21] = [
-        66,65,75,69,78,58,83,77,80,95,66,65,83,69,95,82,69,65,68,89,10
-    ];
+    let base_marker: [u8; 21] = [66,65,75,69,78,58,83,77,80,95,66,65,83,69,95,82,69,65,68,89,10];
     if !smp_write_marker(&base_marker[0], 21) { return false; }
     if smp_started_ap_count() != 0 {
-        let ap_marker: [u8; 20] = [
-            66,65,75,69,78,58,83,77,80,95,65,80,95,79,78,76,73,78,69,10
-        ];
+        let ap_marker: [u8; 20] = [66,65,75,69,78,58,83,77,80,95,65,80,95,79,78,76,73,78,69,10];
         if !smp_write_marker(&ap_marker[0], 20) { return false; }
     }
     if smp_runtime_ap_count() != 0 {
-        let runtime_marker: [u8; 27] = [
-            66,65,75,69,78,58,83,77,80,95,65,80,95,82,85,78,84,73,77,69,95,82,69,65,68,89,10
-        ];
+        let runtime_marker: [u8; 27] = [66,65,75,69,78,58,83,77,80,95,65,80,95,82,85,78,84,73,77,69,95,82,69,65,68,89,10];
         if !smp_write_marker(&runtime_marker[0], 27) { return false; }
     }
     return true;

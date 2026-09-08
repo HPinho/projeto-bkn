@@ -2,7 +2,7 @@
 //
 // So opera depois que a pagina MMIO indicada pela MADT foi mapeada UC. O modo
 // x2APIC e recusado nesta fase. Alem de EOI/LVT e ICR INIT/SIPI, APs podem
-// preparar o proprio Local APIC sem alterar o estado global publicado pelo BSP.
+// preparar o proprio Local APIC e receber IPIs de reschedule dedicados.
 
 module kernel::interrupts::lapic;
 
@@ -35,6 +35,8 @@ pub const LAPIC_ICR_INIT_ASSERT: u32 = 0x0000C500;
 pub const LAPIC_ICR_INIT_DEASSERT: u32 = 0x00008500;
 pub const LAPIC_ICR_STARTUP: u32 = 0x00000600;
 pub const LAPIC_ICR_SPIN_LIMIT: u64 = 1000000;
+pub const LAPIC_FIXED_VECTOR_MIN: u8 = 0x20;
+pub const LAPIC_FIXED_VECTOR_MAX: u8 = 0xFE;
 
 static mut LAPIC_READY: bool = false;
 static mut LAPIC_BASE: u64 = 0;
@@ -114,8 +116,6 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
     return true;
 }
 
-// Prepara os registradores locais do AP atual usando o mesmo endereco xAPIC ja
-// validado/mapeado pelo BSP. Nenhum cache global de ID/versao e reescrito aqui.
 @system
 pub fn lapic_prepare_current_cpu_masked() -> bool {
     let base = lapic_base();
@@ -146,11 +146,9 @@ pub fn lapic_base() -> u64 { unsafe { return LAPIC_BASE; } }
 @system
 pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
 
-// ID cacheado do BSP, usado como destino/identidade durante o bring-up.
 @system
 pub fn lapic_id() -> u8 { unsafe { return LAPIC_ID; } }
 
-// ID do processador logico que esta executando esta chamada.
 @system
 pub fn lapic_current_id() -> u8 {
     let base = lapic_base();
@@ -194,6 +192,14 @@ pub fn lapic_send_init_deassert(destination_apic_id: u8) -> bool {
 pub fn lapic_send_startup(destination_apic_id: u8, vector: u8) -> bool {
     if vector == 0 { return false; }
     return lapic_send_icr(destination_apic_id, LAPIC_ICR_STARTUP | (vector as u32));
+}
+
+// Fixed-delivery IPI. Um vetor separado do INT 0x43 e obrigatorio porque IPIs
+// exigem EOI, enquanto o yield/syscall por software nao deve emitir EOI.
+@system
+pub fn lapic_send_fixed(destination_apic_id: u8, vector: u8) -> bool {
+    if vector < LAPIC_FIXED_VECTOR_MIN || vector > LAPIC_FIXED_VECTOR_MAX { return false; }
+    return lapic_send_icr(destination_apic_id, vector as u32);
 }
 
 @system
