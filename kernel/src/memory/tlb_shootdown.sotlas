@@ -3,6 +3,8 @@
 // Sem dependência de scheduler/SMP de alto nível: a topologia é registrada pelo
 // bring-up e o handler identifica a CPU pelo APIC ID. O caminho de interrupção
 // não aloca, não adquire locks e só executa INVLPG + acknowledgement volátil.
+// O protocolo é simétrico: BSP e APs podem iniciar uma invalidação depois de
+// entrarem no conjunto ativo.
 module kernel::memory::tlb_shootdown;
 
 import kernel::arch::x86_64::cpu::*;
@@ -68,6 +70,9 @@ pub fn tlb_shootdown_register_cpu(slot: usize, apic_id: u8) -> bool {
         }
         TLB_SHOOTDOWN_CPU_APIC_ID[slot] = apic_id;
         TLB_SHOOTDOWN_CPU_REGISTERED[slot] = true;
+        // O BSP já está executando com IRQ/IDT/LAPIC prontos quando o bring-up
+        // SMP registra o slot 0. APs só entram no conjunto após release.
+        if slot == 0 { TLB_SHOOTDOWN_CPU_ACTIVE[slot] = true; }
     }
     __dma_fence();
     return true;
@@ -75,13 +80,26 @@ pub fn tlb_shootdown_register_cpu(slot: usize, apic_id: u8) -> bool {
 
 @system
 pub fn tlb_shootdown_activate_cpu(slot: usize) -> bool {
-    if !tlb_shootdown_is_ready() || slot == 0 || slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
+    if !tlb_shootdown_is_ready() || slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
     unsafe {
         if !TLB_SHOOTDOWN_CPU_REGISTERED[slot] { return false; }
         TLB_SHOOTDOWN_CPU_ACTIVE[slot] = true;
     }
     __dma_fence();
     return true;
+}
+
+@system
+pub fn tlb_shootdown_active_cpu_count() -> u32 {
+    let mut count: u32 = 0;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_ACTIVE[slot] { count += 1; }
+            slot += 1;
+        }
+    }
+    return count;
 }
 
 @system
@@ -158,15 +176,16 @@ fn tlb_shootdown_ack_value(slot: usize) -> u32 {
 }
 
 @system
-fn tlb_shootdown_wait_ack(generation: u32, expected: u32) -> bool {
+fn tlb_shootdown_wait_ack(generation: u32, requester_slot: usize, expected: u32) -> bool {
     if expected == 0 { return true; }
     let mut spins: u64 = 0;
     while spins < TLB_SHOOTDOWN_SPIN_LIMIT {
         let mut matched: u32 = 0;
         unsafe {
-            let mut slot: usize = 1;
+            let mut slot: usize = 0;
             while slot < TLB_SHOOTDOWN_MAX_CPUS {
-                if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_ACTIVE[slot] &&
+                if slot != requester_slot && TLB_SHOOTDOWN_CPU_REGISTERED[slot] &&
+                   TLB_SHOOTDOWN_CPU_ACTIVE[slot] &&
                    tlb_shootdown_ack_value(slot) == generation { matched += 1; }
                 slot += 1;
             }
@@ -193,22 +212,36 @@ fn tlb_shootdown_slot_for_current_cpu() -> usize {
     return TLB_SHOOTDOWN_MAX_CPUS;
 }
 
-// Deve ser chamado depois da publicação da PTE. Mappings globais do kernel são
-// compartilhados pelos address spaces, então INVLPG é executado em toda CPU
-// participante independentemente do CR3 corrente.
+// Deve ser chamado depois da publicação da PTE. Antes do SMP registrar CPUs,
+// a invalidação é local. Com 2+ participantes ativos, qualquer CPU pode iniciar
+// o broadcast e espera exatamente os demais participantes, nunca a si própria.
 @system
 pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
     if !tlb_shootdown_is_ready() || !x86_page_aligned(address) { return false; }
     let flags = tlb_shootdown_lock_irq();
     if flags == 0 { return false; }
-    let expected = tlb_shootdown_active_ap_count();
+
+    let active_count = tlb_shootdown_active_cpu_count();
     let generation = tlb_shootdown_next_generation();
     tlb_shootdown_publish(address, generation);
     x86_invlpg(address);
-    if expected > 0 {
+
+    if active_count > 1 {
+        let requester_slot = tlb_shootdown_slot_for_current_cpu();
+        if requester_slot >= TLB_SHOOTDOWN_MAX_CPUS {
+            tlb_shootdown_unlock_irq(flags);
+            return false;
+        }
+        unsafe {
+            if !TLB_SHOOTDOWN_CPU_ACTIVE[requester_slot] {
+                tlb_shootdown_unlock_irq(flags);
+                return false;
+            }
+        }
+        let expected = active_count - 1;
         if !xapic_ipi_is_ready() ||
            !xapic_ipi_send_fixed_all_excluding_self(TLB_SHOOTDOWN_VECTOR as u8) ||
-           !tlb_shootdown_wait_ack(generation, expected) {
+           !tlb_shootdown_wait_ack(generation, requester_slot, expected) {
             tlb_shootdown_unlock_irq(flags);
             return false;
         }
@@ -221,7 +254,7 @@ pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
 pub fn tlb_shootdown_handle_ipi() -> bool {
     if !tlb_shootdown_is_ready() { return false; }
     let slot = tlb_shootdown_slot_for_current_cpu();
-    if slot == 0 || slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
+    if slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
     unsafe {
         if !TLB_SHOOTDOWN_CPU_ACTIVE[slot] { return false; }
         let lo: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_LO;

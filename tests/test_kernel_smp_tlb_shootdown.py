@@ -1,6 +1,5 @@
 """Guardrails da coerencia de page tables/TLB em SMP."""
 from pathlib import Path
-import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,11 +54,21 @@ class KernelSmpTlbShootdownTests(unittest.TestCase):
         self.assertIn("x86_irq_restore(flags);", active)
         self.assertIn("pub fn active_runtime_remap", active)
         for function in ("active_runtime_map", "active_runtime_remap", "active_runtime_protect", "active_runtime_unmap"):
-            body = active.split(f"pub fn {function}", 1)[1]
-            body = body.split("@system", 1)[0]
+            body = active.split(f"pub fn {function}", 1)[1].split("@system", 1)[0]
             self.assertIn("active_page_tables_lock_irq()", body)
             self.assertIn("active_page_tables_publish_locked", body)
         self.assertIn("return tlb_shootdown_kernel_page(address);", active)
+
+    def test_bsp_and_aps_are_symmetric_shootdown_participants(self):
+        text = TLB.read_text(encoding="utf-8")
+        self.assertIn("if slot == 0 { TLB_SHOOTDOWN_CPU_ACTIVE[slot] = true; }", text)
+        self.assertIn("pub fn tlb_shootdown_active_cpu_count() -> u32", text)
+        self.assertIn("let mut slot: usize = 0;", text)
+        self.assertIn("slot != requester_slot", text)
+        self.assertIn("let expected = active_count - 1;", text)
+        handler = text.split("pub fn tlb_shootdown_handle_ipi() -> bool", 1)[1]
+        self.assertNotIn("slot == 0", handler)
+        self.assertIn("TLB_SHOOTDOWN_CPU_ACTIVE[slot]", handler)
 
     def test_smp_registers_then_activates_shootdown_participants(self):
         smp = SMP.read_text(encoding="utf-8")
