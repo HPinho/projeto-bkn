@@ -43,10 +43,20 @@ class ProcessRegistryTests(unittest.TestCase):
         )[0]
         self.assertLess(unlock.index("spinlock_unlock(&mut PROCESS_REGISTRY_LOCK)"), unlock.index("x86_irq_restore(flags)"))
 
-    def test_registry_documents_one_way_pmm_lock_hierarchy(self):
-        self.assertIn("PROCESS_REGISTRY_LOCK -> PMM_ALLOCATOR_LOCK", self.source)
+    def test_registry_documents_one_way_nested_lock_hierarchy(self):
+        # Registry remains the outer owner. Process lifetime paths may descend to
+        # PMM, while PTE publication may descend to the allocation-free TLB lock.
+        # Neither lower layer is allowed to call back into the process registry.
+        self.assertIn(
+            "PROCESS_REGISTRY_LOCK -> TLB_SHOOTDOWN_LOCK -> PMM_ALLOCATOR_LOCK",
+            self.source,
+        )
         pmm = (ROOT / "kernel/src/memory/pmm_allocator.sotlas").read_text(encoding="utf-8")
+        tlb = (ROOT / "kernel/src/memory/tlb_shootdown.sotlas").read_text(encoding="utf-8")
         self.assertNotIn("process_registry_", pmm)
+        self.assertNotIn("process_registry_", tlb)
+        self.assertNotIn("kernel::process::registry", pmm)
+        self.assertNotIn("kernel::process::registry", tlb)
 
     def test_runtime_probe_covers_capacity_stale_ids_and_reclamation(self):
         for token in ("let unexpected = process_create_locked()", "process_retain_locked(first)",
