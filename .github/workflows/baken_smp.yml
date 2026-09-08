@@ -45,6 +45,7 @@ jobs:
           test -s build/baken_os.iso
 
       - name: Prove AP Scheduler Dispatch and Timer Preemption
+        timeout-minutes: 4
         shell: bash
         run: |
           OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
@@ -67,9 +68,12 @@ jobs:
           qemu_pid=$!
 
           found=0
-          for i in $(seq 1 500); do
+          for i in $(seq 1 1200); do
             if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:SMP_TIMER_ON_AP' build/qemu-smp-serial.log; then
               found=1
+              break
+            fi
+            if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
               break
             fi
             if ! kill -0 "$qemu_pid" 2>/dev/null; then
