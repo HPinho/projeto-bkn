@@ -67,7 +67,7 @@ fn xhci_start_build_shared_arena() -> DmaBuffer {
     let virtual_address = direct_map_virtual_address(physical);
     if virtual_address == 0 { return dma_invalid_buffer(); }
     let buffer = DmaBuffer {
-        virtual_address: virtual_address as *mut u8,
+        virtual_address: unsafe { virtual_address as *mut u8 },
         physical_address: physical,
         size: size,
         alignment: XHCI_RUNTIME_PAGE_SIZE,
@@ -131,7 +131,7 @@ fn xhci_start_wait_running() -> bool {
 fn xhci_start_publish_noop(command_physical: u64) -> bool {
     let command_virtual = direct_map_virtual_address(command_physical);
     if command_virtual == 0 { return false; }
-    let slot = command_virtual as *mut XhciTrb;
+    let slot = unsafe { command_virtual as *mut XhciTrb };
     let noop = xhci_trb_noop_command(true);
     unsafe { *slot = noop; }
 
@@ -159,7 +159,7 @@ fn xhci_start_wait_noop_completion(command_physical: u64) -> bool {
     let event_physical = xhci_runtime_event_ring_physical();
     let event_virtual = direct_map_virtual_address(event_physical);
     if event_virtual == 0 { return false; }
-    let event = event_virtual as *const XhciTrb;
+    let event = unsafe { event_virtual as *const XhciTrb };
     let operational = xhci_controller_operational_base();
     if operational == 0 { return false; }
 
