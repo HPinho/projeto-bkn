@@ -32,6 +32,11 @@ static mut USERSPACE_STARTED: bool = false;
 static mut USERSPACE_FINISHED: bool = false;
 
 @system
+fn userspace_diag(stage: u32) -> void {
+    if x86_serial_is_ready() { x86_serial_write_hex32_marker('U' as u8, stage); }
+}
+
+@system
 fn userspace_zero_frame(physical: u64) -> bool {
     let virtual_address = direct_map_virtual_address(physical);
     if virtual_address == 0 { return false; }
@@ -103,26 +108,32 @@ fn userspace_teardown_mapping(pid: u64, code: u64, data: u64, stack: u64) -> boo
 @system
 @export
 pub fn sotlas_x86_userspace_bootstrap_entry() -> ! {
+    userspace_diag(0x10);
     let cpu_slot = scheduler_current_cpu_slot();
     if cpu_slot == SCHEDULER_INVALID_CPU_SLOT { loop { x86_cpu_pause(); } }
+    userspace_diag(0x11);
     let pid = process_current_id();
     unsafe {
         if pid == 0 || pid != USERSPACE_PID { loop { x86_cpu_pause(); } }
     }
+    userspace_diag(0x12);
     let current_rsp = __current_rsp();
     if current_rsp > 0xFFFFFFFFFFFFFFD7 { loop { x86_cpu_pause(); } }
     // Scheduler trampoline: stack_top - 32 bytes de home space - return address.
     let kernel_stack_top = (current_rsp + 40) & 0xFFFFFFFFFFFFFFF0;
     if !tss_set_rsp0_for_cpu(cpu_slot, kernel_stack_top) { loop { x86_cpu_pause(); } }
+    userspace_diag(0x13);
     __enter_user(USERSPACE_CODE_ADDRESS, USERSPACE_STACK_TOP);
     loop { x86_cpu_pause(); }
 }
 
 @system
 pub fn userspace_loader_start_probe() -> bool {
+    userspace_diag(1);
     unsafe { if USERSPACE_STARTED { return false; } }
     let pid = process_create();
     if pid == 0 { return false; }
+    userspace_diag(2);
     let code = pmm_alloc_page();
     let data = pmm_alloc_page();
     let stack = pmm_alloc_page();
@@ -137,6 +148,7 @@ pub fn userspace_loader_start_probe() -> bool {
         process_destroy(pid);
         return false;
     }
+    userspace_diag(3);
     // Sem janela W+X: os bytes já estão prontos quando as folhas são publicadas.
     if !process_map_user_page(pid, USERSPACE_CODE_ADDRESS, code, false, true) ||
        !process_map_user_page(pid, USERSPACE_DATA_ADDRESS, data, false, false) ||
@@ -144,6 +156,7 @@ pub fn userspace_loader_start_probe() -> bool {
         userspace_teardown_mapping(pid, code, data, stack);
         return false;
     }
+    userspace_diag(4);
     if process_user_pte(pid, USERSPACE_STACK_GUARD) != 0 {
         userspace_teardown_mapping(pid, code, data, stack);
         return false;
@@ -160,6 +173,7 @@ pub fn userspace_loader_start_probe() -> bool {
         userspace_teardown_mapping(pid, code, data, stack);
         return false;
     }
+    userspace_diag(5);
     let entry = __userspace_bootstrap_entry_address();
     if entry == 0 {
         userspace_teardown_mapping(pid, code, data, stack);
@@ -171,12 +185,14 @@ pub fn userspace_loader_start_probe() -> bool {
         USERSPACE_DATA_FRAME = data;
         USERSPACE_STACK_FRAME = stack;
     }
+    userspace_diag(6);
     let tid = scheduler_create_process_thread(pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
     if tid == 0 {
         unsafe { USERSPACE_PID = 0; }
         userspace_teardown_mapping(pid, code, data, stack);
         return false;
     }
+    userspace_diag(7);
     unsafe {
         USERSPACE_TID = tid;
         USERSPACE_STARTED = true;
