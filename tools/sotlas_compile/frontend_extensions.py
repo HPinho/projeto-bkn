@@ -22,8 +22,6 @@ _COMPOUND_ASSIGNMENTS = (
     (">>=", ">>"),
 )
 
-# Palavras que podem ser identificadores válidos em Sotlas, mas não podem ser
-# emitidas literalmente como nomes locais no backend C11.
 _C_RESERVED = {
     "auto", "break", "case", "char", "const", "continue", "default", "do",
     "double", "else", "enum", "extern", "float", "for", "goto", "if",
@@ -45,13 +43,17 @@ def _safe_local(name: str) -> str:
 
 
 def install(bootstrap) -> None:
-    """Instala a gramática estendida de forma idempotente no módulo bootstrap."""
+    """Instala a gramática estendida e a política canônica de segurança."""
     if getattr(bootstrap, "_FRONTEND_EXTENSIONS_INSTALLED", False):
+        # O instalador de segurança é idempotente e precisa estar presente até
+        # quando este módulo foi carregado antes de language_safety existir.
+        try:
+            from .language_safety import install as install_language_safety
+        except ImportError:
+            from language_safety import install as install_language_safety
+        install_language_safety(bootstrap)
         return
 
-    # O lexer já conhecia a maior parte destes tokens, mas %= não fazia parte do
-    # conjunto. Mantê-los explicitamente antes das formas curtas evita que <<=
-    # seja dividido em << + =, e faz lexer/parser compartilharem o contrato.
     required_multi = ("<<=", ">>=", "^=", "%=")
     bootstrap.MULTI = required_multi + tuple(
         token for token in bootstrap.MULTI if token not in required_multi
@@ -79,8 +81,6 @@ def install(bootstrap) -> None:
         def statement(self):
             token = self.current
 
-            # Preserve a informação de mutabilidade que o parser bootstrap
-            # anteriormente calculava e descartava antes do lowering.
             if self.accept("let"):
                 is_mut = bool(self.accept("mut"))
                 name = self.ident()
@@ -126,8 +126,6 @@ def install(bootstrap) -> None:
                 node.is_static = True
                 return node
 
-            # Defer também aceita a mesma família de assignments. Blocos usam
-            # block() sem pré-consumir '{', corrigindo a dupla leitura antiga.
             if self.accept("defer"):
                 if self.current.kind == "{":
                     return bootstrap.Defer(token, body=self.block())
@@ -138,8 +136,6 @@ def install(bootstrap) -> None:
                 self.expect(";")
                 return bootstrap.Defer(token, expr)
 
-            # Fluxos de controle continuam no parser base. Como block() chama
-            # self.statement(), a extensão também vale em blocos aninhados.
             if token.kind in {
                 "return", "break", "continue", "if", "while", "loop", "for", "unsafe"
             }:
@@ -154,8 +150,6 @@ def install(bootstrap) -> None:
 
     bootstrap.Parser = ExtendedParser
 
-    # Marcação de storage em tipos de arrays mutáveis. Type é frozen para a
-    # linguagem, então o metadado do lowering é anexado somente internamente.
     original_c_decl = bootstrap.Type.c_decl
 
     def extended_c_decl(type_obj, var_name: str) -> str:
@@ -295,15 +289,10 @@ def install(bootstrap) -> None:
     original_emit_c = bootstrap.emit_c
 
     def emit_c(module, *args, **kwargs):
-        # Semântica Sotlas já foi validada com os nomes originais. A partir
-        # daqui tratamos somente detalhes do lowering C.
         sanitize_c_local_names(module)
         mark_mutable_arrays(module)
         code = original_emit_c(module, *args, **kwargs)
 
-        # O emissor bootstrap historicamente transformava arrays locais em
-        # ``static const``. Os marcadores tornam a correção exata por tipo, sem
-        # substituir declarações imutáveis homônimas em outras funções.
         code = code.replace(f"static const {_MUT_AUTO_MARKER} ", "")
         code = code.replace(f"static {_MUT_AUTO_MARKER} ", "")
         code = code.replace(f"{_MUT_AUTO_MARKER} ", "")
@@ -314,8 +303,6 @@ def install(bootstrap) -> None:
 
     bootstrap.emit_c = emit_c
 
-    # Headers recebem a mesma sanitização de parâmetros para que a assinatura
-    # pública e a unidade C usem nomes backend-safe de forma determinística.
     original_emit_header = bootstrap.emit_header
 
     def emit_header(module, *args, **kwargs):
@@ -323,4 +310,14 @@ def install(bootstrap) -> None:
         return original_emit_header(module, *args, **kwargs)
 
     bootstrap.emit_header = emit_header
+
+    # Segurança é parte do mesmo frontend, não uma segunda etapa opcional. Isso
+    # também cobre a execução direta de compiler.py, que instala este módulo
+    # explicitamente quando o pacote Python não foi inicializado.
+    try:
+        from .language_safety import install as install_language_safety
+    except ImportError:
+        from language_safety import install as install_language_safety
+    install_language_safety(bootstrap)
+
     bootstrap._FRONTEND_EXTENSIONS_INSTALLED = True
