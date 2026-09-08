@@ -21,18 +21,26 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertIn("import kernel::arch::x86_64::post_cutover::*;", main)
         self.assertNotIn("pub fn baken_kernel_main", main)
 
+    def test_handoff_is_snapshotted_at_one_explicit_unsafe_boundary(self):
+        text = POST.read_text(encoding="utf-8")
+        body = text.split("fn post_cutover_context_snapshot", 1)[1].split("pub fn post_cutover_memory_map_virtual", 1)[0]
+        self.assertIn("return unsafe { *context };", body)
+        self.assertIn("post_cutover_context_invalid()", body)
+
     def test_handoff_pointers_are_translated_through_direct_map(self):
         text = POST.read_text(encoding="utf-8")
         self.assertIn("import kernel::memory::direct_map::*;", text)
         map_body = text.split("pub fn post_cutover_memory_map_virtual", 1)[1].split("pub fn post_cutover_acpi_rsdp_virtual", 1)[0]
         acpi_body = text.split("pub fn post_cutover_acpi_rsdp_virtual", 1)[1].split("pub fn post_cutover_context_valid", 1)[0]
-        self.assertIn("direct_map_virtual_address(context.memory_map_base)", map_body)
-        self.assertIn("direct_map_virtual_address(context.acpi_rsdp)", acpi_body)
+        self.assertIn("let snapshot = post_cutover_context_snapshot(context);", map_body)
+        self.assertIn("direct_map_virtual_address(snapshot.memory_map_base)", map_body)
+        self.assertIn("let snapshot = post_cutover_context_snapshot(context);", acpi_body)
+        self.assertIn("direct_map_virtual_address(snapshot.acpi_rsdp)", acpi_body)
 
     def test_cpu_activation_order_is_cr3_gdt_ltr_lidt(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn post_cutover_activate_cpu", 1)[1].split("pub fn post_cutover_cpu_tables_active", 1)[0]
-        cr3 = body.index("x86_mmu_activate_root(context.root_physical)")
+        cr3 = body.index("x86_mmu_activate_root(snapshot.root_physical)")
         gdt = body.index("x86_gdt_activate_segments_raw(")
         ltr = body.index("x86_ltr_raw(GDT_TSS_SELECTOR)")
         lidt = body.index("x86_lidt_table_raw(idt_address, idt_limit())")
@@ -54,8 +62,11 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertIn("import kernel::memory::pmm_allocator::*;", text)
         body = text.split("pub fn post_cutover_activate_pmm", 1)[1].split("pub fn post_cutover_pmm_active", 1)[0]
         self.assertIn("if !post_cutover_cpu_tables_active()", body)
+        self.assertIn("let snapshot = post_cutover_context_snapshot(context);", body)
         self.assertIn("let memory_map = post_cutover_memory_map_virtual(context);", body)
         self.assertIn("pmm_inventory_init(", body)
+        self.assertIn("snapshot.memory_map_size as usize", body)
+        self.assertIn("snapshot.memory_descriptor_size as usize", body)
         self.assertIn("pmm_allocator_activate_after_exit_boot_services()", body)
         self.assertIn("pmm_allocator_is_active()", body)
 
@@ -64,7 +75,8 @@ class PostCutoverEntryTests(unittest.TestCase):
         self.assertIn("import kernel::memory::vmm::*;", text)
         body = text.split("pub fn post_cutover_activate_vmm", 1)[1].split("pub fn post_cutover_vmm_active", 1)[0]
         self.assertIn("if !post_cutover_pmm_active()", body)
-        self.assertIn("vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE)", body)
+        self.assertIn("let snapshot = post_cutover_context_snapshot(context);", body)
+        self.assertIn("vmm_activate_current_tables(snapshot.root_physical, BAKEN_DIRECT_MAP_BASE)", body)
         self.assertIn("vmm_is_active()", body)
 
         entry = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
