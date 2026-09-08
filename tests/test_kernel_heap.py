@@ -23,6 +23,7 @@ class KernelHeapTests(unittest.TestCase):
             "pmm_free_pages(physical, pages)",
             "direct_map_virtual_address(physical)",
             "vmm_direct_map_base() != BAKEN_DIRECT_MAP_BASE",
+            "import kernel::sync::spinlock::*;",
         ):
             self.assertIn(token, self.heap)
         lower = self.heap.lower()
@@ -48,13 +49,28 @@ class KernelHeapTests(unittest.TestCase):
         self.assertIn("right_end == KERNEL_HEAP_BLOCK_BASES[left]", coalesce)
         self.assertIn("KERNEL_HEAP_BLOCK_ACTIVE[right] = false", coalesce)
 
-    def test_public_operations_preserve_interrupt_state(self):
+    def test_public_operations_take_smp_lock_and_preserve_interrupt_state(self):
         alloc = self.heap.split("pub fn kernel_heap_alloc(size: u64)", 1)[1].split("pub fn kernel_heap_free", 1)[0]
         free = self.heap.split("pub fn kernel_heap_free(pointer: *mut u8)", 1)[1].split("fn kernel_heap_self_test", 1)[0]
         for body in (alloc, free):
-            save = body.index("x86_irq_save_disable()")
-            restore = body.index("x86_irq_restore(flags)")
-            self.assertLess(save, restore)
+            lock = body.index("kernel_heap_lock_irq()")
+            unlock = body.index("kernel_heap_unlock_irq(flags)")
+            self.assertLess(lock, unlock)
+
+    def test_heap_lock_masks_irq_and_serializes_bsp_and_aps(self):
+        self.assertIn("static mut KERNEL_HEAP_LOCK: SpinLock", self.heap)
+        self.assertIn("static mut KERNEL_HEAP_LOCK_READY: bool = false", self.heap)
+        lock = self.heap.split("fn kernel_heap_lock_irq() -> u64", 1)[1].split("fn kernel_heap_unlock_irq", 1)[0]
+        self.assertLess(lock.index("x86_irq_save_disable()"), lock.index("spinlock_lock(&mut KERNEL_HEAP_LOCK)"))
+        unlock = self.heap.split("fn kernel_heap_unlock_irq(flags: u64)", 1)[1].split("fn kernel_heap_align_size", 1)[0]
+        self.assertLess(unlock.index("spinlock_unlock(&mut KERNEL_HEAP_LOCK)"), unlock.index("x86_irq_restore(flags)"))
+
+    def test_heap_documents_one_way_lock_hierarchy(self):
+        self.assertIn("KERNEL_HEAP_LOCK -> PMM_ALLOCATOR_LOCK", self.heap)
+        grow = self.heap.split("fn kernel_heap_grow_locked", 1)[1].split("fn kernel_heap_alloc_locked", 1)[0]
+        self.assertIn("pmm_alloc_pages(pages)", grow)
+        pmm = (ROOT / "kernel/src/memory/pmm_allocator.sotlas").read_text(encoding="utf-8")
+        self.assertNotIn("kernel_heap_", pmm)
 
     def test_self_test_proves_reuse_and_neighbor_survival(self):
         body = self.heap.split("fn kernel_heap_self_test() -> bool", 1)[1].split("pub fn kernel_heap_activate", 1)[0]
@@ -73,6 +89,7 @@ class KernelHeapTests(unittest.TestCase):
         self.assertIn("vmm_direct_map_base() != BAKEN_DIRECT_MAP_BASE", body)
         self.assertIn("kernel_heap_self_test()", body)
         self.assertIn("KERNEL_HEAP_SELF_TEST_PASSED = true", body)
+        self.assertIn("spinlock_init(&mut KERNEL_HEAP_LOCK)", body)
 
     def test_heap_is_in_kernel_graph(self):
         self.assertIn("import kernel::memory::kernel_heap::*;", MAIN.read_text(encoding="utf-8"))

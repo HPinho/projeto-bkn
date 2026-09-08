@@ -11,6 +11,7 @@ import kernel::memory::pmm::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::vmm::*;
 import kernel::memory::direct_map::*;
+import kernel::sync::spinlock::*;
 
 pub const KERNEL_HEAP_ALIGNMENT: u64 = 16;
 pub const KERNEL_HEAP_GROW_PAGES: u64 = 16;
@@ -27,6 +28,37 @@ static mut KERNEL_HEAP_SELF_TEST_PASSED: bool = false;
 static mut KERNEL_HEAP_RESERVED_BYTES: u64 = 0;
 static mut KERNEL_HEAP_ALLOCATED_BYTES: u64 = 0;
 static mut KERNEL_HEAP_ALLOCATION_COUNT: u64 = 0;
+
+// Hierarquia obrigatória: KERNEL_HEAP_LOCK -> PMM_ALLOCATOR_LOCK. O caminho
+// inverso é proibido: crescer o heap solicita páginas ao PMM enquanto mantém
+// este lock, mas o PMM nunca pode chamar o heap. IRQ-off impede reentrada local
+// pelo timer/reaper; o spinlock serializa mutações concorrentes de BSP e APs.
+static mut KERNEL_HEAP_LOCK: SpinLock = SpinLock { state: 0 };
+static mut KERNEL_HEAP_LOCK_READY: bool = false;
+
+@system
+fn kernel_heap_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !KERNEL_HEAP_LOCK_READY {
+            x86_irq_restore(flags);
+            return 0;
+        }
+        if !spinlock_lock(&mut KERNEL_HEAP_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn kernel_heap_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut KERNEL_HEAP_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
 
 @system
 fn kernel_heap_align_size(size: u64) -> u64 {
@@ -236,19 +268,25 @@ fn kernel_heap_free_locked(pointer: *mut u8) -> bool {
 
 @system
 pub fn kernel_heap_alloc(size: u64) -> *mut u8 {
-    unsafe { if !KERNEL_HEAP_ACTIVE { return null as *mut u8; } }
-    let flags = x86_irq_save_disable();
-    let pointer = kernel_heap_alloc_locked(size);
-    x86_irq_restore(flags);
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return null as *mut u8; }
+    let mut pointer = null as *mut u8;
+    unsafe {
+        if KERNEL_HEAP_ACTIVE { pointer = kernel_heap_alloc_locked(size); }
+    }
+    kernel_heap_unlock_irq(flags);
     return pointer;
 }
 
 @system
 pub fn kernel_heap_free(pointer: *mut u8) -> bool {
-    unsafe { if !KERNEL_HEAP_ACTIVE { return false; } }
-    let flags = x86_irq_save_disable();
-    let released = kernel_heap_free_locked(pointer);
-    x86_irq_restore(flags);
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return false; }
+    let mut released = false;
+    unsafe {
+        if KERNEL_HEAP_ACTIVE { released = kernel_heap_free_locked(pointer); }
+    }
+    kernel_heap_unlock_irq(flags);
     return released;
 }
 
@@ -290,33 +328,90 @@ pub fn kernel_heap_activate() -> bool {
     }
 
     let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_init(&mut KERNEL_HEAP_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        KERNEL_HEAP_LOCK_READY = true;
+        if !spinlock_lock(&mut KERNEL_HEAP_LOCK) {
+            KERNEL_HEAP_LOCK_READY = false;
+            x86_irq_restore(flags);
+            return false;
+        }
+    }
     kernel_heap_reset_locked();
     if !kernel_heap_grow_locked(KERNEL_HEAP_ALIGNMENT) {
+        unsafe { spinlock_unlock(&mut KERNEL_HEAP_LOCK); }
         x86_irq_restore(flags);
         return false;
     }
     unsafe { KERNEL_HEAP_ACTIVE = true; }
+    unsafe { spinlock_unlock(&mut KERNEL_HEAP_LOCK); }
     x86_irq_restore(flags);
 
     if !kernel_heap_self_test() {
-        unsafe { KERNEL_HEAP_ACTIVE = false; }
+        let failure_flags = kernel_heap_lock_irq();
+        if failure_flags != 0 {
+            unsafe { KERNEL_HEAP_ACTIVE = false; }
+            kernel_heap_unlock_irq(failure_flags);
+        }
         return false;
     }
+    let success_flags = kernel_heap_lock_irq();
+    if success_flags == 0 { return false; }
     unsafe { KERNEL_HEAP_SELF_TEST_PASSED = true; }
+    kernel_heap_unlock_irq(success_flags);
     return true;
 }
 
 @system
-pub fn kernel_heap_is_active() -> bool { unsafe { return KERNEL_HEAP_ACTIVE; } }
+pub fn kernel_heap_is_active() -> bool {
+    unsafe { if !KERNEL_HEAP_LOCK_READY { return false; } }
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return false; }
+    let mut value = false;
+    unsafe { value = KERNEL_HEAP_ACTIVE; }
+    kernel_heap_unlock_irq(flags);
+    return value;
+}
 
 @system
-pub fn kernel_heap_self_test_passed() -> bool { unsafe { return KERNEL_HEAP_SELF_TEST_PASSED; } }
+pub fn kernel_heap_self_test_passed() -> bool {
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return false; }
+    let mut value = false;
+    unsafe { value = KERNEL_HEAP_SELF_TEST_PASSED; }
+    kernel_heap_unlock_irq(flags);
+    return value;
+}
 
 @system
-pub fn kernel_heap_reserved_bytes() -> u64 { unsafe { return KERNEL_HEAP_RESERVED_BYTES; } }
+pub fn kernel_heap_reserved_bytes() -> u64 {
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return 0; }
+    let mut value: u64 = 0;
+    unsafe { value = KERNEL_HEAP_RESERVED_BYTES; }
+    kernel_heap_unlock_irq(flags);
+    return value;
+}
 
 @system
-pub fn kernel_heap_allocated_bytes() -> u64 { unsafe { return KERNEL_HEAP_ALLOCATED_BYTES; } }
+pub fn kernel_heap_allocated_bytes() -> u64 {
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return 0; }
+    let mut value: u64 = 0;
+    unsafe { value = KERNEL_HEAP_ALLOCATED_BYTES; }
+    kernel_heap_unlock_irq(flags);
+    return value;
+}
 
 @system
-pub fn kernel_heap_allocation_count() -> u64 { unsafe { return KERNEL_HEAP_ALLOCATION_COUNT; } }
+pub fn kernel_heap_allocation_count() -> u64 {
+    let flags = kernel_heap_lock_irq();
+    if flags == 0 { return 0; }
+    let mut value: u64 = 0;
+    unsafe { value = KERNEL_HEAP_ALLOCATION_COUNT; }
+    kernel_heap_unlock_irq(flags);
+    return value;
+}
