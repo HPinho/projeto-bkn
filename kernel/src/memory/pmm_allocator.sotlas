@@ -3,11 +3,15 @@
 // Não usa Boot Services, heap ou estruturas UEFI após o cutover. As regiões
 // EfiConventionalMemory são inventariadas antes da ativação e cada bitmap fixo
 // passa a ser a fonte de verdade para alocação/liberação de páginas físicas.
+// Mutações runtime são serializadas por spinlock global com IRQ local mascarado,
+// evitando corrida BSP/AP e reentrada por timer enquanto o PMM está protegido.
 
 module kernel::memory::pmm_allocator;
 
+import kernel::arch::x86_64::cpu::*;
 import kernel::memory::pmm::*;
 import kernel::memory::pmm_bitmap::*;
+import kernel::sync::spinlock::*;
 
 pub const PMM_ALLOCATOR_STATE_LOCKED: u32 = 0;
 pub const PMM_ALLOCATOR_STATE_ACTIVE: u32 = 1;
@@ -58,11 +62,40 @@ static mut PMM_REGION_BITMAPS: [PmmBitmap; PMM_BOOTSTRAP_MAX_REGIONS] = [
 ];
 static mut PMM_BOOTSTRAP_BITMAP_STORAGE: [u8; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES] = [0; PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES];
 static mut PMM_REUSE_SELF_TEST_PASSED: bool = false;
-// Código persistente do último ponto alcançado pela auto-prova.  Ele não é
+// Código persistente do último ponto alcançado pela auto-prova. Ele não é
 // necessário ao allocator: é diagnóstico serial para o primeiro boot real.
 // 0=nenhuma falha, 1=início, 2=A, 3=B, 4=free(A), 5=reuso(A),
 // 6=free(reuso), 7=free(B), 8=contabilidade final.
 static mut PMM_REUSE_SELF_TEST_FAILURE_STAGE: u32 = 0;
+
+// O lock é inicializado no cutover antes de qualquer AP entrar no scheduler.
+// IRQ-off é obrigatório porque o reaper pode liberar páginas a partir do timer.
+static mut PMM_ALLOCATOR_LOCK: SpinLock = SpinLock { state: 0 };
+static mut PMM_ALLOCATOR_LOCK_READY: bool = false;
+
+@system
+fn pmm_allocator_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PMM_ALLOCATOR_LOCK_READY {
+            x86_irq_restore(flags);
+            return 0;
+        }
+        if !spinlock_lock(&mut PMM_ALLOCATOR_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn pmm_allocator_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PMM_ALLOCATOR_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
 
 @system
 pub fn pmm_allocator_is_active() -> bool {
@@ -285,6 +318,16 @@ pub fn pmm_alloc_page() -> u64 { return pmm_alloc_pages(1); }
 @system
 pub fn pmm_alloc_pages(count: u64) -> u64 {
     if count == 0 { return 0; }
+    let flags = pmm_allocator_lock_irq();
+    if flags == 0 { return 0; }
+    let result = pmm_alloc_pages_locked(count);
+    pmm_allocator_unlock_irq(flags);
+    return result;
+}
+
+@system
+fn pmm_alloc_pages_locked(count: u64) -> u64 {
+    if count == 0 { return 0; }
     unsafe {
         if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
         let mut region: u64 = 0;
@@ -309,6 +352,15 @@ pub fn pmm_alloc_pages(count: u64) -> u64 {
 pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64 {
     if count == 0 || alignment < BAKEN_PAGE_SIZE { return 0; }
     if (alignment & (alignment - 1)) != 0 || (alignment % BAKEN_PAGE_SIZE) != 0 { return 0; }
+    let flags = pmm_allocator_lock_irq();
+    if flags == 0 { return 0; }
+    let result = pmm_alloc_pages_aligned_locked(count, alignment);
+    pmm_allocator_unlock_irq(flags);
+    return result;
+}
+
+@system
+fn pmm_alloc_pages_aligned_locked(count: u64, alignment: u64) -> u64 {
     unsafe {
         if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
         let mut region: u64 = 0;
@@ -336,7 +388,16 @@ pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64,
     let bytes = count * BAKEN_PAGE_SIZE;
     if bytes / BAKEN_PAGE_SIZE != count { return 0; }
     if boundary != 0 && bytes > boundary { return 0; }
+    let flags = pmm_allocator_lock_irq();
+    if flags == 0 { return 0; }
+    let result = pmm_alloc_pages_constrained_locked(count, alignment, max_address, boundary);
+    pmm_allocator_unlock_irq(flags);
+    return result;
+}
 
+@system
+fn pmm_alloc_pages_constrained_locked(count: u64, alignment: u64,
+                                      max_address: u64, boundary: u64) -> u64 {
     unsafe {
         if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE { return 0; }
         let mut region: u64 = 0;
@@ -358,6 +419,16 @@ pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64,
 // Isso rejeita double-free e ranges parcialmente livres antes de alterar bits.
 @system
 pub fn pmm_free_pages(base: u64, count: u64) -> bool {
+    if base == 0 || count == 0 || base < PMM_GENERAL_ALLOC_MIN_PHYSICAL { return false; }
+    let flags = pmm_allocator_lock_irq();
+    if flags == 0 { return false; }
+    let result = pmm_free_pages_locked(base, count);
+    pmm_allocator_unlock_irq(flags);
+    return result;
+}
+
+@system
+fn pmm_free_pages_locked(base: u64, count: u64) -> bool {
     if base == 0 || count == 0 || base < PMM_GENERAL_ALLOC_MIN_PHYSICAL { return false; }
     unsafe {
         if PMM_ALLOCATOR.state != PMM_ALLOCATOR_STATE_ACTIVE &&
@@ -396,12 +467,20 @@ pub fn pmm_free_pages(base: u64, count: u64) -> bool {
     return true;
 }
 
-// Compatibilidade para consumidores ainda LIFO. A política real é bitmap; este
-// wrapper só aceita exatamente a alocação mais recente e pode reduzir o
-// high-water quando essa alocação havia estendido a fronteira.
+// Compatibilidade para consumidores ainda LIFO. O mesmo lock cobre leitura dos
+// metadados, free e ajuste do high-water; o helper interno evita lock recursivo.
 @system
 pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool {
     if base == 0 || count == 0 { return false; }
+    let flags = pmm_allocator_lock_irq();
+    if flags == 0 { return false; }
+    let result = pmm_free_pages_lifo_locked(base, count);
+    pmm_allocator_unlock_irq(flags);
+    return result;
+}
+
+@system
+fn pmm_free_pages_lifo_locked(base: u64, count: u64) -> bool {
     let mut region: u64 = 0;
     let mut previous_frontier: u64 = 0;
     unsafe {
@@ -409,7 +488,7 @@ pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool {
         region = PMM_ALLOCATOR.last_region_index;
         previous_frontier = PMM_ALLOCATOR.last_previous_next;
     }
-    if !pmm_free_pages(base, count) { return false; }
+    if !pmm_free_pages_locked(base, count) { return false; }
     unsafe {
         if region < PMM_ALLOCATOR.active_region_count && previous_frontier != 0 &&
            previous_frontier <= PMM_REGION_NEXT[region] {
@@ -469,6 +548,8 @@ pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
     if !pmm_inventory_is_valid() { return false; }
 
     unsafe {
+        if !spinlock_init(&mut PMM_ALLOCATOR_LOCK) { return false; }
+        PMM_ALLOCATOR_LOCK_READY = true;
         pmm_allocator_reset_locked();
         let mut storage_index: u64 = 0;
         while storage_index < PMM_BOOTSTRAP_BITMAP_STORAGE_BYTES {
@@ -555,4 +636,14 @@ pub fn pmm_allocator_activate_after_exit_boot_services() -> bool {
 }
 
 @system
-pub fn pmm_allocator_allocated_pages() -> u64 { unsafe { return PMM_ALLOCATOR.allocated_pages; } }
+pub fn pmm_allocator_allocated_pages() -> u64 {
+    unsafe {
+        if !PMM_ALLOCATOR_LOCK_READY { return PMM_ALLOCATOR.allocated_pages; }
+    }
+    let flags = pmm_allocator_lock_irq();
+    if flags == 0 { return 0; }
+    let mut pages: u64 = 0;
+    unsafe { pages = PMM_ALLOCATOR.allocated_pages; }
+    pmm_allocator_unlock_irq(flags);
+    return pages;
+}

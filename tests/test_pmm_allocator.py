@@ -61,12 +61,43 @@ class PmmAllocatorTests(unittest.TestCase):
         free_body = free_body.split("pub fn pmm_free_pages_lifo", 1)[0]
         self.assertIn("base < PMM_GENERAL_ALLOC_MIN_PHYSICAL", free_body)
 
-    def test_lifo_api_remains_compatible_but_delegates_to_general_free(self):
+    def test_lifo_api_remains_compatible_without_recursive_lock(self):
         body = self.alloc.split("pub fn pmm_free_pages_lifo", 1)[1]
         body = body.split("fn pmm_allocator_self_test_reuse", 1)[0]
         self.assertIn("base != PMM_ALLOCATOR.last_base", body)
-        self.assertIn("pmm_free_pages(base, count)", body)
+        self.assertIn("pmm_free_pages_locked(base, count)", body)
+        self.assertNotIn("pmm_free_pages(base, count)", body)
         self.assertIn("PMM_REGION_NEXT[region] = previous_frontier", body)
+
+    def test_runtime_mutations_are_serialized_across_cpus(self):
+        self.assertIn("import kernel::sync::spinlock::*;", self.alloc)
+        self.assertIn("static mut PMM_ALLOCATOR_LOCK: SpinLock", self.alloc)
+        self.assertIn("static mut PMM_ALLOCATOR_LOCK_READY: bool = false", self.alloc)
+        lock = self.alloc.split("fn pmm_allocator_lock_irq() -> u64", 1)[1]
+        lock = lock.split("fn pmm_allocator_unlock_irq", 1)[0]
+        self.assertLess(lock.index("x86_irq_save_disable()"), lock.index("spinlock_lock(&mut PMM_ALLOCATOR_LOCK)"))
+        unlock = self.alloc.split("fn pmm_allocator_unlock_irq", 1)[1]
+        unlock = unlock.split("pub fn pmm_allocator_is_active", 1)[0]
+        self.assertLess(unlock.index("spinlock_unlock(&mut PMM_ALLOCATOR_LOCK)"), unlock.index("x86_irq_restore(flags)"))
+
+        wrappers = (
+            ("pub fn pmm_alloc_pages(count: u64) -> u64", "fn pmm_alloc_pages_locked", "pmm_alloc_pages_locked(count)"),
+            ("pub fn pmm_alloc_pages_aligned(count: u64, alignment: u64) -> u64", "fn pmm_alloc_pages_aligned_locked", "pmm_alloc_pages_aligned_locked(count, alignment)"),
+            ("pub fn pmm_alloc_pages_constrained(count: u64, alignment: u64", "fn pmm_alloc_pages_constrained_locked", "pmm_alloc_pages_constrained_locked(count, alignment, max_address, boundary)"),
+            ("pub fn pmm_free_pages(base: u64, count: u64) -> bool", "fn pmm_free_pages_locked", "pmm_free_pages_locked(base, count)"),
+            ("pub fn pmm_free_pages_lifo(base: u64, count: u64) -> bool", "fn pmm_free_pages_lifo_locked", "pmm_free_pages_lifo_locked(base, count)"),
+        )
+        for public, boundary, helper in wrappers:
+            body = self.alloc.split(public, 1)[1].split(boundary, 1)[0]
+            acquire = body.index("pmm_allocator_lock_irq()")
+            call = body.index(helper)
+            release = body.index("pmm_allocator_unlock_irq(flags)")
+            self.assertLess(acquire, call)
+            self.assertLess(call, release)
+
+        activate = self.alloc.split("pub fn pmm_allocator_activate_after_exit_boot_services", 1)[1]
+        self.assertLess(activate.index("spinlock_init(&mut PMM_ALLOCATOR_LOCK)"),
+                        activate.index("PMM_ALLOCATOR.state = PMM_ALLOCATOR_STATE_ACTIVE"))
 
     def test_allocator_self_test_proves_out_of_order_reuse(self):
         body = self.alloc.split("fn pmm_allocator_self_test_reuse", 1)[1]
