@@ -1,4 +1,4 @@
-"""Sotlas CLI — Driver de compilação da toolchain Sotlas.
+"""Sotlas CLI — canonical driver for the Sotlas production frontend.
 
 Uso:
     sotlas compile arquivo.sotlas [-o saída] [--target x86_64-freestanding] [--emit-c]
@@ -11,28 +11,23 @@ import sys
 import subprocess
 from pathlib import Path
 
-# Adiciona o diretório pai ao path para importar o pacote sotlas
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from sotlas import compile_source, SOTLAS_VERSION
-from sotlas.lexer import SotlasLexError
-from sotlas.parser import SotlasParseError
-from sotlas.sema import SotlasSemaError
+from sotlas import compile_source, SOTLAS_VERSION, SotlasBootstrapError
+from sotlas_compile import bootstrap as production_frontend
 
-# Extensão oficial da linguagem Sotlas
 SOTLAS_EXT = ".sotlas"
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="sotlas",
-        description=f"Compilador Sotlas Bootstrap v{SOTLAS_VERSION}",
+        description=f"Compilador Sotlas v{SOTLAS_VERSION}",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    # sotlas compile <arquivo.sotlas> [-o saída] [--target] [--emit-c]
-    cp = sub.add_parser("compile", help=f"Compila um arquivo {SOTLAS_EXT} para binário ou C99")
+    cp = sub.add_parser("compile", help=f"Compila um arquivo {SOTLAS_EXT} para binário ou C11")
     cp.add_argument("source", help=f"Arquivo fonte {SOTLAS_EXT}")
     cp.add_argument("-o", "--output", default=None, help="Arquivo de saída")
     cp.add_argument(
@@ -44,7 +39,7 @@ def main() -> int:
     cp.add_argument(
         "--emit-c",
         action="store_true",
-        help="Emite apenas o arquivo C99 (não invoca o compilador C)",
+        help="Emite apenas o C11 intermediário (não invoca o compilador C)",
     )
     cp.add_argument(
         "--cc",
@@ -52,11 +47,9 @@ def main() -> int:
         help="Compilador C a invocar (padrão: gcc)",
     )
 
-    # sotlas version
     sub.add_parser("version", help="Exibe a versão do compilador")
 
-    # sotlas check <arquivo.sotlas> — apenas análise léxica, sintática e semântica
-    chk = sub.add_parser("check", help="Verifica o arquivo sem gerar código")
+    chk = sub.add_parser("check", help="Executa lexer, parser, tipos e safety sem gerar código")
     chk.add_argument("source", help=f"Arquivo fonte {SOTLAS_EXT}")
 
     args = parser.parse_args()
@@ -64,79 +57,72 @@ def main() -> int:
     if args.cmd == "version":
         print(f"Sotlas {SOTLAS_VERSION}")
         return 0
-
     if args.cmd == "check":
         return _run_check(args.source)
-
     if args.cmd == "compile":
         return _run_compile(args)
-
     return 1
 
 
-def _run_check(source_path: str) -> int:
+def _read_source(source_path: str) -> tuple[Path, str] | None:
     src = Path(source_path)
     if not src.exists():
         print(f"sotlas: erro: arquivo não encontrado: {source_path}", file=sys.stderr)
-        return 1
-    # Aceita .sotlas (oficial) e .st (legado)
+        return None
     if src.suffix not in (SOTLAS_EXT, ".st"):
-        print(f"sotlas: aviso: extensão não reconhecida '{src.suffix}' (esperado {SOTLAS_EXT})", file=sys.stderr)
-    text = src.read_text(encoding="utf-8")
-    try:
-        from sotlas.lexer import Lexer
-        from sotlas.parser import Parser
-        from sotlas.sema import Sema
-        tokens = Lexer(text, source_path).tokenize()
-        ast = Parser(tokens, source_path).parse()
-        Sema(ast, source_path).check()
-        print(f"sotlas: ok — {source_path}")
-        return 0
-    except (SotlasLexError, SotlasParseError, SotlasSemaError) as e:
-        print(f"sotlas: erro: {e}", file=sys.stderr)
+        print(
+            f"sotlas: aviso: extensão não reconhecida '{src.suffix}' (esperado {SOTLAS_EXT})",
+            file=sys.stderr,
+        )
+    return src, src.read_text(encoding="utf-8")
+
+
+def _run_check(source_path: str) -> int:
+    loaded = _read_source(source_path)
+    if loaded is None:
         return 1
+    _, text = loaded
+    try:
+        module = production_frontend.parse(text, filename=source_path)
+        production_frontend.check(module)
+    except SotlasBootstrapError as error:
+        print(f"sotlas: erro: {error}", file=sys.stderr)
+        return 1
+    print(f"sotlas: ok — {source_path}")
+    return 0
 
 
 def _run_compile(args) -> int:
-    src = Path(args.source)
-    if not src.exists():
-        print(f"sotlas: erro: arquivo não encontrado: {args.source}", file=sys.stderr)
+    loaded = _read_source(args.source)
+    if loaded is None:
         return 1
+    src, text = loaded
 
-    text = src.read_text(encoding="utf-8")
     try:
         c_code = compile_source(text, args.source)
-    except SotlasLexError as e:
-        print(f"sotlas: erro léxico: {e}", file=sys.stderr)
-        return 1
-    except SotlasParseError as e:
-        print(f"sotlas: erro sintático: {e}", file=sys.stderr)
-        return 1
-    except SotlasSemaError as e:
-        print(f"sotlas: erro semântico: {e}", file=sys.stderr)
+    except SotlasBootstrapError as error:
+        print(f"sotlas: erro: {error}", file=sys.stderr)
         return 1
 
-    # Determinar arquivo de saída
     if args.output:
         out_path = Path(args.output)
     else:
         out_path = src.with_suffix(".bin" if not args.emit_c else ".c")
 
     if args.emit_c:
-        out_path.with_suffix(".c").write_text(c_code, encoding="utf-8")
-        print(f"sotlas: C99 emitido em {out_path.with_suffix('.c')}")
+        c_path = out_path.with_suffix(".c")
+        c_path.write_text(c_code, encoding="utf-8")
+        print(f"sotlas: C11 emitido em {c_path}")
         return 0
 
-    # Escreve C temporário e invoca compilador C
     c_file = out_path.with_suffix(".c")
     c_file.write_text(c_code, encoding="utf-8")
 
-    cc_flags = ["-std=c99", "-Wall", "-Wextra"]
+    cc_flags = ["-std=c11", "-Wall", "-Wextra"]
     if args.target == "x86_64-freestanding":
         cc_flags += [
             "-ffreestanding", "-nostdlib", "-nostdinc",
             "-mno-red-zone", "-mno-mmx", "-mno-sse", "-mno-sse2",
-            "-target", "x86_64-elf",
         ]
 
     cmd = [args.cc, str(c_file), "-o", str(out_path)] + cc_flags
@@ -148,7 +134,10 @@ def _run_compile(args) -> int:
         print(f"sotlas: binário gerado em {out_path}")
         return 0
     except FileNotFoundError:
-        print(f"sotlas: compilador C '{args.cc}' não encontrado — use --emit-c para gerar apenas o C99", file=sys.stderr)
+        print(
+            f"sotlas: compilador C '{args.cc}' não encontrado — use --emit-c para gerar apenas o C11",
+            file=sys.stderr,
+        )
         return 1
 
 
