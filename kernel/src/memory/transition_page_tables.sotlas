@@ -75,7 +75,7 @@ pub fn transition_page_tables_build(arena: *mut PageTableArena,
     );
     if !direct.valid { return transition_page_tables_invalid(); }
 
-    let image_base = image.virtual_base as *const u8;
+    let image_base = unsafe { image.virtual_base as *const u8 };
     if image_base == (null as *const u8) { return transition_page_tables_invalid(); }
     let image_map = transition_image_map_wx(arena, root, image, image_base);
     if !image_map.valid { return transition_page_tables_invalid(); }
