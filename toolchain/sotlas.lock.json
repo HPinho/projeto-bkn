@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "toolchain": "sotlas",
+  "source_kind": "in-tree",
+  "source_path": "tools/sotlas_compile",
+  "repository": null,
+  "revision": null,
+  "language_version": "0.2",
+  "compiler_api": "canonical-v1",
+  "c_abi": "c-v1",
+  "target": "x86_64-freestanding",
+  "required_features": [
+    "unsafe-lexical-boundaries",
+    "system-capability-boundary",
+    "extern-c",
+    "foreign-pointer-provenance",
+    "modular-compilation"
+  ],
+  "compatibility_entry": "kernel/src/main.sotlas"
+}
