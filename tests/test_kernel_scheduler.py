@@ -202,13 +202,17 @@ class KernelSchedulerTests(unittest.TestCase):
         idle_pick = body.index("scheduler_select_slot(SCHEDULER_IDLE_SLOT, frame_address)", normal_pick)
         self.assertLess(normal_pick, idle_pick)
 
-    def test_reaper_runs_from_masked_timer_path_after_current_frame_is_saved(self):
+    def test_reaper_runs_on_bsp_after_current_frame_is_saved(self):
         text = CORE.read_text(encoding="utf-8")
         body = text.split("pub fn scheduler_on_timer_interrupt", 1)[1]
         save = body.index("SCHEDULER_THREADS[current].saved_frame = frame_address")
         reap = body.index("scheduler_reap_terminated_noncurrent()")
         self.assertLess(save, reap)
-        self.assertIn("Executado somente dentro do IRQ de timer", text)
+
+        secondary = text.split("fn scheduler_on_secondary_interrupt", 1)[1]
+        secondary = secondary.split("pub fn scheduler_on_timer_interrupt", 1)[0]
+        self.assertNotIn("scheduler_reap_terminated_noncurrent()", secondary)
+        self.assertIn("if cpu_slot != 0 { return scheduler_on_secondary_interrupt(cpu_slot, frame_address); }", body)
 
     def test_scheduler_round_trip_run_queue_and_reaper_are_required_before_runtime(self):
         text = RUNTIME.read_text(encoding="utf-8")
