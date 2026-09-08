@@ -57,6 +57,15 @@ fn write() -> void {
 """
         parse_check(source)
 
+    def test_raw_pointer_to_raw_pointer_cast_does_not_require_unsafe(self):
+        source = """
+module contract::raw_requalify;
+fn readonly(ptr: *mut u32) -> *const u32 {
+    return ptr as *const u32;
+}
+"""
+        parse_check(source)
+
     def test_null_raw_pointer_sentinel_does_not_require_unsafe(self):
         source = """
 module contract::null_pointer;
@@ -166,6 +175,25 @@ extern "C" {
 fn read_first() -> u8 {
     let ptr = driver_buffer();
     return *ptr;
+}
+"""
+        with self.assertRaisesRegex(
+            bootstrap.SotlasBootstrapError,
+            "desreferenciamento de ponteiro cru exige bloco unsafe explícito",
+        ):
+            parse_check(source)
+
+    def test_foreign_provenance_survives_raw_pointer_cast(self):
+        source = """
+module contract::ffi_cast;
+extern "C" {
+    fn driver_buffer() -> *mut u8;
+}
+@system
+fn read_first() -> u8 {
+    let ptr = driver_buffer();
+    let readonly = ptr as *const u8;
+    return *readonly;
 }
 """
         with self.assertRaisesRegex(
