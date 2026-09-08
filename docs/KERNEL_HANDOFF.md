@@ -231,3 +231,27 @@ Além disso, manter os guardrails de:
 ## LangSotlas
 
 `HPinho/LangSotlas` permanece **somente leitura/referência** neste trabalho. Não modificar esse repositório sem instrução explícita do usuário.
+# Diagnóstico de CI — 2026-09-08 / HEAD 6efb9eb
+
+- Os três runs do HEAD falharam: CI #998 no smoke QEMU, SMP #101 durante a
+  instalação de dependências e NVMe-only #198 no smoke QEMU.
+- A suíte local do HEAD passou: **1.109 testes**; build EFI passou com **141
+  módulos / 143 objetos**; o smoke single-core local original também passou.
+- Causa de instabilidade isolada entre o último SHA verde e o HEAD: a espera
+  final da probe de wait/sleep executava `scheduler_yield()` em laço apertado,
+  gerando interrupções de software enquanto dependia de ticks LAPIC reais.
+- Correção local: `x86_halt_until_interrupt()` exige IF=1 e executa `HLT`;
+  a probe agora dorme até um IRQ real, sem medir tempo por velocidade de host e
+  sem tempestade de yield. Smoke single-core corrigido passou, incluindo Ring 3,
+  syscalls, user-copy e loader, sem `BAKEN:HEX=E:`.
+- O runner local ganhou `--smp` e `--required-marker`. O smoke local com 2 CPUs
+  passou exigindo `SMP_PROCESS_TLB_READY` e `SMP_RING3_ON_AP_READY`, além do
+  gate completo single-core; portanto cobriu AP dispatch, timer, TLB shootdown,
+  retomada CPL3 no AP e teardown sem marcador de exceção.
+- A falha de instalação do SMP é independente do kernel. Os três workflows
+  agora usam `Acquire::Retries=3` tanto em `apt-get update` quanto em `install`,
+  preservando os timeouts existentes.
+- O acesso autenticado aos artefatos GitHub foi bloqueado pelo controle de
+  segurança do navegador. Diagnóstico baseado em etapas públicas, diff entre
+  SHAs e reprodução local; validar os três workflows no SHA novo antes de
+  declarar a correção definitivamente verde.

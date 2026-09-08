@@ -51,7 +51,8 @@ def run(args):
     serial = media / 'qemu-serial.log'
     with (work / 'qemu.log').open('w') as log:
         process = subprocess.Popen([
-            args.qemu, '-machine', 'q35', '-m', '512M', '-no-reboot',
+            args.qemu, '-machine', 'q35', '-smp', str(args.smp),
+            '-m', '512M', '-no-reboot',
             '-drive', f'if=pflash,format=raw,readonly=on,file={args.ovmf_code}',
             '-drive', f'if=pflash,format=raw,file={work / "vars.fd"}',
             '-drive', f'file={disk},format=raw,if=ide,index=0',
@@ -88,7 +89,7 @@ def run(args):
                     text = serial.read_text(errors='replace') if serial.exists() else ''
                     if 'BAKEN:HEX=E:' in text:
                         raise RuntimeError(f'CPU exception; see {serial}')
-                    if not validate(text):
+                    if not validate(text) and all(marker in text for marker in args.required_marker):
                         break
                     time.sleep(1)
                 else:
@@ -98,6 +99,9 @@ def run(args):
             process.wait(timeout=10)
     subprocess.run([sys.executable, '-c', blocks[1]], cwd=work, check=True)
     errors = validate(serial.read_text(errors='replace'))
+    final_text = serial.read_text(errors='replace')
+    errors.extend(f'Missing required marker: {marker}' for marker in args.required_marker
+                  if marker not in final_text)
     if errors:
         raise RuntimeError('; '.join(errors))
     verify(disk, serial)
@@ -118,4 +122,6 @@ if __name__ == '__main__':
     parser.add_argument('--ovmf-vars', default='C:/Program Files/qemu/share/edk2-i386-vars.fd')
     parser.add_argument('--iso', default=str(ROOT / 'build/baken_os.iso'))
     parser.add_argument('--timeout', type=int, default=90)
+    parser.add_argument('--smp', type=int, default=1)
+    parser.add_argument('--required-marker', action='append', default=[])
     run(parser.parse_args())

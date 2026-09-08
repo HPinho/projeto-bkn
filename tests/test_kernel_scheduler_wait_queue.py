@@ -88,13 +88,13 @@ class KernelSchedulerWaitQueueTests(unittest.TestCase):
 
     def test_completion_wait_drives_scheduler_progress_instead_of_host_speed(self):
         probe = PROBE.read_text(encoding="utf-8")
-        self.assertIn("import kernel::scheduler::yield::*;", probe)
         body = probe.split("pub fn scheduler_wait_probe_wait_complete() -> bool", 1)[1]
         self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1", body)
-        self.assertIn("if !scheduler_yield() { return false; }", body)
+        self.assertIn("if !x86_halt_until_interrupt() { return false; }", body)
         self.assertNotIn("x86_cpu_pause()", body)
+        self.assertNotIn("scheduler_yield()", body)
         self.assertLess(body.index("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1"),
-                        body.index("scheduler_yield()"))
+                        body.index("x86_halt_until_interrupt()"))
 
     def test_nvme_qemu_gate_requires_wait_queue_proof_markers(self):
         workflow = NVME_WORKFLOW.read_text(encoding="utf-8")

@@ -38,3 +38,11 @@ class KernelSmokeGateTests(unittest.TestCase):
                 self.assertIn(gate, source)
                 self.assertLess(source.index(gate), source.index("--verify build/"))
                 self.assertIn("timeout-minutes: 10", source)
+
+    def test_all_qemu_workflows_retry_transient_apt_downloads(self):
+        root = Path(__file__).resolve().parents[1]
+        for workflow in ("baken_ci.yml", "baken_nvme_only.yml", "baken_smp.yml"):
+            with self.subTest(workflow=workflow):
+                source = (root / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
+                self.assertIn("apt-get -o Acquire::Retries=3 update", source)
+                self.assertIn("apt-get -o Acquire::Retries=3 install", source)

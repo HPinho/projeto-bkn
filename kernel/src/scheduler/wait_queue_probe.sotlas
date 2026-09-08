@@ -9,7 +9,6 @@ module kernel::scheduler::wait_queue_probe;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::scheduler::core::*;
-import kernel::scheduler::yield::*;
 import kernel::scheduler::wait_queue::*;
 import kernel::scheduler::sleep::*;
 
@@ -131,10 +130,10 @@ pub fn scheduler_wait_probe_wait_complete() -> bool {
                 return true;
             }
         }
-        // O fechamento depende de timer + retorno + reaper. Ceder a CPU produz
-        // progresso explícito do scheduler e evita usar a velocidade de `pause`
-        // do host/QEMU como relógio implícito para a prova dinâmica.
-        if !scheduler_yield() { return false; }
+        // O fechamento depende de um IRQ real de timer. HLT evita tanto usar a
+        // velocidade do host como relógio quanto inundar o vetor de software de
+        // yield; o LAPIC acorda o bootstrap e o próximo ciclo reavalia o reaper.
+        if !x86_halt_until_interrupt() { return false; }
         attempts += 1;
     }
     return false;

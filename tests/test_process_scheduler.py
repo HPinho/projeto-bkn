@@ -72,7 +72,9 @@ class ProcessSchedulerTests(unittest.TestCase):
 
     def test_local_qemu_uses_full_gate_and_read_fixture(self):
         source = (ROOT / "tools/scripts/run_foundation_qemu.py").read_text(encoding="utf-8")
-        self.assertIn("if not validate(text):", source)
+        self.assertIn("if not validate(text) and all(marker in text for marker in args.required_marker):", source)
         self.assertIn("if 'BAKEN:HEX=E:' in text:", source)
         self.assertIn("image.seek(1023 * 512)", source)
         self.assertNotIn("if 'BAKEN:BARE_METAL_READY' in text:", source)
+        self.assertIn("'-smp', str(args.smp)", source)
+        self.assertIn("all(marker in text for marker in args.required_marker)", source)
