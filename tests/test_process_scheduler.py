@@ -17,7 +17,18 @@ class ProcessSchedulerTests(unittest.TestCase):
         self.assertLess(body.index("process_retain(pid)"), body.index("scheduler_create_kernel_thread("))
         self.assertIn("SCHEDULER_THREADS[slot].process_id = pid", body)
         self.assertIn("SCHEDULER_THREADS[slot].address_space_root = root", body)
-        self.assertEqual(body.count("process_release(pid)"), 2)
+
+        # Every failure after process_retain() must drop the acquired reference
+        # before restoring IRQ state and returning.  Do not pin this invariant to
+        # an exact occurrence count: adding a new rollback point must stay safe.
+        normalized = " ".join(body.split())
+        for rollback in (
+            "if root == 0 { process_release(pid); x86_irq_restore(flags); return 0; }",
+            "if tid == 0 { process_release(pid); x86_irq_restore(flags); return 0; }",
+            "if !scheduler_switch_lock() { process_release(pid); x86_irq_restore(flags); return 0; }",
+        ):
+            with self.subTest(rollback=rollback):
+                self.assertIn(rollback, normalized)
 
     def test_root_switch_precedes_current_slot_publication(self):
         body = self.code.split("fn scheduler_select_slot", 1)[1].split(
