@@ -66,43 +66,44 @@ pub fn cutover_prepare_invalid() -> CutoverPrepareResult {
 @system
 pub fn cutover_prepare(input: *const CutoverPrepareInput) -> CutoverPrepareResult {
     if input == (null as *const CutoverPrepareInput) { return cutover_prepare_invalid(); }
-    if input.memory_map_base == (null as *const u8) { return cutover_prepare_invalid(); }
-    if input.memory_map_size == 0 || input.descriptor_size < 40 {
+    let snapshot = unsafe { *input };
+    if snapshot.memory_map_base == (null as *const u8) { return cutover_prepare_invalid(); }
+    if snapshot.memory_map_size == 0 || snapshot.descriptor_size < 40 {
         return cutover_prepare_invalid();
     }
 
     let mut arena = page_table_arena_make(
-        input.arena_physical_base,
-        input.arena_virtual_base,
-        input.arena_page_count
+        snapshot.arena_physical_base,
+        snapshot.arena_virtual_base,
+        snapshot.arena_page_count
     );
     if !arena.valid { return cutover_prepare_invalid(); }
 
     let image = transition_image_layout(
-        input.image_physical_base,
-        input.image_virtual_base,
-        input.image_size
+        snapshot.image_physical_base,
+        snapshot.image_virtual_base,
+        snapshot.image_size
     );
     if !image.valid { return cutover_prepare_invalid(); }
 
     let framebuffer = transition_framebuffer_layout(
-        input.framebuffer_physical_base,
-        input.framebuffer_size
+        snapshot.framebuffer_physical_base,
+        snapshot.framebuffer_size
     );
     if !framebuffer.valid { return cutover_prepare_invalid(); }
 
     let stack = transition_stack_layout(
-        input.stack_physical_base,
-        input.stack_virtual_base,
-        input.stack_page_count
+        snapshot.stack_physical_base,
+        snapshot.stack_virtual_base,
+        snapshot.stack_page_count
     );
     if !stack.valid { return cutover_prepare_invalid(); }
 
     let tables = transition_page_tables_build(
         &mut arena,
-        input.memory_map_base,
-        input.memory_map_size,
-        input.descriptor_size,
+        snapshot.memory_map_base,
+        snapshot.memory_map_size,
+        snapshot.descriptor_size,
         image,
         framebuffer,
         stack
