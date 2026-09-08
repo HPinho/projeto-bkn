@@ -1,12 +1,14 @@
-"""Sotlas Compile — resolvedor modular e frontend bootstrap."""
+"""Sotlas Compile — frontend canônico, segurança e lowering de produção."""
 
-# Instala a gramática/lowering de produção antes de carregar o compilador. Isso
-# garante que todos os consumidores de ``tools.sotlas_compile.bootstrap`` usem
-# o mesmo contrato de lexer, parser e emissão C.
+# Há uma única rota de compilação de produção: bootstrap + extensões oficiais +
+# política de segurança/FFI. Ferramentas podem expor ASTs auxiliares, mas não
+# podem possuir um segundo lowering ou uma segunda semântica executável.
 from . import bootstrap as bootstrap
 from .frontend_extensions import install as _install_frontend_extensions
+from .language_safety import install as _install_language_safety
 
 _install_frontend_extensions(bootstrap)
+_install_language_safety(bootstrap)
 
 from .compiler import SotlasError
 
