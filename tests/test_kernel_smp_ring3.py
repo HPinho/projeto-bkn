@@ -77,7 +77,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
             "data_new, true, false",
             "if remapped_data != data { return false; }",
             "scheduler_smp_probe_wait_flag(resumed_address)",
-            "if unmapped_data != data_new",
+            "unmapped_data != data_new",
             "pmm_free_pages(data, 1)",
             "pmm_free_pages(data_new, 1)",
             "scheduler_smp_probe_emit_process_tlb_marker()",
