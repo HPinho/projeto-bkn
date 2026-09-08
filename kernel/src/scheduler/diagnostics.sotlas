@@ -14,11 +14,7 @@ pub fn scheduler_diag_round_trip() -> void {
         66, 65, 75, 69, 78, 58, 83, 67, 72, 69, 68, 85, 76, 69, 82,
         95, 82, 79, 85, 78, 68, 95, 84, 82, 73, 80, 10
     ];
-    let mut index: usize = 0;
-    while index < 27 {
-        if !x86_serial_write_byte(marker[index]) { return; }
-        index += 1;
-    }
+    unsafe { x86_serial_write_buffer(&marker[0], 27); }
 }
 
 @system
@@ -28,11 +24,7 @@ pub fn scheduler_diag_run_queue_created() -> void {
         66, 65, 75, 69, 78, 58, 82, 85, 78, 95, 81, 85, 69, 85, 69,
         95, 67, 82, 69, 65, 84, 69, 68, 10
     ];
-    let mut index: usize = 0;
-    while index < 24 {
-        if !x86_serial_write_byte(marker[index]) { return; }
-        index += 1;
-    }
+    unsafe { x86_serial_write_buffer(&marker[0], 24); }
 }
 
 @system
@@ -42,9 +34,5 @@ pub fn scheduler_diag_yield_round_trip() -> void {
         66, 65, 75, 69, 78, 58, 89, 73, 69, 76, 68, 95,
         82, 79, 85, 78, 68, 95, 84, 82, 73, 80, 10
     ];
-    let mut index: usize = 0;
-    while index < 23 {
-        if !x86_serial_write_byte(marker[index]) { return; }
-        index += 1;
-    }
+    unsafe { x86_serial_write_buffer(&marker[0], 23); }
 }
