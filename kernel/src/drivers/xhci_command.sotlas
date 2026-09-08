@@ -45,7 +45,7 @@ fn xhci_command_slot_virtual(index: u32) -> *mut XhciTrb {
     if base == 0 { return null as *mut XhciTrb; }
     let offset = (index as u64) * XHCI_TRB_SIZE;
     if offset / XHCI_TRB_SIZE != (index as u64) { return null as *mut XhciTrb; }
-    return (base + offset) as *mut XhciTrb;
+    return unsafe { (base + offset) as *mut XhciTrb };
 }
 
 @system
