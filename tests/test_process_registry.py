@@ -16,14 +16,18 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertEqual(self.source.count("PROCESS_NEXT_ID: u64 = 1"), 1)
         self.assertIn("if pid == 0", self.source)
 
-    def test_destruction_requires_no_references_and_releases_tables_first(self):
+    def test_destruction_requires_no_scheduler_references_or_vm_pins(self):
         body = self.source.split("fn process_destroy_locked", 1)[1].split("fn process_retain_locked", 1)[0]
+        self.assertIn("PROCESS_REFERENCES[slot] != 0 || PROCESS_VM_PINS[slot] != 0", body)
         self.assertLess(body.index("PROCESS_REFERENCES[slot] != 0"), body.index("process_address_space_destroy"))
+        self.assertLess(body.index("PROCESS_VM_PINS[slot] != 0"), body.index("process_address_space_destroy"))
         self.assertLess(body.index("process_address_space_destroy"), body.index("PROCESS_IDS[slot] = 0"))
 
-    def test_refcount_overflow_and_underflow_are_rejected(self):
+    def test_refcount_and_vm_pin_overflow_underflow_are_rejected(self):
         self.assertIn("PROCESS_REFERENCES[slot] == PROCESS_ID_MAX", self.source)
         self.assertIn("PROCESS_REFERENCES[slot] == 0", self.source)
+        self.assertIn("PROCESS_VM_PINS[slot] == PROCESS_ID_MAX", self.source)
+        self.assertIn("PROCESS_VM_PINS[slot] == 0", self.source)
 
     def test_public_lifetime_operations_use_smp_registry_lock(self):
         for name in ("create", "destroy", "retain", "release"):
@@ -50,20 +54,26 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertLess(unlock.index("spinlock_unlock(&mut PROCESS_REGISTRY_LOCK)"),
                         unlock.index("x86_irq_restore(flags)"))
 
-    def test_registry_never_waits_for_tlb_ack_while_holding_registry_lock(self):
+    def test_vm_mutations_do_not_borrow_scheduler_reference_count(self):
+        self.assertIn("static mut PROCESS_VM_PINS", self.source)
+        self.assertIn("fn process_vm_pin_locked(pid: u64) -> bool", self.source)
+        self.assertIn("fn process_vm_unpin_locked(pid: u64) -> bool", self.source)
+        self.assertIn("fn process_vm_unpin(pid: u64) -> bool", self.source)
         for name in ("map", "remap", "unmap"):
             marker = f"pub fn process_{name}_user_page"
             body = self.source.split(marker, 1)[1].split("\n}\n", 1)[0]
-            self.assertIn("process_retain_locked(pid)", body)
+            self.assertIn("process_vm_pin_locked(pid)", body)
             self.assertIn("process_registry_unlock_irq(flags)", body)
             self.assertIn("tlb_shootdown_address_space_page(root, address)", body)
-            self.assertIn("process_release(pid)", body)
-            self.assertLess(body.index("process_retain_locked(pid)"),
+            self.assertIn("process_vm_unpin(pid)", body)
+            self.assertNotIn("process_retain_locked(pid)", body)
+            self.assertNotIn("process_release(pid)", body)
+            self.assertLess(body.index("process_vm_pin_locked(pid)"),
                             body.index("process_registry_unlock_irq(flags)"))
             self.assertLess(body.index("process_registry_unlock_irq(flags)"),
                             body.index("tlb_shootdown_address_space_page(root, address)"))
             self.assertLess(body.index("tlb_shootdown_address_space_page(root, address)"),
-                            body.index("process_release(pid)"))
+                            body.index("process_vm_unpin(pid)"))
 
     def test_registry_documents_non_nested_tlb_publication(self):
         self.assertIn("SOLTA o registro e somente então espera o shootdown", self.source)
@@ -74,11 +84,17 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertNotIn("kernel::process::registry", pmm)
         self.assertNotIn("kernel::process::registry", tlb)
 
-    def test_runtime_probe_covers_capacity_stale_ids_and_reclamation(self):
-        for token in ("let unexpected = process_create_locked()", "process_retain_locked(first)",
-                      "process_destroy_locked(first)", "process_release_locked(first)",
-                      "ids[0] <= ids[PROCESS_SLOT_COUNT - 1]",
-                      "pmm_allocator_allocated_pages() == before"):
+    def test_runtime_probe_covers_refs_vm_pins_stale_ids_and_reclamation(self):
+        for token in (
+            "let unexpected = process_create_locked()",
+            "process_vm_pin_locked(first)",
+            "process_vm_unpin_locked(first)",
+            "process_retain_locked(first)",
+            "process_destroy_locked(first)",
+            "process_release_locked(first)",
+            "ids[0] <= ids[PROCESS_SLOT_COUNT - 1]",
+            "pmm_allocator_allocated_pages() == before",
+        ):
             self.assertIn(token, self.source)
 
     def test_boot_gate_runs_before_scheduler(self):
