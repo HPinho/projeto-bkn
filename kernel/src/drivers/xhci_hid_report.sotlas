@@ -79,7 +79,7 @@ fn xhci_hid_report_ring_slot(index: u32) -> *mut XhciTrb {
     if index >= usable { return null as *mut XhciTrb; }
     let base = direct_map_virtual_address(xhci_hid_context_ring_physical());
     if base == 0 { return null as *mut XhciTrb; }
-    return (base + ((index as u64) * XHCI_TRB_SIZE)) as *mut XhciTrb;
+    return unsafe { (base + ((index as u64) * XHCI_TRB_SIZE)) as *mut XhciTrb };
 }
 
 @system
