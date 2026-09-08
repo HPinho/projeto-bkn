@@ -307,14 +307,16 @@ pub fn gpt_probe_first_esp_partition(
             return false;
         }
         if sector_offset + GPT_PARTITION_MANDATORY_BYTES > (GPT_REDUNDANCY_BLOCK_SIZE as u64) {
+            let next_sector = unsafe {
+                ((sector as usize) + (GPT_REDUNDANCY_BLOCK_SIZE as usize)) as *mut u8
+            };
             if sector_lba + 1 >= first_usable_lba ||
-               !block_device_read_sector(sector_lba + 1,
-                   ((sector as usize) + (GPT_REDUNDANCY_BLOCK_SIZE as usize)) as *mut u8) {
+               !block_device_read_sector(sector_lba + 1, next_sector) {
                 return false;
             }
         }
 
-        let entry = ((sector as usize) + (sector_offset as usize)) as *const u8;
+        let entry = unsafe { ((sector as usize) + (sector_offset as usize)) as *const u8 };
         let type0 = gpt_redundancy_read_u32(entry, 0);
         let type1 = gpt_redundancy_read_u32(entry, 4);
         let type2 = gpt_redundancy_read_u32(entry, 8);
