@@ -31,13 +31,23 @@ class ProcessRegistryTests(unittest.TestCase):
             self.assertIn("process_registry_lock_irq()", body)
             self.assertIn("process_registry_unlock_irq(flags)", body)
 
-    def test_registry_lock_masks_irq_and_serializes_all_cpus(self):
+    def test_registry_waiters_restore_irq_before_retrying_lock(self):
         self.assertIn("import kernel::sync::spinlock::*;", self.source)
         self.assertIn("static mut PROCESS_REGISTRY_LOCK: SpinLock", self.source)
         lock = self.source.split("fn process_registry_lock_irq() -> u64", 1)[1].split(
             "fn process_registry_unlock_irq", 1
         )[0]
-        self.assertLess(lock.index("x86_irq_save_disable()"), lock.index("spinlock_lock(&mut PROCESS_REGISTRY_LOCK)"))
+        self.assertIn("loop {", lock)
+        self.assertIn("spinlock_try_lock(&mut PROCESS_REGISTRY_LOCK)", lock)
+        self.assertNotIn("spinlock_lock(&mut PROCESS_REGISTRY_LOCK)", lock)
+        save = lock.index("x86_irq_save_disable()")
+        attempt = lock.index("spinlock_try_lock(&mut PROCESS_REGISTRY_LOCK)")
+        restore = lock.rindex("x86_irq_restore(flags)")
+        pause = lock.index("x86_cpu_pause()")
+        self.assertLess(save, attempt)
+        self.assertLess(attempt, restore)
+        self.assertLess(restore, pause)
+
         unlock = self.source.split("fn process_registry_unlock_irq(flags: u64)", 1)[1].split(
             "fn process_find_locked", 1
         )[0]
@@ -58,6 +68,19 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertNotIn("kernel::process::registry", pmm)
         self.assertNotIn("kernel::process::registry", tlb)
 
+    def test_user_pte_publication_uses_root_aware_shootdown_under_registry_lock(self):
+        for name in ("map", "unmap"):
+            marker = f"pub fn process_{name}_user_page"
+            body = self.source.split(marker, 1)[1].split("\n}\n", 1)[0]
+            self.assertIn("process_registry_lock_irq()", body)
+            self.assertIn("root = PROCESS_SPACES[slot].root_physical", body)
+            self.assertIn("tlb_shootdown_address_space_page(root, address)", body)
+            self.assertIn("process_registry_unlock_irq(flags)", body)
+            self.assertLess(
+                body.index("tlb_shootdown_address_space_page(root, address)"),
+                body.index("process_registry_unlock_irq(flags)"),
+            )
+
     def test_runtime_probe_covers_capacity_stale_ids_and_reclamation(self):
         for token in ("let unexpected = process_create_locked()", "process_retain_locked(first)",
                       "process_destroy_locked(first)", "process_release_locked(first)",
@@ -75,3 +98,7 @@ class ProcessRegistryTests(unittest.TestCase):
     def test_registry_does_not_claim_userspace_execution(self):
         self.assertNotIn("x86_write_cr3_raw", self.source)
         self.assertNotIn("scheduler_create_kernel_thread", self.source)
+
+
+if __name__ == "__main__":
+    unittest.main()

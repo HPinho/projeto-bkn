@@ -1,6 +1,7 @@
 // Registro SMP de processos: ownership das tabelas e lifetime por referências.
 // PID 0 é reservado ao kernel. Não expõe cópias owning de ProcessAddressSpace.
-// IRQ-off bloqueia reentrada local e o spinlock serializa BSP/APs.
+// O dono do lock mantém IRQ-off; waiters restauram IF antes de retry para que
+// IPIs de TLB continuem progredindo enquanto outro CPU publica uma PTE.
 module kernel::process::registry;
 
 import kernel::process::address_space::*;
@@ -33,18 +34,20 @@ static mut PROCESS_REGISTRY_LOCK_READY: bool = false;
 
 @system
 fn process_registry_lock_irq() -> u64 {
-    let flags = x86_irq_save_disable();
-    unsafe {
-        if !PROCESS_REGISTRY_LOCK_READY {
-            x86_irq_restore(flags);
-            return 0;
+    loop {
+        let flags = x86_irq_save_disable();
+        unsafe {
+            if !PROCESS_REGISTRY_LOCK_READY {
+                x86_irq_restore(flags);
+                return 0;
+            }
+            if spinlock_try_lock(&mut PROCESS_REGISTRY_LOCK) { return flags; }
         }
-        if !spinlock_lock(&mut PROCESS_REGISTRY_LOCK) {
-            x86_irq_restore(flags);
-            return 0;
-        }
+        // Nunca esperar pelo lock com IF=0: o dono pode estar aguardando um
+        // acknowledgement de TLB que precisa chegar por IPI neste CPU.
+        x86_irq_restore(flags);
+        x86_cpu_pause();
     }
-    return flags;
 }
 
 @system
