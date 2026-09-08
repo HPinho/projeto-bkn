@@ -8,6 +8,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::pmm_allocator::*;
+import kernel::memory::tlb_shootdown::*;
 import kernel::sync::spinlock::*;
 
 pub const PROCESS_SLOT_COUNT: usize = 16;
@@ -23,9 +24,10 @@ static mut PROCESS_SPACES: [ProcessAddressSpace; PROCESS_SLOT_COUNT] = [
 static mut PROCESS_NEXT_ID: u64 = 1;
 static mut PROCESS_REGISTRY_READY: bool = false;
 
-// Hierarquia obrigatória: PROCESS_REGISTRY_LOCK -> PMM_ALLOCATOR_LOCK.
-// Criação/destruição de address spaces alcança o PMM sob este lock; o PMM não
-// pode chamar o registro. Isso mantém lifetime, PID e page tables atômicos.
+// Hierarquia obrigatória: PROCESS_REGISTRY_LOCK -> TLB_SHOOTDOWN_LOCK -> PMM_ALLOCATOR_LOCK.
+// Criação/destruição de address spaces alcança o PMM sob o lock do registro;
+// publicação de PTE de usuário alcança apenas o shootdown. Nenhum desses caminhos
+// pode chamar de volta o registro. Isso mantém lifetime, PID e page tables atômicos.
 static mut PROCESS_REGISTRY_LOCK: SpinLock = SpinLock { state: 0 };
 static mut PROCESS_REGISTRY_LOCK_READY: bool = false;
 
@@ -231,11 +233,18 @@ pub fn process_map_user_page(pid: u64, address: u64, physical: u64,
     if flags == 0 { return false; }
     let slot = process_find_locked(pid);
     let mut result = false;
+    let mut root: u64 = 0;
     unsafe {
         if slot != PROCESS_INVALID_SLOT {
+            root = PROCESS_SPACES[slot].root_physical;
             result = process_address_space_map_user_page(&mut PROCESS_SPACES[slot], address,
                                                          physical, writable, executable);
         }
+    }
+    // Depois que a PTE foi publicada não existe retorno seguro se o shootdown
+    // falhar: continuar permitiria stale TLB em outro CPU. Falhamos fechados.
+    if result && !tlb_shootdown_address_space_page(root, address) {
+        loop { x86_cpu_pause(); }
     }
     process_registry_unlock_irq(flags);
     return result;
@@ -247,10 +256,15 @@ pub fn process_unmap_user_page(pid: u64, address: u64) -> u64 {
     if flags == 0 { return 0; }
     let slot = process_find_locked(pid);
     let mut physical: u64 = 0;
+    let mut root: u64 = 0;
     unsafe {
         if slot != PROCESS_INVALID_SLOT {
+            root = PROCESS_SPACES[slot].root_physical;
             physical = process_address_space_unmap_user_page(&mut PROCESS_SPACES[slot], address);
         }
+    }
+    if physical != 0 && !tlb_shootdown_address_space_page(root, address) {
+        loop { x86_cpu_pause(); }
     }
     process_registry_unlock_irq(flags);
     return physical;
@@ -292,7 +306,7 @@ fn process_registry_self_test_locked() -> bool {
 
 @system
 pub fn process_registry_activate() -> bool {
-    if !process_address_space_is_ready() { return false; }
+    if !process_address_space_is_ready() || !tlb_shootdown_is_ready() { return false; }
     let flags = x86_irq_save_disable();
     unsafe {
         if !PROCESS_REGISTRY_LOCK_READY {

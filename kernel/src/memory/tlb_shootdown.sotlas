@@ -1,10 +1,11 @@
-// Baken OS — shootdown de TLB SMP para mappings globais da raiz do kernel.
+// Baken OS — shootdown de TLB SMP para mappings globais e address spaces.
 //
 // Sem dependência de scheduler/SMP de alto nível: a topologia é registrada pelo
 // bring-up e o handler identifica a CPU pelo APIC ID. O caminho de interrupção
 // não aloca, não adquire locks e só executa INVLPG + acknowledgement volátil.
 // O protocolo é simétrico: BSP e APs podem iniciar uma invalidação depois de
-// entrarem no conjunto ativo.
+// entrarem no conjunto ativo. Root 0 significa mapping compartilhado por todas
+// as raízes; root != 0 limita o INVLPG aos CPUs que executam aquele CR3.
 module kernel::memory::tlb_shootdown;
 
 import kernel::arch::x86_64::cpu::*;
@@ -23,6 +24,8 @@ static mut TLB_SHOOTDOWN_CPU_ACTIVE: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false; TL
 static mut TLB_SHOOTDOWN_CPU_APIC_ID: [u8; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
 static mut TLB_SHOOTDOWN_ADDRESS_LO: u32 = 0;
 static mut TLB_SHOOTDOWN_ADDRESS_HI: u32 = 0;
+static mut TLB_SHOOTDOWN_ROOT_LO: u32 = 0;
+static mut TLB_SHOOTDOWN_ROOT_HI: u32 = 0;
 static mut TLB_SHOOTDOWN_GENERATION: u32 = 0;
 static mut TLB_SHOOTDOWN_ACK: [u32; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
 
@@ -44,6 +47,8 @@ pub fn tlb_shootdown_initialize() -> bool {
         }
         TLB_SHOOTDOWN_ADDRESS_LO = 0;
         TLB_SHOOTDOWN_ADDRESS_HI = 0;
+        TLB_SHOOTDOWN_ROOT_LO = 0;
+        TLB_SHOOTDOWN_ROOT_HI = 0;
         TLB_SHOOTDOWN_GENERATION = 0;
         TLB_SHOOTDOWN_READY = true;
     }
@@ -153,13 +158,17 @@ fn tlb_shootdown_next_generation() -> u32 {
 }
 
 @system
-fn tlb_shootdown_publish(address: u64, generation: u32) -> void {
+fn tlb_shootdown_publish(address: u64, root: u64, generation: u32) -> void {
     unsafe {
         let lo: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_LO;
         let hi: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_HI;
+        let root_lo: *mut u32 = &mut TLB_SHOOTDOWN_ROOT_LO;
+        let root_hi: *mut u32 = &mut TLB_SHOOTDOWN_ROOT_HI;
         let gen: *mut u32 = &mut TLB_SHOOTDOWN_GENERATION;
         x86_mmio_write32(tlb_u32_address(lo), address as u32);
         x86_mmio_write32(tlb_u32_address(hi), (address >> 32) as u32);
+        x86_mmio_write32(tlb_u32_address(root_lo), root as u32);
+        x86_mmio_write32(tlb_u32_address(root_hi), (root >> 32) as u32);
         __dma_fence();
         x86_mmio_write32(tlb_u32_address(gen), generation);
     }
@@ -212,19 +221,18 @@ fn tlb_shootdown_slot_for_current_cpu() -> usize {
     return TLB_SHOOTDOWN_MAX_CPUS;
 }
 
-// Deve ser chamado depois da publicação da PTE. Antes do SMP registrar CPUs,
-// a invalidação é local. Com 2+ participantes ativos, qualquer CPU pode iniciar
-// o broadcast e espera exatamente os demais participantes, nunca a si própria.
 @system
-pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
+fn tlb_shootdown_page(address: u64, root: u64) -> bool {
     if !tlb_shootdown_is_ready() || !x86_page_aligned(address) { return false; }
+    if root != 0 && !x86_page_aligned(root) { return false; }
     let flags = tlb_shootdown_lock_irq();
     if flags == 0 { return false; }
 
     let active_count = tlb_shootdown_active_cpu_count();
     let generation = tlb_shootdown_next_generation();
-    tlb_shootdown_publish(address, generation);
-    x86_invlpg(address);
+    tlb_shootdown_publish(address, root, generation);
+    let current_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+    if root == 0 || current_root == root { x86_invlpg(address); }
 
     if active_count > 1 {
         let requester_slot = tlb_shootdown_slot_for_current_cpu();
@@ -250,6 +258,20 @@ pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
     return true;
 }
 
+// Mapping compartilhado pela raiz do kernel e pelas cópias supervisor herdadas.
+@system
+pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
+    return tlb_shootdown_page(address, 0);
+}
+
+// Mapping privado de processo. Sem PCID, CPUs fora desta raiz apenas ACKam; uma
+// futura carga de CR3 descarta traduções non-global antigas antes de executar.
+@system
+pub fn tlb_shootdown_address_space_page(root: u64, address: u64) -> bool {
+    if root == 0 || !x86_page_aligned(root) { return false; }
+    return tlb_shootdown_page(address, root);
+}
+
 @system
 pub fn tlb_shootdown_handle_ipi() -> bool {
     if !tlb_shootdown_is_ready() { return false; }
@@ -259,13 +281,20 @@ pub fn tlb_shootdown_handle_ipi() -> bool {
         if !TLB_SHOOTDOWN_CPU_ACTIVE[slot] { return false; }
         let lo: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_LO;
         let hi: *mut u32 = &mut TLB_SHOOTDOWN_ADDRESS_HI;
+        let root_lo: *mut u32 = &mut TLB_SHOOTDOWN_ROOT_LO;
+        let root_hi: *mut u32 = &mut TLB_SHOOTDOWN_ROOT_HI;
         let gen: *mut u32 = &mut TLB_SHOOTDOWN_GENERATION;
         let address_lo = x86_mmio_read32(tlb_u32_address(lo)) as u64;
         let address_hi = x86_mmio_read32(tlb_u32_address(hi)) as u64;
+        let target_root_lo = x86_mmio_read32(tlb_u32_address(root_lo)) as u64;
+        let target_root_hi = x86_mmio_read32(tlb_u32_address(root_hi)) as u64;
         let generation = x86_mmio_read32(tlb_u32_address(gen));
         let address = address_lo | (address_hi << 32);
+        let target_root = target_root_lo | (target_root_hi << 32);
         if address == 0 || generation == 0 || !x86_page_aligned(address) { return false; }
-        x86_invlpg(address);
+        if target_root != 0 && !x86_page_aligned(target_root) { return false; }
+        let current_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+        if target_root == 0 || current_root == target_root { x86_invlpg(address); }
         __dma_fence();
         let ack: *mut u32 = &mut TLB_SHOOTDOWN_ACK[slot];
         x86_mmio_write32(tlb_u32_address(ack), generation);
