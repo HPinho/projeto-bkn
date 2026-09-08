@@ -34,6 +34,11 @@ class Crc32Tests(unittest.TestCase):
         self.assertIn("current = (current >> 1) ^ CRC32_POLYNOMIAL", text)
         self.assertIn("return crc ^ 0xFFFFFFFF", text)
 
+    def test_sotlas_crc_marks_raw_pointer_index_as_unsafe(self):
+        text = CRC.read_text(encoding="utf-8")
+        self.assertIn("let byte = unsafe { data[i] };", text)
+        self.assertNotIn("state ^ (data[i] as u32)", text)
+
     def test_gpt_uses_native_crc32_layer(self):
         text = GPT.read_text(encoding="utf-8")
         self.assertIn("import kernel::storage::crc32::*;", text)
