@@ -66,18 +66,32 @@ fn none() -> *mut u8 {
 """
         parse_check(source)
 
-    def test_safe_layer_cannot_call_system_api_directly(self):
+    def test_safe_wrapper_may_call_system_abstraction(self):
         source = """
-module contract::system_layer;
+module contract::system_wrapper;
 @system
-fn privileged() -> void { }
-fn safe_layer() -> void { privileged(); }
+fn implementation() -> u32 { return 7; }
+fn safe_wrapper() -> u32 { return implementation(); }
+"""
+        parse_check(source)
+
+    def test_safe_layer_cannot_call_privileged_intrinsic_directly(self):
+        source = """
+module contract::system_intrinsic;
+fn safe_layer() -> void { __hlt(); }
 """
         with self.assertRaisesRegex(
             bootstrap.SotlasBootstrapError,
-            "API @system exige que a função chamadora seja @system",
+            "intrínseco privilegiado exige função @system",
         ):
             parse_check(source)
+
+    def test_safe_reference_deref_does_not_require_unsafe(self):
+        source = """
+module contract::safe_reference;
+fn read(value: &u32) -> u32 { return *value; }
+"""
+        parse_check(source)
 
 
 class SotlasCAbiTests(unittest.TestCase):
@@ -105,7 +119,7 @@ fn safe_layer() -> u64 { return foreign_tick(); }
 """
         with self.assertRaisesRegex(
             bootstrap.SotlasBootstrapError,
-            'FFI extern "C" exige que a função chamadora seja @system',
+            'FFI extern "C" exige função @system',
         ):
             parse_check(source)
 
