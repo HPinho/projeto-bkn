@@ -268,3 +268,20 @@ Além disso, manter os guardrails de:
   segurança do navegador. Diagnóstico baseado em etapas públicas, diff entre
   SHAs e reprodução local; validar os três workflows no SHA novo antes de
   declarar a correção definitivamente verde.
+
+# Diagnóstico de CI — 2026-09-08 / tracking de CR3 por CPU
+
+- Os runs CI #1002, NVMe-only #202 e SMP #105 falharam no SHA `915a0d6`.
+- A CI principal encontrou três contratos antigos que ainda exigiam a chamada
+  direta ao scheduler; eles agora validam o wrapper e a ordem seleção ->
+  publicação do CR3.
+- A falha bare-metal foi reproduzida localmente: o serial parava no primeiro
+  tick, em `BAKEN:HEX=T:00000001`. O timer podia chegar antes de o scheduler
+  estar ativo e antes do registro do BSP no shootdown, mas o wrapper tentava
+  publicar o CR3 e entrava no caminho fail-closed.
+- A publicação agora é obrigatória somente quando `scheduler_is_active()`;
+  antes disso não existe decisão de scheduling a publicar. Depois da ativação,
+  uma falha de tracking continua parando o kernel.
+- Validação local final: **1.115 testes**, build **141 módulos / 143 objetos**,
+  smoke single-core completo e smoke SMP completo até
+  `SMP_PROCESS_TLB_READY` e `SMP_RING3_ON_AP_READY`, sem `BAKEN:HEX=E:`.

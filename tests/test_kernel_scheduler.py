@@ -96,7 +96,13 @@ class KernelSchedulerTests(unittest.TestCase):
         timer = text.split("if vector == IRQ_VECTOR_TIMER as u64", 1)[1]
         timer = timer.split("if vector == IRQ_VECTOR_KEYBOARD as u64", 1)[0]
         self.assertIn("lapic_eoi();", timer)
-        self.assertIn("return scheduler_on_timer_interrupt(frame_address);", timer)
+        self.assertIn("return irq_schedule_publish_root(frame_address);", timer)
+        wrapper = text.split("fn irq_schedule_publish_root(frame_address: u64) -> u64", 1)[1]
+        wrapper = wrapper.split("fn irq_schedule_with_fpu", 1)[0]
+        self.assertLess(
+            wrapper.index("scheduler_on_timer_interrupt(frame_address)"),
+            wrapper.index("tlb_shootdown_publish_current_root()"),
+        )
 
     def test_scheduler_allocates_real_idle_stack_and_initial_frame(self):
         text = CORE.read_text(encoding="utf-8")

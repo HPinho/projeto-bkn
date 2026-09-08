@@ -45,8 +45,15 @@ class KernelSchedulerYieldTests(unittest.TestCase):
         irq = IRQ.read_text(encoding="utf-8")
         reschedule = irq.split("if vector == IRQ_VECTOR_RESCHEDULE as u64", 1)[1]
         reschedule = reschedule.split("if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64", 1)[0]
-        self.assertIn("return scheduler_on_timer_interrupt(frame_address);", reschedule)
+        self.assertIn("return irq_schedule_publish_root(frame_address);", reschedule)
         self.assertNotIn("lapic_eoi();", reschedule)
+
+        wrapper = irq.split("fn irq_schedule_publish_root(frame_address: u64) -> u64", 1)[1]
+        wrapper = wrapper.split("fn irq_schedule_with_fpu", 1)[0]
+        self.assertLess(
+            wrapper.index("scheduler_on_timer_interrupt(frame_address)"),
+            wrapper.index("tlb_shootdown_publish_current_root()"),
+        )
 
     def test_runtime_forces_probe_via_yield_before_waiting_for_timer_policy(self):
         runtime = RUNTIME.read_text(encoding="utf-8")

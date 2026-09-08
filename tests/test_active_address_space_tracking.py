@@ -39,6 +39,10 @@ class ActiveAddressSpaceTrackingTests(unittest.TestCase):
             plain.index("scheduler_on_timer_interrupt(frame_address)"),
             plain.index("tlb_shootdown_publish_current_root()"),
         )
+        self.assertIn(
+            "scheduler_is_active() && !tlb_shootdown_publish_current_root()",
+            plain,
+        )
 
         fpu = irq.split("fn irq_schedule_with_fpu(frame_address: u64) -> u64", 1)[1]
         fpu = fpu.split("@system\n@export", 1)[0]
@@ -49,6 +53,10 @@ class ActiveAddressSpaceTrackingTests(unittest.TestCase):
         self.assertLess(save, select)
         self.assertLess(select, publish)
         self.assertLess(publish, restore)
+        self.assertIn(
+            "scheduler_is_active() && !tlb_shootdown_publish_current_root()",
+            fpu,
+        )
 
     def test_no_fpu_scheduling_paths_use_publication_wrapper(self):
         irq = IRQ.read_text(encoding="utf-8")
@@ -57,7 +65,7 @@ class ActiveAddressSpaceTrackingTests(unittest.TestCase):
             2,
         )
         self.assertIn(
-            "let selected = scheduler_on_timer_interrupt(frame_address);\n    if !tlb_shootdown_publish_current_root()",
+            "let selected = scheduler_on_timer_interrupt(frame_address);\n    if scheduler_is_active() && !tlb_shootdown_publish_current_root()",
             irq,
         )
 

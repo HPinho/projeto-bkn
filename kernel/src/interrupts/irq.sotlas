@@ -98,7 +98,10 @@ pub fn irq_timer_count_for_cpu(cpu_slot: usize) -> u64 {
 @system
 fn irq_schedule_publish_root(frame_address: u64) -> u64 {
     let selected = scheduler_on_timer_interrupt(frame_address);
-    if !tlb_shootdown_publish_current_root() { loop {} }
+    // IRQs de timer podem chegar antes de smp_initialize_base() registrar o
+    // BSP e antes de scheduler_initialize() ativar qualquer contexto. Nessa
+    // janela nao existe decisao de scheduling para publicar.
+    if scheduler_is_active() && !tlb_shootdown_publish_current_root() { loop {} }
     return selected;
 }
 
@@ -111,7 +114,7 @@ fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     let old_terminated = scheduler_thread_is_terminated(old_tid);
     if old_tid != 0 && fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
     let selected = scheduler_on_timer_interrupt(frame_address);
-    if !tlb_shootdown_publish_current_root() { loop {} }
+    if scheduler_is_active() && !tlb_shootdown_publish_current_root() { loop {} }
     let new_tid = scheduler_current_thread_id();
     if x86_saved_frame_is_user(selected) {
         let kernel_rsp0 = selected + X86_KERNEL_THREAD_FRAME_BYTES;

@@ -33,9 +33,16 @@ class KernelSchedulerSleepTests(unittest.TestCase):
         timer = irq.split("if vector == IRQ_VECTOR_TIMER as u64", 1)[1].split("if vector == IRQ_VECTOR_KEYBOARD", 1)[0]
         eoi = timer.index("lapic_eoi()")
         wake = timer.index("scheduler_sleep_on_timer_tick(timer_count)")
-        schedule = timer.index("scheduler_on_timer_interrupt(frame_address)")
+        schedule = timer.index("irq_schedule_publish_root(frame_address)")
         self.assertLess(eoi, wake)
         self.assertLess(wake, schedule)
+
+        wrapper = irq.split("fn irq_schedule_publish_root(frame_address: u64) -> u64", 1)[1]
+        wrapper = wrapper.split("fn irq_schedule_with_fpu", 1)[0]
+        self.assertLess(
+            wrapper.index("scheduler_on_timer_interrupt(frame_address)"),
+            wrapper.index("tlb_shootdown_publish_current_root()"),
+        )
 
     def test_sleep_rejects_tick_overflow_and_duplicate_wait(self):
         text = SLEEP.read_text(encoding="utf-8")
