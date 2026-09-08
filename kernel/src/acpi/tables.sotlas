@@ -77,7 +77,7 @@ fn acpi_sdt_pointer(physical_address: u64) -> *const u8 {
             return virtual_address as *const u8;
         }
     }
-    return physical_address as *const u8;
+    return unsafe { physical_address as *const u8 };
 }
 
 @system
