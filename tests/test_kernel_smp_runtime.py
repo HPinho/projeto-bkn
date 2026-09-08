@@ -44,7 +44,7 @@ class KernelSmpRuntimeTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
-    def test_ap_runtime_loads_private_gdt_tss_shared_idt_and_keeps_if_clear(self):
+    def test_ap_runtime_loads_private_tables_before_controlled_scheduler_release(self):
         text = SMP.read_text(encoding="utf-8")
         body = text.split("pub fn sotlas_x86_smp_ap_runtime_entry", 1)[1].split("fn smp_start_one_ap", 1)[0]
         for token in (
@@ -55,14 +55,17 @@ class KernelSmpRuntimeTests(unittest.TestCase):
             "x86_gdt_activate_segments_raw(",
             "x86_ltr_raw(GDT_TSS_SELECTOR)",
             "x86_lidt_table_raw(idt_address, idt_limit())",
-            "if x86_interrupts_enabled()",
             "SMP_AP_RUNTIME_READY",
+            "while x86_mmio_read32(release) != 1",
+            "x86_mmio_write32(active, 1)",
+            "x86_sti_raw()",
         ):
             self.assertIn(token, text if token == "SMP_AP_RUNTIME_READY" else body)
-        self.assertNotIn("x86_sti_raw()", body)
+        self.assertLess(body.index("x86_mmio_write32(runtime_ready, 1)"), body.index("while x86_mmio_read32(release) != 1"))
+        self.assertLess(body.index("while x86_mmio_read32(release) != 1"), body.index("x86_sti_raw()"))
         self.assertNotIn("scheduler_", body)
 
-    def test_ap_runtime_initializes_cpu_local_fpu_pat_lapic_and_masked_timer(self):
+    def test_ap_runtime_initializes_cpu_local_state_and_keeps_timer_masked(self):
         smp = SMP.read_text(encoding="utf-8")
         body = smp.split("pub fn sotlas_x86_smp_ap_runtime_entry", 1)[1].split("fn smp_start_one_ap", 1)[0]
         for token in (
@@ -72,6 +75,7 @@ class KernelSmpRuntimeTests(unittest.TestCase):
             "lapic_timer_prepare_current_cpu_masked()",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("lapic_timer_unmask_periodic()", body)
         self.assertIn("pub fn fpu_enable_current_cpu() -> bool", FPU.read_text(encoding="utf-8"))
         self.assertIn("pub fn lapic_prepare_current_cpu_masked() -> bool", LAPIC.read_text(encoding="utf-8"))
         timer = LAPIC_TIMER.read_text(encoding="utf-8")
@@ -82,6 +86,7 @@ class KernelSmpRuntimeTests(unittest.TestCase):
         text = IRQ.read_text(encoding="utf-8")
         body = text.split("fn irq_schedule_with_fpu", 1)[1].split("@system\n@export", 1)[0]
         for token in (
+            "scheduler_switch_lock()",
             "let old_terminated = scheduler_thread_is_terminated(old_tid);",
             "let selected = scheduler_on_timer_interrupt(frame_address);",
             "if x86_saved_frame_is_user(selected)",
@@ -89,10 +94,11 @@ class KernelSmpRuntimeTests(unittest.TestCase):
             "tss_set_rsp0(kernel_rsp0)",
             "fpu_restore_thread(new_tid)",
             "fpu_release_thread(old_tid)",
+            "scheduler_switch_unlock()",
         ):
             self.assertIn(token, body)
 
-    def test_backend_exposes_native_ap_runtime_entry_address(self):
+    def test_backend_exposes_native_ap_runtime_and_smp_probe_addresses(self):
         cpu = CPU.read_text(encoding="utf-8")
         intrinsic = INTRINSICS.read_text(encoding="utf-8")
         self.assertIn("pub fn x86_smp_ap_runtime_entry_address() -> u64", cpu)
@@ -100,6 +106,8 @@ class KernelSmpRuntimeTests(unittest.TestCase):
         self.assertIn("extern void sotlas_x86_smp_ap_runtime_entry(void);", intrinsic)
         self.assertIn("static inline uint64_t __smp_ap_runtime_entry_address", intrinsic)
         self.assertIn('"__smp_ap_runtime_entry_address": Function(', intrinsic)
+        self.assertIn("pub fn x86_scheduler_smp_probe_entry_address() -> u64", cpu)
+        self.assertIn("extern void sotlas_x86_scheduler_smp_probe_entry(void);", intrinsic)
 
     def test_smp_workflow_requires_runtime_ready_marker(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")

@@ -1,0 +1,43 @@
+// Baken OS — spinlock x86-64 sem dependencia de runtime externo.
+//
+// xchg com operando de memoria e atomicamente locked no x86. O backend expõe
+// somente a primitiva; a politica de espera e ownership permanece em Sotlas.
+
+module kernel::sync::spinlock;
+
+import kernel::arch::x86_64::cpu::*;
+
+pub const SPINLOCK_UNLOCKED: u32 = 0;
+pub const SPINLOCK_LOCKED: u32 = 1;
+
+@repr(C)
+pub struct SpinLock {
+    pub state: u32;
+}
+
+@system
+pub fn spinlock_init(lock: *mut SpinLock) -> bool {
+    if lock == (null as *mut SpinLock) { return false; }
+    unsafe { (*lock).state = SPINLOCK_UNLOCKED; }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn spinlock_lock(lock: *mut SpinLock) -> bool {
+    if lock == (null as *mut SpinLock) { return false; }
+    let address = lock as u64;
+    loop {
+        if x86_atomic_exchange_u32(address, SPINLOCK_LOCKED) == SPINLOCK_UNLOCKED {
+            return true;
+        }
+        x86_cpu_pause();
+    }
+}
+
+@system
+pub fn spinlock_unlock(lock: *mut SpinLock) -> bool {
+    if lock == (null as *mut SpinLock) { return false; }
+    let address = lock as u64;
+    return x86_atomic_exchange_u32(address, SPINLOCK_UNLOCKED) == SPINLOCK_LOCKED;
+}

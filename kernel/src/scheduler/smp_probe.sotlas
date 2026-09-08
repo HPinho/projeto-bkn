@@ -1,0 +1,144 @@
+// Baken OS — prova de dispatch real de uma kernel thread em Application Processor.
+//
+// A thread e criada/pinned enquanto APs ainda estao com IF=0. Depois o BSP
+// libera os APs, envia IPI 0x44, observa execucao no AP, espera TERMINATED e
+// envia um segundo IPI para retirar a stack terminada e restaurar o idle frame.
+
+module kernel::scheduler::smp_probe;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::arch::x86_64::smp::*;
+import kernel::interrupts::irq::*;
+import kernel::interrupts::lapic::*;
+import kernel::scheduler::core::*;
+
+pub const SCHEDULER_SMP_PROBE_CPU_SLOT: usize = 1;
+pub const SCHEDULER_SMP_PROBE_SPIN_LIMIT: u64 = 10000000;
+
+static mut SCHEDULER_SMP_PROBE_EXECUTED: u32 = 0;
+static mut SCHEDULER_SMP_PROBE_CPU: u32 = 0xFFFFFFFF;
+
+@system
+fn scheduler_smp_probe_executed_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_PROBE_EXECUTED; return value as u64; }
+}
+
+@system
+fn scheduler_smp_probe_cpu_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_PROBE_CPU; return value as u64; }
+}
+
+@system
+@export
+pub fn sotlas_x86_scheduler_smp_probe_entry() -> void {
+    let cpu_slot = scheduler_current_cpu_slot();
+    let thread_id = scheduler_current_thread_id();
+    if cpu_slot == 0 || cpu_slot == SCHEDULER_INVALID_CPU_SLOT || thread_id == 0 { return; }
+    if scheduler_thread_owner_cpu(thread_id) != cpu_slot as u32 { return; }
+
+    let cpu_address = scheduler_smp_probe_cpu_address();
+    let executed_address = scheduler_smp_probe_executed_address();
+    if cpu_address == 0 || executed_address == 0 { return; }
+    x86_mmio_write32(cpu_address, cpu_slot as u32);
+    __dma_fence();
+    x86_mmio_write32(executed_address, 1);
+    __dma_fence();
+    return;
+}
+
+@system
+fn scheduler_smp_probe_wait_executed(cpu_slot: usize) -> bool {
+    let executed_address = scheduler_smp_probe_executed_address();
+    let cpu_address = scheduler_smp_probe_cpu_address();
+    if executed_address == 0 || cpu_address == 0 { return false; }
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
+        if x86_mmio_read32(executed_address) == 1 &&
+           x86_mmio_read32(cpu_address) == cpu_slot as u32 { return true; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn scheduler_smp_probe_wait_terminated(thread_id: u64, cpu_slot: usize) -> bool {
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
+        __dma_fence();
+        if scheduler_thread_is_terminated(thread_id) &&
+           scheduler_thread_owner_cpu(thread_id) == cpu_slot as u32 { return true; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn scheduler_smp_probe_wait_idle(thread_id: u64, cpu_slot: usize, idle_epoch_before: u64) -> bool {
+    let mut spins: u64 = 0;
+    while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
+        __dma_fence();
+        if scheduler_secondary_idle_epoch(cpu_slot) > idle_epoch_before &&
+           scheduler_thread_owner_cpu(thread_id) == SCHEDULER_CPU_NONE { return true; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    return false;
+}
+
+@system
+fn scheduler_smp_probe_emit_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 23] = [
+        66,65,75,69,78,58,83,77,80,95,84,72,82,69,65,68,95,79,78,95,65,80,10
+    ];
+    let mut index: usize = 0;
+    while index < 23 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn scheduler_smp_probe_run() -> bool {
+    if !scheduler_is_active() || !smp_is_ready() { return false; }
+    if smp_runtime_ap_count() == 0 { return true; }
+    if SCHEDULER_SMP_PROBE_CPU_SLOT >= SCHEDULER_CPU_SLOT_COUNT { return false; }
+
+    let entry = x86_scheduler_smp_probe_entry_address();
+    if entry == 0 { return false; }
+    let executed_address = scheduler_smp_probe_executed_address();
+    let cpu_address = scheduler_smp_probe_cpu_address();
+    if executed_address == 0 || cpu_address == 0 { return false; }
+    x86_mmio_write32(executed_address, 0);
+    x86_mmio_write32(cpu_address, 0xFFFFFFFF);
+    __dma_fence();
+
+    // Publica afinidade antes de permitir qualquer IRQ no AP.
+    let idle_epoch_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let thread_id = scheduler_create_kernel_thread_on_cpu(
+        entry,
+        SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
+        SCHEDULER_SMP_PROBE_CPU_SLOT
+    );
+    if thread_id == 0 { return false; }
+
+    if !smp_release_aps_for_scheduler() { return false; }
+    if smp_scheduler_active_ap_count() != smp_runtime_ap_count() { return false; }
+
+    let apic_id = smp_cpu_apic_id(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_executed(SCHEDULER_SMP_PROBE_CPU_SLOT) { return false; }
+    if !scheduler_smp_probe_wait_terminated(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT) { return false; }
+
+    // Segundo IPI e parte da prova: ele salva a stack TERMINATED, remove o
+    // ownership e retorna pelo frame idle original do AP.
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_idle(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_epoch_before) {
+        return false;
+    }
+    return scheduler_smp_probe_emit_marker();
+}
