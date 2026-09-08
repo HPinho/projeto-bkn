@@ -59,7 +59,7 @@ pub fn x86_saved_frame(frame_address: u64) -> *mut X86KernelThreadFrame {
     if !x86_kernel_thread_frame_address_valid(frame_address) {
         return null as *mut X86KernelThreadFrame;
     }
-    return frame_address as *mut X86KernelThreadFrame;
+    return unsafe { frame_address as *mut X86KernelThreadFrame };
 }
 
 @system
@@ -107,7 +107,7 @@ pub fn x86_saved_frame_set_result(frame_address: u64, value: u64) -> bool {
 pub fn x86_kernel_thread_dump_last_prepared_frame() -> bool {
     let frame_address = x86_kernel_thread_last_prepared_frame();
     if !x86_kernel_thread_frame_address_valid(frame_address) { return false; }
-    let frame = frame_address as *const X86KernelThreadFrame;
+    let frame = unsafe { frame_address as *const X86KernelThreadFrame };
     if frame == (null as *const X86KernelThreadFrame) { return false; }
 
     unsafe {
@@ -145,7 +145,7 @@ pub fn x86_kernel_thread_prepare_frame(stack_top: u64, entry_rip: u64) -> u64 {
     if trampoline_rip == 0 { return 0; }
     let frame_address = aligned_top - X86_KERNEL_THREAD_FRAME_BYTES;
     if !x86_kernel_thread_frame_address_valid(frame_address) { return 0; }
-    let frame = frame_address as *mut X86KernelThreadFrame;
+    let frame = unsafe { frame_address as *mut X86KernelThreadFrame };
     if !x86_thread_zero_frame(frame) { return 0; }
     unsafe {
         (*frame).r11 = entry_rip;
@@ -173,7 +173,7 @@ pub fn x86_user_thread_prepare_frame(kernel_stack_top: u64,
     if kernel_top <= X86_KERNEL_THREAD_FRAME_BYTES || user_top == 0 { return 0; }
     let frame_address = kernel_top - X86_KERNEL_THREAD_FRAME_BYTES;
     if !x86_kernel_thread_frame_address_valid(frame_address) { return 0; }
-    let frame = frame_address as *mut X86KernelThreadFrame;
+    let frame = unsafe { frame_address as *mut X86KernelThreadFrame };
     if !x86_thread_zero_frame(frame) { return 0; }
     unsafe {
         (*frame).rip = user_entry;
