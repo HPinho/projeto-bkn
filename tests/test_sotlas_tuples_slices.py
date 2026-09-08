@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Testes de tuplas, slices, operador de erro (?) e defer na linguagem Sotlas."""
+"""Testes de migração do frontend histórico: tuplas, slices, ? e defer.
+
+Esses testes exercitam recursos ainda não portados ao frontend canônico. Eles
+não definem a rota pública de compilação usada pelo BakenOS.
+"""
 
 import unittest
 from pathlib import Path
@@ -8,7 +12,6 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
-from sotlas import compile_source
 from sotlas.lexer import Lexer
 from sotlas.parser import Parser
 from sotlas.sema import Sema
