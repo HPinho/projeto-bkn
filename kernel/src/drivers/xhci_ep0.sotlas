@@ -42,7 +42,7 @@ fn xhci_ep0_slot_virtual(index: u32) -> *mut XhciTrb {
     let base = direct_map_virtual_address(xhci_context_ep0_ring_physical());
     if base == 0 { return null as *mut XhciTrb; }
     let offset = (index as u64) * XHCI_TRB_SIZE;
-    return (base + offset) as *mut XhciTrb;
+    return unsafe { (base + offset) as *mut XhciTrb };
 }
 
 @system
