@@ -18,7 +18,8 @@ pub fn crc32_ieee_update(crc: u32, data: *const u8, length: usize) -> u32 {
 
     let mut state = crc;
     for mut i in 0..length {
-        let mut current = state ^ (data[i] as u32);
+        let byte = unsafe { data[i] };
+        let mut current = state ^ (byte as u32);
         for mut bit in 0..8 {
             if (current & 1) != 0 {
                 current = (current >> 1) ^ CRC32_POLYNOMIAL;
