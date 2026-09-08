@@ -81,8 +81,10 @@ fn xhci_start_build_shared_arena() -> DmaBuffer {
 
 @system
 fn xhci_start_set_bus_master(enabled: bool) -> bool {
-    let candidate = xhci_discovery_candidate(0);
-    if candidate == (null as *const XhciControllerCandidate) || !candidate.valid { return false; }
+    let candidate_ptr = xhci_discovery_candidate(0);
+    if candidate_ptr == (null as *const XhciControllerCandidate) { return false; }
+    let candidate = unsafe { *candidate_ptr };
+    if !candidate.valid { return false; }
     let current = pci_read_config16(candidate.bus, candidate.slot, candidate.func, 0x04);
     let updated = if enabled {
         current | PCI_COMMAND_BUS_MASTER | PCI_COMMAND_MEMORY_SPACE

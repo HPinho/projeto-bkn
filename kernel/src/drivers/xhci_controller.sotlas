@@ -211,8 +211,9 @@ pub fn xhci_controller_prepare_first() -> bool {
     if xhci_discovery_scan() == 0 { return false; }
     xhci_controller_checkpoint(2, '5' as u8);
 
-    let candidate = xhci_discovery_candidate(0);
-    if candidate == (null as *const XhciControllerCandidate) { return false; }
+    let candidate_ptr = xhci_discovery_candidate(0);
+    if candidate_ptr == (null as *const XhciControllerCandidate) { return false; }
+    let candidate = unsafe { *candidate_ptr };
     if !candidate.valid || !candidate.mmio_usable || candidate.mmio_base == 0 { return false; }
     xhci_controller_checkpoint(3, '6' as u8);
 
