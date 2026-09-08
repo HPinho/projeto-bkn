@@ -76,7 +76,12 @@ class ProcessRegistryTests(unittest.TestCase):
                             body.index("process_vm_unpin(pid)"))
 
     def test_registry_documents_non_nested_tlb_publication(self):
-        self.assertIn("SOLTA o registro e somente então espera o shootdown", self.source)
+        comments = " ".join(
+            line.lstrip()[2:].strip()
+            for line in self.source.splitlines()
+            if line.lstrip().startswith("//")
+        )
+        self.assertIn("SOLTA o registro e somente então espera o shootdown", comments)
         pmm = (ROOT / "kernel/src/memory/pmm_allocator.sotlas").read_text(encoding="utf-8")
         tlb = (ROOT / "kernel/src/memory/tlb_shootdown.sotlas").read_text(encoding="utf-8")
         self.assertNotIn("process_registry_", pmm)
