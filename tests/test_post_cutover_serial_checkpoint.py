@@ -49,7 +49,7 @@ class PostCutoverSerialCheckpointTests(unittest.TestCase):
             "pub fn post_cutover_cpu_tables_active", 1
         )[0]
         context = body.index("x86_serial_write_stage_marker('0' as u8)")
-        cr3 = body.index("x86_mmu_activate_root(context.root_physical)")
+        cr3 = body.index("x86_mmu_activate_root(snapshot.root_physical)")
         after_cr3 = body.index("x86_serial_write_stage_marker('1' as u8)")
         tables = body.index("x86_serial_write_stage_marker('2' as u8)")
         loaded = body.index("x86_serial_write_stage_marker('3' as u8)")
