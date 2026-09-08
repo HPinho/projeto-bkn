@@ -132,7 +132,7 @@ pub fn page_fault_was_shadow_stack(error_code: u64) -> bool {
 @system
 @export
 pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> void {
-    let frame = frame_address as *const ExceptionRawFrame;
+    let frame = unsafe { frame_address as *const ExceptionRawFrame };
 
     if frame == (null as *const ExceptionRawFrame) {
         __cli();
