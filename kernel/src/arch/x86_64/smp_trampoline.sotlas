@@ -88,7 +88,7 @@ pub fn smp_trampoline_build(physical: u64,
 
     let virtual_address = direct_map_virtual_address(physical);
     if virtual_address == 0 { return false; }
-    let base = virtual_address as *mut u8;
+    let base = unsafe { virtual_address as *mut u8 };
 
     unsafe {
         let mut index: usize = 0;
