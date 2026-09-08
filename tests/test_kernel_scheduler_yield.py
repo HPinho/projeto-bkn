@@ -41,7 +41,7 @@ class KernelSchedulerYieldTests(unittest.TestCase):
     def test_software_reschedule_never_sends_lapic_eoi(self):
         irq = IRQ.read_text(encoding="utf-8")
         reschedule = irq.split("if vector == IRQ_VECTOR_RESCHEDULE as u64", 1)[1]
-        reschedule = reschedule.split("if vector == IRQ_VECTOR_TIMER as u64", 1)[0]
+        reschedule = reschedule.split("if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64", 1)[0]
         self.assertIn("return scheduler_on_timer_interrupt(frame_address);", reschedule)
         self.assertNotIn("lapic_eoi();", reschedule)
 
