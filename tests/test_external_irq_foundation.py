@@ -2,6 +2,7 @@
 """Guardrails da fundação de IRQs externos pós-cutover."""
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,14 @@ IOAPIC = ROOT / "kernel/src/interrupts/ioapic.sotlas"
 I8042 = ROOT / "kernel/src/drivers/i8042.sotlas"
 POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 X86 = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
+
+
+def irq_vector_branch(text: str, vector: str) -> str:
+    """Return only one vector branch, independent of dispatcher branch order."""
+    marker = f"if vector == {vector}"
+    tail = text.split(marker, 1)[1]
+    next_branch = re.search(r"\n\s*if vector == IRQ_VECTOR_[A-Z0-9_]+", tail)
+    return tail[:next_branch.start()] if next_branch else tail
 
 
 class ExternalIrqFoundationTests(unittest.TestCase):
@@ -32,20 +41,20 @@ class ExternalIrqFoundationTests(unittest.TestCase):
 
     def test_spurious_vector_never_sends_eoi(self):
         text = IRQ.read_text(encoding="utf-8")
-        body = text.split("if vector == IRQ_VECTOR_SPURIOUS", 1)[1].split("if vector == IRQ_VECTOR_TIMER", 1)[0]
+        body = irq_vector_branch(text, "IRQ_VECTOR_SPURIOUS")
         self.assertIn("IRQ_SPURIOUS_COUNT", body)
         self.assertNotIn("lapic_eoi()", body)
 
     def test_real_irq_vectors_send_lapic_eoi(self):
         text = IRQ.read_text(encoding="utf-8")
         for vector in ("IRQ_VECTOR_TIMER", "IRQ_VECTOR_KEYBOARD", "IRQ_VECTOR_MOUSE"):
-            body = text.split(f"if vector == {vector}", 1)[1].split("return;", 1)[0]
+            body = irq_vector_branch(text, vector)
             self.assertIn("lapic_eoi()", body)
 
     def test_keyboard_mouse_use_bounded_irq_drain_before_eoi(self):
         text = IRQ.read_text(encoding="utf-8")
         for vector in ("IRQ_VECTOR_KEYBOARD", "IRQ_VECTOR_MOUSE"):
-            body = text.split(f"if vector == {vector}", 1)[1].split("return;", 1)[0]
+            body = irq_vector_branch(text, vector)
             self.assertIn("i8042_drain_irq_output();", body)
             self.assertNotIn("i8042_initialize_polling", body)
             self.assertLess(body.index("i8042_drain_irq_output();"), body.index("lapic_eoi();"))
