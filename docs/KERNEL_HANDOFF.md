@@ -1,170 +1,233 @@
-# Baken OS / Sotlas — continuidade do kernel
+# Baken OS / Sotlas — Kernel Handoff
 
-Atualizado em 2026-09-07. Este documento distingue implementação, contratos
-estáticos e prova de execução; não equivale a uma certificação do kernel.
+Atualizado em 2026-09-08.
 
-## Ponto de partida confirmado
+## Estado atual
 
-- Repositório: https://github.com/HPinho/projeto-bkn
-- Checkout: `E:\projeto-bkn`, branch `main`, base desta rodada `59f1a16`.
-- Kernel escrito em `.sotlas`; compilador em `tools/sotlas_compile/`.
-- Acesso ao terminal: prefixar comandos com `rtk`; usar `rtk proxy` se o
-  comando filtrado não funcionar. Ler as instruções AGENTS/RTK antes de trabalhar.
-- Não descartar alterações locais nem declarar funcionalidades completas por
-  existirem testes que apenas procuram texto no código.
+A **Fase 0 — Fundação Bare-Metal está fechada**.
 
-## Evidência já obtida
+Checkpoint técnico validado:
 
-- Confirmados no GitHub: runs **34158406771** e **34158406869**, ambos com
-  sucesso em `59f1a165e76078d659800b1c4f3af310e0e7b967` (registro de processos).
-- Confirmados no GitHub: CI principal **34156827304** e NVMe-only
-  **34156827300**, ambos com sucesso em `8f9050d5dd7d695be04c9c39765f5b3f68c89a0d`.
-  Incluem a prova CR3 primeira → segunda → primeira → kernel e os gates
-  reforçados. Essa validação não se estende a alterações posteriores.
-- CI principal 34155388044 e NVMe-only 34155387973 na base `dcd48c9`
-  consultados no GitHub: sucesso. O NVMe exige `SCHEDULER_ROUND_TRIP`.
-- Frame sintético de thread corrigido: 21 qwords / 168 bytes, incluindo
-  RIP, CS, RFLAGS, RSP e SS; arquivo `kernel/src/arch/x86_64/thread_context.sotlas`.
-- Rodada local anterior: 987 testes passaram; rodada direcionada posterior:
-  50 testes passaram. Não somar essas contagens: há sobreposição.
-- Grafo Sotlas: 126 módulos, sem módulos fora da rota ou raízes órfãs.
-
-## Implementado na base (alcance limitado ao código e smoke existentes)
-
-- Cutover UEFI, ExitBootServices, stack/CR3, GDT/TSS/IDT, PMM/VMM/direct-map.
-- ACPI/APIC/timer, PCI/DMA, xHCI/HID, AHCI/NVMe, probes GPT/FAT32, PAT/WC.
-- Scheduler e threads de kernel: round trip, yield, wait/wakeup, sleep,
-  thread_exit/reaper e liberação de stack.
-- Heap PMM-backed com split/coalesce/reuso: 256 descritores; exclusão por
-  interrupções locais, NÃO é sincronização SMP. Arenas permanecem reservadas.
-- `kernel/src/process/address_space.sotlas`: raízes privadas, mapeamento de
-  páginas de usuário e self-test de backing distinto para mesmo VA.
-  NÃO executa Ring 3 nem troca CR3 para rodar um processo.
-
-## Alterações publicadas em 8f9050d
-
-- `tools/scripts/verify_kernel_smoke.py`: gate comum que rejeita qualquer
-  `BAKEN:HEX=E:` e exige heap, isolamento, scheduler, yield, wait, sleep e reaper.
-- `tests/test_kernel_smoke_gate.py`: testes comportamentais e integração.
-- `.github/workflows/baken_ci.yml` e `baken_nvme_only.yml`: usam esse gate;
-  NVMe também limita instalação de dependências a dez minutos.
-- Publicadas pelo usuário; os dois workflows acima passaram.
-
-## Sequência de implementação restante
-
-1. Prova controlada CR3 concluída no smoke. Agora auditar ownership/lifetime
-   para processos duradouros, além do self-test temporário.
-2. Vínculo PID/TID, CR3 e reaper CPL0 implementado nesta rodada; ainda falta
-   contexto de entrada CPL3 e integração userspace.
-3. Ring 3: stack de usuário, frame de entrada, TSS.RSP0 e caminho de retorno
-   seguro; validar exceções e permissões de páginas em QEMU.
-4. Syscalls: definir ABI, entrada/saída, validação de ponteiros e cópias
-   usuário/kernel; impedir acesso direto arbitrário à memória do kernel.
-5. Loader userspace Sotlas: formato, segmentos, limites, W^X, entrypoint,
-   stack e rejeição de imagens inválidas. Primeiro programa isolado mínimo.
-6. Contexto FPU/SIMD por thread: política de CPU e save/restore testado.
-7. SMP: startup AP, estado por CPU, locks, TLB shootdown e scheduler multicore.
-
-Cada etapa precisa de testes negativos e prova runtime, não apenas markers
-incondicionais. O objetivo atual é implementar incrementalmente esta sequência;
-não afirmar que o kernel inteiro está pronto antes dessas provas.
-
-## Comandos de validação
-
-```powershell
-rtk proxy py -m unittest discover -s tests
-rtk proxy py tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
-rtk proxy git diff --check
+```text
+d5ad8e9163ee10b5e6d84162bc43e5a7722a00f5
+feat(smp): preempt and resume real Ring 3 process on AP
 ```
 
-Build/QEMU de referência: os dois workflows em `.github/workflows/`.
-Verificar o SHA do run antes de atribuir sucesso a alterações novas.
+Esse SHA passou simultaneamente:
 
-## Histórico da etapa CR3 (já publicada)
+- CI principal #987 — run `34271845602`;
+- SMP #90 — run `34271845718`;
+- NVMe-only #187 — run `34271845584`.
 
-- Documento criado primeiro, conforme pedido do usuário.
-- Implementado localmente `process_address_space_cr3_probe`: dentro do self-test
-  BSP com IRQs desligadas, alterna primeira raiz → segunda → primeira, lê o mesmo
-  VA por operações voláteis e restaura CR3 original antes de liberar tabelas.
-  A prova é pré-requisito do marker existente `PROCESS_ISOLATION_READY`.
-- Atualizado teste que antes proibia toda troca CR3: agora exige restauração,
-  leituras voláteis e ausência de retorno antecipado na região de troca.
-- Testes direcionados: 17 passaram; grafo: 126 módulos válidos.
-- Suíte completa da nova etapa: **988 testes passaram em 63,571 s**.
-  Build nativo: compilação dos módulos passou, mas link EFI falhou:
-  `kernel__storage__fat32_path.o: undefined reference to memset`.
-  GCC encontrado pelo compilador em `tools/w64devkit/bin/gcc.exe`, embora fora
-  do PATH. Falha do toolchain local; os builds/QEMU Linux de `8f9050d` passaram.
-  Saída separada: `build/cr3-probe/BOOTX64.EFI`, manifest
-  `build/cr3-probe.manifest.json`. Não confundir com imagem anterior de CI.
-- Nenhum suporte Ring 3/syscall/SMP foi adicionado nesta etapa. Próximo passo:
-  prover/verificar as primitivas freestanding exigidas pelo GCC (`memset` é a
-  referência não resolvida observada; não mascarar erro nem adicionar libc ao
-  kernel), repetir link e validar boot/QEMU antes de avançar para lifetime/PID/TID e
-  contexto de processo. A etapa CR3 foi publicada pelo usuário em `8f9050d`.
+O CI principal passou suíte completa, grafo Sotlas, build nativo, ISO e smoke QEMU. O SMP passou dispatch em AP, timer, TLB shootdown e processo Ring 3 real preemptado e retomado no CPU 1. O NVMe-only passou contracts, build, fixture e boot proof.
 
-## Registro de processos — publicado em 59f1a16
+## Arquitetura que deve ser preservada
 
-- Implementado `kernel/src/process/registry.sotlas`: 16 slots BSP, PID 0
-  reservado, PIDs monotônicos sem wrap/reuso, ownership privado das raízes.
-- APIs kernel-only: `process_create`, `process_destroy`, `process_retain`,
-  `process_release`. Todas preservam IF; não são APIs de syscall.
-- Destruição exige zero referências e sucesso de `process_address_space_destroy`
-  (este também rejeita raiz ativa ou folhas user presentes).
-- Self-test de boot: enche os slots, recusa tabela cheia, bloqueia destruição
-  com referência, rejeita underflow e PID antigo, reutiliza slot com PID novo,
-  verifica devolução da contagem de páginas PMM ao valor inicial.
-- Integrado após a prova CR3 e antes de `scheduler_initialize`. O gate comum
-  dos dois workflows exige `BAKEN:PROCESS_REGISTRY_READY`; o marker só é
-  emitido depois de ativação bem-sucedida. Os runs da base 59f1a16 passaram.
-- `tests/test_process_registry.py`: contratos estáticos complementares; não
-  confundir com execução do self-test em hardware.
-- Grafo: 127 módulos. Rodada intermediária: 995 testes passaram.
-- Corrigida a referência local ausente a `memset`: suporte ABI freestanding
-  em `tools/sotlas_compile/runtime/memory.c`, compilado pelo driver modular.
-  Implementa `memset`, `memcpy`, `memmove`, `memcmp` por bytes voláteis para
-  evitar chamadas recursivas geradas pelo otimizador. Não vincula libc ao EFI.
-- `tests/test_freestanding_memory.py` compila e executa essas funções com GCC;
-  prova de limites, retorno, overlap e comparação unsigned passou localmente.
-- Build EFI local após essa correção: **sucesso, 129 objetos / 127 módulos**,
-  saída `build/process-registry/BOOTX64.EFI`. A falha `memset` está resolvida
-  nesse build. Nenhum QEMU local foi executado.
-- Atualizado `tests/test_sotlas_resolver.py`: exige o objeto ABI adicional e
-  o bootloader explicitamente. **Suíte final: 996 testes passaram em 62,249 s**.
-  `git diff --check` passou; imagem identificada como PE x86-64 / EFI application.
-- O registro não equivale a Ring 3 funcional.
-- Limitação histórica de criação a partir da raiz corrente: corrigida na rodada
-  seguinte pela captura da raiz canônica do kernel.
-- A rodada seguinte integra vínculo thread–PID e contexto CR3; TSS por thread
-  e Ring 3 permanecem como passos posteriores.
-  FPU/SIMD, syscalls, loader userspace e SMP continuam pendentes.
-- Essa etapa foi publicada pelo usuário em 59f1a16.
+- UEFI é somente bootstrap.
+- Depois de `ExitBootServices()`, o kernel não usa Boot Services, Runtime Services, Pointer Protocol, Block I/O UEFI ou `EFI_SYSTEM_TABLE`.
+- O kernel, drivers, gráficos, UI e serviços pertencem ao código Sotlas.
+- Python pertence ao host: compilador, build, testes e tooling.
+- O compilador Sotlas deve permanecer genérico: lexer/parser/AST/IR/lowering/ABI/backend/intrínsecos, sem lógica específica de UI ou drivers do Baken.
+- `BakenBootInfo` não pode voltar a transportar pontes executáveis para firmware.
+- W+X continua fail-closed.
+- PAT/WC, MMIO e page-table mutations pertencem ao VMM/active page tables.
+- TSS/RSP0 é per-CPU.
+- Hardware da certificação não pode ser substituído por mocks que apenas retornam sucesso.
 
-## Rodada atual — scheduler com PID/CR3 (um único commit solicitado)
+## Fundação comprovada
 
-- `KernelThread` agora carrega PID e raiz física. PID 0 permanece kernel/idle.
-- Criação de thread de processo retém a referência antes da publicação e
-  mantém IF desligado até gravar PID/root; desfaz retenção nas falhas de criação.
-- Seleção pelo scheduler troca CR3 antes de retomar o frame. Contexto continua
-  CPL0, com stack de kernel compartilhada pelas raízes supervisor.
-- Reaper libera a referência depois de devolver/cachear a stack de uma thread
-  não corrente e antes de reutilizar o slot. TID não faz wrap.
-- A criação de address spaces usa a raiz canônica do kernel capturada no bring-up,
-  não a raiz de outro processo que eventualmente esteja executando.
-- Probe da run queue usa um processo real do registro; a entrada verifica CR3;
-  o bootstrap exige reaper, retorno à raiz do kernel e destruição do processo.
-  Só então emite `BAKEN:PROCESS_SCHEDULER_READY`, exigido no gate comum.
-- Runner QEMU local agora usa gate completo (não para em BARE_METAL_READY) e
-  inicializa também o sentinela de leitura AHCI do setor 1023.
-- **Rodada final: 1.004 testes passaram em 60,616 s**; `git diff --check` passou.
-- **Build EFI passou:** 127 módulos / 129 objetos; imagem
-  `build/process-scheduler/BOOTX64.EFI`, ISO `build/process-scheduler/baken.iso`.
-- **Smoke QEMU local passou**, incluindo `PROCESS_SCHEDULER_READY`, wait/wakeup,
-  sleep e verificação de disco SATA/FAT32/NVMe, sem `BAKEN:HEX=E:`.
-  Evidência local: `build/foundation-ryem021e/build/qemu-serial.log` (ignorada
-  pelo Git). Esse smoke termina quando todos os gates passam, não é um soak test.
-- **Não concluído:** Ring 3/TSS.RSP0 por thread, syscalls e user-copy, loader
-  userspace, contexto FPU/SIMD e SMP. Esta rodada não implementa o kernel inteiro.
-- Não confundir execução CPL0 sob raiz privada com execução isolada CPL3.
-- Ao continuar: validar o SHA novo no CI; depois preparar TSS/kernel stack de
-  entrada por thread, frames CPL3 e retorno seguro antes de expor syscalls.
+### Boot / CPU / memória
+
+- ExitBootServices real;
+- stack trampoline e stack própria;
+- CR3 Baken;
+- W^X e guard stack;
+- GDT, segment reload, TSS/LTR e IDT;
+- PMM, VMM, direct-map e active page tables;
+- PAT e framebuffer WC;
+- auditoria zero-UEFI pós-cutover.
+
+### Plataforma / hardware
+
+- ACPI/MADT;
+- LAPIC/IOAPIC;
+- IRQ e LAPIC timer;
+- PCI e DMA;
+- xHCI/USB HID;
+- AHCI;
+- NVMe;
+- BlockDevice;
+- GPT/MBR/FAT32.
+
+### Kernel Core já existente
+
+Embora formalmente pertençam à evolução de Kernel Core, várias peças já estão implementadas e testadas:
+
+- scheduler preemptivo;
+- threads de kernel;
+- wait/wakeup e sleep;
+- thread exit e reaper;
+- heap PMM-backed;
+- registro de processos;
+- address spaces privados;
+- PID/TID e CR3 por processo;
+- Ring 3;
+- syscalls;
+- user-copy;
+- contexto FPU/SIMD por thread no caminho do scheduler;
+- scheduler SMP;
+- TLB shootdown para mappings kernel-global;
+- processo real pinned em AP;
+- timer preemptando frame CPL3 no AP;
+- retorno comprovado ao mesmo processo em CPL3 antes do `exit`;
+- retorno ao kernel CR3, reaper e teardown.
+
+## Limites atuais — não confundir com regressão da Fundação
+
+O checkpoint não declara prontos os seguintes comportamentos genéricos:
+
+1. **Migração irrestrita de processos entre CPUs**
+   - o processo SMP provado é explicitamente pinned no CPU 1;
+   - `scheduler_create_process_thread()` continua preservando o comportamento BSP histórico;
+   - a API `scheduler_create_process_thread_on_cpu()` permite prova controlada em AP.
+
+2. **TLB shootdown por address space de usuário**
+   - o shootdown kernel-global está implementado;
+   - mappings de usuário do probe são construídos antes do dispatch e desmontados depois que o AP voltou ao kernel root;
+   - ainda não liberar mutação concorrente de PTE de processo sem um protocolo root-aware.
+
+3. **Process registry lock + IPI**
+   - antes de esperar ACK remoto durante mutação de address space, a aquisição do lock deve ser compatível com recebimento de IPI;
+   - evitar spin com IF=0 que possa bloquear o próprio shootdown necessário para progredir.
+
+4. **Heap SMP**
+   - revisar a sincronização do heap global antes de permitir uso concorrente amplo por processos/serviços em múltiplos CPUs.
+
+5. **FPU/SIMD em migração**
+   - save/restore passa pelo scheduler e a prova CPL3/AP atravessa esse caminho;
+   - ainda falta prova explícita de migração da mesma thread entre CPUs preservando ownership e estado SIMD.
+
+## Próximo trabalho — Fase 1
+
+A ordem recomendada é esta:
+
+### 1. Active address-space tracking per CPU
+
+Adicionar uma camada baixa que saiba qual CR3/root está ativo em cada CPU sem criar dependência circular scheduler ↔ memory.
+
+A atualização deve ocorrer sempre que o scheduler:
+
+- seleciona uma process thread;
+- troca CR3;
+- retorna ao idle/kernel root.
+
+### 2. Process-root TLB shootdown
+
+Criar uma operação conceitualmente equivalente a:
+
+```text
+tlb_shootdown_address_space_page(root, virtual_address)
+```
+
+Requisitos:
+
+- invalidar somente CPUs que podem possuir tradução daquele root;
+- permitir requester BSP ou AP;
+- ACK/generation sem depender de requester fixo;
+- funcionar se o requester não estiver usando o root alvo;
+- preservar o shootdown kernel-global existente.
+
+### 3. Tornar locks envolvidos IPI-friendly
+
+Antes de segurar lock de processo enquanto espera shootdown remoto:
+
+- usar política semelhante ao active-page-table lock;
+- `irq_save_disable` + `try_lock`;
+- se ocupado, restaurar IRQ e `pause` antes de tentar novamente;
+- nunca criar deadlock onde um CPU espera ACK de outro que está girando com IF=0.
+
+### 4. Migração controlada BSP ↔ AP
+
+Adicionar uma prova real:
+
+```text
+process thread em CPL3 no BSP
+→ timer/preempção
+→ thread volta READY
+→ scheduler a seleciona no AP
+→ CR3 correto
+→ TSS.RSP0 do AP correto
+→ user state continua
+→ syscall
+→ exit
+→ kernel root
+→ reaper
+```
+
+A prova deve rejeitar qualquer `BAKEN:HEX=E:` e registrar CPU antes/depois.
+
+### 5. FPU/SIMD migration proof
+
+A mesma process thread deve:
+
+- gravar estado XMM/x87 no primeiro CPU;
+- ser preemptada/migrada;
+- restaurar exatamente o estado no segundo CPU;
+- terminar sem dupla execução/ownership concorrente.
+
+### 6. Heap e estruturas globais SMP-safe
+
+Revisar estruturas globais que ainda dependem apenas de exclusão por IRQ local e convertê-las para sincronização SMP apropriada quando necessário.
+
+### 7. Só então liberar affinity ANY para processos
+
+Não trocar globalmente:
+
+```text
+SCHEDULER_THREAD_AFFINITY_CPU = 0
+```
+
+para `ANY` antes de page-table coherence, locks e FPU ownership estarem comprovados.
+
+## Fases posteriores
+
+### Fase 2 — Platform / Drivers
+
+- AML;
+- I2C-HID;
+- rede;
+- áudio;
+- GPU/aceleração.
+
+### Fase 3 — User Experience
+
+- compositor;
+- desktop/window manager;
+- installer/OOBE;
+- animações;
+- aplicativos.
+
+## Validação obrigatória para mudanças futuras
+
+Antes de chamar um novo checkpoint de estável, executar e conferir o SHA exato em:
+
+```text
+CI principal
+SMP verification
+NVMe-only verification
+```
+
+Além disso, manter os guardrails de:
+
+- zero firmware reentry;
+- compilador sem UI/driver Baken específico;
+- W^X;
+- TLB/SMP;
+- storage real;
+- USB real;
+- PAT/WC;
+- processo/Ring3/syscall/reaper.
+
+## LangSotlas
+
+`HPinho/LangSotlas` permanece **somente leitura/referência** neste trabalho. Não modificar esse repositório sem instrução explícita do usuário.
