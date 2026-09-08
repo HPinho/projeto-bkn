@@ -1,0 +1,226 @@
+// Baken OS — catálogo uniforme e SMP-safe de dispositivos da plataforma.
+// A enumeração PCI continua read-only; somente um driver pode reivindicar cada
+// entrada. Recursos são copiados, portanto consumidores não retêm ponteiros do bus.
+module kernel::platform::device_catalog;
+
+import kernel::platform::inventory::*;
+import kernel::drivers::pci_bus::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+import kernel::sync::spinlock::*;
+
+pub const PLATFORM_DEVICE_CAPACITY: usize = 64;
+pub const PLATFORM_DEVICE_STATE_EMPTY: u32 = 0;
+pub const PLATFORM_DEVICE_STATE_DISCOVERED: u32 = 1;
+pub const PLATFORM_DEVICE_STATE_CLAIMED: u32 = 2;
+pub const PLATFORM_DEVICE_STATE_ACTIVE: u32 = 3;
+pub const PLATFORM_DEVICE_STATE_FAILED: u32 = 4;
+pub const PLATFORM_DRIVER_NONE: u32 = 0;
+
+@repr(C)
+pub struct PlatformDevice {
+    pub pci_index: u32;
+    pub state: u32;
+    pub owner_driver: u32;
+    pub bus: u8;
+    pub slot: u8;
+    pub function: u8;
+    pub class_code: u8;
+    pub subclass: u8;
+    pub prog_if: u8;
+    pub vendor_id: u16;
+    pub device_id: u16;
+    pub bar0_base: u64;
+    pub bar0_size: u64;
+    pub bar5_base: u64;
+    pub bar5_size: u64;
+    pub valid: bool;
+}
+
+static mut PLATFORM_DEVICES: [PlatformDevice; PLATFORM_DEVICE_CAPACITY] = [
+    PlatformDevice { pci_index: 0, state: PLATFORM_DEVICE_STATE_EMPTY,
+        owner_driver: PLATFORM_DRIVER_NONE, bus: 0, slot: 0, function: 0,
+        class_code: 0, subclass: 0, prog_if: 0, vendor_id: 0, device_id: 0,
+        bar0_base: 0, bar0_size: 0, bar5_base: 0, bar5_size: 0, valid: false };
+    PLATFORM_DEVICE_CAPACITY
+];
+static mut PLATFORM_DEVICE_COUNT: u32 = 0;
+static mut PLATFORM_DEVICE_CATALOG_READY: bool = false;
+static mut PLATFORM_DEVICE_LOCK: SpinLock = SpinLock { state: 0 };
+static mut PLATFORM_DEVICE_LOCK_READY: bool = false;
+
+@system
+pub fn platform_device_invalid() -> PlatformDevice {
+    return PlatformDevice { pci_index: 0, state: PLATFORM_DEVICE_STATE_EMPTY,
+        owner_driver: PLATFORM_DRIVER_NONE, bus: 0, slot: 0, function: 0,
+        class_code: 0, subclass: 0, prog_if: 0, vendor_id: 0, device_id: 0,
+        bar0_base: 0, bar0_size: 0, bar5_base: 0, bar5_size: 0, valid: false };
+}
+
+@system
+fn platform_device_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PLATFORM_DEVICE_LOCK_READY || !spinlock_lock(&mut PLATFORM_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn platform_device_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PLATFORM_DEVICE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+pub fn platform_device_catalog_init() -> bool {
+    if !platform_inventory_is_ready() { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PLATFORM_DEVICE_LOCK_READY {
+            if !spinlock_init(&mut PLATFORM_DEVICE_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            PLATFORM_DEVICE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut PLATFORM_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if PLATFORM_DEVICE_CATALOG_READY {
+            spinlock_unlock(&mut PLATFORM_DEVICE_LOCK);
+            x86_irq_restore(flags);
+            return true;
+        }
+    }
+
+    let count = pci_get_device_count();
+    if count == 0 || count > (PLATFORM_DEVICE_CAPACITY as u32) {
+        unsafe { spinlock_unlock(&mut PLATFORM_DEVICE_LOCK); }
+        x86_irq_restore(flags);
+        return false;
+    }
+    let mut index: u32 = 0;
+    while index < count {
+        let source = pci_get_device(index);
+        if source == (null as *const PciDevice) {
+            unsafe { spinlock_unlock(&mut PLATFORM_DEVICE_LOCK); }
+            x86_irq_restore(flags);
+            return false;
+        }
+        unsafe {
+            let slot = index as usize;
+            PLATFORM_DEVICES[slot].pci_index = index;
+            PLATFORM_DEVICES[slot].state = PLATFORM_DEVICE_STATE_DISCOVERED;
+            PLATFORM_DEVICES[slot].owner_driver = PLATFORM_DRIVER_NONE;
+            PLATFORM_DEVICES[slot].bus = (*source).bus;
+            PLATFORM_DEVICES[slot].slot = (*source).slot;
+            PLATFORM_DEVICES[slot].function = (*source).func;
+            PLATFORM_DEVICES[slot].class_code = (*source).class_code;
+            PLATFORM_DEVICES[slot].subclass = (*source).subclass;
+            PLATFORM_DEVICES[slot].prog_if = (*source).prog_if;
+            PLATFORM_DEVICES[slot].vendor_id = (*source).vendor_id;
+            PLATFORM_DEVICES[slot].device_id = (*source).device_id;
+            PLATFORM_DEVICES[slot].bar0_base = (*source).bars[0].base_address;
+            PLATFORM_DEVICES[slot].bar0_size = (*source).bars[0].size;
+            PLATFORM_DEVICES[slot].bar5_base = (*source).bars[5].base_address;
+            PLATFORM_DEVICES[slot].bar5_size = (*source).bars[5].size;
+            PLATFORM_DEVICES[slot].valid = true;
+        }
+        index += 1;
+    }
+    unsafe {
+        PLATFORM_DEVICE_COUNT = count;
+        PLATFORM_DEVICE_CATALOG_READY = true;
+        spinlock_unlock(&mut PLATFORM_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn platform_device_count() -> u32 {
+    let flags = platform_device_lock_irq();
+    if flags == 0 { return 0; }
+    let mut count: u32 = 0;
+    unsafe { if PLATFORM_DEVICE_CATALOG_READY { count = PLATFORM_DEVICE_COUNT; } }
+    platform_device_unlock_irq(flags);
+    return count;
+}
+
+@system
+pub fn platform_device_snapshot(index: u32) -> PlatformDevice {
+    let flags = platform_device_lock_irq();
+    if flags == 0 { return platform_device_invalid(); }
+    let mut result = platform_device_invalid();
+    unsafe {
+        if PLATFORM_DEVICE_CATALOG_READY && index < PLATFORM_DEVICE_COUNT &&
+           PLATFORM_DEVICES[index as usize].valid {
+            result = PLATFORM_DEVICES[index as usize];
+        }
+    }
+    platform_device_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn platform_device_claim(index: u32, driver: u32) -> bool {
+    if driver == PLATFORM_DRIVER_NONE { return false; }
+    let flags = platform_device_lock_irq();
+    if flags == 0 { return false; }
+    let mut claimed = false;
+    unsafe {
+        if PLATFORM_DEVICE_CATALOG_READY && index < PLATFORM_DEVICE_COUNT &&
+           PLATFORM_DEVICES[index as usize].valid &&
+           PLATFORM_DEVICES[index as usize].state == PLATFORM_DEVICE_STATE_DISCOVERED {
+            PLATFORM_DEVICES[index as usize].owner_driver = driver;
+            PLATFORM_DEVICES[index as usize].state = PLATFORM_DEVICE_STATE_CLAIMED;
+            claimed = true;
+        }
+    }
+    platform_device_unlock_irq(flags);
+    return claimed;
+}
+
+@system
+pub fn platform_device_set_state(index: u32, driver: u32, state: u32) -> bool {
+    if driver == PLATFORM_DRIVER_NONE ||
+       (state != PLATFORM_DEVICE_STATE_ACTIVE && state != PLATFORM_DEVICE_STATE_FAILED) {
+        return false;
+    }
+    let flags = platform_device_lock_irq();
+    if flags == 0 { return false; }
+    let mut changed = false;
+    unsafe {
+        if PLATFORM_DEVICE_CATALOG_READY && index < PLATFORM_DEVICE_COUNT &&
+           PLATFORM_DEVICES[index as usize].valid &&
+           PLATFORM_DEVICES[index as usize].owner_driver == driver &&
+           PLATFORM_DEVICES[index as usize].state == PLATFORM_DEVICE_STATE_CLAIMED {
+            PLATFORM_DEVICES[index as usize].state = state;
+            changed = true;
+        }
+    }
+    platform_device_unlock_irq(flags);
+    return changed;
+}
+
+@system
+pub fn platform_device_catalog_emit_ready_marker() -> bool {
+    if platform_device_count() == 0 { return false; }
+    let marker: [u8; 27] = [
+        66,65,75,69,78,58,68,69,86,73,67,69,95,67,65,84,65,76,79,71,
+        95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 27 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
