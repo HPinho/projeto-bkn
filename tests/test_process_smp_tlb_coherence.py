@@ -41,10 +41,12 @@ class ProcessSmpTlbCoherenceTests(unittest.TestCase):
         self.assertIn("xapic_ipi_send_fixed_all_excluding_self", body)
         self.assertIn("tlb_shootdown_wait_ack", body)
 
-    def test_process_registry_pins_lifetime_but_releases_lock_before_shootdown(self):
+    def test_process_registry_vm_pins_lifetime_but_releases_lock_before_shootdown(self):
         text = REGISTRY.read_text(encoding="utf-8")
         self.assertIn("import kernel::memory::tlb_shootdown::*;", text)
         self.assertIn("!process_address_space_is_ready() || !tlb_shootdown_is_ready()", text)
+        self.assertIn("static mut PROCESS_VM_PINS", text)
+        self.assertIn("PROCESS_REFERENCES[slot] != 0 || PROCESS_VM_PINS[slot] != 0", text)
 
         for name, mutation in (
             ("map", "process_address_space_map_user_page"),
@@ -53,16 +55,18 @@ class ProcessSmpTlbCoherenceTests(unittest.TestCase):
         ):
             body = text.split(f"pub fn process_{name}_user_page", 1)[1].split("@system", 1)[0]
             self.assertIn("root = PROCESS_SPACES[slot].root_physical;", body)
-            self.assertIn("process_retain_locked(pid)", body)
+            self.assertIn("process_vm_pin_locked(pid)", body)
             self.assertIn(mutation, body)
             self.assertIn("tlb_shootdown_address_space_page(root, address)", body)
-            self.assertIn("process_release(pid)", body)
-            self.assertLess(body.index("process_retain_locked(pid)"), body.index(mutation))
+            self.assertIn("process_vm_unpin(pid)", body)
+            self.assertNotIn("process_retain_locked(pid)", body)
+            self.assertNotIn("process_release(pid)", body)
+            self.assertLess(body.index("process_vm_pin_locked(pid)"), body.index(mutation))
             self.assertLess(body.index(mutation), body.index("process_registry_unlock_irq(flags)"))
             self.assertLess(body.index("process_registry_unlock_irq(flags)"),
                             body.index("tlb_shootdown_address_space_page(root, address)"))
             self.assertLess(body.index("tlb_shootdown_address_space_page(root, address)"),
-                            body.index("process_release(pid)"))
+                            body.index("process_vm_unpin(pid)"))
 
     def test_remap_replaces_one_present_user_leaf_and_returns_old_frame(self):
         text = SPACE.read_text(encoding="utf-8")
