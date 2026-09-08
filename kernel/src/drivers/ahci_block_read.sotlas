@@ -69,7 +69,7 @@ fn ahci_block_virtual(physical: u64) -> *mut u8 {
     if physical == 0 { return null as *mut u8; }
     let virtual_address = direct_map_virtual_address(physical);
     if virtual_address == 0 { return null as *mut u8; }
-    return virtual_address as *mut u8;
+    return unsafe { virtual_address as *mut u8 };
 }
 
 @system
