@@ -48,7 +48,7 @@ fn xhci_event_consumer_slot(index: u32) -> *const XhciTrb {
     let base = direct_map_virtual_address(xhci_runtime_event_ring_physical());
     if base == 0 { return null as *const XhciTrb; }
     let offset = (index as u64) * XHCI_TRB_SIZE;
-    return (base + offset) as *const XhciTrb;
+    return unsafe { (base + offset) as *const XhciTrb };
 }
 
 @system
