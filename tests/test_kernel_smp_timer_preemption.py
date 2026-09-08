@@ -47,6 +47,21 @@ class KernelSmpTimerPreemptionTests(unittest.TestCase):
         after_timer_ipi = run[timer_ipi + len("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)"):timer_marker]
         self.assertNotIn("lapic_send_fixed(", after_timer_ipi)
 
+    def test_any_affinity_thread_is_taken_by_ap_timer_without_ipi(self):
+        text = PROBE.read_text(encoding="utf-8")
+        run = text.split("pub fn scheduler_smp_probe_run() -> bool", 1)[1]
+        timer_marker = run.index("scheduler_smp_probe_emit_timer_marker()")
+        any_window = run[timer_marker:]
+        self.assertIn("let bsp_irq_flags = x86_irq_save_disable();", any_window)
+        self.assertIn("let any_thread_id = scheduler_create_kernel_thread(", any_window)
+        self.assertNotIn("scheduler_create_kernel_thread_on_cpu(", any_window)
+        self.assertIn("scheduler_smp_probe_wait_executed(SCHEDULER_SMP_PROBE_CPU_SLOT)", any_window)
+        self.assertIn("scheduler_smp_probe_wait_terminated(any_thread_id", any_window)
+        self.assertIn("scheduler_smp_probe_wait_idle(", any_window)
+        self.assertIn("x86_irq_restore(bsp_irq_flags);", any_window)
+        self.assertIn("scheduler_smp_probe_emit_any_thread_marker()", any_window)
+        self.assertNotIn("lapic_send_fixed(", any_window)
+
     def test_ap_timer_count_is_per_cpu_and_sleep_clock_remains_bsp_only(self):
         irq = IRQ.read_text(encoding="utf-8")
         self.assertIn("static mut IRQ_CPU_TIMER_COUNT", irq)
@@ -59,12 +74,13 @@ class KernelSmpTimerPreemptionTests(unittest.TestCase):
         self.assertIn("scheduler_sleep_on_timer_tick(timer_count)", timer)
         self.assertLess(timer.index("if bsp_clock"), timer.index("scheduler_sleep_on_timer_tick(timer_count)"))
 
-    def test_qemu_gate_requires_real_ap_timer_interrupt(self):
+    def test_qemu_gate_requires_real_ap_timer_and_generic_dispatch(self):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("python3 tests/test_kernel_smp_timer_preemption.py", workflow)
         self.assertIn("BAKEN:SMP_THREAD_ON_AP", workflow)
         self.assertIn("BAKEN:SMP_TIMER_ON_AP", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_TIMER_ON_AP'", workflow)
+        self.assertIn("BAKEN:SMP_ANY_THREAD_ON_AP", workflow)
+        self.assertIn("grep -Fq 'BAKEN:SMP_ANY_THREAD_ON_AP'", workflow)
 
 
 if __name__ == "__main__":

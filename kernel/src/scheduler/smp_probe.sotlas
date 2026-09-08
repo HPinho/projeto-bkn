@@ -4,7 +4,9 @@
 // BSP libera os APs, envia IPI 0x44, observa execucao no AP e usa um segundo IPI
 // para restaurar o idle frame. Somente apos essa prova uma segunda thread pinned
 // desmascara o LAPIC timer local; o IRQ 0x40 deve entao retirar a thread
-// terminada do AP sem ajuda de um novo IPI.
+// terminada do AP sem ajuda de um novo IPI. Por fim, uma thread sem afinidade e
+// publicada com IRQs locais do BSP desabilitados: somente o timer do AP pode
+// captura-la da run queue compartilhada, provando dispatch SMP generico.
 
 module kernel::scheduler::smp_probe;
 
@@ -174,6 +176,20 @@ fn scheduler_smp_probe_emit_timer_marker() -> bool {
 }
 
 @system
+fn scheduler_smp_probe_emit_any_thread_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 27] = [
+        66,65,75,69,78,58,83,77,80,95,65,78,89,95,84,72,82,69,65,68,95,79,78,95,65,80,10
+    ];
+    let mut index: usize = 0;
+    while index < 27 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
 pub fn scheduler_smp_probe_run() -> bool {
     if !scheduler_is_active() || !smp_is_ready() { return false; }
     if smp_runtime_ap_count() == 0 { return true; }
@@ -241,5 +257,39 @@ pub fn scheduler_smp_probe_run() -> bool {
         SCHEDULER_SMP_PROBE_CPU_SLOT,
         timer_idle_epoch_before
     ) { return false; }
-    return scheduler_smp_probe_emit_timer_marker();
+    if !scheduler_smp_probe_emit_timer_marker() { return false; }
+
+    // Terceira prova: nenhuma afinidade e nenhum IPI. O BSP mascara seus IRQs
+    // para nao consumir a thread ANY; o timer periodico ja ativo no AP precisa
+    // encontra-la na run queue compartilhada, executa-la e devolve-la ao idle.
+    x86_mmio_write32(executed_address, 0);
+    x86_mmio_write32(cpu_address, 0xFFFFFFFF);
+    x86_mmio_write32(mode_address, SCHEDULER_SMP_PROBE_MODE_THREAD);
+    __dma_fence();
+    let any_idle_epoch_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let bsp_irq_flags = x86_irq_save_disable();
+    let any_thread_id = scheduler_create_kernel_thread(
+        entry,
+        SCHEDULER_DEFAULT_THREAD_STACK_PAGES
+    );
+    if any_thread_id == 0 {
+        x86_irq_restore(bsp_irq_flags);
+        return false;
+    }
+    let any_executed = scheduler_smp_probe_wait_executed(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let mut any_terminated = false;
+    let mut any_idle = false;
+    if any_executed {
+        any_terminated = scheduler_smp_probe_wait_terminated(any_thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT);
+    }
+    if any_terminated {
+        any_idle = scheduler_smp_probe_wait_idle(
+            any_thread_id,
+            SCHEDULER_SMP_PROBE_CPU_SLOT,
+            any_idle_epoch_before
+        );
+    }
+    x86_irq_restore(bsp_irq_flags);
+    if !any_executed || !any_terminated || !any_idle { return false; }
+    return scheduler_smp_probe_emit_any_thread_marker();
 }
