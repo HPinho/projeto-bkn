@@ -24,12 +24,12 @@ A arquitetura conceitual é:
                 │ optionals / UI / app │
                 └──────────┬───────────┘
                            │
-                    explicit @system
+                  safe typed wrappers
                            │
                 ┌──────────▼───────────┐
                 │ Sotlas Systems Layer │
-                │ pointers / MMIO /    │
-                │ DMA / interrupts     │
+                │ @system / pointers / │
+                │ MMIO / DMA / IRQ     │
                 └──────────┬───────────┘
                            │
                      extern "C"
@@ -44,19 +44,28 @@ guardrails de memória.
 
 ## 2. `@system` é uma capability boundary
 
-Uma função sem `@system` pertence à camada segura e não pode chamar diretamente
-uma API marcada `@system` nem uma função FFI `extern "C"`.
+`@system` marca implementações que podem alcançar intrínsecos privilegiados e
+recursos de baixo nível do Baken. Uma função `@system` pode expor uma abstração
+segura para a camada superior; o chamador não precisa tornar-se `@system` apenas
+porque a implementação interna usa hardware.
+
+O que código seguro não pode fazer é chamar diretamente um intrínseco
+privilegiado ou atravessar uma fronteira FFI `extern "C"`. Essas operações
+exigem contexto `@system`.
 
 ```sotlas
 @system
-fn read_timer() -> u64 {
+fn read_timer_impl() -> u64 {
     return x86_read_timer();
+}
+
+fn read_timer() -> u64 {
+    return read_timer_impl();
 }
 ```
 
-`@system` significa que a função participa da camada de sistemas e pode acessar
-APIs privilegiadas do Baken. Ele não significa "confie em tudo dentro desta
-função".
+`@system` significa que a função participa da camada de sistemas. Ele não
+significa "confie em tudo dentro desta função".
 
 Portanto isto continua inválido:
 
@@ -78,8 +87,8 @@ Operações que exigem `unsafe` incluem, no mínimo:
 - indexar memória através de ponteiro cru;
 - acessar campos através de ponteiro cru;
 - invocar métodos através de ponteiro cru;
-- criar/converter um endereço não nulo para ponteiro cru com `as *mut T` ou
-  `as *const T`;
+- criar/converter um endereço não nulo que ainda não é ponteiro cru para
+  `*mut T` ou `*const T`, por exemplo inteiro → ponteiro cru;
 - chamar uma função FFI explicitamente declarada `unsafe fn`.
 
 Exemplo rejeitado:
@@ -106,6 +115,20 @@ let none: *mut u8 = null as *mut u8;
 
 A construção do sentinela não acessa memória. Qualquer desreferenciamento
 posterior permanece sujeito a `unsafe`.
+
+Requalificar ou reinterpretar um endereço que **já é um ponteiro cru** não exige
+`unsafe` por si só:
+
+```sotlas
+fn readonly(ptr: *mut u32) -> *const u32 {
+    return ptr as *const u32;
+}
+```
+
+Essa conversão não cria nem valida um endereço; apenas preserva o valor bruto com
+outro tipo/mutabilidade. O uso perigoso do ponteiro resultante — como
+indexação, acesso a campo ou desreferenciamento — continua exigindo `unsafe`.
+Isso evita blocos `unsafe` artificiais em operações como `*mut T -> *const T`.
 
 ## 4. Referências e ponteiros crus são conceitos diferentes
 
@@ -192,8 +215,9 @@ fn read_first() -> u8 {
 }
 ```
 
-O compilador nunca infere ownership, lifetime ou exclusividade de um ponteiro
-FFI apenas por ele ter atravessado a fronteira ABI.
+A proveniência estrangeira permanece associada ao valor mesmo após casts entre
+ponteiros crus. O compilador nunca infere ownership, lifetime ou exclusividade de
+um ponteiro FFI apenas por ele ter atravessado a fronteira ABI.
 
 ## 7. `unsafe fn` em FFI
 
@@ -254,7 +278,7 @@ convergir para este pipeline.
 Código do kernel deve seguir a seguinte disciplina:
 
 1. usar abstrações seguras quando possível;
-2. marcar a passagem para serviços privilegiados com `@system`;
+2. marcar implementações que alcançam serviços privilegiados com `@system`;
 3. limitar `unsafe` ao menor bloco que contém o acesso cru;
 4. encapsular MMIO/DMA/ponteiros crus em APIs Sotlas tipadas;
 5. manter firmware, C, assembly e Objective-C atrás de `extern "C"` ou
