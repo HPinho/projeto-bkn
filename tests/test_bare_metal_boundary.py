@@ -45,7 +45,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
 
     def test_post_cutover_entry_validates_and_activates_native_foundations(self):
         post = POST.read_text(encoding="utf-8")
-        for token in ("pub fn post_cutover_context_valid", "post_cutover_memory_map_virtual(context)", "post_cutover_acpi_rsdp_virtual(context)", "x86_mmu_activate_root(context.root_physical)", "pmm_inventory_init(", "pmm_allocator_activate_after_exit_boot_services()", "vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE)", "acpi_init_post_cutover(rsdp)", "baken_native_kernel_run("):
+        for token in ("pub fn post_cutover_context_valid", "post_cutover_memory_map_virtual(context)", "post_cutover_acpi_rsdp_virtual(context)", "x86_mmu_activate_root(snapshot.root_physical)", "pmm_inventory_init(", "pmm_allocator_activate_after_exit_boot_services()", "vmm_activate_current_tables(snapshot.root_physical, BAKEN_DIRECT_MAP_BASE)", "acpi_init_post_cutover(rsdp)", "baken_native_kernel_run("):
             self.assertIn(token, post)
 
     def test_pmm_inventory_uses_baken_owned_boot_descriptors_without_allocating(self):
@@ -105,7 +105,7 @@ class BareMetalBoundaryTests(unittest.TestCase):
         self.assertNotIn("baken_kernel_main", main)
         self.assertNotIn("write_cr3(", main)
         self.assertNotIn("transition_map_identity_range(", main)
-        self.assertIn("x86_mmu_activate_root(context.root_physical)", post)
+        self.assertIn("x86_mmu_activate_root(snapshot.root_physical)", post)
         self.assertIn("x86_gdt_activate_segments_raw(", post)
         self.assertIn("x86_lidt_table_raw(", post)
 

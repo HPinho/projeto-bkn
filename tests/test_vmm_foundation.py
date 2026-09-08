@@ -17,5 +17,5 @@ class VmmFoundationTests(unittest.TestCase):
         for token in ("vmm_mark_tables_ready(root_table_physical, direct_map_base)","x86_mmu_current_root() != root_table_physical","VMM.state = VMM_STATE_ACTIVE","VMM.state = VMM_STATE_OFFLINE"): self.assertIn(token,body)
     def test_post_cutover_activates_vmm_only_after_pmm(self):
         body=self.post.split("pub fn post_cutover_activate_vmm",1)[1].split("pub fn post_cutover_vmm_active",1)[0]
-        for token in ("if !post_cutover_pmm_active()","vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE)","active_page_tables_resume(","active_page_tables_is_ready()"): self.assertIn(token,body)
+        for token in ("if !post_cutover_pmm_active()","vmm_activate_current_tables(snapshot.root_physical, BAKEN_DIRECT_MAP_BASE)","active_page_tables_resume(","active_page_tables_is_ready()"): self.assertIn(token,body)
 if __name__ == "__main__": unittest.main()

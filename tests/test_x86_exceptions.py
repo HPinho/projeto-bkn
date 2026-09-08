@@ -22,6 +22,6 @@ class X86ExceptionTests(unittest.TestCase):
         code=re.sub(r"//[^\n]*","",EXCEPTIONS.read_text(encoding="utf-8")); self.assertIn("__cli();",code); self.assertIn("loop { __hlt(); }",code); self.assertNotRegex(code.lower(),r"\b(?:x86_)?iretq?\s*\(")
     def test_post_cutover_prepares_and_loads_private_exception_idt(self):
         body=POST.read_text(encoding="utf-8").split("pub fn post_cutover_activate_cpu",1)[1].split("pub fn post_cutover_cpu_tables_active",1)[0]
-        for token in ("idt_prepare_exceptions()","idt_exceptions_ready()","x86_lidt_table_raw(idt_address, idt_limit())","x86_mmu_activate_root(context.root_physical)"): self.assertIn(token,body)
-        self.assertLess(body.index("x86_mmu_activate_root(context.root_physical)"),body.index("x86_lidt_table_raw(idt_address, idt_limit())"))
+        for token in ("idt_prepare_exceptions()","idt_exceptions_ready()","x86_lidt_table_raw(idt_address, idt_limit())","x86_mmu_activate_root(snapshot.root_physical)"): self.assertIn(token,body)
+        self.assertLess(body.index("x86_mmu_activate_root(snapshot.root_physical)"),body.index("x86_lidt_table_raw(idt_address, idt_limit())"))
 if __name__ == "__main__": unittest.main()

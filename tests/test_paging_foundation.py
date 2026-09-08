@@ -18,5 +18,5 @@ class PagingFoundationTests(unittest.TestCase):
         for token in ("__write_cr3","write_cr3","mov %","invlpg(","__invlpg"): self.assertNotIn(token,code)
     def test_post_cutover_activates_cr3_before_vmm(self):
         entry=self.post.split("pub fn sotlas_x86_post_cutover_entry(argument: u64) -> !",1)[1]; cpu=entry.index("post_cutover_activate_cpu(context)"); pmm=entry.index("post_cutover_activate_pmm(context)",cpu); vmm=entry.index("post_cutover_activate_vmm(context)",pmm)
-        self.assertLess(cpu,pmm); self.assertLess(pmm,vmm); self.assertIn("x86_mmu_activate_root(context.root_physical)",self.post); self.assertIn("vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE)",self.post)
+        self.assertLess(cpu,pmm); self.assertLess(pmm,vmm); self.assertIn("x86_mmu_activate_root(snapshot.root_physical)",self.post); self.assertIn("vmm_activate_current_tables(snapshot.root_physical, BAKEN_DIRECT_MAP_BASE)",self.post)
 if __name__ == "__main__": unittest.main()
