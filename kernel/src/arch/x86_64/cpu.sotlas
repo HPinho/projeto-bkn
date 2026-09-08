@@ -1,8 +1,8 @@
 // Baken OS - wrappers x86-64 privilegiados do backend Sotlas.
 //
-// Estes wrappers existem no grafo canônico para que o build produza e valide
-// as instruções reais. Carregar GDT/IDT/TSS, substituir CR3, tocar MMIO ou abrir
-// interrupções só é permitido pelo caminho pós-ExitBootServices validado.
+// Estes wrappers existem no grafo canonico para que o build produza e valide
+// as instrucoes reais. Carregar GDT/IDT/TSS, substituir CR3, tocar MMIO ou abrir
+// interrupcoes so e permitido pelo caminho pos-ExitBootServices validado.
 
 module kernel::arch::x86_64::cpu;
 
@@ -59,6 +59,11 @@ pub fn x86_scheduler_exit_probe_entry_address() -> u64 {
 @system
 pub fn x86_scheduler_idle_entry_address() -> u64 {
     return __scheduler_idle_entry_address();
+}
+
+@system
+pub fn x86_smp_ap_runtime_entry_address() -> u64 {
+    return __smp_ap_runtime_entry_address();
 }
 
 @system

@@ -1,8 +1,8 @@
-// Baken OS — Local APIC xAPIC pós-cutover.
+// Baken OS — Local APIC xAPIC pos-cutover.
 //
-// Só opera depois que a página MMIO indicada pela MADT foi mapeada UC. O modo
-// x2APIC é recusado nesta fase. Além de EOI/LVT, esta unidade expõe somente o
-// subconjunto ICR necessário ao bring-up INIT/SIPI de processadores secundários.
+// So opera depois que a pagina MMIO indicada pela MADT foi mapeada UC. O modo
+// x2APIC e recusado nesta fase. Alem de EOI/LVT e ICR INIT/SIPI, APs podem
+// preparar o proprio Local APIC sem alterar o estado global publicado pelo BSP.
 
 module kernel::interrupts::lapic;
 
@@ -59,6 +59,17 @@ fn lapic_write(offset: u64, value: u32) -> void {
 }
 
 @system
+fn lapic_mask_local_vectors_at(base: u64) -> void {
+    x86_mmio_write32(base + LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
+    x86_mmio_write32(base + LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
+    x86_mmio_write32(base + LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
+    x86_mmio_write32(base + LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
+    x86_mmio_write32(base + LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
+    x86_mmio_write32(base + LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
+    x86_mmio_write32(base + LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
+}
+
+@system
 pub fn lapic_init_masked(madt_base: u64) -> bool {
     unsafe {
         LAPIC_READY = false;
@@ -86,6 +97,7 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
     if (version & 0xFF) == 0 { return false; }
     let apic_id = ((x86_mmio_read32(madt_base + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
 
+    // Preserve o caminho BSP historico e seus guardrails de mascaramento.
     lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
     lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
@@ -102,6 +114,29 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
     return true;
 }
 
+// Prepara os registradores locais do AP atual usando o mesmo endereco xAPIC ja
+// validado/mapeado pelo BSP. Nenhum cache global de ID/versao e reescrito aqui.
+@system
+pub fn lapic_prepare_current_cpu_masked() -> bool {
+    let base = lapic_base();
+    if !lapic_is_ready() || base == 0 { return false; }
+
+    let mut apic_base = x86_read_msr(IA32_APIC_BASE_MSR);
+    if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }
+    let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
+    if msr_base != 0 && msr_base != base { return false; }
+    if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
+        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) |
+            base | IA32_APIC_BASE_ENABLE;
+        x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
+    }
+
+    let version = x86_mmio_read32(base + LAPIC_REG_VERSION);
+    if (version & 0xFF) == 0 { return false; }
+    lapic_mask_local_vectors_at(base);
+    return true;
+}
+
 @system
 pub fn lapic_is_ready() -> bool { unsafe { return LAPIC_READY; } }
 
@@ -111,8 +146,17 @@ pub fn lapic_base() -> u64 { unsafe { return LAPIC_BASE; } }
 @system
 pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
 
+// ID cacheado do BSP, usado como destino/identidade durante o bring-up.
 @system
 pub fn lapic_id() -> u8 { unsafe { return LAPIC_ID; } }
+
+// ID do processador logico que esta executando esta chamada.
+@system
+pub fn lapic_current_id() -> u8 {
+    let base = lapic_base();
+    if base == 0 { return 0; }
+    return ((x86_mmio_read32(base + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
+}
 
 @system
 pub fn lapic_wait_icr_idle(spin_limit: u64) -> bool {

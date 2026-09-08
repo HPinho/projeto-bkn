@@ -1,8 +1,10 @@
 // Baken OS — contexto FPU/SSE por thread x86-64.
 //
-// FXSAVE/FXRSTOR exigem área de 512 bytes alinhada em 16. O frontend Sotlas
-// não depende de um atributo de alinhamento: cada slot reserva 512+15 bytes e
-// calcula internamente um endereço alinhado, garantindo espaço integral.
+// FXSAVE/FXRSTOR exigem area de 512 bytes alinhada em 16. O frontend Sotlas
+// nao depende de um atributo de alinhamento: cada slot reserva 512+15 bytes e
+// calcula internamente um endereco alinhado, garantindo espaco integral.
+// A habilitacao de CR0/CR4 e feita por CPU; o storage de contextos continua
+// global e so e usado pelo scheduler BSP nesta fase SMP.
 
 module kernel::arch::x86_64::fpu;
 
@@ -75,13 +77,21 @@ fn fpu_state_address(slot: usize) -> u64 {
     }
 }
 
+// CR0/CR4 e o estado inicial x87/SSE sao locais ao processador logico.
+// APs chamam esta rotina antes de qualquer futura execucao de threads.
+@system
+pub fn fpu_enable_current_cpu() -> bool {
+    if !__fpu_supported() { return false; }
+    __fpu_enable();
+    return true;
+}
+
 @system
 pub fn fpu_initialize() -> bool {
     unsafe {
         if FPU_READY { return FPU_SELF_TEST_PASSED; }
     }
-    if !__fpu_supported() { return false; }
-    __fpu_enable();
+    if !fpu_enable_current_cpu() { return false; }
     if !__fpu_round_trip_test() { return false; }
     let slot = fpu_allocate_slot(0);
     if slot == FPU_INVALID_SLOT { return false; }

@@ -1,4 +1,4 @@
-// Baken OS — fundação de IRQs externos x86-64 + syscall CPL3.
+// Baken OS — fundacao de IRQs externos x86-64 + syscall CPL3.
 module kernel::interrupts::irq;
 
 import kernel::arch::x86_64::cpu::*;
@@ -6,6 +6,7 @@ import kernel::arch::x86_64::fpu::*;
 import kernel::arch::x86_64::idt::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::thread_context::*;
+import kernel::arch::x86_64::tss::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
@@ -82,13 +83,29 @@ pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
 @system
 pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
 
+// Mantem o contrato historico de troca com FPU e acrescenta dois invariantes:
+// RSP0 acompanha a thread CPL3 selecionada e contextos FPU terminados sao
+// liberados apenas depois de sair da stack/contexto antigo.
 @system
 fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     let old_tid = scheduler_current_thread_id();
+    let old_terminated = scheduler_thread_is_terminated(old_tid);
     if fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
+
     let selected = scheduler_on_timer_interrupt(frame_address);
     let new_tid = scheduler_current_thread_id();
+
+    if x86_saved_frame_is_user(selected) {
+        let kernel_rsp0 = selected + X86_KERNEL_THREAD_FRAME_BYTES;
+        if kernel_rsp0 <= selected || (kernel_rsp0 & 15) != 0 || !tss_set_rsp0(kernel_rsp0) {
+            loop {}
+        }
+    }
+
     if fpu_is_ready() && !fpu_restore_thread(new_tid) { loop {} }
+    if fpu_is_ready() && old_terminated && old_tid != 0 && old_tid != new_tid {
+        if !fpu_release_thread(old_tid) { loop {} }
+    }
     return selected;
 }
 
@@ -109,8 +126,8 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             }
             return frame_address;
         }
-        // Durante bring-up, antes de FPU/SIMD ficar ativa, preserva exatamente
-        // o caminho histórico CPL0. Depois, save/restore envolve a mesma troca.
+        // Pre-FPU fallback preserva o caminho minimo do bring-up. Userspace so
+        // e publicado depois de fpu_initialize(), portanto CPL3 usa o helper.
         if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
