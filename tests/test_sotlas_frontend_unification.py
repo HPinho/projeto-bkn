@@ -1,5 +1,6 @@
 """Guardrails that keep Sotlas on one production frontend."""
 from pathlib import Path
+import json
 import sys
 import unittest
 
@@ -37,11 +38,32 @@ pub fn add(left: u32, right: u32) -> u32 {
         self.assertNotIn("from sotlas.sema import Sema", cli)
         self.assertNotIn("tokens = Lexer(", cli)
 
+    def test_direct_compiler_bootstrap_installs_same_safety_pass(self):
+        compiler = (ROOT / "tools" / "sotlas_compile" / "compiler.py").read_text(encoding="utf-8")
+        extensions = (ROOT / "tools" / "sotlas_compile" / "frontend_extensions.py").read_text(encoding="utf-8")
+        self.assertIn("frontend_extensions.install(bootstrap)", compiler)
+        self.assertIn("install_language_safety(bootstrap)", extensions)
+        self.assertIn("_LANGUAGE_SAFETY_INSTALLED", (ROOT / "tools" / "sotlas_compile" / "language_safety.py").read_text(encoding="utf-8"))
+
     def test_baken_compiler_uses_same_bootstrap_package(self):
         compiler = (ROOT / "tools" / "sotlas_compile" / "compiler.py").read_text(encoding="utf-8")
         self.assertIn("from tools.sotlas_compile import bootstrap", compiler)
         package = (ROOT / "tools" / "sotlas_compile" / "__init__.py").read_text(encoding="utf-8")
         self.assertIn("compile_source = bootstrap.compile_source", package)
+
+    def test_baken_declares_exact_toolchain_contract(self):
+        lock_path = ROOT / "toolchain" / "sotlas.lock.json"
+        contract = json.loads(lock_path.read_text(encoding="utf-8"))
+        self.assertEqual(contract["schema"], 1)
+        self.assertEqual(contract["toolchain"], "sotlas")
+        self.assertEqual(contract["source_kind"], "in-tree")
+        self.assertEqual(contract["source_path"], "tools/sotlas_compile")
+        self.assertIsNone(contract["repository"])
+        self.assertIsNone(contract["revision"])
+        self.assertEqual(contract["language_version"], sotlas.SOTLAS_LANG_VERSION)
+        self.assertEqual(contract["compiler_api"], "canonical-v1")
+        self.assertIn("extern-c", contract["required_features"])
+        self.assertEqual(contract["compatibility_entry"], "kernel/src/main.sotlas")
 
 
 if __name__ == "__main__":
