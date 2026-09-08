@@ -36,7 +36,10 @@ class KernelSchedulerYieldTests(unittest.TestCase):
         self.assertIn("IDT_GATE_USER_INTERRUPT: u8 = 0xEE", idt)
         self.assertIn("pub fn idt_set_user_irq_gate", idt)
         self.assertIn("SOTLAS_X86_IRQ_STUB(67)", intrinsics)
-        self.assertIn("case 67: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_67;", intrinsics)
+        self.assertRegex(
+            intrinsics,
+            r"case\s+67\s*:\s*return\s*\(uint64_t\)\s*\(uintptr_t\)\s*&__sotlas_x86_irq_67\s*;",
+        )
 
     def test_software_reschedule_never_sends_lapic_eoi(self):
         irq = IRQ.read_text(encoding="utf-8")

@@ -79,9 +79,9 @@ class KernelSchedulerTests(unittest.TestCase):
 
     def test_irq_backend_can_restore_dispatcher_selected_frame(self):
         text = INTRINSICS.read_text(encoding="utf-8")
-        self.assertIn(
-            "extern uint64_t sotlas_x86_irq_dispatch(uint64_t vector, uint64_t frame_address);",
+        self.assertRegex(
             text,
+            r"extern\s+uint64_t\s+sotlas_x86_irq_dispatch\(\s*uint64_t\s+vector\s*,\s*uint64_t\s+frame_address\s*\)\s*;",
         )
         self.assertIn('"movq %r12, %rdx\\n\\t"', text)
         self.assertIn('"movq %rax, %rsp\\n\\t"', text)

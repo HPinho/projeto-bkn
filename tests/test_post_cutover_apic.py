@@ -26,7 +26,10 @@ class PostCutoverApicTests(unittest.TestCase):
         self.assertIn("__mmio_read32", text)
         self.assertIn("__mmio_write32", text)
         self.assertIn("volatile uint32_t", text)
-        self.assertIn('__asm__ __volatile__("" : : : "memory");', text)
+        self.assertRegex(
+            text,
+            r'__asm__\s+__volatile__\(\s*""\s*:\s*:\s*:\s*"memory"\s*\);',
+        )
 
     def test_active_mapper_only_maps_explicit_mmio_pages(self):
         text = ACTIVE.read_text(encoding="utf-8")

@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,25 +14,27 @@ class FoundationPatWriteCombiningGateTests(unittest.TestCase):
         text = INTRINSICS.read_text(encoding="utf-8")
         body = text.split("static inline bool __pat_install_wc(void)", 1)[1]
         body = body.split("static inline uint64_t __rdtsc", 1)[0]
+        compact = re.sub(r"\s+", "", body)
 
+        # Validate the architectural sequence, not source-code whitespace.
         for token in (
-            'uint32_t a = 1, b, c, d;',
+            'uint32_ta=1,b,c,d;',
             '"cpuid"',
-            'if (!(d & (1u << 16))) return false;',
-            'pushfq; popq %0; cli; mov %%cr0,%1; mov %%cr3,%2',
-            '(cr0 | (1ull << 30)) & ~(1ull << 29)',
-            'mov %0,%%cr0; wbinvd',
+            'if(!(d&(1u<<16)))returnfalse;',
+            'pushfq;popq%0;cli;mov%%cr0,%1;mov%%cr3,%2',
+            '(cr0|(1ull<<30))&~(1ull<<29)',
+            'mov%0,%%cr0;wbinvd',
             '"c"(0x277)',
-            'hi = (hi & 0x00ffffffu) | 0x01000000u;',
-            'wrmsr; wbinvd',
-            'mov %0,%%cr3; mov %1,%%cr0; pushq %2; popfq',
-            'return (hi >> 24) == 1;',
+            'hi=(hi&0x00ffffffu)|0x01000000u;',
+            'wrmsr;wbinvd',
+            'mov%0,%%cr3;mov%1,%%cr0;pushq%2;popfq',
+            'return(hi>>24)==1;',
         ):
-            self.assertIn(token, body)
+            self.assertIn(token, compact)
 
         # Slot 7 is the only PAT byte rewritten; bootstrap WB/UC slots remain intact.
-        self.assertNotIn('lo =', body)
-        self.assertIn('hi & 0x00ffffffu', body)
+        self.assertNotIn('lo=', compact)
+        self.assertIn('hi&0x00ffffffu', compact)
 
     def test_framebuffer_preflights_entire_identity_range_before_pat_change(self):
         text = ACTIVE.read_text(encoding="utf-8")
@@ -46,9 +49,16 @@ class FoundationPatWriteCombiningGateTests(unittest.TestCase):
             'if limit < end { return false; }',
             'x86_pte_address(pte) != page',
             '(pte & (X86_PTE_WRITABLE | X86_PTE_NX)) != (X86_PTE_WRITABLE | X86_PTE_NX)',
-            'if !__pat_install_wc() { return false; }',
+            'if !__pat_install_wc()',
         ):
             self.assertIn(token, body)
+
+        # Installing PAT while the page-table lock is held must release ownership
+        # before propagating a failure; the old one-line guard is no longer valid.
+        failure = body.split('if !__pat_install_wc()', 1)[1].split('page = first;', 1)[0]
+        unlock = failure.index('active_page_tables_unlock_irq(flags_irq);')
+        reject = failure.index('return false;')
+        self.assertLess(unlock, reject)
 
         preflight = body.index('while page < limit')
         install = body.index('__pat_install_wc()')
@@ -63,11 +73,23 @@ class FoundationPatWriteCombiningGateTests(unittest.TestCase):
 
         for token in (
             'old | 0x98',
-            'x86_invlpg(page);',
+            'active_page_tables_publish_locked(page)',
             '(page_table_read_entry(leaf, x86_pt_index(page)) & 0x98) != 0x98',
             '__dma_fence();',
         ):
             self.assertIn(token, body)
+
+        # The publication path must invalidate the page on every active CPU,
+        # rather than regressing to BSP-only INVLPG.
+        publish = text.split('fn active_page_tables_publish_locked(address: u64) -> bool', 1)[1]
+        publish = publish.split('@system', 1)[0]
+        self.assertIn('tlb_shootdown_kernel_page(address)', publish)
+
+        mutate = body.index('old | 0x98')
+        invalidate = body.index('active_page_tables_publish_locked(page)', mutate)
+        verify = body.index('(page_table_read_entry(leaf, x86_pt_index(page)) & 0x98) != 0x98', invalidate)
+        self.assertLess(mutate, invalidate)
+        self.assertLess(invalidate, verify)
 
         # 4K PAT=1, PCD=1, PWT=1 -> index 7. No huge-page rewrite is allowed here.
         self.assertNotIn('X86_PTE_HUGE', body)

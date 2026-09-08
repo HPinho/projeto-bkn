@@ -51,7 +51,7 @@ class KernelSchedulerWaitQueueTests(unittest.TestCase):
         self.assertIn("static inline void __irq_restore(uint64_t flags)", backend)
         restore = backend.split("static inline void __irq_restore", 1)[1]
         restore = restore.split("static inline void __scheduler_block_switch", 1)[0]
-        self.assertIn("1ull << 9", restore)
+        self.assertRegex(restore, r"1ull\s*<<\s*9")
         self.assertNotIn("popfq", restore)
 
     def test_wake_paths_run_with_interrupts_masked_and_preserve_previous_if(self):

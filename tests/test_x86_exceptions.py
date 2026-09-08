@@ -6,7 +6,9 @@ ROOT=Path(__file__).resolve().parents[1]; BACKEND=ROOT/"tools/sotlas_compile/x86
 class X86ExceptionTests(unittest.TestCase):
     def test_backend_emits_all_32_exception_stubs(self):
         text=BACKEND.read_text(encoding="utf-8"); vectors={int(m.group(1)) for m in re.finditer(r"SOTLAS_X86_ISR_(?:NOERR|ERR)\((\d+)\)",text)}; self.assertEqual(vectors,set(range(32)))
-        for token in ("__sotlas_x86_exception_common","call sotlas_x86_exception_dispatch","__attribute__((naked, used)) static void __sotlas_x86_exception_common","__attribute__((naked, unused)) static void __sotlas_x86_isr_##n"): self.assertIn(token,text)
+        self.assertIn("__sotlas_x86_exception_common",text); self.assertIn("call sotlas_x86_exception_dispatch",text)
+        self.assertRegex(text,r"__attribute__\(\(\s*naked\s*,\s*used\s*\)\)\s+static\s+void\s+__sotlas_x86_exception_common")
+        self.assertRegex(text,r"__attribute__\(\(\s*naked\s*,\s*unused\s*\)\)\s+static\s+void\s+__sotlas_x86_isr_##n")
         self.assertNotIn("baken_exception_dispatch",text)
     def test_error_code_vectors_are_not_given_synthetic_error_codes(self):
         text=BACKEND.read_text(encoding="utf-8"); expected={8,10,11,12,13,14,17,21,29,30}; actual={int(m.group(1)) for m in re.finditer(r"SOTLAS_X86_ISR_ERR\((\d+)\)",text)}; self.assertEqual(actual,expected)
