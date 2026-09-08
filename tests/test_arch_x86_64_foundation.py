@@ -53,9 +53,9 @@ class X8664FoundationTests(unittest.TestCase):
     def test_post_cutover_loads_private_cpu_tables_after_activating_cr3(self):
         post = POST.read_text(encoding="utf-8")
         body = post.split("pub fn post_cutover_activate_cpu", 1)[1].split("pub fn post_cutover_cpu_tables_active", 1)[0]
-        for token in ("x86_mmu_activate_root(context.root_physical)", "tss_prepare_default_stacks()", "gdt_prepare()", "gdt_set_tss_descriptor(tss_base(), tss_limit())", "idt_prepare_exceptions()", "x86_gdt_activate_segments_raw(", "x86_ltr_raw(GDT_TSS_SELECTOR)", "x86_lidt_table_raw("):
+        for token in ("x86_mmu_activate_root(snapshot.root_physical)", "tss_prepare_default_stacks()", "gdt_prepare()", "gdt_set_tss_descriptor(tss_base(), tss_limit())", "idt_prepare_exceptions()", "x86_gdt_activate_segments_raw(", "x86_ltr_raw(GDT_TSS_SELECTOR)", "x86_lidt_table_raw("):
             self.assertIn(token, body)
-        self.assertLess(body.index("x86_mmu_activate_root(context.root_physical)"), body.index("x86_gdt_activate_segments_raw("))
+        self.assertLess(body.index("x86_mmu_activate_root(snapshot.root_physical)"), body.index("x86_gdt_activate_segments_raw("))
 
 
 if __name__ == "__main__": unittest.main()
