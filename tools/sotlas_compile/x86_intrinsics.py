@@ -126,8 +126,18 @@ static inline void __dma_fence(void) {
     __asm__ __volatile__("mfence" : : : "memory");
 }
 
-/* BSP-only PAT slot 7. All bootstrap mappings use slot 0 (WB) or 3 (UC).
- * Preserve those slots and follow the cache-disable/flush sequence. */
+/* xchg with a memory operand is implicitly locked on x86 and acts as the
+ * full ordering primitive used by Sotlas spinlocks. */
+static inline uint32_t __atomic_exchange_u32(uint64_t address, uint32_t value) {
+    __asm__ __volatile__("xchgl %0,(%1)"
+                         : "+r"(value)
+                         : "r"((uintptr_t)address)
+                         : "memory");
+    return value;
+}
+
+/* PAT slot 7 is programmed on every logical CPU before that CPU is released
+ * to the scheduler. Bootstrap mappings keep using slot 0 (WB) or 3 (UC). */
 static inline bool __pat_install_wc(void) {
     uint32_t a = 1, b, c, d;
     __asm__ __volatile__("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
@@ -249,6 +259,8 @@ extern void sotlas_x86_scheduler_idle_entry(void);
 static inline uint64_t __scheduler_idle_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_idle_entry; }
 extern void sotlas_x86_smp_ap_runtime_entry(void);
 static inline uint64_t __smp_ap_runtime_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_smp_ap_runtime_entry; }
+extern void sotlas_x86_scheduler_smp_probe_entry(void);
+static inline uint64_t __scheduler_smp_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_smp_probe_entry; }
 extern void sotlas_x86_scheduler_wait_probe_entry(void);
 static inline uint64_t __scheduler_wait_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wait_probe_entry; }
 extern void sotlas_x86_scheduler_wake_probe_entry(void);
@@ -407,6 +419,7 @@ SOTLAS_X86_IRQ_STUB(64)
 SOTLAS_X86_IRQ_STUB(65)
 SOTLAS_X86_IRQ_STUB(66)
 SOTLAS_X86_IRQ_STUB(67)
+SOTLAS_X86_IRQ_STUB(68)
 SOTLAS_X86_IRQ_STUB(255)
 #undef SOTLAS_X86_IRQ_STUB
 
@@ -416,6 +429,7 @@ static inline uint64_t __irq_stub_address(uint16_t vector) {
         case 65: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_65;
         case 66: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_66;
         case 67: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_67;
+        case 68: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_68;
         case 255: return (uint64_t)(uintptr_t)&__sotlas_x86_irq_255;
         default: return 0;
     }
@@ -442,6 +456,7 @@ def install(bootstrap) -> None:
         "__scheduler_exit_probe_entry_address": Function("__scheduler_exit_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_idle_entry_address": Function("__scheduler_idle_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__smp_ap_runtime_entry_address": Function("__smp_ap_runtime_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
+        "__scheduler_smp_probe_entry_address": Function("__scheduler_smp_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_wait_probe_entry_address": Function("__scheduler_wait_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_wake_probe_entry_address": Function("__scheduler_wake_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__userspace_bootstrap_entry_address": Function("__userspace_bootstrap_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
@@ -452,6 +467,7 @@ def install(bootstrap) -> None:
         "__irq_restore": Function("__irq_restore", [("flags", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__invlpg": Function("__invlpg", [("address", Type("u64"))], Type("void"), [], public=True, attributes=["@system"]),
         "__dma_fence": Function("__dma_fence", [], Type("void"), [], public=True, attributes=["@system"]),
+        "__atomic_exchange_u32": Function("__atomic_exchange_u32", [("address", Type("u64")), ("value", Type("u32"))], Type("u32"), [], public=True, attributes=["@system"]),
         "__pat_install_wc": Function("__pat_install_wc", [], Type("bool"), [], public=True, attributes=["@system"]),
         "__rdtsc": Function("__rdtsc", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__cpu_pause": Function("__cpu_pause", [], Type("void"), [], public=True, attributes=["@system"]),

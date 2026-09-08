@@ -67,6 +67,11 @@ pub fn x86_smp_ap_runtime_entry_address() -> u64 {
 }
 
 @system
+pub fn x86_scheduler_smp_probe_entry_address() -> u64 {
+    return __scheduler_smp_probe_entry_address();
+}
+
+@system
 pub fn x86_scheduler_wait_probe_entry_address() -> u64 {
     return __scheduler_wait_probe_entry_address();
 }
@@ -93,6 +98,11 @@ pub fn x86_irq_restore(flags: u64) -> void { __irq_restore(flags); }
 
 @system
 pub fn x86_cpu_pause() -> void { __cpu_pause(); }
+
+@system
+pub fn x86_atomic_exchange_u32(address: u64, value: u32) -> u32 {
+    return __atomic_exchange_u32(address, value);
+}
 
 @system
 pub fn x86_invlpg(address: u64) -> void { __invlpg(address); }

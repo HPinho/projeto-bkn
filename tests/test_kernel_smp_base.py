@@ -62,7 +62,6 @@ class KernelSmpBaseTests(unittest.TestCase):
             "__dma_fence();",
         ):
             self.assertIn(token, text)
-        # 66 0d 00 09 00 00 == OR EAX, 0x900 (EFER.LME | EFER.NXE).
         self.assertIn("102, 13, 0, 9, 0, 0", text)
 
     def test_ap_uses_private_stack_and_enters_per_cpu_runtime(self):
@@ -82,7 +81,14 @@ class KernelSmpBaseTests(unittest.TestCase):
             self.assertIn(token, text)
         self.assertNotIn("scheduler_initialize", text)
         self.assertNotIn("scheduler_on_timer_interrupt", text)
-        self.assertNotIn("x86_sti_raw()", text)
+
+        # O AP pode habilitar IF apenas depois da liberacao explicita do BSP.
+        body = text.split("pub fn sotlas_x86_smp_ap_runtime_entry", 1)[1].split("fn smp_start_one_ap", 1)[0]
+        release = body.index("while x86_mmio_read32(release) != 1")
+        sti = body.index("x86_sti_raw()")
+        self.assertLess(release, sti)
+        self.assertIn("lapic_timer_prepare_current_cpu_masked()", body)
+        self.assertNotIn("lapic_timer_unmask_periodic()", body)
 
     def test_runtime_brings_aps_up_before_process_scheduler_and_bsp_fpu_publication(self):
         text = RUNTIME.read_text(encoding="utf-8")

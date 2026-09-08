@@ -1,4 +1,4 @@
-// Baken OS — fundacao de IRQs externos x86-64 + syscall CPL3.
+// Baken OS — fundacao de IRQs externos x86-64 + syscall CPL3 + IPI SMP.
 module kernel::interrupts::irq;
 
 import kernel::arch::x86_64::cpu::*;
@@ -19,6 +19,7 @@ pub const IRQ_VECTOR_TIMER: u16 = 0x40;
 pub const IRQ_VECTOR_KEYBOARD: u16 = 0x41;
 pub const IRQ_VECTOR_MOUSE: u16 = 0x42;
 pub const IRQ_VECTOR_RESCHEDULE: u16 = 0x43;
+pub const IRQ_VECTOR_RESCHEDULE_IPI: u16 = 0x44;
 pub const IRQ_VECTOR_SPURIOUS: u16 = 0xFF;
 
 static mut IRQ_IDT_READY: bool = false;
@@ -27,6 +28,7 @@ static mut IRQ_TIMER_COUNT: u64 = 0;
 static mut IRQ_KEYBOARD_COUNT: u64 = 0;
 static mut IRQ_MOUSE_COUNT: u64 = 0;
 static mut IRQ_SPURIOUS_COUNT: u64 = 0;
+static mut IRQ_RESCHEDULE_IPI_COUNT: u64 = 0;
 
 @system
 fn irq_install_gate(vector: u16) -> bool {
@@ -50,6 +52,7 @@ pub fn irq_prepare_idt() -> bool {
     if !irq_install_gate(IRQ_VECTOR_KEYBOARD) { return false; }
     if !irq_install_gate(IRQ_VECTOR_MOUSE) { return false; }
     if !irq_install_user_gate(IRQ_VECTOR_RESCHEDULE) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_RESCHEDULE_IPI) { return false; }
     if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
     unsafe { IRQ_IDT_READY = true; }
     return true;
@@ -82,20 +85,26 @@ pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
 pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
 @system
 pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
+@system
+pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_COUNT; } }
 
-// Mantem o contrato historico de troca com FPU e acrescenta dois invariantes:
-// RSP0 acompanha a thread CPL3 selecionada e contextos FPU terminados sao
-// liberados apenas depois de sair da stack/contexto antigo.
+// Serializa a run queue e o storage FPU durante a troca. Isso impede que BSP e
+// AP publiquem/restaurem o mesmo slot de thread simultaneamente.
 @system
 fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
+    if !scheduler_switch_lock() { loop {} }
+
     let old_tid = scheduler_current_thread_id();
     let old_terminated = scheduler_thread_is_terminated(old_tid);
-    if fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
+    if old_tid != 0 && fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
 
     let selected = scheduler_on_timer_interrupt(frame_address);
     let new_tid = scheduler_current_thread_id();
 
     if x86_saved_frame_is_user(selected) {
+        // Userspace em AP ainda nao faz parte desta fase. Fail-closed evita usar
+        // o TSS BSP em um processador secundario por acidente.
+        if scheduler_current_cpu_slot() != 0 { loop {} }
         let kernel_rsp0 = selected + X86_KERNEL_THREAD_FRAME_BYTES;
         if kernel_rsp0 <= selected || (kernel_rsp0 & 15) != 0 || !tss_set_rsp0(kernel_rsp0) {
             loop {}
@@ -106,6 +115,7 @@ fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     if fpu_is_ready() && old_terminated && old_tid != 0 && old_tid != new_tid {
         if !fpu_release_thread(old_tid) { loop {} }
     }
+    if !scheduler_switch_unlock() { loop {} }
     return selected;
 }
 
@@ -117,6 +127,7 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         return frame_address;
     }
 
+    // INT 0x43 permanece software-only: yield/syscall nao envia LAPIC EOI.
     if vector == IRQ_VECTOR_RESCHEDULE as u64 {
         if x86_saved_frame_is_user(frame_address) {
             let action = syscall_dispatch_frame(frame_address);
@@ -129,6 +140,15 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
         // Pre-FPU fallback preserva o caminho minimo do bring-up. Userspace so
         // e publicado depois de fpu_initialize(), portanto CPL3 usa o helper.
         if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
+        return irq_schedule_with_fpu(frame_address);
+    }
+
+    // IPI 0x44 e hardware Local APIC: sempre reconhece a origem com EOI antes
+    // de entrar na selecao de contexto compartilhada.
+    if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64 {
+        unsafe { IRQ_RESCHEDULE_IPI_COUNT += 1; }
+        lapic_eoi();
+        if !fpu_is_ready() { loop {} }
         return irq_schedule_with_fpu(frame_address);
     }
 
