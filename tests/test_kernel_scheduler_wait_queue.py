@@ -86,6 +86,16 @@ class KernelSchedulerWaitQueueTests(unittest.TestCase):
         self.assertLess(second_yield, resumed)
         self.assertLess(resumed, complete)
 
+    def test_completion_wait_drives_scheduler_progress_instead_of_host_speed(self):
+        probe = PROBE.read_text(encoding="utf-8")
+        self.assertIn("import kernel::scheduler::yield::*;", probe)
+        body = probe.split("pub fn scheduler_wait_probe_wait_complete() -> bool", 1)[1]
+        self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1", body)
+        self.assertIn("if !scheduler_yield() { return false; }", body)
+        self.assertNotIn("x86_cpu_pause()", body)
+        self.assertLess(body.index("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1"),
+                        body.index("scheduler_yield()"))
+
     def test_nvme_qemu_gate_requires_wait_queue_proof_markers(self):
         workflow = NVME_WORKFLOW.read_text(encoding="utf-8")
         for marker in ("BAKEN:WAIT_BLOCKED", "BAKEN:WAIT_WAKE", "BAKEN:WAIT_RESUME"):

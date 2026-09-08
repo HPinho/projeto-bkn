@@ -9,6 +9,7 @@ module kernel::scheduler::wait_queue_probe;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::scheduler::core::*;
+import kernel::scheduler::yield::*;
 import kernel::scheduler::wait_queue::*;
 import kernel::scheduler::sleep::*;
 
@@ -122,16 +123,19 @@ pub fn scheduler_wait_probe_resumed() -> bool {
 
 @system
 pub fn scheduler_wait_probe_wait_complete() -> bool {
-    let mut spins: u64 = 0;
-    while spins < SCHEDULER_WAIT_PROBE_SPIN_LIMIT {
+    let mut attempts: u64 = 0;
+    while attempts < SCHEDULER_WAIT_PROBE_SPIN_LIMIT {
         unsafe {
             if WAIT_PROBE_RESUMED && WAIT_PROBE_WOKEN && WAIT_PROBE_SLEEP_COMPLETE &&
                scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1 {
                 return true;
             }
         }
-        x86_cpu_pause();
-        spins += 1;
+        // O fechamento depende de timer + retorno + reaper. Ceder a CPU produz
+        // progresso explícito do scheduler e evita usar a velocidade de `pause`
+        // do host/QEMU como relógio implícito para a prova dinâmica.
+        if !scheduler_yield() { return false; }
+        attempts += 1;
     }
     return false;
 }
