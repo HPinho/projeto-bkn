@@ -71,11 +71,12 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
 
     def test_probe_pins_thread_before_releasing_aps_and_uses_two_ipis(self):
         text = PROBE.read_text(encoding="utf-8")
-        create = text.index("scheduler_create_kernel_thread_on_cpu(")
-        release = text.index("smp_release_aps_for_scheduler()")
-        first_ipi = text.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)")
-        second_ipi = text.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)", first_ipi + 1)
-        idle = text.index("scheduler_smp_probe_wait_idle", second_ipi)
+        run = text.split("pub fn scheduler_smp_probe_run() -> bool", 1)[1]
+        create = run.index("scheduler_create_kernel_thread_on_cpu(")
+        release = run.index("smp_release_aps_for_scheduler()")
+        first_ipi = run.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)")
+        second_ipi = run.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)", first_ipi + 1)
+        idle = run.index("scheduler_smp_probe_wait_idle", second_ipi)
         self.assertLess(create, release)
         self.assertLess(release, first_ipi)
         self.assertLess(first_ipi, second_ipi)
