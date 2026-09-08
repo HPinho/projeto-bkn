@@ -129,7 +129,7 @@ pub fn dma_alloc(size: u64, alignment: u64) -> DmaBuffer {
         return dma_invalid_buffer();
     }
     let buffer = DmaBuffer {
-        virtual_address: virtual_address as *mut u8,
+        virtual_address: unsafe { virtual_address as *mut u8 },
         physical_address: physical,
         size: allocated_size,
         alignment: alignment,
@@ -243,7 +243,7 @@ pub fn dma_alloc_for_device(size: u64, alignment: u64, max_address: u64, boundar
     }
 
     let buffer = DmaBuffer {
-        virtual_address: virtual_address as *mut u8,
+        virtual_address: unsafe { virtual_address as *mut u8 },
         physical_address: physical,
         size: allocated_size,
         alignment: alignment,
