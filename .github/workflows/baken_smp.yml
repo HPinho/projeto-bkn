@@ -32,6 +32,7 @@ jobs:
           python3 tests/test_kernel_smp_scheduler_dispatch.py
           python3 tests/test_kernel_smp_timer_preemption.py
           python3 tests/test_kernel_smp_tlb_shootdown.py
+          python3 tests/test_kernel_smp_ring3.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -45,7 +46,7 @@ jobs:
           python3 tools/scripts/create_uefi_iso.py
           test -s build/baken_os.iso
 
-      - name: Prove AP Dispatch, Timer Preemption, Generic Dispatch and TLB Shootdown
+      - name: Prove AP Dispatch, Timer Preemption, Generic Dispatch, TLB and Ring3
         timeout-minutes: 4
         shell: bash
         run: |
@@ -70,7 +71,7 @@ jobs:
 
           found=0
           for i in $(seq 1 1200); do
-            if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:SMP_TLB_SHOOTDOWN_READY' build/qemu-smp-serial.log; then
+            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log; then
               found=1
               break
             fi
@@ -94,8 +95,10 @@ jobs:
           grep -Fq 'BAKEN:SMP_TIMER_ON_AP' build/qemu-smp-serial.log
           grep -Fq 'BAKEN:SMP_ANY_THREAD_ON_AP' build/qemu-smp-serial.log
           grep -Fq 'BAKEN:SMP_TLB_SHOOTDOWN_READY' build/qemu-smp-serial.log
+          grep -Fxq 'BAKEN:SMP_RING3_ON_AP' build/qemu-smp-serial.log
+          grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
-            echo '::error::CPU exception reported during SMP/TLB proof.'
+            echo '::error::CPU exception reported during SMP/TLB/Ring3 proof.'
             exit 1
           fi
           test "$found" -eq 1

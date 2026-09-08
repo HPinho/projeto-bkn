@@ -1,14 +1,16 @@
-// Baken OS — provas reais de dispatch, timer periodico e TLB shootdown em AP.
+// Baken OS — provas reais de dispatch, timer, TLB shootdown e Ring 3 em AP.
 //
-// As tres provas historicas permanecem inalteradas. A quarta prova preenche o
-// TLB do AP com um frame, remapeia a mesma VA no BSP e exige que o IPI 0x45
-// invalide a entrada remota antes de liberar a segunda leitura.
-
+// As provas históricas continuam isoladas. O modo Ring 3 usa a mesma kernel
+// thread pinned do probe SMP, mas publica um address space de processo real,
+// entra em CPL3 no CPU 1, executa write+exit via INT 0x43 e só finaliza depois
+// de retornar ao idle/kernel CR3, destruir o processo e restaurar o timer do AP.
 module kernel::scheduler::smp_probe;
 
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::smp::*;
+import kernel::arch::x86_64::tss::*;
 import kernel::interrupts::irq::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::lapic_timer::*;
@@ -16,16 +18,26 @@ import kernel::memory::active_page_tables::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::tlb_shootdown::*;
+import kernel::process::address_space::*;
+import kernel::process::registry::*;
 import kernel::scheduler::core::*;
+import kernel::syscall::dispatch::*;
 
 pub const SCHEDULER_SMP_PROBE_CPU_SLOT: usize = 1;
 pub const SCHEDULER_SMP_PROBE_SPIN_LIMIT: u64 = 10000000;
 pub const SCHEDULER_SMP_PROBE_MODE_THREAD: u32 = 1;
 pub const SCHEDULER_SMP_PROBE_MODE_TIMER: u32 = 2;
 pub const SCHEDULER_SMP_PROBE_MODE_TLB: u32 = 3;
+pub const SCHEDULER_SMP_PROBE_MODE_RING3: u32 = 4;
 pub const SCHEDULER_SMP_TLB_ADDRESS: u64 = VMM_RUNTIME_BASE + 4096;
 pub const SCHEDULER_SMP_TLB_OLD_VALUE: u32 = 0x13572468;
 pub const SCHEDULER_SMP_TLB_NEW_VALUE: u32 = 0x24681357;
+pub const SCHEDULER_SMP_RING3_CODE_ADDRESS: u64 = PROCESS_USER_BASE;
+pub const SCHEDULER_SMP_RING3_DATA_ADDRESS: u64 = PROCESS_USER_BASE + 0x1000;
+pub const SCHEDULER_SMP_RING3_STACK_ADDRESS: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE - 0x1000;
+pub const SCHEDULER_SMP_RING3_STACK_TOP: u64 = PROCESS_USER_BASE + PROCESS_USER_WINDOW_SIZE;
+pub const SCHEDULER_SMP_RING3_CODE_BYTES: usize = 39;
+pub const SCHEDULER_SMP_RING3_DATA_BYTES: usize = 22;
 
 static mut SCHEDULER_SMP_PROBE_EXECUTED: u32 = 0;
 static mut SCHEDULER_SMP_PROBE_CPU: u32 = 0xFFFFFFFF;
@@ -34,6 +46,12 @@ static mut SCHEDULER_SMP_TIMER_ENABLED: u32 = 0;
 static mut SCHEDULER_SMP_TLB_PRIMED: u32 = 0;
 static mut SCHEDULER_SMP_TLB_RELEASE: u32 = 0;
 static mut SCHEDULER_SMP_TLB_OBSERVED: u32 = 0;
+static mut SCHEDULER_SMP_RING3_ENTERED: u32 = 0;
+static mut SCHEDULER_SMP_RING3_CPU: u32 = 0xFFFFFFFF;
+static mut SCHEDULER_SMP_RING3_ROOT_LO: u32 = 0;
+static mut SCHEDULER_SMP_RING3_ROOT_HI: u32 = 0;
+static mut SCHEDULER_SMP_RING3_PID_LO: u32 = 0;
+static mut SCHEDULER_SMP_RING3_PID_HI: u32 = 0;
 
 @system
 fn scheduler_smp_probe_executed_address() -> u64 {
@@ -62,6 +80,30 @@ fn scheduler_smp_tlb_release_address() -> u64 {
 @system
 fn scheduler_smp_tlb_observed_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TLB_OBSERVED; return value as u64; }
+}
+@system
+fn scheduler_smp_ring3_entered_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_ENTERED; return value as u64; }
+}
+@system
+fn scheduler_smp_ring3_cpu_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_CPU; return value as u64; }
+}
+@system
+fn scheduler_smp_ring3_root_lo_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_ROOT_LO; return value as u64; }
+}
+@system
+fn scheduler_smp_ring3_root_hi_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_ROOT_HI; return value as u64; }
+}
+@system
+fn scheduler_smp_ring3_pid_lo_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_PID_LO; return value as u64; }
+}
+@system
+fn scheduler_smp_ring3_pid_hi_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_RING3_PID_HI; return value as u64; }
 }
 
 @system
@@ -101,6 +143,28 @@ pub fn sotlas_x86_scheduler_smp_probe_entry() -> void {
             __dma_fence();
         }
         return;
+    }
+
+    if mode == SCHEDULER_SMP_PROBE_MODE_RING3 {
+        if cpu_slot != SCHEDULER_SMP_PROBE_CPU_SLOT { return; }
+        lapic_timer_mask();
+        let root = (x86_mmio_read32(scheduler_smp_ring3_root_lo_address()) as u64) |
+                   ((x86_mmio_read32(scheduler_smp_ring3_root_hi_address()) as u64) << 32);
+        let expected_pid = (x86_mmio_read32(scheduler_smp_ring3_pid_lo_address()) as u64) |
+                           ((x86_mmio_read32(scheduler_smp_ring3_pid_hi_address()) as u64) << 32);
+        if root == 0 || expected_pid == 0 || !x86_page_aligned(root) { return; }
+        if (x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK) != root { x86_write_cr3_raw(root); }
+        if process_current_id() != expected_pid { return; }
+        let current_rsp = __current_rsp();
+        if current_rsp > 0xFFFFFFFFFFFFFFD7 { return; }
+        let kernel_stack_top = (current_rsp + 40) & 0xFFFFFFFFFFFFFFF0;
+        if !tss_set_rsp0_for_cpu(cpu_slot, kernel_stack_top) { return; }
+        x86_mmio_write32(scheduler_smp_ring3_cpu_address(), cpu_slot as u32);
+        __dma_fence();
+        x86_mmio_write32(scheduler_smp_ring3_entered_address(), 1);
+        __dma_fence();
+        __enter_user(SCHEDULER_SMP_RING3_CODE_ADDRESS, SCHEDULER_SMP_RING3_STACK_TOP);
+        loop { x86_cpu_pause(); }
     }
 
     if mode != SCHEDULER_SMP_PROBE_MODE_THREAD { return; }
@@ -225,6 +289,138 @@ fn scheduler_smp_probe_emit_tlb_marker() -> bool {
     let mut index: usize = 0;
     while index < 30 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
     return true;
+}
+@system
+fn scheduler_smp_probe_emit_ring3_ready_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 28] = [66,65,75,69,78,58,83,77,80,95,82,73,78,71,51,95,79,78,95,65,80,95,82,69,65,68,89,10];
+    let mut index: usize = 0;
+    while index < 28 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
+    return true;
+}
+
+@system
+fn scheduler_smp_probe_zero_page(physical: u64) -> bool {
+    let virtual_address = direct_map_virtual_address(physical);
+    if virtual_address == 0 { return false; }
+    unsafe {
+        let mut index: u64 = 0;
+        while index < X86_PAGE_SIZE {
+            *((virtual_address + index) as *mut u8) = 0;
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn scheduler_smp_probe_materialize_ring3(code_physical: u64, data_physical: u64) -> bool {
+    let code_virtual = direct_map_virtual_address(code_physical);
+    let data_virtual = direct_map_virtual_address(data_physical);
+    if code_virtual == 0 || data_virtual == 0 { return false; }
+    // mov rax,1; movabs rdi,DATA; mov rsi,22; int 43h;
+    // mov rax,2; xor edi,edi; int 43h; ud2.
+    let code: [u8; SCHEDULER_SMP_RING3_CODE_BYTES] = [
+        72,199,192,1,0,0,0,
+        72,191,0,16,0,0,0,32,0,0,
+        72,199,198,22,0,0,0,
+        205,67,
+        72,199,192,2,0,0,0,
+        49,255,205,67,15,11
+    ];
+    let data: [u8; SCHEDULER_SMP_RING3_DATA_BYTES] = [
+        66,65,75,69,78,58,83,77,80,95,82,73,78,71,51,95,79,78,95,65,80,10
+    ];
+    unsafe {
+        let mut index: usize = 0;
+        while index < SCHEDULER_SMP_RING3_CODE_BYTES {
+            *((code_virtual + index as u64) as *mut u8) = code[index];
+            index += 1;
+        }
+        index = 0;
+        while index < SCHEDULER_SMP_RING3_DATA_BYTES {
+            *((data_virtual + index as u64) as *mut u8) = data[index];
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn scheduler_smp_probe_restore_ap_timer(apic_id: u8) -> bool {
+    let enabled_address = scheduler_smp_timer_enabled_address();
+    x86_mmio_write32(scheduler_smp_probe_mode_address(), SCHEDULER_SMP_PROBE_MODE_TIMER);
+    x86_mmio_write32(enabled_address, 0);
+    __dma_fence();
+    let before = irq_timer_count_for_cpu(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let idle_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let entry = x86_scheduler_smp_probe_entry_address();
+    let tid = scheduler_create_kernel_thread_on_cpu(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
+                                                     SCHEDULER_SMP_PROBE_CPU_SLOT);
+    if tid == 0 { return false; }
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_timer_enabled() { return false; }
+    if !scheduler_smp_probe_wait_timer_tick(SCHEDULER_SMP_PROBE_CPU_SLOT, before) { return false; }
+    return scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before);
+}
+
+@system
+fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
+    let pid = process_create();
+    if pid == 0 || !process_retain(pid) { return false; }
+    let root = process_borrow_root(pid);
+    if root == 0 || !x86_page_aligned(root) { process_release(pid); process_destroy(pid); return false; }
+
+    let code = pmm_alloc_page();
+    let data = pmm_alloc_page();
+    let stack = pmm_alloc_page();
+    if code == 0 || data == 0 || stack == 0 {
+        if code != 0 { pmm_free_pages(code, 1); }
+        if data != 0 { pmm_free_pages(data, 1); }
+        if stack != 0 { pmm_free_pages(stack, 1); }
+        process_release(pid); process_destroy(pid); return false;
+    }
+    if !scheduler_smp_probe_zero_page(code) || !scheduler_smp_probe_zero_page(data) ||
+       !scheduler_smp_probe_zero_page(stack) || !scheduler_smp_probe_materialize_ring3(code, data) {
+        pmm_free_pages(code, 1); pmm_free_pages(data, 1); pmm_free_pages(stack, 1);
+        process_release(pid); process_destroy(pid); return false;
+    }
+    if !process_map_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS, code, false, true) ||
+       !process_map_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS, data, false, false) ||
+       !process_map_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS, stack, true, false) {
+        return false;
+    }
+
+    x86_mmio_write32(scheduler_smp_ring3_root_lo_address(), root as u32);
+    x86_mmio_write32(scheduler_smp_ring3_root_hi_address(), (root >> 32) as u32);
+    x86_mmio_write32(scheduler_smp_ring3_pid_lo_address(), pid as u32);
+    x86_mmio_write32(scheduler_smp_ring3_pid_hi_address(), (pid >> 32) as u32);
+    x86_mmio_write32(scheduler_smp_ring3_entered_address(), 0);
+    x86_mmio_write32(scheduler_smp_ring3_cpu_address(), 0xFFFFFFFF);
+    x86_mmio_write32(scheduler_smp_probe_mode_address(), SCHEDULER_SMP_PROBE_MODE_RING3);
+    __dma_fence();
+
+    let syscall_before = syscall_count();
+    let exit_before = syscall_exit_count();
+    let idle_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let entry = x86_scheduler_smp_probe_entry_address();
+    let tid = scheduler_create_kernel_thread_on_cpu(entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
+                                                     SCHEDULER_SMP_PROBE_CPU_SLOT);
+    if tid == 0 { return false; }
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_flag(scheduler_smp_ring3_entered_address()) { return false; }
+    if !scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before) { return false; }
+    if x86_mmio_read32(scheduler_smp_ring3_cpu_address()) != SCHEDULER_SMP_PROBE_CPU_SLOT as u32 { return false; }
+    if syscall_count() < syscall_before + 2 || syscall_exit_count() <= exit_before { return false; }
+
+    let unmapped_code = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS);
+    let unmapped_data = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS);
+    let unmapped_stack = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS);
+    if unmapped_code != code || unmapped_data != data || unmapped_stack != stack { return false; }
+    if !pmm_free_pages(code, 1) || !pmm_free_pages(data, 1) || !pmm_free_pages(stack, 1) { return false; }
+    if !process_release(pid) || !process_destroy(pid) { return false; }
+    if !scheduler_smp_probe_restore_ap_timer(apic_id) { return false; }
+    return scheduler_smp_probe_emit_ring3_ready_marker();
 }
 
 @system
@@ -351,5 +547,6 @@ pub fn scheduler_smp_probe_run() -> bool {
     if !any_executed || !any_terminated || !any_idle { return false; }
     if !scheduler_smp_probe_emit_any_thread_marker() { return false; }
 
-    return scheduler_smp_probe_run_tlb(apic_id);
+    if !scheduler_smp_probe_run_tlb(apic_id) { return false; }
+    return scheduler_smp_probe_run_ring3(apic_id);
 }
