@@ -30,7 +30,7 @@ class Lexer:
 
     Suporta:
       - Comentários de linha  // ...
-      - Comentários de bloco  (* ... *)
+      - Comentários de bloco  /* ... */ e (* ... *)
       - Literais: inteiro, hexadecimal (0x), binário (0b), float, string, char
       - Todos os operadores e delimitadores da gramática Sotlas
       - Palavra-chave composta 'co-owned' resolvida em pós-processamento
@@ -74,6 +74,18 @@ class Lexer:
             self._col += 1
         return ch
 
+    def _skip_block_comment(self, opening: str, closing: str) -> None:
+        line, col = self._line, self._col
+        for _ in opening:
+            self._advance()
+        while self._pos < len(self._src):
+            if self._src.startswith(closing, self._pos):
+                for _ in closing:
+                    self._advance()
+                return
+            self._advance()
+        raise SotlasLexError("comentário de bloco não terminado", self._fn, line, col)
+
     def _skip_whitespace_and_comments(self) -> None:
         while self._pos < len(self._src):
             ch = self._peek()
@@ -83,26 +95,23 @@ class Lexer:
                 while self._pos < len(self._src) and self._peek() != "\n":
                     self._advance()
             elif ch == "/" and self._peek(1) == "*":
-                self._advance(); self._advance()  # consume /*
-                while self._pos < len(self._src):
-                    if self._peek() == "*" and self._peek(1) == "/":
-                        self._advance(); self._advance()  # consume */
-                        break
-                    self._advance()
+                self._skip_block_comment("/*", "*/")
             elif ch == "(" and self._peek(1) == "*":
-                end_pos = self._src.find("*)", self._pos + 2)
-                if end_pos != -1 and ")" not in self._src[self._pos + 2 : end_pos]:
-                    inner = self._src[self._pos + 2 : end_pos]
-                    self._pos = end_pos + 2
-                    self._line += inner.count("\n")
-                    if "\n" in inner:
-                        self._col = len(inner) - inner.rfind("\n") + 1
-                    else:
-                        self._col += len(inner) + 4
-                else:
-                    break
+                self._skip_block_comment("(*", "*)")
             else:
                 break
+
+    @staticmethod
+    def _decode_escape(esc: str) -> str:
+        return {
+            "0": "\0",
+            "n": "\n",
+            "t": "\t",
+            "r": "\r",
+            "\\": "\\",
+            '"': '"',
+            "'": "'",
+        }.get(esc, esc)
 
     def _next_token(self) -> Token:
         self._skip_whitespace_and_comments()
@@ -261,8 +270,6 @@ class Lexer:
         )
 
     def _lex_number(self, line: int, col: int) -> Token:
-        start = self._pos - 1  # _advance não foi chamado ainda para o primeiro dígito
-        # Refaz: _advance só foi chamado no loop interno, então aqui ainda temos o char.
         buf = []
         ch = self._peek()
 
@@ -314,8 +321,9 @@ class Lexer:
         while self._pos < len(self._src) and self._peek() != '"':
             if self._peek() == "\\":
                 self._advance()
-                esc = self._advance()
-                buf.append({"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"'}.get(esc, esc))
+                if self._pos >= len(self._src):
+                    raise SotlasLexError("string não terminada", self._fn, line, col)
+                buf.append(self._decode_escape(self._advance()))
             else:
                 buf.append(self._advance())
         if self._pos >= len(self._src):
@@ -325,12 +333,16 @@ class Lexer:
 
     def _lex_char(self, line: int, col: int) -> Token:
         self._advance()  # consume abre-aspas simples
+        if self._pos >= len(self._src) or self._peek() == "'":
+            raise SotlasLexError("literal char inválido", self._fn, line, col)
         if self._peek() == "\\":
             self._advance()
-            ch = self._advance()
+            if self._pos >= len(self._src):
+                raise SotlasLexError("literal char inválido", self._fn, line, col)
+            ch = self._decode_escape(self._advance())
         else:
             ch = self._advance()
-        if self._peek() != "'":
+        if self._pos >= len(self._src) or self._peek() != "'":
             raise SotlasLexError("literal char inválido", self._fn, line, col)
         self._advance()  # consume fecha-aspas simples
         return Token(TK.CHAR_LIT, ch, line, col)
