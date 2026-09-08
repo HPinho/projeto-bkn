@@ -103,6 +103,8 @@ fn userspace_teardown_mapping(pid: u64, code: u64, data: u64, stack: u64) -> boo
 @system
 @export
 pub fn sotlas_x86_userspace_bootstrap_entry() -> ! {
+    let cpu_slot = scheduler_current_cpu_slot();
+    if cpu_slot == SCHEDULER_INVALID_CPU_SLOT { loop { x86_cpu_pause(); } }
     let pid = process_current_id();
     unsafe {
         if pid == 0 || pid != USERSPACE_PID { loop { x86_cpu_pause(); } }
@@ -111,7 +113,7 @@ pub fn sotlas_x86_userspace_bootstrap_entry() -> ! {
     if current_rsp > 0xFFFFFFFFFFFFFFD7 { loop { x86_cpu_pause(); } }
     // Scheduler trampoline: stack_top - 32 bytes de home space - return address.
     let kernel_stack_top = (current_rsp + 40) & 0xFFFFFFFFFFFFFFF0;
-    if !tss_set_rsp0(kernel_stack_top) { loop { x86_cpu_pause(); } }
+    if !tss_set_rsp0_for_cpu(cpu_slot, kernel_stack_top) { loop { x86_cpu_pause(); } }
     __enter_user(USERSPACE_CODE_ADDRESS, USERSPACE_STACK_TOP);
     loop { x86_cpu_pause(); }
 }

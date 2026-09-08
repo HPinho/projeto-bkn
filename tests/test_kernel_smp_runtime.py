@@ -1,4 +1,4 @@
-"""Guardrails do runtime per-CPU SMP e das transicoes de contexto BSP."""
+"""Guardrails do runtime per-CPU SMP e das transicoes de contexto BSP/AP."""
 from pathlib import Path
 import unittest
 
@@ -12,6 +12,7 @@ SMP = ARCH / "smp.sotlas"
 LAPIC = ROOT / "kernel/src/interrupts/lapic.sotlas"
 LAPIC_TIMER = ROOT / "kernel/src/interrupts/lapic_timer.sotlas"
 IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
+USERSPACE = ROOT / "kernel/src/process/userspace_loader.sotlas"
 INTRINSICS = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
 WORKFLOW = ROOT / ".github/workflows/baken_smp.yml"
 
@@ -39,6 +40,7 @@ class KernelSmpRuntimeTests(unittest.TestCase):
             "static mut AP_NMI_STACKS",
             "static mut AP_MACHINE_CHECK_STACKS",
             "pub fn tss_prepare_for_cpu(cpu_slot: usize, kernel_rsp0: u64) -> bool",
+            "pub fn tss_set_rsp0_for_cpu(cpu_slot: usize, kernel_rsp0: u64) -> bool",
             "pub fn tss_base_for_cpu(cpu_slot: usize) -> u64",
             "AP_TSS[cpu_slot].io_map_base = 104",
         ):
@@ -63,8 +65,6 @@ class KernelSmpRuntimeTests(unittest.TestCase):
             self.assertIn(token, text if token == "SMP_AP_RUNTIME_READY" else body)
         self.assertLess(body.index("x86_mmio_write32(runtime_ready, 1)"), body.index("while x86_mmio_read32(release) != 1"))
         self.assertLess(body.index("while x86_mmio_read32(release) != 1"), body.index("x86_sti_raw()"))
-        # O AP pode participar do scheduler somente depois do flag de release;
-        # a rotina de entrada nao inicializa nem executa a run queue por conta propria.
         self.assertNotIn("scheduler_initialize", body)
         self.assertNotIn("scheduler_on_timer_interrupt", body)
         self.assertNotIn("scheduler_create_", body)
@@ -86,21 +86,33 @@ class KernelSmpRuntimeTests(unittest.TestCase):
         self.assertIn("pub fn lapic_timer_prepare_current_cpu_masked() -> bool", timer)
         self.assertIn("LAPIC_TIMER_MASKED | LAPIC_TIMER_PERIODIC", timer)
 
-    def test_irq_switch_updates_user_rsp0_and_releases_terminated_fpu_slot(self):
+    def test_irq_switch_updates_cpu_local_user_rsp0_and_releases_terminated_fpu_slot(self):
         text = IRQ.read_text(encoding="utf-8")
         body = text.split("fn irq_schedule_with_fpu", 1)[1].split("@system\n@export", 1)[0]
         for token in (
             "scheduler_switch_lock()",
+            "let cpu_slot = scheduler_current_cpu_slot();",
+            "cpu_slot == SCHEDULER_INVALID_CPU_SLOT",
             "let old_terminated = scheduler_thread_is_terminated(old_tid);",
             "let selected = scheduler_on_timer_interrupt(frame_address);",
             "if x86_saved_frame_is_user(selected)",
             "selected + X86_KERNEL_THREAD_FRAME_BYTES",
-            "tss_set_rsp0(kernel_rsp0)",
+            "tss_set_rsp0_for_cpu(cpu_slot, kernel_rsp0)",
             "fpu_restore_thread(new_tid)",
             "fpu_release_thread(old_tid)",
             "scheduler_switch_unlock()",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("if cpu_slot != 0", body)
+
+    def test_userspace_bootstrap_uses_current_cpu_tss_before_iret(self):
+        text = USERSPACE.read_text(encoding="utf-8")
+        body = text.split("pub fn sotlas_x86_userspace_bootstrap_entry() -> !", 1)[1].split("@system", 1)[0]
+        self.assertIn("let cpu_slot = scheduler_current_cpu_slot();", body)
+        self.assertIn("cpu_slot == SCHEDULER_INVALID_CPU_SLOT", body)
+        self.assertIn("tss_set_rsp0_for_cpu(cpu_slot, kernel_stack_top)", body)
+        self.assertLess(body.index("tss_set_rsp0_for_cpu"), body.index("__enter_user"))
+        self.assertNotIn("tss_set_rsp0(kernel_stack_top)", body)
 
     def test_backend_exposes_native_ap_runtime_and_smp_probe_addresses(self):
         cpu = CPU.read_text(encoding="utf-8")
