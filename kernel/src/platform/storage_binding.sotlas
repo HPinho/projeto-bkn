@@ -13,6 +13,15 @@ static mut PLATFORM_STORAGE_BOUND: bool = false;
 static mut PLATFORM_STORAGE_DEVICE_INDEX: u32 = 0;
 static mut PLATFORM_STORAGE_DRIVER: u32 = PLATFORM_DRIVER_NONE;
 
+// Nem todo boot precisa ter um disco de dados anexado (por exemplo, a prova SMP
+// inicia apenas pela mídia óptica). O binding só é um gate quando a camada de
+// storage já publicou um BlockDevice nativo real; nesse caso falhar o ownership
+// continua sendo erro fatal e não é mascarado.
+@system
+pub fn platform_storage_binding_required() -> bool {
+    return storage_generic_block_io_is_ready();
+}
+
 @system
 pub fn platform_storage_bind_active_driver() -> bool {
     unsafe { if PLATFORM_STORAGE_BOUND { return true; } }

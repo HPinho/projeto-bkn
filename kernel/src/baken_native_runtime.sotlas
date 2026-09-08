@@ -181,7 +181,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     // Consolida ACPI/APIC/PCI antes de liberar APs ou inicializar serviços.
     if !platform_inventory_init() || !platform_inventory_emit_ready_marker() { loop {} }
     if !platform_device_catalog_init() || !platform_device_catalog_emit_ready_marker() { loop {} }
-    if !platform_storage_bind_active_driver() || !platform_storage_emit_bound_marker() { loop {} }
+    if platform_storage_binding_required() {
+        if !platform_storage_bind_active_driver() || !platform_storage_emit_bound_marker() { loop {} }
+    }
 
     // APs chegam ate runtime per-CPU com IF=0 e permanecem estacionados.
     if !smp_initialize_base() || !smp_emit_ready_markers() { loop {} }
