@@ -32,6 +32,7 @@ jobs:
           python3 tests/test_kernel_smp_scheduler_dispatch.py
           python3 tests/test_kernel_smp_timer_preemption.py
           python3 tests/test_kernel_smp_tlb_shootdown.py
+          python3 tests/test_active_address_space_tracking.py
           python3 tests/test_kernel_smp_ring3.py
           python3 tests/test_process_smp_tlb_coherence.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas

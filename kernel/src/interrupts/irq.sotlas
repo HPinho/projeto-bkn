@@ -93,6 +93,15 @@ pub fn irq_timer_count_for_cpu(cpu_slot: usize) -> u64 {
 @system pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_COUNT; } }
 @system pub fn irq_tlb_shootdown_ipi_count() -> u64 { unsafe { return IRQ_TLB_SHOOTDOWN_IPI_COUNT; } }
 
+// Caminho sem FPU: publica o CR3 somente depois que o scheduler terminou de
+// selecionar o frame/root. O scheduler continua sem importar memory.
+@system
+fn irq_schedule_publish_root(frame_address: u64) -> u64 {
+    let selected = scheduler_on_timer_interrupt(frame_address);
+    if !tlb_shootdown_publish_current_root() { loop {} }
+    return selected;
+}
+
 @system
 fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     if !scheduler_switch_lock() { loop {} }
@@ -102,6 +111,7 @@ fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     let old_terminated = scheduler_thread_is_terminated(old_tid);
     if old_tid != 0 && fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
     let selected = scheduler_on_timer_interrupt(frame_address);
+    if !tlb_shootdown_publish_current_root() { loop {} }
     let new_tid = scheduler_current_thread_id();
     if x86_saved_frame_is_user(selected) {
         let kernel_rsp0 = selected + X86_KERNEL_THREAD_FRAME_BYTES;
@@ -133,7 +143,7 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             }
             return frame_address;
         }
-        if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
+        if !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
 
@@ -172,7 +182,7 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             if timer_count <= 3 { x86_serial_write_hex32_marker('T' as u8, timer_count as u32); }
             scheduler_sleep_on_timer_tick(timer_count);
         }
-        if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
+        if !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {

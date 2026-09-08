@@ -22,6 +22,9 @@ static mut TLB_SHOOTDOWN_READY: bool = false;
 static mut TLB_SHOOTDOWN_CPU_REGISTERED: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false; TLB_SHOOTDOWN_MAX_CPUS];
 static mut TLB_SHOOTDOWN_CPU_ACTIVE: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false; TLB_SHOOTDOWN_MAX_CPUS];
 static mut TLB_SHOOTDOWN_CPU_APIC_ID: [u8; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
+// Root realmente carregado em cada CPU na ultima decisao de scheduling. Zero
+// significa desconhecido e permanece conservador para o futuro filtro seletivo.
+static mut TLB_SHOOTDOWN_CPU_ROOT: [u64; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
 static mut TLB_SHOOTDOWN_ADDRESS_LO: u32 = 0;
 static mut TLB_SHOOTDOWN_ADDRESS_HI: u32 = 0;
 static mut TLB_SHOOTDOWN_ROOT_LO: u32 = 0;
@@ -42,6 +45,7 @@ pub fn tlb_shootdown_initialize() -> bool {
             TLB_SHOOTDOWN_CPU_REGISTERED[slot] = false;
             TLB_SHOOTDOWN_CPU_ACTIVE[slot] = false;
             TLB_SHOOTDOWN_CPU_APIC_ID[slot] = 0;
+            TLB_SHOOTDOWN_CPU_ROOT[slot] = 0;
             TLB_SHOOTDOWN_ACK[slot] = 0;
             slot += 1;
         }
@@ -74,6 +78,7 @@ pub fn tlb_shootdown_register_cpu(slot: usize, apic_id: u8) -> bool {
             probe += 1;
         }
         TLB_SHOOTDOWN_CPU_APIC_ID[slot] = apic_id;
+        TLB_SHOOTDOWN_CPU_ROOT[slot] = 0;
         TLB_SHOOTDOWN_CPU_REGISTERED[slot] = true;
         // O BSP já está executando com IRQ/IDT/LAPIC prontos quando o bring-up
         // SMP registra o slot 0. APs só entram no conjunto após release.
@@ -118,6 +123,48 @@ pub fn tlb_shootdown_active_ap_count() -> u32 {
         }
     }
     return count;
+}
+
+@system
+fn tlb_shootdown_slot_for_current_cpu() -> usize {
+    let apic_id = xapic_ipi_current_id();
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_APIC_ID[slot] == apic_id {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return TLB_SHOOTDOWN_MAX_CPUS;
+}
+
+// Publicado depois que o scheduler terminou de selecionar o frame/CR3. O
+// shootdown atual ainda faz broadcast; este tracking é a precondição para
+// restringir destinos sem criar dependência memory -> scheduler.
+@system
+pub fn tlb_shootdown_publish_current_root() -> bool {
+    if !tlb_shootdown_is_ready() { return false; }
+    let slot = tlb_shootdown_slot_for_current_cpu();
+    if slot >= TLB_SHOOTDOWN_MAX_CPUS { return false; }
+    let root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+    if root == 0 || !x86_page_aligned(root) { return false; }
+    unsafe {
+        if !TLB_SHOOTDOWN_CPU_REGISTERED[slot] || !TLB_SHOOTDOWN_CPU_ACTIVE[slot] { return false; }
+        TLB_SHOOTDOWN_CPU_ROOT[slot] = root;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn tlb_shootdown_cpu_root(slot: usize) -> u64 {
+    if !tlb_shootdown_is_ready() || slot >= TLB_SHOOTDOWN_MAX_CPUS { return 0; }
+    unsafe {
+        if !TLB_SHOOTDOWN_CPU_REGISTERED[slot] || !TLB_SHOOTDOWN_CPU_ACTIVE[slot] { return 0; }
+        return TLB_SHOOTDOWN_CPU_ROOT[slot];
+    }
 }
 
 @system
@@ -204,21 +251,6 @@ fn tlb_shootdown_wait_ack(generation: u32, requester_slot: usize, expected: u32)
         spins += 1;
     }
     return false;
-}
-
-@system
-fn tlb_shootdown_slot_for_current_cpu() -> usize {
-    let apic_id = xapic_ipi_current_id();
-    unsafe {
-        let mut slot: usize = 0;
-        while slot < TLB_SHOOTDOWN_MAX_CPUS {
-            if TLB_SHOOTDOWN_CPU_REGISTERED[slot] && TLB_SHOOTDOWN_CPU_APIC_ID[slot] == apic_id {
-                return slot;
-            }
-            slot += 1;
-        }
-    }
-    return TLB_SHOOTDOWN_MAX_CPUS;
 }
 
 @system
