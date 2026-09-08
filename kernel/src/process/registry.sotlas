@@ -1,6 +1,8 @@
 // Registro SMP de processos: ownership das tabelas e lifetime por referências.
 // PID 0 é reservado ao kernel. Não expõe cópias owning de ProcessAddressSpace.
-// O dono do lock mantém IRQ-off; waiters restauram IF antes de retry quando possível.
+// PROCESS_REFERENCES pertence ao scheduler/thread lifetime; PROCESS_VM_PINS
+// protege a address space durante publicação de PTE + shootdown sem alterar a
+// semântica observável de process_reference_count().
 module kernel::process::registry;
 
 import kernel::process::address_space::*;
@@ -17,6 +19,7 @@ pub const PROCESS_ID_MAX: u64 = 0xFFFFFFFFFFFFFFFF;
 
 static mut PROCESS_IDS: [u64; PROCESS_SLOT_COUNT] = [0; PROCESS_SLOT_COUNT];
 static mut PROCESS_REFERENCES: [u64; PROCESS_SLOT_COUNT] = [0; PROCESS_SLOT_COUNT];
+static mut PROCESS_VM_PINS: [u64; PROCESS_SLOT_COUNT] = [0; PROCESS_SLOT_COUNT];
 static mut PROCESS_SPACES: [ProcessAddressSpace; PROCESS_SLOT_COUNT] = [
     ProcessAddressSpace { table_base_physical: 0, root_physical: 0, user_pdpt_physical: 0,
         user_pd_physical: 0, user_pt_physical: 0, valid: false }; PROCESS_SLOT_COUNT
@@ -25,9 +28,9 @@ static mut PROCESS_NEXT_ID: u64 = 1;
 static mut PROCESS_REGISTRY_READY: bool = false;
 
 // Criação/destruição pode descer ao PMM sob PROCESS_REGISTRY_LOCK.
-// Publicação de PTE de usuário é diferente: retém uma referência temporária sob
-// o registro, publica a PTE, SOLTA o registro e somente então espera o shootdown.
-// Assim nenhum CPU aguarda ACK de IPI enquanto bloqueia syscalls no registro.
+// Publicação de PTE de usuário fixa a VM sob o registro, publica a PTE, SOLTA o
+// registro e somente então espera o shootdown. Nenhum CPU aguarda ACK de IPI
+// enquanto bloqueia syscalls no registro, e o scheduler refcount não é poluído.
 static mut PROCESS_REGISTRY_LOCK: SpinLock = SpinLock { state: 0 };
 static mut PROCESS_REGISTRY_LOCK_READY: bool = false;
 
@@ -81,6 +84,7 @@ fn process_create_locked() -> u64 {
                 PROCESS_NEXT_ID += 1;
                 PROCESS_SPACES[slot] = space;
                 PROCESS_REFERENCES[slot] = 0;
+                PROCESS_VM_PINS[slot] = 0;
                 PROCESS_IDS[slot] = pid;
                 return pid;
             }
@@ -95,8 +99,10 @@ fn process_destroy_locked(pid: u64) -> bool {
     let slot = process_find_locked(pid);
     if slot == PROCESS_INVALID_SLOT { return false; }
     unsafe {
-        if PROCESS_REFERENCES[slot] != 0 { return false; }
+        if PROCESS_REFERENCES[slot] != 0 || PROCESS_VM_PINS[slot] != 0 { return false; }
         if !process_address_space_destroy(&mut PROCESS_SPACES[slot]) { return false; }
+        PROCESS_REFERENCES[slot] = 0;
+        PROCESS_VM_PINS[slot] = 0;
         PROCESS_IDS[slot] = 0;
     }
     return true;
@@ -122,6 +128,38 @@ fn process_release_locked(pid: u64) -> bool {
         PROCESS_REFERENCES[slot] -= 1;
     }
     return true;
+}
+
+@system
+fn process_vm_pin_locked(pid: u64) -> bool {
+    let slot = process_find_locked(pid);
+    if slot == PROCESS_INVALID_SLOT { return false; }
+    unsafe {
+        if PROCESS_VM_PINS[slot] == PROCESS_ID_MAX { return false; }
+        PROCESS_VM_PINS[slot] += 1;
+    }
+    return true;
+}
+
+@system
+fn process_vm_unpin_locked(pid: u64) -> bool {
+    let slot = process_find_locked(pid);
+    if slot == PROCESS_INVALID_SLOT { return false; }
+    unsafe {
+        if PROCESS_VM_PINS[slot] == 0 { return false; }
+        PROCESS_VM_PINS[slot] -= 1;
+    }
+    return true;
+}
+
+@system
+fn process_vm_unpin(pid: u64) -> bool {
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return false; }
+    let mut result = false;
+    unsafe { if PROCESS_REGISTRY_READY { result = process_vm_unpin_locked(pid); } }
+    process_registry_unlock_irq(flags);
+    return result;
 }
 
 @system
@@ -234,18 +272,18 @@ pub fn process_map_user_page(pid: u64, address: u64, physical: u64,
     let slot = process_find_locked(pid);
     let mut result = false;
     let mut root: u64 = 0;
-    if slot != PROCESS_INVALID_SLOT && process_retain_locked(pid) {
+    if slot != PROCESS_INVALID_SLOT && process_vm_pin_locked(pid) {
         unsafe {
             root = PROCESS_SPACES[slot].root_physical;
             result = process_address_space_map_user_page(&mut PROCESS_SPACES[slot], address,
                                                          physical, writable, executable);
         }
-        if !result && !process_release_locked(pid) { loop { x86_cpu_pause(); } }
+        if !result && !process_vm_unpin_locked(pid) { loop { x86_cpu_pause(); } }
     }
     process_registry_unlock_irq(flags);
     if !result { return false; }
     if !tlb_shootdown_address_space_page(root, address) { loop { x86_cpu_pause(); } }
-    if !process_release(pid) { loop { x86_cpu_pause(); } }
+    if !process_vm_unpin(pid) { loop { x86_cpu_pause(); } }
     return true;
 }
 
@@ -257,18 +295,18 @@ pub fn process_remap_user_page(pid: u64, address: u64, physical: u64,
     let slot = process_find_locked(pid);
     let mut previous: u64 = 0;
     let mut root: u64 = 0;
-    if slot != PROCESS_INVALID_SLOT && process_retain_locked(pid) {
+    if slot != PROCESS_INVALID_SLOT && process_vm_pin_locked(pid) {
         unsafe {
             root = PROCESS_SPACES[slot].root_physical;
             previous = process_address_space_remap_user_page(&mut PROCESS_SPACES[slot], address,
                                                              physical, writable, executable);
         }
-        if previous == 0 && !process_release_locked(pid) { loop { x86_cpu_pause(); } }
+        if previous == 0 && !process_vm_unpin_locked(pid) { loop { x86_cpu_pause(); } }
     }
     process_registry_unlock_irq(flags);
     if previous == 0 { return 0; }
     if !tlb_shootdown_address_space_page(root, address) { loop { x86_cpu_pause(); } }
-    if !process_release(pid) { loop { x86_cpu_pause(); } }
+    if !process_vm_unpin(pid) { loop { x86_cpu_pause(); } }
     return previous;
 }
 
@@ -279,17 +317,17 @@ pub fn process_unmap_user_page(pid: u64, address: u64) -> u64 {
     let slot = process_find_locked(pid);
     let mut physical: u64 = 0;
     let mut root: u64 = 0;
-    if slot != PROCESS_INVALID_SLOT && process_retain_locked(pid) {
+    if slot != PROCESS_INVALID_SLOT && process_vm_pin_locked(pid) {
         unsafe {
             root = PROCESS_SPACES[slot].root_physical;
             physical = process_address_space_unmap_user_page(&mut PROCESS_SPACES[slot], address);
         }
-        if physical == 0 && !process_release_locked(pid) { loop { x86_cpu_pause(); } }
+        if physical == 0 && !process_vm_unpin_locked(pid) { loop { x86_cpu_pause(); } }
     }
     process_registry_unlock_irq(flags);
     if physical == 0 { return 0; }
     if !tlb_shootdown_address_space_page(root, address) { loop { x86_cpu_pause(); } }
-    if !process_release(pid) { loop { x86_cpu_pause(); } }
+    if !process_vm_unpin(pid) { loop { x86_cpu_pause(); } }
     return physical;
 }
 
@@ -309,6 +347,9 @@ fn process_registry_self_test_locked() -> bool {
     if unexpected != 0 { passed = false; process_destroy_locked(unexpected); }
     if passed {
         let first = ids[0];
+        if !process_vm_pin_locked(first) { passed = false; }
+        if process_destroy_locked(first) { passed = false; }
+        if !process_vm_unpin_locked(first) { passed = false; }
         if process_release_locked(first) { passed = false; }
         if !process_retain_locked(first) { passed = false; }
         if process_destroy_locked(first) { passed = false; }
@@ -316,8 +357,10 @@ fn process_registry_self_test_locked() -> bool {
         if !process_destroy_locked(first) { passed = false; }
         ids[0] = process_create_locked();
         if ids[0] == 0 || ids[0] <= ids[PROCESS_SLOT_COUNT - 1] { passed = false; }
-        if process_retain_locked(first) || process_release_locked(first) || process_destroy_locked(first) { passed = false; }
-        if process_retain_locked(0) || process_destroy_locked(0) { passed = false; }
+        if process_retain_locked(first) || process_release_locked(first) ||
+           process_vm_pin_locked(first) || process_vm_unpin_locked(first) ||
+           process_destroy_locked(first) { passed = false; }
+        if process_retain_locked(0) || process_vm_pin_locked(0) || process_destroy_locked(0) { passed = false; }
     }
     slot = 0;
     while slot < PROCESS_SLOT_COUNT {
