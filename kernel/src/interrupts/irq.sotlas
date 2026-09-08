@@ -24,7 +24,10 @@ pub const IRQ_VECTOR_SPURIOUS: u16 = 0xFF;
 
 static mut IRQ_IDT_READY: bool = false;
 static mut IRQ_ROUTES_READY: bool = false;
+// Clock monotonic global: somente o BSP incrementa este contador. APs possuem
+// contadores locais para preempcao e nunca avancam duas vezes o sleep clock.
 static mut IRQ_TIMER_COUNT: u64 = 0;
+static mut IRQ_CPU_TIMER_COUNT: [u64; SCHEDULER_CPU_SLOT_COUNT] = [0; SCHEDULER_CPU_SLOT_COUNT];
 static mut IRQ_KEYBOARD_COUNT: u64 = 0;
 static mut IRQ_MOUSE_COUNT: u64 = 0;
 static mut IRQ_SPURIOUS_COUNT: u64 = 0;
@@ -80,6 +83,12 @@ pub fn irq_routes_ready() -> bool { unsafe { return IRQ_ROUTES_READY; } }
 @system
 pub fn irq_timer_count() -> u64 { unsafe { return IRQ_TIMER_COUNT; } }
 @system
+pub fn irq_timer_count_for_cpu(cpu_slot: usize) -> u64 {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
+    if cpu_slot == 0 { return irq_timer_count(); }
+    unsafe { return IRQ_CPU_TIMER_COUNT[cpu_slot]; }
+}
+@system
 pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
 @system
 pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
@@ -94,6 +103,7 @@ pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_CO
 fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     if !scheduler_switch_lock() { loop {} }
 
+    let cpu_slot = scheduler_current_cpu_slot();
     let old_tid = scheduler_current_thread_id();
     let old_terminated = scheduler_thread_is_terminated(old_tid);
     if old_tid != 0 && fpu_is_ready() && !fpu_save_thread(old_tid) { loop {} }
@@ -104,14 +114,15 @@ fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     if x86_saved_frame_is_user(selected) {
         // Userspace em AP ainda nao faz parte desta fase. Fail-closed evita usar
         // o TSS BSP em um processador secundario por acidente.
-        if scheduler_current_cpu_slot() != 0 { loop {} }
+        if cpu_slot != 0 { loop {} }
         let kernel_rsp0 = selected + X86_KERNEL_THREAD_FRAME_BYTES;
         if kernel_rsp0 <= selected || (kernel_rsp0 & 15) != 0 || !tss_set_rsp0(kernel_rsp0) {
             loop {}
         }
     }
 
-    if fpu_is_ready() && !fpu_restore_thread(new_tid) { loop {} }
+    // Em AP idle, thread_id 0 significa "nenhuma thread", nao o boot thread BSP.
+    if fpu_is_ready() && (cpu_slot == 0 || new_tid != 0) && !fpu_restore_thread(new_tid) { loop {} }
     if fpu_is_ready() && old_terminated && old_tid != 0 && old_tid != new_tid {
         if !fpu_release_thread(old_tid) { loop {} }
     }
@@ -153,16 +164,25 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
     }
 
     if vector == IRQ_VECTOR_TIMER as u64 {
+        let cpu_slot = scheduler_current_cpu_slot();
         let mut timer_count: u64 = 0;
+        let bsp_clock = cpu_slot == 0 || cpu_slot == SCHEDULER_INVALID_CPU_SLOT;
         unsafe {
-            IRQ_TIMER_COUNT += 1;
-            timer_count = IRQ_TIMER_COUNT;
+            if bsp_clock {
+                IRQ_TIMER_COUNT += 1;
+                timer_count = IRQ_TIMER_COUNT;
+            } else if cpu_slot < SCHEDULER_CPU_SLOT_COUNT {
+                IRQ_CPU_TIMER_COUNT[cpu_slot] += 1;
+                timer_count = IRQ_CPU_TIMER_COUNT[cpu_slot];
+            }
         }
         lapic_eoi();
-        if timer_count <= 3 {
-            x86_serial_write_hex32_marker('T' as u8, timer_count as u32);
+        if bsp_clock {
+            if timer_count <= 3 {
+                x86_serial_write_hex32_marker('T' as u8, timer_count as u32);
+            }
+            scheduler_sleep_on_timer_tick(timer_count);
         }
-        scheduler_sleep_on_timer_tick(timer_count);
         if !fpu_is_ready() { return scheduler_on_timer_interrupt(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
