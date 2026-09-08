@@ -67,7 +67,7 @@ fn fat_path_find(directory: u32, name: *const u16, length: usize, buffer: *mut u
             if lba > fat32_runtime_partition_last_lba() || !block_device_read_sector(lba, buffer) { return fat_path_invalid(); }
             let mut offset: usize = 0;
             while offset < 512 {
-                let entry = ((buffer as usize) + offset) as *const u8;
+                let entry = unsafe { ((buffer as usize) + offset) as *const u8 };
                 let first = fat_path_byte(entry, 0);
                 let attr = fat_path_byte(entry, 11);
                 if first == 0 { return fat_path_invalid(); }
@@ -181,7 +181,7 @@ pub fn fat32_lookup(path: *const u16, length: usize) -> Fat32File {
         let mut end = start;
         unsafe { while end < length && *(((path as usize) + end * 2) as *const u16) != 47 { end += 1; } }
         let n = end - start;
-        let component = ((path as usize) + start * 2) as *const u16;
+        let component = unsafe { ((path as usize) + start * 2) as *const u16 };
         let mut dot = false;
         unsafe { dot = n == 1 && *component == 46; if n == 2 && *component == 46 && *(((component as usize) + 2) as *const u16) == 46 { dot = true; } }
         if n == 0 || dot || (result.attributes & 0x10) == 0 { result = fat_path_invalid(); break; }
