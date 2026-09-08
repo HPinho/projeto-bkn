@@ -321,7 +321,12 @@ class _StrictSafetyChecker:
             return _ExprInfo(method.result if method else None, target.foreign)
         if isinstance(expr, b.Cast):
             info = self._infer(expr.expr, scope, depth, system_context)
-            if _is_raw_pointer(expr.target_type) and not isinstance(expr.expr, b.NullLit):
+            target_is_raw = _is_raw_pointer(expr.target_type)
+            source_is_raw = _is_raw_pointer(info.type_obj)
+            # Requalifying/reinterpreting an already-raw pointer does not create
+            # a new address and therefore needs no unsafe by itself. Address
+            # creation from integers/references remains an explicit boundary.
+            if target_is_raw and not source_is_raw and not isinstance(expr.expr, b.NullLit):
                 self._require_unsafe(expr.token, depth, "criação/conversão para ponteiro cru")
             return _ExprInfo(expr.target_type, info.foreign)
         return _ExprInfo(None)
