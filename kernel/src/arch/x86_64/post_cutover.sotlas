@@ -89,49 +89,82 @@ static mut POST_CUTOVER_XHCI_NOOP_LIVE: bool = false;
 static mut POST_CUTOVER_USB_PORT_READY: bool = false;
 
 @system
+fn post_cutover_context_invalid() -> PostCutoverContext {
+    return PostCutoverContext {
+        root_physical: 0,
+        stack_top: 0,
+        framebuffer_base: 0,
+        framebuffer_size: 0,
+        screen_width: 0,
+        screen_height: 0,
+        pixels_per_scanline: 0,
+        reserved0: 0,
+        memory_map_base: 0,
+        memory_map_size: 0,
+        memory_descriptor_size: 0,
+        acpi_rsdp: 0,
+        page_table_arena_physical_base: 0,
+        page_table_arena_page_count: 0,
+        page_table_pages_used: 0,
+        valid: false
+    };
+}
+
+// A fronteira raw-pointer do handoff fica concentrada aqui. Depois da cópia POD
+// nenhuma função precisa acessar campos através de *const PostCutoverContext.
+@system
+fn post_cutover_context_snapshot(context: *const PostCutoverContext) -> PostCutoverContext {
+    if context == (null as *const PostCutoverContext) { return post_cutover_context_invalid(); }
+    return unsafe { *context };
+}
+
+@system
 pub fn post_cutover_memory_map_virtual(context: *const PostCutoverContext) -> *const u8 {
-    if context == (null as *const PostCutoverContext) || context.memory_map_base == 0 {
-        return null as *const u8;
-    }
-    let virtual_address = direct_map_virtual_address(context.memory_map_base);
+    if context == (null as *const PostCutoverContext) { return null as *const u8; }
+    let snapshot = post_cutover_context_snapshot(context);
+    if snapshot.memory_map_base == 0 { return null as *const u8; }
+    let virtual_address = direct_map_virtual_address(snapshot.memory_map_base);
     if virtual_address == 0 { return null as *const u8; }
     return unsafe { virtual_address as *const u8 };
 }
 
 @system
 pub fn post_cutover_acpi_rsdp_virtual(context: *const PostCutoverContext) -> *const u8 {
-    if context == (null as *const PostCutoverContext) || context.acpi_rsdp == 0 {
-        return null as *const u8;
-    }
-    let virtual_address = direct_map_virtual_address(context.acpi_rsdp);
+    if context == (null as *const PostCutoverContext) { return null as *const u8; }
+    let snapshot = post_cutover_context_snapshot(context);
+    if snapshot.acpi_rsdp == 0 { return null as *const u8; }
+    let virtual_address = direct_map_virtual_address(snapshot.acpi_rsdp);
     if virtual_address == 0 { return null as *const u8; }
     return unsafe { virtual_address as *const u8 };
 }
 
 @system
 pub fn post_cutover_context_valid(context: *const PostCutoverContext) -> bool {
-    if context == (null as *const PostCutoverContext) || !context.valid { return false; }
-    if context.root_physical == 0 || !x86_page_aligned(context.root_physical) { return false; }
-    if context.stack_top == 0 || (context.stack_top & 15) != 0 { return false; }
-    if context.framebuffer_base == 0 || context.framebuffer_size == 0 { return false; }
-    if context.screen_width == 0 || context.screen_height == 0 { return false; }
-    if context.pixels_per_scanline < context.screen_width { return false; }
-    if context.memory_map_base == 0 || context.memory_map_size == 0 { return false; }
-    if context.memory_descriptor_size < 40 { return false; }
+    if context == (null as *const PostCutoverContext) { return false; }
+    let snapshot = post_cutover_context_snapshot(context);
+    if !snapshot.valid { return false; }
+    if snapshot.root_physical == 0 || !x86_page_aligned(snapshot.root_physical) { return false; }
+    if snapshot.stack_top == 0 || (snapshot.stack_top & 15) != 0 { return false; }
+    if snapshot.framebuffer_base == 0 || snapshot.framebuffer_size == 0 { return false; }
+    if snapshot.screen_width == 0 || snapshot.screen_height == 0 { return false; }
+    if snapshot.pixels_per_scanline < snapshot.screen_width { return false; }
+    if snapshot.memory_map_base == 0 || snapshot.memory_map_size == 0 { return false; }
+    if snapshot.memory_descriptor_size < 40 { return false; }
     if post_cutover_memory_map_virtual(context) == (null as *const u8) { return false; }
-    if context.acpi_rsdp == 0 || post_cutover_acpi_rsdp_virtual(context) == (null as *const u8) { return false; }
-    if context.page_table_arena_physical_base == 0 ||
-       !x86_page_aligned(context.page_table_arena_physical_base) { return false; }
-    if context.page_table_arena_page_count == 0 || context.page_table_pages_used == 0 ||
-       context.page_table_pages_used > context.page_table_arena_page_count { return false; }
+    if snapshot.acpi_rsdp == 0 || post_cutover_acpi_rsdp_virtual(context) == (null as *const u8) { return false; }
+    if snapshot.page_table_arena_physical_base == 0 ||
+       !x86_page_aligned(snapshot.page_table_arena_physical_base) { return false; }
+    if snapshot.page_table_arena_page_count == 0 || snapshot.page_table_pages_used == 0 ||
+       snapshot.page_table_pages_used > snapshot.page_table_arena_page_count { return false; }
     return true;
 }
 
 @system
 pub fn post_cutover_activate_cpu(context: *const PostCutoverContext) -> bool {
     if !post_cutover_context_valid(context) { return false; }
+    let snapshot = post_cutover_context_snapshot(context);
     x86_serial_write_stage_marker('0' as u8);
-    if !x86_mmu_activate_root(context.root_physical) { return false; }
+    if !x86_mmu_activate_root(snapshot.root_physical) { return false; }
     x86_serial_write_stage_marker('1' as u8);
     tss_prepare_default_stacks();
     if !tss_is_prepared() { return false; }
@@ -157,10 +190,11 @@ pub fn post_cutover_cpu_tables_active() -> bool { unsafe { return POST_CUTOVER_C
 @system
 pub fn post_cutover_activate_pmm(context: *const PostCutoverContext) -> bool {
     if !post_cutover_cpu_tables_active() || !post_cutover_context_valid(context) { return false; }
+    let snapshot = post_cutover_context_snapshot(context);
     x86_serial_write_stage_marker('p' as u8);
     let memory_map = post_cutover_memory_map_virtual(context);
     if memory_map == (null as *const u8) { return false; }
-    if !pmm_inventory_init(memory_map, context.memory_map_size as usize, context.memory_descriptor_size as usize) {
+    if !pmm_inventory_init(memory_map, snapshot.memory_map_size as usize, snapshot.memory_descriptor_size as usize) {
         x86_serial_write_hex32_marker('P' as u8, 1);
         return false;
     }
@@ -181,12 +215,13 @@ pub fn post_cutover_pmm_active() -> bool { unsafe { return POST_CUTOVER_PMM_ACTI
 @system
 pub fn post_cutover_activate_vmm(context: *const PostCutoverContext) -> bool {
     if !post_cutover_pmm_active() || !post_cutover_context_valid(context) { return false; }
-    if !vmm_activate_current_tables(context.root_physical, BAKEN_DIRECT_MAP_BASE) || !vmm_is_active() { return false; }
+    let snapshot = post_cutover_context_snapshot(context);
+    if !vmm_activate_current_tables(snapshot.root_physical, BAKEN_DIRECT_MAP_BASE) || !vmm_is_active() { return false; }
     if !active_page_tables_resume(
-        context.root_physical,
-        context.page_table_arena_physical_base,
-        context.page_table_arena_page_count,
-        context.page_table_pages_used
+        snapshot.root_physical,
+        snapshot.page_table_arena_physical_base,
+        snapshot.page_table_arena_page_count,
+        snapshot.page_table_pages_used
     ) { return false; }
     if !active_page_tables_is_ready() { return false; }
     unsafe { POST_CUTOVER_VMM_ACTIVE = true; }
@@ -530,6 +565,7 @@ pub fn post_cutover_probe_backup_gpt_entries() -> bool {
 @export
 pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let context = unsafe { argument as *const PostCutoverContext };
+    let snapshot = post_cutover_context_snapshot(context);
     let serial_ready = x86_serial_init();
     if serial_ready { x86_serial_write_stage_marker('B' as u8); }
 
@@ -646,7 +682,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
 
     // Cache policy do framebuffer pertence à fundação obrigatória: o runtime
     // gráfico não começa com o framebuffer em política desconhecida.
-    if !active_framebuffer_write_combining(context.framebuffer_base, context.framebuffer_size) { loop {} }
+    if !active_framebuffer_write_combining(snapshot.framebuffer_base, snapshot.framebuffer_size) { loop {} }
     if serial_ready { x86_serial_write_stage_marker('%' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
 
@@ -657,8 +693,8 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
         if !x86_serial_write_bare_metal_ready_marker() { loop {} }
     }
 
-    baken_native_kernel_run(unsafe { context.framebuffer_base as *mut u32 },
-                            context.screen_width,
-                            context.screen_height,
-                            context.pixels_per_scanline);
+    baken_native_kernel_run(unsafe { snapshot.framebuffer_base as *mut u32 },
+                            snapshot.screen_width,
+                            snapshot.screen_height,
+                            snapshot.pixels_per_scanline);
 }
