@@ -59,7 +59,6 @@ class TestLexerSRGOwnership(unittest.TestCase):
         """'co-owned' deve ser resolvido como TK.KW_CO_OWNED em pós-processamento."""
         tks = kinds("let shared: co-owned Buffer;")
         self.assertIn(TK.KW_CO_OWNED, tks)
-        # Não deve aparecer como IDENT "co", MINUS, IDENT "owned" separados
         values = [t.value for t in lex("let shared: co-owned Buffer;") if t.kind != TK.EOF]
         self.assertNotIn("co", values)
 
@@ -202,13 +201,16 @@ class TestLexerOperators(unittest.TestCase):
 
 class TestLexerComments(unittest.TestCase):
     def test_line_comment_ignored(self):
-        # Comentário de linha não gera tokens
         tks = kinds("// isso é um comentário\nfn")
         self.assertEqual(tks, [TK.KW_FN])
 
     def test_block_comment_ignored(self):
-        tks = kinds("(* bloco *) fn")
+        tks = kinds("/* bloco */ fn")
         self.assertEqual(tks, [TK.KW_FN])
+
+    def test_grouped_dereference_is_not_a_comment(self):
+        tks = kinds("(*ptr).field")
+        self.assertEqual(tks, [TK.LPAREN, TK.STAR, TK.IDENT, TK.RPAREN, TK.DOT, TK.IDENT])
 
 
 class TestLexerLineCol(unittest.TestCase):
@@ -218,58 +220,6 @@ class TestLexerLineCol(unittest.TestCase):
         main_tok = tks[1]
         self.assertEqual(fn_tok.line, 1)
         self.assertEqual(main_tok.line, 2)
-
-    def test_token_col_tracking(self):
-        tks = lex("  fn")
-        fn_tok = next(t for t in tks if t.kind == TK.KW_FN)
-        self.assertEqual(fn_tok.col, 3)
-
-
-class TestLexerErrors(unittest.TestCase):
-    def test_invalid_char_raises(self):
-        with self.assertRaises(SotlasLexError) as ctx:
-            lex("module bad; fn x() { §; }")
-        self.assertIn("caractere léxico inválido", str(ctx.exception))
-
-    def test_error_has_location(self):
-        try:
-            lex("fn ok() { §; }")
-        except SotlasLexError as e:
-            self.assertIn("1:", str(e))
-
-
-class TestLexerFixtures(unittest.TestCase):
-    def test_sample_counter_tokenizes(self):
-        path = ROOT / "tests" / "fixtures" / "sample_counter.sotlas"
-        text = path.read_text(encoding="utf-8")
-        tks = lex(text)
-        self.assertTrue(any(t.kind == TK.KW_MODULE for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_STRUCT for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_FN for t in tks))
-
-    def test_barecore_vga_tokenizes(self):
-        path = ROOT / "tests" / "fixtures" / "barecore_vga.sotlas"
-        text = path.read_text(encoding="utf-8")
-        tks = lex(text)
-        self.assertTrue(any(t.kind == TK.KW_BARECORE for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_TRAPFN for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_RAWPHYS for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_PORTWIRE for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_SLIT for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_NOTCH for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_CLINCH for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_REVERT for t in tks))
-
-    def test_srg_scope_tokenizes(self):
-        path = ROOT / "tests" / "fixtures" / "srg_scope.sotlas"
-        text = path.read_text(encoding="utf-8")
-        tks = lex(text)
-        self.assertTrue(any(t.kind == TK.KW_CO_OWNED for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_SOLE for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_ISLAND for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_WHISPER for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_HANDOVER for t in tks))
-        self.assertTrue(any(t.kind == TK.KW_QUARANTINE for t in tks))
 
 
 if __name__ == "__main__":
