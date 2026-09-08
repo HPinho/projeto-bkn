@@ -1,0 +1,110 @@
+// Baken OS — inventário canônico da plataforma pós-cutover.
+// Copia fatos de ACPI/APIC/PCI; não guarda ponteiros UEFI nem inicializa drivers.
+module kernel::platform::inventory;
+
+import kernel::acpi::tables::*;
+import kernel::acpi::madt::*;
+import kernel::acpi::mcfg::*;
+import kernel::acpi::hpet::*;
+import kernel::drivers::pci_bus::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::ioapic::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const PLATFORM_ARCH_X86_64: u32 = 1;
+pub const PLATFORM_PCI_CLASS_STORAGE: u8 = 0x01;
+pub const PLATFORM_PCI_CLASS_DISPLAY: u8 = 0x03;
+pub const PLATFORM_PCI_CLASS_SERIAL_BUS: u8 = 0x0C;
+pub const PLATFORM_PCI_SUBCLASS_USB: u8 = 0x03;
+pub const PLATFORM_PCI_PROGIF_XHCI: u8 = 0x30;
+
+@repr(C)
+pub struct PlatformInventory {
+    pub architecture: u32;
+    pub cpu_count: u32;
+    pub ioapic_count: u32;
+    pub pci_device_count: u32;
+    pub pci_segment_count: u32;
+    pub bsp_apic_id: u8;
+    pub acpi_revision: u8;
+    pub has_hpet: bool;
+    pub has_display: bool;
+    pub has_storage: bool;
+    pub has_xhci: bool;
+    pub valid: bool;
+}
+
+static mut PLATFORM_INFO: PlatformInventory = PlatformInventory {
+    architecture: 0, cpu_count: 0, ioapic_count: 0, pci_device_count: 0,
+    pci_segment_count: 0, bsp_apic_id: 0, acpi_revision: 0,
+    has_hpet: false, has_display: false, has_storage: false, has_xhci: false,
+    valid: false
+};
+
+@system
+pub fn platform_inventory_init() -> bool {
+    unsafe { if PLATFORM_INFO.valid { return true; } }
+    if !acpi_is_ready() || !acpi_uses_post_cutover_direct_map() ||
+       !madt_is_ready() || !lapic_is_ready() || !ioapic_is_ready() { return false; }
+    let cpu_count = madt_cpu_count();
+    let interrupt_controller_count = ioapic_count();
+    let device_count = pci_get_device_count();
+    if cpu_count == 0 || interrupt_controller_count == 0 || device_count == 0 { return false; }
+
+    let mut display = false;
+    let mut storage = false;
+    let mut xhci = false;
+    let mut index: u32 = 0;
+    while index < device_count {
+        let device = pci_get_device(index);
+        if device == (null as *const PciDevice) { return false; }
+        unsafe {
+            if (*device).class_code == PLATFORM_PCI_CLASS_DISPLAY { display = true; }
+            if (*device).class_code == PLATFORM_PCI_CLASS_STORAGE { storage = true; }
+            if (*device).class_code == PLATFORM_PCI_CLASS_SERIAL_BUS &&
+               (*device).subclass == PLATFORM_PCI_SUBCLASS_USB &&
+               (*device).prog_if == PLATFORM_PCI_PROGIF_XHCI { xhci = true; }
+        }
+        index += 1;
+    }
+    unsafe {
+        PLATFORM_INFO.architecture = PLATFORM_ARCH_X86_64;
+        PLATFORM_INFO.cpu_count = cpu_count;
+        PLATFORM_INFO.ioapic_count = interrupt_controller_count;
+        PLATFORM_INFO.pci_device_count = device_count;
+        PLATFORM_INFO.pci_segment_count = if mcfg_is_ready() { mcfg_segment_count() } else { 0 };
+        PLATFORM_INFO.bsp_apic_id = lapic_id();
+        PLATFORM_INFO.acpi_revision = acpi_revision();
+        PLATFORM_INFO.has_hpet = hpet_is_ready();
+        PLATFORM_INFO.has_display = display;
+        PLATFORM_INFO.has_storage = storage;
+        PLATFORM_INFO.has_xhci = xhci;
+        PLATFORM_INFO.valid = true;
+    }
+    return true;
+}
+
+@system
+pub fn platform_inventory() -> *const PlatformInventory {
+    unsafe {
+        if !PLATFORM_INFO.valid { return null as *const PlatformInventory; }
+        return &PLATFORM_INFO;
+    }
+}
+
+@system
+pub fn platform_inventory_is_ready() -> bool { unsafe { return PLATFORM_INFO.valid; } }
+
+@system
+pub fn platform_inventory_emit_ready_marker() -> bool {
+    if !platform_inventory_is_ready() { return false; }
+    let marker: [u8; 21] = [
+        66,65,75,69,78,58,80,76,65,84,70,79,82,77,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 21 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}

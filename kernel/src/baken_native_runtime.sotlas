@@ -25,6 +25,7 @@ import kernel::scheduler::yield::*;
 import kernel::scheduler::diagnostics::*;
 import kernel::scheduler::wait_queue_probe::*;
 import kernel::scheduler::smp_probe::*;
+import kernel::platform::inventory::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -174,6 +175,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
                                height: u32, pixels_per_scanline: u32) -> ! {
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
+
+    // Consolida ACPI/APIC/PCI antes de liberar APs ou inicializar serviços.
+    if !platform_inventory_init() || !platform_inventory_emit_ready_marker() { loop {} }
 
     // APs chegam ate runtime per-CPU com IF=0 e permanecem estacionados.
     if !smp_initialize_base() || !smp_emit_ready_markers() { loop {} }
