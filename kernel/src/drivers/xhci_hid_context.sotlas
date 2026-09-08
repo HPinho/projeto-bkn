@@ -152,7 +152,7 @@ pub fn xhci_hid_context_prepare() -> bool {
     let input_physical = xhci_context_input_physical();
     let input_virtual = direct_map_virtual_address(input_physical);
     if input_physical == 0 || input_virtual == 0 { return false; }
-    let input = input_virtual as *mut u8;
+    let input = unsafe { input_virtual as *mut u8 };
 
     let mut ring_buffer = dma_alloc(XHCI_HID_RING_SIZE, XHCI_HID_RING_SIZE);
     if !dma_buffer_cpu_owned(&ring_buffer) { return false; }
