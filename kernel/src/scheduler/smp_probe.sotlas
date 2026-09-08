@@ -2,9 +2,9 @@
 //
 // O fechamento SMP usa uma process thread real: o scheduler publica PID/root,
 // carrega o CR3 no CPU 1, entra em CPL3 e deixa o LAPIC timer preemptar o frame
-// de usuário. O BSP só libera a continuação depois de observar um tick posterior
-// ao flag escrito em CPL3; o segundo flag/marker prova retorno a CPL3 antes do
-// syscall exit, reaper e teardown integral do address space.
+// de usuário. O probe também remapeia a página de dados enquanto o AP continua
+// executando a mesma raiz: stale TLB deixa o usuário preso no frame antigo;
+// somente o shootdown root-aware permite observar o novo frame e concluir.
 module kernel::scheduler::smp_probe;
 
 import kernel::arch::x86_64::cpu::*;
@@ -289,6 +289,14 @@ fn scheduler_smp_probe_emit_tlb_marker() -> bool {
     return true;
 }
 @system
+fn scheduler_smp_probe_emit_process_tlb_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 28] = [66,65,75,69,78,58,83,77,80,95,80,82,79,67,69,83,83,95,84,76,66,95,82,69,65,68,89,10];
+    let mut index: usize = 0;
+    while index < 28 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
+    return true;
+}
+@system
 fn scheduler_smp_probe_emit_ring3_ready_marker() -> bool {
     if !x86_serial_is_ready() { return false; }
     let marker: [u8; 28] = [66,65,75,69,78,58,83,77,80,95,82,73,78,71,51,95,79,78,95,65,80,95,82,69,65,68,89,10];
@@ -316,9 +324,6 @@ fn scheduler_smp_probe_materialize_ring3(code_physical: u64, data_physical: u64)
     let code_virtual = direct_map_virtual_address(code_physical);
     let data_virtual = direct_map_virtual_address(data_physical);
     if code_virtual == 0 || data_virtual == 0 { return false; }
-    // User program:
-    // started=1; write("BAKEN:SMP_RING3_ON_AP\n"); while(!release) pause-by-load;
-    // resumed=1; write("BAKEN:SMP_RING3_RESUMED_ON_AP\n"); exit(0); ud2.
     let code: [u8; SCHEDULER_SMP_RING3_CODE_BYTES] = [
         72,187,32,16,0,0,0,32,0,0,
         199,3,1,0,0,0,
@@ -364,7 +369,8 @@ fn scheduler_smp_probe_materialize_ring3(code_physical: u64, data_physical: u64)
 
 @system
 fn scheduler_smp_probe_cleanup_unstarted_ring3(pid: u64, code: u64,
-                                               data: u64, stack: u64) -> bool {
+                                               data: u64, data_new: u64,
+                                               stack: u64) -> bool {
     let mapped_code = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS);
     let mapped_data = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS);
     let mapped_stack = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS);
@@ -374,6 +380,7 @@ fn scheduler_smp_probe_cleanup_unstarted_ring3(pid: u64, code: u64,
     let mut released = true;
     if release_code != 0 && !pmm_free_pages(release_code, 1) { released = false; }
     if release_data != 0 && !pmm_free_pages(release_data, 1) { released = false; }
+    if data_new != 0 && !pmm_free_pages(data_new, 1) { released = false; }
     if release_stack != 0 && !pmm_free_pages(release_stack, 1) { released = false; }
     return released && process_destroy(pid);
 }
@@ -384,33 +391,39 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     if pid == 0 { return false; }
     let code = pmm_alloc_page();
     let data = pmm_alloc_page();
+    let data_new = pmm_alloc_page();
     let stack = pmm_alloc_page();
-    if code == 0 || data == 0 || stack == 0 {
-        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+    if code == 0 || data == 0 || data_new == 0 || stack == 0 {
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, data_new, stack);
         return false;
     }
     if !scheduler_smp_probe_zero_page(code) || !scheduler_smp_probe_zero_page(data) ||
-       !scheduler_smp_probe_zero_page(stack) || !scheduler_smp_probe_materialize_ring3(code, data) {
-        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+       !scheduler_smp_probe_zero_page(data_new) || !scheduler_smp_probe_zero_page(stack) ||
+       !scheduler_smp_probe_materialize_ring3(code, data) ||
+       !scheduler_smp_probe_materialize_ring3(code, data_new) {
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, data_new, stack);
         return false;
     }
     if !process_map_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS, code, false, true) ||
        !process_map_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS, data, true, false) ||
        !process_map_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS, stack, true, false) {
-        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, data_new, stack);
         return false;
     }
 
     let data_virtual = direct_map_virtual_address(data);
-    if data_virtual == 0 {
-        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+    let data_new_virtual = direct_map_virtual_address(data_new);
+    if data_virtual == 0 || data_new_virtual == 0 {
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, data_new, stack);
         return false;
     }
     let started_address = data_virtual + SCHEDULER_SMP_RING3_STARTED_OFFSET;
-    let release_address = data_virtual + SCHEDULER_SMP_RING3_RELEASE_OFFSET;
-    let resumed_address = data_virtual + SCHEDULER_SMP_RING3_RESUMED_OFFSET;
+    let release_old_address = data_virtual + SCHEDULER_SMP_RING3_RELEASE_OFFSET;
+    let release_new_address = data_new_virtual + SCHEDULER_SMP_RING3_RELEASE_OFFSET;
+    let resumed_address = data_new_virtual + SCHEDULER_SMP_RING3_RESUMED_OFFSET;
     x86_mmio_write32(started_address, 0);
-    x86_mmio_write32(release_address, 0);
+    x86_mmio_write32(release_old_address, 0);
+    x86_mmio_write32(release_new_address, 0);
     x86_mmio_write32(resumed_address, 0);
     x86_mmio_write32(scheduler_smp_ring3_pid_lo_address(), pid as u32);
     x86_mmio_write32(scheduler_smp_ring3_pid_hi_address(), (pid >> 32) as u32);
@@ -427,7 +440,7 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
                                                      SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
                                                      SCHEDULER_SMP_PROBE_CPU_SLOT);
     if tid == 0 {
-        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, stack);
+        scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, data_new, stack);
         return false;
     }
     if process_destroy(pid) { return false; }
@@ -435,13 +448,17 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     if !scheduler_smp_probe_wait_flag(started_address) { return false; }
     if x86_mmio_read32(scheduler_smp_ring3_cpu_address()) != SCHEDULER_SMP_PROBE_CPU_SLOT as u32 { return false; }
 
-    // O contador é capturado somente depois do flag escrito em CPL3. Portanto o
-    // próximo incremento necessariamente ocorre enquanto a process thread ainda
-    // está viva; release permanece 0 e o programa de usuário não pode terminar.
     let timer_after_user_start = irq_timer_count_for_cpu(SCHEDULER_SMP_PROBE_CPU_SLOT);
     if !scheduler_smp_probe_wait_timer_tick(SCHEDULER_SMP_PROBE_CPU_SLOT, timer_after_user_start) { return false; }
-    x86_mmio_write32(release_address, 1);
+
+    // O frame novo já contém os mesmos markers, mas release=1. O usuário está
+    // girando no mesmo VA do frame antigo com release=0. Somente a invalidação
+    // do TLB da raiz desse processo permite que o próximo load veja o frame novo.
+    x86_mmio_write32(release_new_address, 1);
     __dma_fence();
+    let remapped_data = process_remap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS,
+                                                data_new, true, false);
+    if remapped_data != data { return false; }
     if !scheduler_smp_probe_wait_flag(resumed_address) { return false; }
     if !scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before) { return false; }
     if syscall_count() < syscall_before + 3 || syscall_exit_count() <= exit_before { return false; }
@@ -450,9 +467,11 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     let unmapped_code = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS);
     let unmapped_data = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS);
     let unmapped_stack = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS);
-    if unmapped_code != code || unmapped_data != data || unmapped_stack != stack { return false; }
-    if !pmm_free_pages(code, 1) || !pmm_free_pages(data, 1) || !pmm_free_pages(stack, 1) { return false; }
+    if unmapped_code != code || unmapped_data != data_new || unmapped_stack != stack { return false; }
+    if !pmm_free_pages(code, 1) || !pmm_free_pages(data, 1) ||
+       !pmm_free_pages(data_new, 1) || !pmm_free_pages(stack, 1) { return false; }
     if !process_destroy(pid) { return false; }
+    if !scheduler_smp_probe_emit_process_tlb_marker() { return false; }
     return scheduler_smp_probe_emit_ring3_ready_marker();
 }
 
