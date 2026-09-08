@@ -1,6 +1,6 @@
-// Registro BSP de processos: ownership das tabelas e lifetime por referências.
+// Registro SMP de processos: ownership das tabelas e lifetime por referências.
 // PID 0 é reservado ao kernel. Não expõe cópias owning de ProcessAddressSpace.
-// IRQ-off é exclusão local; SMP só poderá remover esta limitação com locks reais.
+// IRQ-off bloqueia reentrada local e o spinlock serializa BSP/APs.
 module kernel::process::registry;
 
 import kernel::process::address_space::*;
@@ -8,6 +8,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::pmm_allocator::*;
+import kernel::sync::spinlock::*;
 
 pub const PROCESS_SLOT_COUNT: usize = 16;
 pub const PROCESS_INVALID_SLOT: usize = PROCESS_SLOT_COUNT;
@@ -21,6 +22,36 @@ static mut PROCESS_SPACES: [ProcessAddressSpace; PROCESS_SLOT_COUNT] = [
 ];
 static mut PROCESS_NEXT_ID: u64 = 1;
 static mut PROCESS_REGISTRY_READY: bool = false;
+
+// Hierarquia obrigatória: PROCESS_REGISTRY_LOCK -> PMM_ALLOCATOR_LOCK.
+// Criação/destruição de address spaces alcança o PMM sob este lock; o PMM não
+// pode chamar o registro. Isso mantém lifetime, PID e page tables atômicos.
+static mut PROCESS_REGISTRY_LOCK: SpinLock = SpinLock { state: 0 };
+static mut PROCESS_REGISTRY_LOCK_READY: bool = false;
+
+@system
+fn process_registry_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PROCESS_REGISTRY_LOCK_READY {
+            x86_irq_restore(flags);
+            return 0;
+        }
+        if !spinlock_lock(&mut PROCESS_REGISTRY_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn process_registry_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PROCESS_REGISTRY_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
 
 @system
 fn process_find_locked(pid: u64) -> usize {
@@ -93,40 +124,48 @@ fn process_release_locked(pid: u64) -> bool {
 
 @system
 pub fn process_create() -> u64 {
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return 0; }
     let mut pid: u64 = 0;
     unsafe { if PROCESS_REGISTRY_READY { pid = process_create_locked(); } }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return pid;
 }
 
 @system
 pub fn process_destroy(pid: u64) -> bool {
-    let flags = x86_irq_save_disable();
-    let result = process_destroy_locked(pid);
-    x86_irq_restore(flags);
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return false; }
+    let mut result = false;
+    unsafe { if PROCESS_REGISTRY_READY { result = process_destroy_locked(pid); } }
+    process_registry_unlock_irq(flags);
     return result;
 }
 
 @system
 pub fn process_retain(pid: u64) -> bool {
-    let flags = x86_irq_save_disable();
-    let result = process_retain_locked(pid);
-    x86_irq_restore(flags);
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return false; }
+    let mut result = false;
+    unsafe { if PROCESS_REGISTRY_READY { result = process_retain_locked(pid); } }
+    process_registry_unlock_irq(flags);
     return result;
 }
 
 @system
 pub fn process_release(pid: u64) -> bool {
-    let flags = x86_irq_save_disable();
-    let result = process_release_locked(pid);
-    x86_irq_restore(flags);
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return false; }
+    let mut result = false;
+    unsafe { if PROCESS_REGISTRY_READY { result = process_release_locked(pid); } }
+    process_registry_unlock_irq(flags);
     return result;
 }
 
 @system
 pub fn process_borrow_root(pid: u64) -> u64 {
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return 0; }
     let slot = process_find_locked(pid);
     let mut root: u64 = 0;
     unsafe {
@@ -134,24 +173,26 @@ pub fn process_borrow_root(pid: u64) -> u64 {
             root = PROCESS_SPACES[slot].root_physical;
         }
     }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return root;
 }
 
 @system
 pub fn process_reference_count(pid: u64) -> u64 {
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return 0; }
     let slot = process_find_locked(pid);
     let mut count: u64 = 0;
     unsafe { if slot != PROCESS_INVALID_SLOT { count = PROCESS_REFERENCES[slot]; } }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return count;
 }
 
 @system
 pub fn process_current_id() -> u64 {
     let root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return 0; }
     let mut pid: u64 = 0;
     unsafe {
         let mut slot: usize = 0;
@@ -164,13 +205,14 @@ pub fn process_current_id() -> u64 {
             slot += 1;
         }
     }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return pid;
 }
 
 @system
 pub fn process_user_pte(pid: u64, address: u64) -> u64 {
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return 0; }
     let slot = process_find_locked(pid);
     let mut pte: u64 = 0;
     unsafe {
@@ -178,14 +220,15 @@ pub fn process_user_pte(pid: u64, address: u64) -> u64 {
             pte = process_address_space_user_pte(&PROCESS_SPACES[slot], address);
         }
     }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return pte;
 }
 
 @system
 pub fn process_map_user_page(pid: u64, address: u64, physical: u64,
                              writable: bool, executable: bool) -> bool {
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return false; }
     let slot = process_find_locked(pid);
     let mut result = false;
     unsafe {
@@ -194,13 +237,14 @@ pub fn process_map_user_page(pid: u64, address: u64, physical: u64,
                                                          physical, writable, executable);
         }
     }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return result;
 }
 
 @system
 pub fn process_unmap_user_page(pid: u64, address: u64) -> u64 {
-    let flags = x86_irq_save_disable();
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return 0; }
     let slot = process_find_locked(pid);
     let mut physical: u64 = 0;
     unsafe {
@@ -208,7 +252,7 @@ pub fn process_unmap_user_page(pid: u64, address: u64) -> u64 {
             physical = process_address_space_unmap_user_page(&mut PROCESS_SPACES[slot], address);
         }
     }
-    x86_irq_restore(flags);
+    process_registry_unlock_irq(flags);
     return physical;
 }
 
@@ -251,17 +295,38 @@ pub fn process_registry_activate() -> bool {
     if !process_address_space_is_ready() { return false; }
     let flags = x86_irq_save_disable();
     unsafe {
-        if PROCESS_REGISTRY_READY { x86_irq_restore(flags); return true; }
+        if !PROCESS_REGISTRY_LOCK_READY {
+            if !spinlock_init(&mut PROCESS_REGISTRY_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            PROCESS_REGISTRY_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut PROCESS_REGISTRY_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if PROCESS_REGISTRY_READY {
+            spinlock_unlock(&mut PROCESS_REGISTRY_LOCK);
+            x86_irq_restore(flags);
+            return true;
+        }
     }
     let passed = process_registry_self_test_locked();
     unsafe { PROCESS_REGISTRY_READY = passed; }
+    unsafe { spinlock_unlock(&mut PROCESS_REGISTRY_LOCK); }
     x86_irq_restore(flags);
     return passed;
 }
 
 @system
 pub fn process_registry_emit_ready_marker() -> bool {
-    unsafe { if !PROCESS_REGISTRY_READY { return false; } }
+    let flags = process_registry_lock_irq();
+    if flags == 0 { return false; }
+    let mut ready = false;
+    unsafe { ready = PROCESS_REGISTRY_READY; }
+    process_registry_unlock_irq(flags);
+    if !ready { return false; }
     let marker: [u8; 29] = [
         66,65,75,69,78,58,80,82,79,67,69,83,83,95,82,69,71,73,83,84,82,89,95,82,69,65,68,89,10
     ];

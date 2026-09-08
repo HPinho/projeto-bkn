@@ -25,11 +25,28 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertIn("PROCESS_REFERENCES[slot] == PROCESS_ID_MAX", self.source)
         self.assertIn("PROCESS_REFERENCES[slot] == 0", self.source)
 
-    def test_public_lifetime_operations_preserve_interrupts(self):
+    def test_public_lifetime_operations_use_smp_registry_lock(self):
         for name in ("create", "destroy", "retain", "release"):
             body = self.source.split(f"pub fn process_{name}(", 1)[1].split("\n}", 1)[0]
-            self.assertIn("x86_irq_save_disable()", body)
-            self.assertIn("x86_irq_restore(flags)", body)
+            self.assertIn("process_registry_lock_irq()", body)
+            self.assertIn("process_registry_unlock_irq(flags)", body)
+
+    def test_registry_lock_masks_irq_and_serializes_all_cpus(self):
+        self.assertIn("import kernel::sync::spinlock::*;", self.source)
+        self.assertIn("static mut PROCESS_REGISTRY_LOCK: SpinLock", self.source)
+        lock = self.source.split("fn process_registry_lock_irq() -> u64", 1)[1].split(
+            "fn process_registry_unlock_irq", 1
+        )[0]
+        self.assertLess(lock.index("x86_irq_save_disable()"), lock.index("spinlock_lock(&mut PROCESS_REGISTRY_LOCK)"))
+        unlock = self.source.split("fn process_registry_unlock_irq(flags: u64)", 1)[1].split(
+            "fn process_find_locked", 1
+        )[0]
+        self.assertLess(unlock.index("spinlock_unlock(&mut PROCESS_REGISTRY_LOCK)"), unlock.index("x86_irq_restore(flags)"))
+
+    def test_registry_documents_one_way_pmm_lock_hierarchy(self):
+        self.assertIn("PROCESS_REGISTRY_LOCK -> PMM_ALLOCATOR_LOCK", self.source)
+        pmm = (ROOT / "kernel/src/memory/pmm_allocator.sotlas").read_text(encoding="utf-8")
+        self.assertNotIn("process_registry_", pmm)
 
     def test_runtime_probe_covers_capacity_stale_ids_and_reclamation(self):
         for token in ("let unexpected = process_create_locked()", "process_retain_locked(first)",
