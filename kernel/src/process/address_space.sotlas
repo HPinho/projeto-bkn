@@ -125,12 +125,8 @@ fn process_address_space_copy_kernel_root(destination: PageTablePage,
     while index < PROCESS_ADDRESS_SPACE_PT_ENTRIES {
         let entry = page_table_read_entry(source, index);
         if index == PROCESS_USER_PML4_INDEX {
-            // O slot é propriedade exclusiva da address space. Não escondemos
-            // mapping pré-existente do kernel sob uma nova subárvore user.
             if x86_pte_present(entry) { return false; }
         } else {
-            // Tudo que é herdado permanece supervisor-only. Uma raiz ativa com
-            // USER fora do slot reservado falha fechada em vez de propagar acesso.
             if x86_pte_present(entry) && (entry & X86_PTE_USER) != 0 { return false; }
             if !page_table_write_entry(destination, index, entry) { return false; }
         }
@@ -167,7 +163,6 @@ pub fn process_address_space_create() -> ProcessAddressSpace {
     if !pmm_allocator_is_active() || !vmm_is_active() ||
        vmm_direct_map_base() != BAKEN_DIRECT_MAP_BASE { return process_address_space_invalid(); }
 
-    // Depois do bring-up, nunca herdar a subárvore user de outro processo.
     let mut source_root = process_address_space_current_root();
     unsafe {
         if PROCESS_KERNEL_ROOT_PHYSICAL != 0 {
@@ -251,6 +246,28 @@ pub fn process_address_space_map_user_page(space: *mut ProcessAddressSpace,
 }
 
 @system
+pub fn process_address_space_remap_user_page(space: *mut ProcessAddressSpace,
+                                             address: u64,
+                                             physical: u64,
+                                             writable: bool,
+                                             executable: bool) -> u64 {
+    if space == (null as *mut ProcessAddressSpace) ||
+       !process_address_space_valid(space as *const ProcessAddressSpace) ||
+       !process_address_space_user_address_valid(address) || physical == 0 ||
+       !x86_page_aligned(physical) || (writable && executable) { return 0; }
+    let pt = process_address_space_user_pt(space as *const ProcessAddressSpace);
+    let index = x86_pt_index(address);
+    let old = page_table_read_entry(pt, index);
+    if !x86_pte_present(old) { return 0; }
+    let mut flags = X86_PTE_PRESENT | X86_PTE_USER;
+    if writable { flags |= X86_PTE_WRITABLE; }
+    if !executable { flags |= X86_PTE_NX; }
+    let desired = x86_pte_make(physical, flags);
+    if desired == 0 || !page_table_write_entry(pt, index, desired) { return 0; }
+    return x86_pte_address(old);
+}
+
+@system
 pub fn process_address_space_unmap_user_page(space: *mut ProcessAddressSpace,
                                              address: u64) -> u64 {
     if space == (null as *mut ProcessAddressSpace) ||
@@ -300,9 +317,6 @@ fn process_address_space_cr3_probe(first: *const ProcessAddressSpace,
     let saved_cr3 = x86_read_cr3_raw();
     let mut passed: bool = false;
     unsafe {
-        // Sem retornos antecipados entre a primeira troca e a restauração.
-        // As leituras MMIO são voláteis no backend: não podem ser reutilizadas
-        // pelo otimizador entre raízes com o mesmo endereço virtual.
         x86_write_cr3_raw((*first).root_physical);
         let first_value = x86_mmio_read32(PROCESS_USER_BASE);
         let first_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
@@ -346,7 +360,6 @@ fn process_address_space_self_test() -> bool {
         return false;
     }
 
-    // Mesmo VA, backing frames distintos e conteúdo independente.
     let first_virtual = direct_map_virtual_address(first_frame);
     let second_virtual = direct_map_virtual_address(second_frame);
     if first_virtual == 0 || second_virtual == 0 || first_virtual == second_virtual { return false; }
@@ -357,7 +370,6 @@ fn process_address_space_self_test() -> bool {
            *(second_virtual as *const u64) != 0xAAAABBBBCCCCDDDD { return false; }
     }
 
-    // O direct-map herdado é compartilhado entre raízes, mas nunca user-accessible.
     let kernel_index = x86_pml4_index(BAKEN_DIRECT_MAP_BASE);
     let first_kernel = process_address_space_pml4_entry(&first, kernel_index);
     let second_kernel = process_address_space_pml4_entry(&second, kernel_index);
@@ -392,8 +404,6 @@ pub fn process_address_space_activate_foundation() -> bool {
     if !kernel_heap_is_active() || !kernel_heap_self_test_passed() ||
        !pmm_allocator_is_active() || !vmm_is_active() { return false; }
 
-    // Ainda BSP-only. IRQ-off protege PMM/page-table metadata contra qualquer
-    // handler futuro que venha a ganhar alocação antes do scheduler existir.
     let flags = x86_irq_save_disable();
     unsafe {
         PROCESS_KERNEL_ROOT_PHYSICAL = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
@@ -416,7 +426,6 @@ pub fn process_address_space_self_test_passed() -> bool {
     unsafe { return PROCESS_ADDRESS_SPACE_SELF_TEST_PASSED; }
 }
 
-// Prova nominal independente de formatação/heap: BAKEN:PROCESS_ISOLATION_READY.
 @system
 pub fn process_address_space_emit_ready_marker() -> bool {
     let marker: [u8; 30] = [

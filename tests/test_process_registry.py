@@ -40,46 +40,39 @@ class ProcessRegistryTests(unittest.TestCase):
         self.assertIn("loop {", lock)
         self.assertIn("spinlock_try_lock(&mut PROCESS_REGISTRY_LOCK)", lock)
         self.assertNotIn("spinlock_lock(&mut PROCESS_REGISTRY_LOCK)", lock)
-        save = lock.index("x86_irq_save_disable()")
-        attempt = lock.index("spinlock_try_lock(&mut PROCESS_REGISTRY_LOCK)")
-        restore = lock.rindex("x86_irq_restore(flags)")
-        pause = lock.index("x86_cpu_pause()")
-        self.assertLess(save, attempt)
-        self.assertLess(attempt, restore)
-        self.assertLess(restore, pause)
+        self.assertLess(lock.index("x86_irq_save_disable()"),
+                        lock.index("spinlock_try_lock(&mut PROCESS_REGISTRY_LOCK)"))
+        self.assertLess(lock.rindex("x86_irq_restore(flags)"), lock.index("x86_cpu_pause()"))
 
         unlock = self.source.split("fn process_registry_unlock_irq(flags: u64)", 1)[1].split(
             "fn process_find_locked", 1
         )[0]
-        self.assertLess(unlock.index("spinlock_unlock(&mut PROCESS_REGISTRY_LOCK)"), unlock.index("x86_irq_restore(flags)"))
+        self.assertLess(unlock.index("spinlock_unlock(&mut PROCESS_REGISTRY_LOCK)"),
+                        unlock.index("x86_irq_restore(flags)"))
 
-    def test_registry_documents_one_way_nested_lock_hierarchy(self):
-        # Registry remains the outer owner. Process lifetime paths may descend to
-        # PMM, while PTE publication may descend to the allocation-free TLB lock.
-        # Neither lower layer is allowed to call back into the process registry.
-        self.assertIn(
-            "PROCESS_REGISTRY_LOCK -> TLB_SHOOTDOWN_LOCK -> PMM_ALLOCATOR_LOCK",
-            self.source,
-        )
+    def test_registry_never_waits_for_tlb_ack_while_holding_registry_lock(self):
+        for name in ("map", "remap", "unmap"):
+            marker = f"pub fn process_{name}_user_page"
+            body = self.source.split(marker, 1)[1].split("\n}\n", 1)[0]
+            self.assertIn("process_retain_locked(pid)", body)
+            self.assertIn("process_registry_unlock_irq(flags)", body)
+            self.assertIn("tlb_shootdown_address_space_page(root, address)", body)
+            self.assertIn("process_release(pid)", body)
+            self.assertLess(body.index("process_retain_locked(pid)"),
+                            body.index("process_registry_unlock_irq(flags)"))
+            self.assertLess(body.index("process_registry_unlock_irq(flags)"),
+                            body.index("tlb_shootdown_address_space_page(root, address)"))
+            self.assertLess(body.index("tlb_shootdown_address_space_page(root, address)"),
+                            body.index("process_release(pid)"))
+
+    def test_registry_documents_non_nested_tlb_publication(self):
+        self.assertIn("SOLTA o registro e somente então espera o shootdown", self.source)
         pmm = (ROOT / "kernel/src/memory/pmm_allocator.sotlas").read_text(encoding="utf-8")
         tlb = (ROOT / "kernel/src/memory/tlb_shootdown.sotlas").read_text(encoding="utf-8")
         self.assertNotIn("process_registry_", pmm)
         self.assertNotIn("process_registry_", tlb)
         self.assertNotIn("kernel::process::registry", pmm)
         self.assertNotIn("kernel::process::registry", tlb)
-
-    def test_user_pte_publication_uses_root_aware_shootdown_under_registry_lock(self):
-        for name in ("map", "unmap"):
-            marker = f"pub fn process_{name}_user_page"
-            body = self.source.split(marker, 1)[1].split("\n}\n", 1)[0]
-            self.assertIn("process_registry_lock_irq()", body)
-            self.assertIn("root = PROCESS_SPACES[slot].root_physical", body)
-            self.assertIn("tlb_shootdown_address_space_page(root, address)", body)
-            self.assertIn("process_registry_unlock_irq(flags)", body)
-            self.assertLess(
-                body.index("tlb_shootdown_address_space_page(root, address)"),
-                body.index("process_registry_unlock_irq(flags)"),
-            )
 
     def test_runtime_probe_covers_capacity_stale_ids_and_reclamation(self):
         for token in ("let unexpected = process_create_locked()", "process_retain_locked(first)",
