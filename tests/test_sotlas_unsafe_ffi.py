@@ -101,6 +101,34 @@ fn read(data: *const u8) -> u8 {
         c_text = bootstrap.emit_c(module, include_preamble=False)
         self.assertIn("return data[0];", c_text)
 
+    def test_raw_pointer_member_requires_unsafe(self):
+        source = """
+module contract::bad_pointer_member;
+struct Packet { pub value: u32; }
+@system
+fn read(packet: *const Packet) -> u32 {
+    return packet.value;
+}
+"""
+        with self.assertRaisesRegex(
+            bootstrap.SotlasBootstrapError,
+            "acesso a campo via ponteiro cru exige bloco unsafe explícito",
+        ):
+            parse_check(source)
+
+    def test_raw_pointer_member_expression_is_accepted_inside_unsafe_and_emitted(self):
+        source = """
+module contract::good_pointer_member;
+struct Packet { pub value: u32; }
+@system
+fn read(packet: *const Packet) -> u32 {
+    return unsafe { packet.value };
+}
+"""
+        module = parse_check(source)
+        c_text = bootstrap.emit_c(module, include_preamble=False)
+        self.assertIn("return packet->value;", c_text)
+
     def test_safe_wrapper_may_call_system_abstraction(self):
         source = """
 module contract::system_wrapper;
