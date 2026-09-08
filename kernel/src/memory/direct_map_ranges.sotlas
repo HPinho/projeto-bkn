@@ -69,7 +69,8 @@ pub fn direct_map_build_from_boot_ranges(arena: *mut PageTableArena,
         if address < (memory_map_base as usize) {
             return direct_map_range_stats_invalid();
         }
-        let descriptor = address as *const BootMemoryDescriptor;
+        let descriptor_ptr = unsafe { address as *const BootMemoryDescriptor };
+        let descriptor = unsafe { *descriptor_ptr };
         descriptor_count += 1;
 
         let type_code = descriptor.type_code;
