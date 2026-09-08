@@ -13,6 +13,16 @@ _EXTERN_ATTR = "@extern(C)"
 _UNSAFE_ATTR = "@unsafe"
 _EXPORT_ATTR = "@export"
 
+# Bounds-checked accessors for immutable embedded assets and pure colour LUTs.
+# Returning a raw pointer is safe; dereferencing it still needs lexical unsafe.
+_SAFE_ASSET_BUILTINS = frozenset({
+    "baken_get_font_advances", "baken_get_font_alpha", "baken_get_font_width",
+    "baken_get_font_height", "baken_get_font_px", "baken_get_cjk_width",
+    "baken_get_cjk_height", "baken_get_cjk_alpha", "baken_get_logo_pixels",
+    "baken_get_logo_size", "baken_srgb_to_linear", "baken_linear_to_srgb",
+    "baken_get_app_icon_alpha", "baken_get_motion_icon_alpha",
+})
+
 
 def _attr(function, name: str) -> bool:
     return name in getattr(function, "attributes", ())
@@ -31,6 +41,7 @@ def _is_raw_pointer(type_obj) -> bool:
     return bool(
         type_obj is not None
         and getattr(type_obj, "pointer", False)
+        and not getattr(type_obj, "is_array", False)
         and not getattr(type_obj, "_sotlas_reference", False)
     )
 
@@ -167,7 +178,8 @@ class _ExprInfo:
 
 
 class _StrictSafetyChecker:
-    def __init__(self, bootstrap, module, imported_fns=None):
+    def __init__(self, bootstrap, module, imported_fns=None, imported_types=None,
+                 imported_globals=None):
         self.b = bootstrap
         self.module = module
         self.filename = getattr(module, "filename", None)
@@ -177,6 +189,9 @@ class _StrictSafetyChecker:
         if imported_fns:
             self.functions.update(imported_fns)
         self.globals = {item.name: item.type for item in module.globals}
+        self.globals.update({name: item.type for name, item in (imported_globals or {}).items()})
+        self.structs = {item.name: item for item in module.structs}
+        self.structs.update(imported_types or {})
 
     def error(self, message, token) -> None:
         raise self.b.SotlasBootstrapError(
@@ -204,6 +219,8 @@ class _StrictSafetyChecker:
     def _infer(self, expr, scope, depth: int, system_context: bool) -> _ExprInfo:
         b = self.b
         if expr is None: return _ExprInfo(None)
+        if isinstance(expr, b.UnsafeExpr):
+            return self._infer(expr.value, scope, depth + 1, system_context)
         if isinstance(expr, b.Number):
             try: return _ExprInfo(b.Type(b.numeric_literal_type(expr.value)))
             except Exception: return _ExprInfo(b.Type("u64"))
@@ -261,6 +278,7 @@ class _StrictSafetyChecker:
             is_privileged_builtin = (
                 expr.callee in getattr(b, "BUILTIN_FUNCTIONS", {})
                 and _attr(function, "@system")
+                and expr.callee not in _SAFE_ASSET_BUILTINS
             )
             if is_extern and not system_context:
                 self.error('chamada a FFI extern "C" exige função @system', expr.token)
@@ -283,12 +301,20 @@ class _StrictSafetyChecker:
             target = self._infer(expr.target, scope, depth, system_context)
             if _is_raw_pointer(target.type_obj):
                 self._require_unsafe(expr.token, depth, "acesso a campo via ponteiro cru")
-            return _ExprInfo(None, target.foreign)
+            struct = self.structs.get(getattr(target.type_obj, "name", None))
+            field = next((f for f in struct.fields if f.name == expr.field), None) if struct else None
+            return _ExprInfo(field.type if field else None, target.foreign)
         if isinstance(expr, b.MethodCall):
             target = self._infer(expr.target, scope, depth, system_context)
             for arg in expr.args: self._infer(arg, scope, depth, system_context)
+            if expr.method == "as_ptr":
+                typ = target.type_obj
+                element = getattr(typ, "elem_type", None) or typ
+                return _ExprInfo(b.Type(element.name, pointer=True), target.foreign) if element else _ExprInfo(None)
             if _is_raw_pointer(target.type_obj):
                 self._require_unsafe(expr.token, depth, "chamada de método via ponteiro cru")
+            if expr.method in ("add", "abs"):
+                return target
             method = None
             if target.type_obj is not None:
                 method = self.functions.get(f"{target.type_obj.name}_{expr.method}")
@@ -398,7 +424,7 @@ def install(bootstrap) -> None:
         finally:
             for function in added_system:
                 function.attributes.remove("@system")
-        _StrictSafetyChecker(bootstrap, module, imported_fns).check()
+        _StrictSafetyChecker(bootstrap, module, imported_fns, imported_types, imported_globals).check()
         return result
     bootstrap.check = strict_check
 

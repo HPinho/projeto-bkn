@@ -239,6 +239,8 @@ class CharLit(Expr): value: str
 @dataclass
 class NullLit(Expr): pass
 @dataclass
+class UnsafeExpr(Expr): value: Expr
+@dataclass
 class Name(Expr): value: str
 @dataclass
 class EnumAccess(Expr): enum_name: str; variant: str
@@ -683,7 +685,7 @@ class Parser:
         elif self.accept("false"): expr = Boolean(token, False)
         elif self.accept("unsafe"):
             self.expect("{")
-            expr = self.expression()
+            expr = UnsafeExpr(token, self.expression())
             self.expect("}")
         elif self.accept("["):
             elements = []
@@ -895,6 +897,8 @@ def check(module: Module, imported_fns: dict[str, Function] | None = None,
     if imported_fns: functions.update(imported_fns)
 
     def expr_type(expr: Expr, scope: dict[str, Type], in_unsafe: bool, is_system_fn: bool) -> Type:
+        if isinstance(expr, UnsafeExpr):
+            return expr_type(expr.value, scope, True, is_system_fn)
         if isinstance(expr, Number):
             try:
                 return Type(numeric_literal_type(expr.value))
@@ -1068,6 +1072,8 @@ def _c_ident(name: str) -> str:
 
 
 def _emit_expr(expr: Expr, mod_prefix: str = "") -> str:
+    if isinstance(expr, UnsafeExpr):
+        return _emit_expr(expr.value, mod_prefix)
     if isinstance(expr, Number):
         base, suffix = numeric_literal_parts(expr.value)
         return f"(({C_TYPES[suffix]})({base}))" if suffix else base

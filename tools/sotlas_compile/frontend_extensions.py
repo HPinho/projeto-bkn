@@ -226,6 +226,8 @@ def install(bootstrap) -> None:
             rename_expr(expr.target, mapping)
             for arg in expr.args:
                 rename_expr(arg, mapping)
+        elif isinstance(expr, bootstrap.UnsafeExpr):
+            rename_expr(expr.value, mapping)
         elif isinstance(expr, bootstrap.Cast):
             rename_expr(expr.expr, mapping)
         elif isinstance(expr, bootstrap.ArrayLit):
