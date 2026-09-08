@@ -2,17 +2,26 @@
 //
 // Usado pelo bring-up para transformar o smoke QEMU em prova de progresso real.
 // Não faz parte da UI e nunca espera indefinidamente por hardware ausente.
+// Escritas multi-byte são serializadas entre CPUs para preservar framing dos
+// checkpoints mesmo depois que Application Processors passam a executar trabalho.
 
 module kernel::arch::x86_64::serial;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
 
 pub const X86_SERIAL_COM1: u16 = 0x3F8;
 pub const X86_SERIAL_MAX_SPINS: u32 = 100000;
 
 static mut X86_SERIAL_READY: bool = false;
+static mut X86_SERIAL_LOCK: SpinLock = SpinLock { state: 0 };
 
 @system
 pub fn x86_serial_init() -> bool {
-    unsafe { X86_SERIAL_READY = false; }
+    unsafe {
+        X86_SERIAL_READY = false;
+        if !spinlock_init(&mut X86_SERIAL_LOCK) { return false; }
+    }
 
     __outb(X86_SERIAL_COM1 + 1, 0x00);
     __outb(X86_SERIAL_COM1 + 3, 0x80);
@@ -36,8 +45,7 @@ pub fn x86_serial_is_ready() -> bool {
 }
 
 @system
-pub fn x86_serial_write_byte(value: u8) -> bool {
-    if !x86_serial_is_ready() { return false; }
+fn x86_serial_write_byte_unlocked(value: u8) -> bool {
     let mut spins: u32 = 0;
     while spins < X86_SERIAL_MAX_SPINS {
         if (__inb(X86_SERIAL_COM1 + 5) & 0x20) != 0 {
@@ -49,6 +57,56 @@ pub fn x86_serial_write_byte(value: u8) -> bool {
     return false;
 }
 
+// Uma escrita isolada também é protegida. Isso evita a corrida clássica em
+// que dois CPUs observam THR-empty e escrevem no COM1 simultaneamente.
+@system
+pub fn x86_serial_write_byte(value: u8) -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut X86_SERIAL_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+    }
+    let success = x86_serial_write_byte_unlocked(value);
+    unsafe { spinlock_unlock(&mut X86_SERIAL_LOCK); }
+    x86_irq_restore(flags);
+    return success;
+}
+
+// Transação serial multi-byte. O lock cobre a linha inteira e as interrupções
+// locais ficam desabilitadas enquanto o lock está em posse deste CPU, evitando
+// deadlock por reentrada de IRQ e impedindo interleaving de checkpoints SMP.
+@system
+pub fn x86_serial_write_buffer(bytes: *const u8, length: usize) -> bool {
+    if length == 0 { return true; }
+    if bytes == (null as *const u8) || !x86_serial_is_ready() { return false; }
+
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut X86_SERIAL_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+    }
+
+    let mut success = true;
+    let mut index: usize = 0;
+    unsafe {
+        while index < length {
+            if !x86_serial_write_byte_unlocked(bytes[index]) {
+                success = false;
+                break;
+            }
+            index += 1;
+        }
+        spinlock_unlock(&mut X86_SERIAL_LOCK);
+    }
+    x86_irq_restore(flags);
+    return success;
+}
+
 @system
 fn x86_serial_hex_digit(value: u8) -> u8 {
     if value < 10 { return ('0' as u8) + value; }
@@ -58,86 +116,48 @@ fn x86_serial_hex_digit(value: u8) -> u8 {
 // Diagnóstico numérico sem alocação/formatação: BAKEN:HEX=<tag>:XXXXXXXX.
 @system
 pub fn x86_serial_write_hex32_marker(tag: u8, value: u32) -> bool {
-    if !x86_serial_write_byte('B' as u8) { return false; }
-    if !x86_serial_write_byte('A' as u8) { return false; }
-    if !x86_serial_write_byte('K' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('N' as u8) { return false; }
-    if !x86_serial_write_byte(':' as u8) { return false; }
-    if !x86_serial_write_byte('H' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('X' as u8) { return false; }
-    if !x86_serial_write_byte('=' as u8) { return false; }
-    if !x86_serial_write_byte(tag) { return false; }
-    if !x86_serial_write_byte(':' as u8) { return false; }
-
+    let mut marker: [u8; 21] = [
+        66,65,75,69,78,58,72,69,88,61,0,58,
+        48,48,48,48,48,48,48,48,10
+    ];
+    marker[10] = tag;
     let mut shift: i32 = 28;
+    let mut index: usize = 12;
     while shift >= 0 {
         let nibble = ((value >> (shift as u32)) & 0x0F) as u8;
-        if !x86_serial_write_byte(x86_serial_hex_digit(nibble)) { return false; }
+        marker[index] = x86_serial_hex_digit(nibble);
+        index += 1;
         shift -= 4;
     }
-    if !x86_serial_write_byte('\n' as u8) { return false; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 21); }
 }
 
-// Checkpoint curto e delimitado para o bring-up pós-cutover.  Um único
+// Checkpoint curto e delimitado para o bring-up pós-cutover. Um único
 // caractere de etapa evita depender de alocação, formatação ou framebuffer
 // enquanto a MMU, o PMM e os controladores de interrupção são validados.
 // Convenção: C=CPU, P=PMM, V=VMM, A=ACPI, I=APIC/IOAPIC, R=rotas IRQ.
 @system
 pub fn x86_serial_write_stage_marker(stage: u8) -> bool {
-    if !x86_serial_write_byte('B' as u8) { return false; }
-    if !x86_serial_write_byte('A' as u8) { return false; }
-    if !x86_serial_write_byte('K' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('N' as u8) { return false; }
-    if !x86_serial_write_byte(':' as u8) { return false; }
-    if !x86_serial_write_byte('S' as u8) { return false; }
-    if !x86_serial_write_byte('T' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('P' as u8) { return false; }
-    if !x86_serial_write_byte('=' as u8) { return false; }
-    if !x86_serial_write_byte(stage) { return false; }
-    if !x86_serial_write_byte('\n' as u8) { return false; }
-    return true;
+    let mut marker: [u8; 13] = [66,65,75,69,78,58,83,84,69,80,61,0,10];
+    marker[11] = stage;
+    unsafe { return x86_serial_write_buffer(&marker[0], 13); }
 }
 
 @system
 pub fn x86_serial_write_timer_ready_marker() -> bool {
-    if !x86_serial_write_byte('B' as u8) { return false; }
-    if !x86_serial_write_byte('A' as u8) { return false; }
-    if !x86_serial_write_byte('K' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('N' as u8) { return false; }
-    if !x86_serial_write_byte(':' as u8) { return false; }
-    if !x86_serial_write_byte('T' as u8) { return false; }
-    if !x86_serial_write_byte('I' as u8) { return false; }
-    if !x86_serial_write_byte('M' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('R' as u8) { return false; }
-    if !x86_serial_write_byte('_' as u8) { return false; }
-    if !x86_serial_write_byte('R' as u8) { return false; }
-    if !x86_serial_write_byte('E' as u8) { return false; }
-    if !x86_serial_write_byte('A' as u8) { return false; }
-    if !x86_serial_write_byte('D' as u8) { return false; }
-    if !x86_serial_write_byte('Y' as u8) { return false; }
-    if !x86_serial_write_byte('\n' as u8) { return false; }
-    return true;
+    let marker: [u8; 18] = [
+        66,65,75,69,78,58,84,73,77,69,82,95,82,69,65,68,89,10
+    ];
+    unsafe { return x86_serial_write_buffer(&marker[0], 18); }
 }
 
 // Prova nominal do heap para os gates QEMU; não usa formatação nem alocação.
 @system
 pub fn x86_serial_write_heap_ready_marker() -> bool {
     let marker: [u8; 17] = [
-        66, 65, 75, 69, 78, 58, 72, 69, 65, 80, 95, 82, 69, 65, 68, 89, 10
+        66,65,75,69,78,58,72,69,65,80,95,82,69,65,68,89,10
     ];
-    let mut index: usize = 0;
-    while index < 17 {
-        if !x86_serial_write_byte(marker[index]) { return false; }
-        index += 1;
-    }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 17); }
 }
 
 // Contrato final do bring-up: emitido somente depois que todos os gates
@@ -145,13 +165,8 @@ pub fn x86_serial_write_heap_ready_marker() -> bool {
 @system
 pub fn x86_serial_write_bare_metal_ready_marker() -> bool {
     let marker: [u8; 23] = [
-        66, 65, 75, 69, 78, 58, 66, 65, 82, 69, 95, 77,
-        69, 84, 65, 76, 95, 82, 69, 65, 68, 89, 10
+        66,65,75,69,78,58,66,65,82,69,95,77,
+        69,84,65,76,95,82,69,65,68,89,10
     ];
-    let mut index: usize = 0;
-    while index < 23 {
-        if !x86_serial_write_byte(marker[index]) { return false; }
-        index += 1;
-    }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 23); }
 }
