@@ -13,6 +13,9 @@ pub const FADT_PM_TMR_BLK_OFFSET: usize = 76;
 pub const FADT_PM_TMR_LEN_OFFSET: usize = 91;
 pub const FADT_FLAGS_OFFSET: usize = 112;
 pub const FADT_X_PM_TMR_OFFSET: usize = 208;
+pub const FADT_DSDT_OFFSET: usize = 40;
+pub const FADT_X_DSDT_OFFSET: usize = 140;
+pub const FADT_X_DSDT_END: usize = 148;
 
 pub const FADT_FLAG_TMR_VAL_EXT: u32 = 1 << 8;
 pub const FADT_FLAG_HW_REDUCED_ACPI: u32 = 1 << 20;
@@ -65,6 +68,25 @@ fn fadt_read_u64(base: *const u8, offset: usize) -> u64 {
 fn fadt_address_space_supported(address_space_id: u8) -> bool {
     return address_space_id == ACPI_GAS_SYSTEM_MEMORY ||
         address_space_id == ACPI_GAS_SYSTEM_IO;
+}
+
+// Retorna somente um DSDT já traduzido pelo direct-map e validado integralmente.
+// ACPI 2+ exige preferência pelo ponteiro X_DSDT de 64 bits quando presente.
+@system
+pub fn fadt_dsdt_table() -> *const u8 {
+    let table = acpi_fadt();
+    if table == (null as *const u8) { return null as *const u8; }
+    let length = acpi_table_length(table);
+    if length <= FADT_DSDT_OFFSET + 3 { return null as *const u8; }
+    if length >= FADT_X_DSDT_END {
+        let extended = fadt_read_u64(table, FADT_X_DSDT_OFFSET);
+        if extended != 0 {
+            let dsdt = acpi_validated_table_from_physical(extended, ACPI_SIG_DSDT);
+            if dsdt != (null as *const u8) { return dsdt; }
+        }
+    }
+    let legacy = fadt_read_u32(table, FADT_DSDT_OFFSET) as u64;
+    return acpi_validated_table_from_physical(legacy, ACPI_SIG_DSDT);
 }
 
 @system

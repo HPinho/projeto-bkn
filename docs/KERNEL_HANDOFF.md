@@ -351,3 +351,16 @@ teardown/reaper e publica `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
 O encerramento rigoroso está completo. O desenvolvimento pode avançar para a
 Fase 2 — Platform e drivers de produção, mantendo esses três gates como proteção
 obrigatória contra regressões do Kernel Core.
+
+## Fase 2 — primeiro incremento AML/ACPI
+
+O catálogo de definition blocks foi iniciado em `kernel/src/acpi/aml_tables.sotlas`.
+Ele resolve o DSDT pelo FADT com preferência por `X_DSDT`, enumera SSDTs,
+rejeita tabelas inválidas ou capacidade excedida e só expõe payloads pertencentes
+ao catálogo validado. O inventário de plataforma registra a presença e a
+quantidade de definition blocks. Os três smokes QEMU exigem agora
+`BAKEN:ACPI_AML_TABLES_READY`.
+
+Este incremento ainda não interpreta AML. A próxima fronteira é um decoder
+limitado e fail-closed para `PkgLength`, `NameString` e objetos constantes,
+seguido pela construção read-only do namespace antes de implementar métodos.

@@ -20,6 +20,8 @@ pub const ACPI_SIG_MADT: u32 = 0x43495041; // "APIC"
 pub const ACPI_SIG_MCFG: u32 = 0x4746434D; // "MCFG"
 pub const ACPI_SIG_HPET: u32 = 0x54455048; // "HPET"
 pub const ACPI_SIG_FADT: u32 = 0x50434146; // "FACP"
+pub const ACPI_SIG_DSDT: u32 = 0x54445344; // "DSDT"
+pub const ACPI_SIG_SSDT: u32 = 0x54445353; // "SSDT"
 
 static mut ACPI_READY: bool = false;
 static mut ACPI_ROOT: *const u8 = null as *const u8;
@@ -167,9 +169,27 @@ pub fn acpi_uses_post_cutover_direct_map() -> bool {
 }
 
 @system
-pub fn acpi_find_table(signature: u32) -> *const u8 {
+pub fn acpi_validated_table_from_physical(physical_address: u64,
+                                          signature: u32) -> *const u8 {
+    unsafe { if !ACPI_READY || signature == 0 { return null as *const u8; } }
+    let table = acpi_sdt_pointer(physical_address);
+    if !acpi_sdt_valid(table, signature) { return null as *const u8; }
+    return table;
+}
+
+@system
+pub fn acpi_table_length(table: *const u8) -> usize {
+    if table == (null as *const u8) { return 0; }
+    let length = acpi_read_u32(table, 4) as usize;
+    if length < ACPI_SDT_HEADER_LENGTH || length > ACPI_MAX_SDT_LENGTH { return 0; }
+    return length;
+}
+
+@system
+pub fn acpi_find_table_at(signature: u32, occurrence: usize) -> *const u8 {
     unsafe {
-        if !ACPI_READY || ACPI_ROOT == (null as *const u8) || ACPI_ROOT_ENTRY_SIZE == 0 {
+        if !ACPI_READY || signature == 0 || ACPI_ROOT == (null as *const u8) ||
+           ACPI_ROOT_ENTRY_SIZE == 0 {
             return null as *const u8;
         }
 
@@ -178,7 +198,9 @@ pub fn acpi_find_table(signature: u32) -> *const u8 {
             return null as *const u8;
         }
         let payload = root_length - ACPI_SDT_HEADER_LENGTH;
+        if payload % ACPI_ROOT_ENTRY_SIZE != 0 { return null as *const u8; }
         let count = payload / ACPI_ROOT_ENTRY_SIZE;
+        let mut matched: usize = 0;
 
         for mut index in 0..count {
             let offset = ACPI_SDT_HEADER_LENGTH + index * ACPI_ROOT_ENTRY_SIZE;
@@ -192,11 +214,46 @@ pub fn acpi_find_table(signature: u32) -> *const u8 {
             let table = acpi_sdt_pointer(address);
             if table != (null as *const u8) &&
                acpi_read_u32(table, 0) == signature && acpi_sdt_valid(table, signature) {
-                return table;
+                if matched == occurrence { return table; }
+                matched += 1;
             }
         }
     }
     return null as *const u8;
+}
+
+@system
+pub fn acpi_find_table(signature: u32) -> *const u8 {
+    return acpi_find_table_at(signature, 0);
+}
+
+@system
+pub fn acpi_table_count(signature: u32) -> usize {
+    unsafe {
+        if !ACPI_READY || signature == 0 || ACPI_ROOT == (null as *const u8) ||
+           ACPI_ROOT_ENTRY_SIZE == 0 { return 0; }
+        let root_length = acpi_read_u32(ACPI_ROOT, 4) as usize;
+        if root_length < ACPI_SDT_HEADER_LENGTH || root_length > ACPI_MAX_SDT_LENGTH {
+            return 0;
+        }
+        let payload = root_length - ACPI_SDT_HEADER_LENGTH;
+        if payload % ACPI_ROOT_ENTRY_SIZE != 0 { return 0; }
+        let entries = payload / ACPI_ROOT_ENTRY_SIZE;
+        let mut matched: usize = 0;
+        for mut index in 0..entries {
+            let offset = ACPI_SDT_HEADER_LENGTH + index * ACPI_ROOT_ENTRY_SIZE;
+            let address: u64 = if ACPI_ROOT_ENTRY_SIZE == 8 {
+                acpi_read_u64(ACPI_ROOT, offset)
+            } else {
+                acpi_read_u32(ACPI_ROOT, offset) as u64
+            };
+            if address == 0 { continue; }
+            let table = acpi_sdt_pointer(address);
+            if table != (null as *const u8) && acpi_read_u32(table, 0) == signature &&
+               acpi_sdt_valid(table, signature) { matched += 1; }
+        }
+        return matched;
+    }
 }
 
 @system

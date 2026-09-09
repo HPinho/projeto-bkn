@@ -13,11 +13,13 @@ class PlatformInventoryTests(unittest.TestCase):
 
     def test_inventory_copies_architecture_and_device_facts(self):
         for token in ("cpu_count", "ioapic_count", "pci_device_count", "pci_segment_count",
-                      "has_hpet", "has_display", "has_storage", "has_xhci"):
+                      "aml_definition_block_count", "has_hpet", "has_aml",
+                      "has_display", "has_storage", "has_xhci"):
             self.assertIn(token, self.source)
 
     def test_platform_requires_post_cutover_native_sources(self):
-        for token in ("acpi_uses_post_cutover_direct_map()", "madt_is_ready()",
+        for token in ("acpi_uses_post_cutover_direct_map()", "aml_tables_is_ready()",
+                      "aml_dsdt()", "madt_is_ready()",
                       "lapic_is_ready()", "ioapic_is_ready()", "pci_get_device_count()"):
             self.assertIn(token, self.source)
         lower = self.source.lower()

@@ -37,6 +37,7 @@ import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
 import kernel::acpi::hpet::*;
 import kernel::acpi::fadt::*;
+import kernel::acpi::aml_tables::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::xhci_discovery::*;

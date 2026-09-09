@@ -1,0 +1,136 @@
+// Baken OS — catálogo validado de definition blocks AML.
+//
+// Esta camada não interpreta opcodes. Ela estabelece a fronteira segura que o
+// futuro namespace AML consumirá: um DSDT obrigatório e SSDTs enumerados pela
+// raiz ACPI, todos com assinatura, tamanho e checksum já validados.
+
+module kernel::acpi::aml_tables;
+
+import kernel::acpi::tables::*;
+import kernel::acpi::fadt::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_MAX_SSDT_COUNT: usize = 32;
+
+static mut AML_DSDT: *const u8 = null as *const u8;
+static mut AML_SSDTS: [*const u8; AML_MAX_SSDT_COUNT] = [
+    null as *const u8; AML_MAX_SSDT_COUNT
+];
+static mut AML_SSDT_COUNT: usize = 0;
+static mut AML_TABLES_READY: bool = false;
+
+@system
+fn aml_tables_reset() -> void {
+    unsafe {
+        AML_DSDT = null as *const u8;
+        AML_SSDT_COUNT = 0;
+        AML_TABLES_READY = false;
+        let mut index: usize = 0;
+        while index < AML_MAX_SSDT_COUNT {
+            AML_SSDTS[index] = null as *const u8;
+            index += 1;
+        }
+    }
+}
+
+@system
+pub fn aml_tables_init() -> bool {
+    aml_tables_reset();
+    if !acpi_is_ready() || !acpi_uses_post_cutover_direct_map() { return false; }
+    let dsdt = fadt_dsdt_table();
+    if dsdt == (null as *const u8) || acpi_table_length(dsdt) <= ACPI_SDT_HEADER_LENGTH {
+        return false;
+    }
+    let count = acpi_table_count(ACPI_SIG_SSDT);
+    if count > AML_MAX_SSDT_COUNT { return false; }
+    let mut index: usize = 0;
+    unsafe { AML_DSDT = dsdt; }
+    while index < count {
+        let ssdt = acpi_find_table_at(ACPI_SIG_SSDT, index);
+        if ssdt == (null as *const u8) ||
+           acpi_table_length(ssdt) <= ACPI_SDT_HEADER_LENGTH {
+            aml_tables_reset();
+            return false;
+        }
+        unsafe { AML_SSDTS[index] = ssdt; }
+        index += 1;
+    }
+    unsafe {
+        AML_SSDT_COUNT = count;
+        __dma_fence();
+        AML_TABLES_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_tables_is_ready() -> bool { unsafe { return AML_TABLES_READY; } }
+
+@system
+pub fn aml_dsdt() -> *const u8 {
+    unsafe {
+        if !AML_TABLES_READY { return null as *const u8; }
+        return AML_DSDT;
+    }
+}
+
+@system
+pub fn aml_ssdt_count() -> usize {
+    unsafe { if !AML_TABLES_READY { return 0; } return AML_SSDT_COUNT; }
+}
+
+@system
+pub fn aml_ssdt(index: usize) -> *const u8 {
+    unsafe {
+        if !AML_TABLES_READY || index >= AML_SSDT_COUNT {
+            return null as *const u8;
+        }
+        return AML_SSDTS[index];
+    }
+}
+
+@system
+fn aml_definition_block_catalogued(table: *const u8) -> bool {
+    if table == (null as *const u8) { return false; }
+    unsafe {
+        if !AML_TABLES_READY { return false; }
+        if table == AML_DSDT { return true; }
+        let mut index: usize = 0;
+        while index < AML_SSDT_COUNT {
+            if table == AML_SSDTS[index] { return true; }
+            index += 1;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn aml_definition_block_payload(table: *const u8) -> *const u8 {
+    if !aml_definition_block_catalogued(table) { return null as *const u8; }
+    let length = acpi_table_length(table);
+    if length <= ACPI_SDT_HEADER_LENGTH { return null as *const u8; }
+    return unsafe { ((table as u64) + ACPI_SDT_HEADER_LENGTH as u64) as *const u8 };
+}
+
+@system
+pub fn aml_definition_block_payload_length(table: *const u8) -> usize {
+    if !aml_definition_block_catalogued(table) { return 0; }
+    let length = acpi_table_length(table);
+    if length <= ACPI_SDT_HEADER_LENGTH { return 0; }
+    return length - ACPI_SDT_HEADER_LENGTH;
+}
+
+@system
+pub fn aml_tables_emit_ready_marker() -> bool {
+    if !aml_tables_is_ready() || aml_dsdt() == (null as *const u8) { return false; }
+    let marker: [u8; 28] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,84,65,66,76,69,83,95,
+        82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 28 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}

@@ -47,7 +47,13 @@ devem preservar os três gates, mas não reabrem a Fase 1 sem regressão comprov
 
 ## Fase 2 — Platform e drivers de produção
 
-**Estado: ▶️ PRÓXIMA FASE ATIVA.**
+**Estado: ▶️ EM DESENVOLVIMENTO.**
+
+Primeiro incremento implementado localmente: catálogo seguro de definition
+blocks AML. O kernel prefere `X_DSDT`, valida/faz fallback para `DSDT`, enumera
+SSDTs com capacidade limitada, publica somente payloads catalogados e exige o
+marker QEMU `BAKEN:ACPI_AML_TABLES_READY`. Ainda não há execução de opcodes AML
+nem construção de namespace; essas são as próximas camadas deste marco.
 
 Objetivo: transformar o hardware já certificado em serviços estáveis de
 plataforma, com descoberta, recuperação e contratos de driver.

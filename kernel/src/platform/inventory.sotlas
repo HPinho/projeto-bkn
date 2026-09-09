@@ -6,6 +6,7 @@ import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
 import kernel::acpi::hpet::*;
+import kernel::acpi::aml_tables::*;
 import kernel::drivers::pci_bus::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
@@ -25,9 +26,11 @@ pub struct PlatformInventory {
     pub ioapic_count: u32;
     pub pci_device_count: u32;
     pub pci_segment_count: u32;
+    pub aml_definition_block_count: u32;
     pub bsp_apic_id: u8;
     pub acpi_revision: u8;
     pub has_hpet: bool;
+    pub has_aml: bool;
     pub has_display: bool;
     pub has_storage: bool;
     pub has_xhci: bool;
@@ -36,8 +39,9 @@ pub struct PlatformInventory {
 
 static mut PLATFORM_INFO: PlatformInventory = PlatformInventory {
     architecture: 0, cpu_count: 0, ioapic_count: 0, pci_device_count: 0,
-    pci_segment_count: 0, bsp_apic_id: 0, acpi_revision: 0,
-    has_hpet: false, has_display: false, has_storage: false, has_xhci: false,
+    pci_segment_count: 0, aml_definition_block_count: 0,
+    bsp_apic_id: 0, acpi_revision: 0,
+    has_hpet: false, has_aml: false, has_display: false, has_storage: false, has_xhci: false,
     valid: false
 };
 
@@ -45,6 +49,7 @@ static mut PLATFORM_INFO: PlatformInventory = PlatformInventory {
 pub fn platform_inventory_init() -> bool {
     unsafe { if PLATFORM_INFO.valid { return true; } }
     if !acpi_is_ready() || !acpi_uses_post_cutover_direct_map() ||
+       !aml_tables_is_ready() || aml_dsdt() == (null as *const u8) ||
        !madt_is_ready() || !lapic_is_ready() || !ioapic_is_ready() { return false; }
     let cpu_count = madt_cpu_count();
     let interrupt_controller_count = ioapic_count();
@@ -73,9 +78,11 @@ pub fn platform_inventory_init() -> bool {
         PLATFORM_INFO.ioapic_count = interrupt_controller_count;
         PLATFORM_INFO.pci_device_count = device_count;
         PLATFORM_INFO.pci_segment_count = if mcfg_is_ready() { mcfg_segment_count() } else { 0 };
+        PLATFORM_INFO.aml_definition_block_count = (aml_ssdt_count() + 1) as u32;
         PLATFORM_INFO.bsp_apic_id = lapic_id();
         PLATFORM_INFO.acpi_revision = acpi_revision();
         PLATFORM_INFO.has_hpet = hpet_is_ready();
+        PLATFORM_INFO.has_aml = true;
         PLATFORM_INFO.has_display = display;
         PLATFORM_INFO.has_storage = storage;
         PLATFORM_INFO.has_xhci = xhci;

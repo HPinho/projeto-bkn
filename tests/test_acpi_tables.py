@@ -29,7 +29,20 @@ class AcpiTableTests(unittest.TestCase):
         text = ACPI.read_text(encoding="utf-8")
         self.assertIn("acpi_sdt_valid(table, signature)", text)
         self.assertIn("ACPI_MAX_SDT_LENGTH", text)
-        for signature in ("ACPI_SIG_MADT", "ACPI_SIG_MCFG", "ACPI_SIG_HPET", "ACPI_SIG_FADT"): self.assertIn(signature, text)
+        for signature in ("ACPI_SIG_MADT", "ACPI_SIG_MCFG", "ACPI_SIG_HPET", "ACPI_SIG_FADT", "ACPI_SIG_DSDT", "ACPI_SIG_SSDT"): self.assertIn(signature, text)
+
+    def test_root_enumeration_is_occurrence_aware_and_rejects_partial_entries(self):
+        text = ACPI.read_text(encoding="utf-8")
+        body = text.split("pub fn acpi_find_table_at", 1)[1].split(
+            "pub fn acpi_find_table(signature", 1
+        )[0]
+        self.assertIn("payload % ACPI_ROOT_ENTRY_SIZE != 0", body)
+        self.assertIn("if matched == occurrence", body)
+        self.assertIn("pub fn acpi_table_count(signature: u32)", text)
+        count = text.split("pub fn acpi_table_count", 1)[1].split("pub fn acpi_madt", 1)[0]
+        self.assertIn("for mut index in 0..entries", count)
+        self.assertIn("acpi_sdt_valid(table, signature)", count)
+        self.assertNotIn("acpi_find_table_at(signature", count)
 
     def test_post_cutover_initializes_acpi_before_interrupt_controllers_and_pci(self):
         text = POST.read_text(encoding="utf-8")
