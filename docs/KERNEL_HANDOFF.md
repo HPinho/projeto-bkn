@@ -342,8 +342,11 @@ não ocultar corrupção de memória ou de controle. O commit
 `b703cb2e77442873910268532d6fc5272a51873f` foi aprovado pelo CI principal
 #1017, SMP #120 e NVMe-only #217 no mesmo SHA.
 
-Os gates atuais certificam a implementação, mas o encerramento rigoroso do
-Kernel Core ainda exige: snapshot de exceção por-CPU ou sincronizado;
-classificação explícita para manter NMI, double fault e machine check fatais;
-e um probe de fault CPL3 executado em AP. Depois dessas três mudanças, os mesmos
-gates devem ser repetidos antes do selo final.
+Os bloqueadores da auditoria foram implementados no working tree: snapshots de
+exceção são por CPU; somente uma allowlist de exceções síncronas CPL3 pode
+encerrar o processo; NMI, double fault e machine check permanecem fatais; e um
+segundo processo pinned no CPU 1 causa #PF em sua guard page, passa por
+teardown/reaper e publica `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
+
+O encerramento rigoroso agora depende apenas da repetição do CI principal, SMP
+e NVMe-only no mesmo SHA que contenha essa implementação.

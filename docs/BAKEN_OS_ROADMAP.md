@@ -6,7 +6,7 @@ gates exigidos passam no mesmo commit da `main`.
 
 ## Marco imediato — Fechar auditoria rigorosa do Kernel Core
 
-**Estado: gates atuais certificados; fechamento arquitetural ainda pendente.**
+**Estado: bloqueadores implementados localmente; nova certificação pendente.**
 
 O commit `b703cb2e77442873910268532d6fc5272a51873f` passou nos três gates
 obrigatórios do mesmo SHA em 2026-09-09:
@@ -32,15 +32,18 @@ Critério de saída:
   um fault CPL3 executado em AP;
 - o workflow deve identificar explicitamente o primeiro marker ausente.
 
-Bloqueadores técnicos ainda abertos pela auditoria:
+Os três bloqueadores técnicos encontrados pela auditoria agora estão
+implementados no working tree e aguardam certificação:
 
-- tornar o snapshot de exceção por-CPU (ou sincronizado), pois o registro atual
-  é global e duas CPUs podem sobrescrever o diagnóstico simultaneamente;
-- classificar vetores: somente falhas síncronas recuperáveis de CPL3 podem
-  terminar o processo. NMI, double fault e machine check precisam permanecer
-  terminais, mesmo quando interrompem CPL3;
-- executar a prova de fault CPL3 também em AP. O SMP #120 voltou a passar e
-  certifica o gate atual, mas ainda não cobre essa combinação arquitetural.
+- snapshot de exceção por CPU, indexado pelo registro SMP antes mesmo da
+  liberação dos APs ao scheduler;
+- allowlist de exceções síncronas recuperáveis de CPL3; NMI, double fault,
+  machine check e vetores reservados continuam terminais;
+- segundo processo de prova pinned no CPU 1, com #PF CPL3, teardown/reaper e o
+  marker obrigatório `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
+
+Para encerrar o marco, CI principal, SMP e NVMe-only precisam passar novamente
+no mesmo SHA que contenha essas três mudanças.
 
 ## Fase 2 — Platform e drivers de produção
 

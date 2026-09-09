@@ -131,6 +131,7 @@ jobs:
           require_marker 'BAKEN:SMP_PROCESS_MIGRATED'
           require_marker 'BAKEN:SMP_FPU_MIGRATION_READY'
           require_marker 'BAKEN:USER_FAULT_ISOLATED_READY'
+          require_marker 'BAKEN:SMP_USER_FAULT_ISOLATED_READY'
           test "$found" -eq 1
 
       - name: Upload SMP diagnostics

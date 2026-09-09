@@ -59,9 +59,10 @@ Não significa que todos os recursos futuros do sistema operacional estão concl
 aberta.** No commit `b703cb2e77442873910268532d6fc5272a51873f`, o CI
 principal #1017, o SMP #120 e o NVMe-only #217 passaram no mesmo SHA.
 
-A auditoria também mantém três bloqueadores de qualidade: snapshot de exceção
-por-CPU/sincronizado, política que preserve NMI/double fault/machine check como
-terminais e prova de uma falha CPL3 executada no AP.
+A auditoria encontrou três bloqueadores de qualidade. Eles agora estão
+implementados localmente: snapshot de exceção por CPU, política que preserva
+NMI/double fault/machine check como terminais e uma falha CPL3 real executada
+no AP. A nova prova SMP publica `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
 
 Além da infraestrutura já comprovada, o último limite do Kernel Core agora tem
 implementação e contrato de teste: um `#PF` vindo de CPL3 é identificado pelo
@@ -71,8 +72,8 @@ frame de kernel válido. Falhas em CPL0 continuam `fail-closed` (`CLI` + `HLT`).
 
 O gate de runtime exige `BAKEN:USER_FAULT_ISOLATED_READY` e rejeita
 `BAKEN:HEX=E:`. Essa implementação está certificada pelos três gates atuais.
-O selo formal de **Kernel Core concluído** permanece reservado até fechar os
-três bloqueadores arquiteturais acima e repetir a certificação no mesmo SHA.
+O selo formal de **Kernel Core concluído** permanece reservado até repetir CI,
+SMP e NVMe-only no mesmo SHA desta implementação.
 
 ## Fases seguintes
 

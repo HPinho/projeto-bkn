@@ -88,6 +88,11 @@ fn smp_find_registered_cpu_slot(apic_id: u8) -> usize {
 }
 
 @system
+pub fn smp_current_cpu_slot() -> usize {
+    return smp_find_registered_cpu_slot(lapic_current_id());
+}
+
+@system
 fn smp_ready_address(slot: usize) -> u64 {
     if slot >= SMP_MAX_CPUS { return 0; }
     unsafe { let flag: *mut u32 = &mut SMP_AP_READY[slot]; return flag as u64; }

@@ -18,8 +18,26 @@ class X86ExceptionTests(unittest.TestCase):
     def test_exception_frame_matches_normalized_stack_prefix(self):
         text=EXCEPTIONS.read_text(encoding="utf-8"); [self.assertIn(field,text) for field in ("r15: u64","rax: u64","vector: u64","error_code: u64","rip: u64","cs: u64","rflags: u64","rsp: u64","ss: u64")]; self.assertIn("@repr(C)\n@packed\npub struct ExceptionSavedFrame",text)
     def test_page_fault_records_cr2_and_decodes_error_bits(self):
-        text=EXCEPTIONS.read_text(encoding="utf-8"); self.assertIn("EXCEPTION_PAGE_FAULT: u64 = 14",text); self.assertIn("LAST_EXCEPTION.cr2 = x86_read_cr2()",text); self.assertIn("@export\npub fn sotlas_x86_exception_dispatch",text)
+        text=EXCEPTIONS.read_text(encoding="utf-8"); self.assertIn("EXCEPTION_PAGE_FAULT: u64 = 14",text); self.assertIn("CPU_LAST_EXCEPTIONS[cpu_slot].cr2 = x86_read_cr2()",text); self.assertIn("@export\npub fn sotlas_x86_exception_dispatch",text)
         for token in ("PAGE_FAULT_PRESENT: u64 = 1","PAGE_FAULT_WRITE: u64 = 2","PAGE_FAULT_USER: u64 = 4","PAGE_FAULT_RESERVED_BIT: u64 = 8","PAGE_FAULT_INSTRUCTION_FETCH: u64 = 16","PAGE_FAULT_PROTECTION_KEY: u64 = 32","PAGE_FAULT_SHADOW_STACK: u64 = 64","page_fault_was_protection_violation","page_fault_was_instruction_fetch"): self.assertIn(token,text)
+    def test_exception_snapshots_are_per_cpu_and_published_last(self):
+        text=EXCEPTIONS.read_text(encoding="utf-8")
+        self.assertIn("CPU_LAST_EXCEPTIONS: [ExceptionSnapshot; SCHEDULER_CPU_SLOT_COUNT]", text)
+        self.assertIn("let smp_slot = smp_current_cpu_slot()", text)
+        self.assertIn("pub fn exception_state_reset_for_cpu(cpu_slot: usize)", text)
+        self.assertIn("pub fn exception_cpu_has_snapshot(cpu_slot: usize)", text)
+        dispatch=text.split("pub fn sotlas_x86_exception_dispatch",1)[1]
+        self.assertLess(dispatch.index("CPU_LAST_EXCEPTIONS[cpu_slot].valid = false"), dispatch.index("CPU_LAST_EXCEPTIONS[cpu_slot].vector = vector"))
+        self.assertLess(dispatch.index("__dma_fence()"), dispatch.index("CPU_LAST_EXCEPTIONS[cpu_slot].valid = true"))
+        self.assertNotIn("static mut LAST_EXCEPTION", text)
+    def test_critical_async_and_catastrophic_vectors_are_never_recoverable(self):
+        text=EXCEPTIONS.read_text(encoding="utf-8")
+        policy=text.split("pub fn exception_user_fault_recoverable",1)[1].split("pub fn page_fault_was_protection_violation",1)[0]
+        for token in ("EXCEPTION_NMI: u64 = 2", "EXCEPTION_DOUBLE_FAULT: u64 = 8", "EXCEPTION_MACHINE_CHECK: u64 = 18"):
+            self.assertIn(token, text)
+        for token in ("EXCEPTION_NMI", "EXCEPTION_DOUBLE_FAULT", "EXCEPTION_MACHINE_CHECK"):
+            self.assertNotIn(token, policy)
+        self.assertIn("user && exception_user_fault_recoverable(vector) && pid != 0", text)
     def test_user_faults_return_to_scheduler_while_kernel_faults_remain_terminal(self):
         exceptions=EXCEPTIONS.read_text(encoding="utf-8"); backend=BACKEND.read_text(encoding="utf-8")
         self.assertIn("user = (frame.cs & 3) == 3", exceptions)

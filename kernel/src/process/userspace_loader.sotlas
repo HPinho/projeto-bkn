@@ -50,6 +50,7 @@ static mut USERSPACE_FAULT_DATA_FRAME: u64 = 0;
 static mut USERSPACE_FAULT_STACK_FRAME: u64 = 0;
 static mut USERSPACE_FAULT_STARTED: bool = false;
 static mut USERSPACE_FAULT_FINISHED: bool = false;
+static mut USERSPACE_FAULT_CPU_SLOT: usize = SCHEDULER_INVALID_CPU_SLOT;
 
 @system
 fn userspace_diag(stage: u32) -> void {
@@ -320,9 +321,11 @@ pub fn userspace_loader_finish_probe() -> bool {
 }
 
 @system
-pub fn userspace_loader_start_fault_probe() -> bool {
+fn userspace_loader_start_fault_probe_on_cpu(cpu_slot: usize) -> bool {
     unsafe { if !USERSPACE_FINISHED || USERSPACE_FAULT_STARTED { return false; } }
-    exception_state_reset();
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return false; }
+    if cpu_slot != 0 && smp_scheduler_active_ap_count() == 0 { return false; }
+    exception_state_reset_for_cpu(cpu_slot);
     let pid = process_create();
     if pid == 0 { return false; }
     let code = pmm_alloc_page();
@@ -358,7 +361,14 @@ pub fn userspace_loader_start_fault_probe() -> bool {
         USERSPACE_FAULT_DATA_FRAME = data;
         USERSPACE_FAULT_STACK_FRAME = stack;
     }
-    let tid = scheduler_create_process_thread(pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    let mut tid: u64 = 0;
+    if cpu_slot == 0 {
+        tid = scheduler_create_process_thread(pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES);
+    } else {
+        tid = scheduler_create_process_thread_on_cpu(
+            pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES, cpu_slot
+        );
+    }
     if tid == 0 {
         unsafe { USERSPACE_PID = 0; USERSPACE_FAULT_PID = 0; }
         userspace_teardown_mapping(pid, code, data, stack);
@@ -368,20 +378,31 @@ pub fn userspace_loader_start_fault_probe() -> bool {
         USERSPACE_TID = tid;
         USERSPACE_STARTED = true;
         USERSPACE_FAULT_STARTED = true;
+        USERSPACE_FAULT_FINISHED = false;
+        USERSPACE_FAULT_CPU_SLOT = cpu_slot;
     }
     return true;
 }
 
 @system
+pub fn userspace_loader_start_fault_probe() -> bool {
+    return userspace_loader_start_fault_probe_on_cpu(0);
+}
+
+@system
 pub fn userspace_loader_wait_fault_probe() -> bool {
+    let mut cpu_slot: usize = SCHEDULER_INVALID_CPU_SLOT;
+    unsafe { cpu_slot = USERSPACE_FAULT_CPU_SLOT; }
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return false; }
     let mut spins: u64 = 0;
     while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
         unsafe {
             if USERSPACE_FAULT_STARTED && USERSPACE_FAULT_PID != 0 &&
-               exception_has_snapshot() && exception_last_was_user() &&
-               exception_last_vector() == EXCEPTION_PAGE_FAULT &&
-               page_fault_was_user(exception_last_error_code()) &&
-               exception_last_process_id() == USERSPACE_FAULT_PID &&
+               exception_cpu_has_snapshot(cpu_slot) &&
+               exception_cpu_last_was_user(cpu_slot) &&
+               exception_cpu_last_vector(cpu_slot) == EXCEPTION_PAGE_FAULT &&
+               page_fault_was_user(exception_cpu_last_error_code(cpu_slot)) &&
+               exception_cpu_last_process_id(cpu_slot) == USERSPACE_FAULT_PID &&
                process_reference_count(USERSPACE_FAULT_PID) == 0 {
                 return true;
             }
@@ -408,8 +429,10 @@ pub fn userspace_loader_finish_fault_probe() -> bool {
         USERSPACE_PID = 0;
         USERSPACE_TID = 0;
         USERSPACE_STARTED = false;
+        USERSPACE_FAULT_STARTED = false;
         USERSPACE_FAULT_FINISHED = true;
         USERSPACE_FAULT_PID = 0;
+        USERSPACE_FAULT_CPU_SLOT = SCHEDULER_INVALID_CPU_SLOT;
     }
     return true;
 }
@@ -445,6 +468,35 @@ pub fn userspace_loader_emit_fault_isolation_marker() -> bool {
         66,65,75,69,78,58,85,83,69,82,95,70,65,85,76,84,95,73,83,79,76,65,84,69,68,95,82,69,65,68,89,10
     ];
     return userspace_emit(&marker[0], 32);
+}
+
+@system
+fn userspace_loader_emit_ap_fault_isolation_marker() -> bool {
+    unsafe { if !USERSPACE_FAULT_FINISHED { return false; } }
+    let marker: [u8; 36] = [
+        66,65,75,69,78,58,83,77,80,95,85,83,69,82,95,70,65,85,76,84,95,
+        73,83,79,76,65,84,69,68,95,82,69,65,68,89,10
+    ];
+    return userspace_emit(&marker[0], 36);
+}
+
+// Prova a mesma política de isolamento em Ring 3 no primeiro AP. O processo
+// nasce pinned no CPU 1, recebe reschedule IPI, causa #PF na guard page e deve
+// ser encerrado/reaped sem afetar o BSP nem o runtime do AP.
+@system
+pub fn userspace_loader_run_ap_fault_probe() -> bool {
+    if smp_runtime_ap_count() == 0 { return true; }
+    if USERSPACE_MIGRATION_CPU_SLOT >= SCHEDULER_CPU_SLOT_COUNT ||
+       smp_scheduler_active_ap_count() == 0 { return false; }
+    if !userspace_loader_start_fault_probe_on_cpu(USERSPACE_MIGRATION_CPU_SLOT) {
+        return false;
+    }
+    let apic_id = smp_cpu_apic_id(USERSPACE_MIGRATION_CPU_SLOT);
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !userspace_loader_wait_fault_probe() || !userspace_loader_finish_fault_probe() {
+        return false;
+    }
+    return userspace_loader_emit_ap_fault_isolation_marker();
 }
 
 @system

@@ -8,14 +8,33 @@ module kernel::arch::x86_64::exceptions;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
+import kernel::arch::x86_64::smp::*;
 import kernel::arch::x86_64::thread_context::*;
 import kernel::interrupts::irq::*;
 import kernel::process::registry::*;
 import kernel::scheduler::core::*;
 
 pub const EXCEPTION_VECTOR_COUNT: u16 = 32;
+pub const EXCEPTION_DIVIDE_ERROR: u64 = 0;
+pub const EXCEPTION_DEBUG: u64 = 1;
+pub const EXCEPTION_NMI: u64 = 2;
+pub const EXCEPTION_BREAKPOINT: u64 = 3;
+pub const EXCEPTION_OVERFLOW: u64 = 4;
+pub const EXCEPTION_BOUND_RANGE: u64 = 5;
+pub const EXCEPTION_INVALID_OPCODE: u64 = 6;
+pub const EXCEPTION_DEVICE_NOT_AVAILABLE: u64 = 7;
+pub const EXCEPTION_DOUBLE_FAULT: u64 = 8;
+pub const EXCEPTION_INVALID_TSS: u64 = 10;
+pub const EXCEPTION_SEGMENT_NOT_PRESENT: u64 = 11;
+pub const EXCEPTION_STACK_SEGMENT: u64 = 12;
 pub const EXCEPTION_GENERAL_PROTECTION: u64 = 13;
 pub const EXCEPTION_PAGE_FAULT: u64 = 14;
+pub const EXCEPTION_X87_FLOATING_POINT: u64 = 16;
+pub const EXCEPTION_ALIGNMENT_CHECK: u64 = 17;
+pub const EXCEPTION_MACHINE_CHECK: u64 = 18;
+pub const EXCEPTION_SIMD_FLOATING_POINT: u64 = 19;
+pub const EXCEPTION_VIRTUALIZATION: u64 = 20;
+pub const EXCEPTION_CONTROL_PROTECTION: u64 = 21;
 
 pub const PAGE_FAULT_PRESENT: u64 = 1;
 pub const PAGE_FAULT_WRITE: u64 = 2;
@@ -64,66 +83,142 @@ pub struct ExceptionSnapshot {
     pub valid: bool;
 }
 
-static mut LAST_EXCEPTION: ExceptionSnapshot = ExceptionSnapshot {
-    vector: 0,
-    error_code: 0,
-    rip: 0,
-    cs: 0,
-    rflags: 0,
-    cr2: 0,
-    user: false,
-    process_id: 0,
-    valid: false
-};
+static mut CPU_LAST_EXCEPTIONS: [ExceptionSnapshot; SCHEDULER_CPU_SLOT_COUNT] = [
+    ExceptionSnapshot {
+        vector: 0,
+        error_code: 0,
+        rip: 0,
+        cs: 0,
+        rflags: 0,
+        cr2: 0,
+        user: false,
+        process_id: 0,
+        valid: false
+    };
+    SCHEDULER_CPU_SLOT_COUNT
+];
+
+@system
+fn exception_current_cpu_slot() -> usize {
+    // O registro SMP já existe antes de liberar os APs ao scheduler, portanto
+    // também mantém snapshots privados durante o bring-up per-CPU.
+    let smp_slot = smp_current_cpu_slot();
+    if smp_slot < SCHEDULER_CPU_SLOT_COUNT { return smp_slot; }
+    let scheduler_slot = scheduler_current_cpu_slot();
+    if scheduler_slot < SCHEDULER_CPU_SLOT_COUNT { return scheduler_slot; }
+    // Antes da descoberta SMP, a única CPU executando é o BSP.
+    return 0;
+}
+
+@system
+pub fn exception_state_reset_for_cpu(cpu_slot: usize) -> void {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return; }
+    unsafe {
+        CPU_LAST_EXCEPTIONS[cpu_slot].valid = false;
+        __dma_fence();
+        CPU_LAST_EXCEPTIONS[cpu_slot].vector = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].error_code = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].rip = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].cs = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].rflags = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].cr2 = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].user = false;
+        CPU_LAST_EXCEPTIONS[cpu_slot].process_id = 0;
+    }
+}
 
 @system
 pub fn exception_state_reset() -> void {
+    exception_state_reset_for_cpu(exception_current_cpu_slot());
+}
+
+@system
+pub fn exception_cpu_has_snapshot(cpu_slot: usize) -> bool {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return false; }
     unsafe {
-        LAST_EXCEPTION.vector = 0;
-        LAST_EXCEPTION.error_code = 0;
-        LAST_EXCEPTION.rip = 0;
-        LAST_EXCEPTION.cs = 0;
-        LAST_EXCEPTION.rflags = 0;
-        LAST_EXCEPTION.cr2 = 0;
-        LAST_EXCEPTION.user = false;
-        LAST_EXCEPTION.process_id = 0;
-        LAST_EXCEPTION.valid = false;
+        if !CPU_LAST_EXCEPTIONS[cpu_slot].valid { return false; }
+        __dma_fence();
+        return true;
     }
 }
 
 @system
 pub fn exception_has_snapshot() -> bool {
-    unsafe { return LAST_EXCEPTION.valid; }
+    return exception_cpu_has_snapshot(exception_current_cpu_slot());
+}
+
+@system
+pub fn exception_cpu_last_vector(cpu_slot: usize) -> u64 {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
+    unsafe { return CPU_LAST_EXCEPTIONS[cpu_slot].vector; }
 }
 
 @system
 pub fn exception_last_vector() -> u64 {
-    unsafe { return LAST_EXCEPTION.vector; }
+    return exception_cpu_last_vector(exception_current_cpu_slot());
+}
+
+@system
+pub fn exception_cpu_last_error_code(cpu_slot: usize) -> u64 {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
+    unsafe { return CPU_LAST_EXCEPTIONS[cpu_slot].error_code; }
 }
 
 @system
 pub fn exception_last_error_code() -> u64 {
-    unsafe { return LAST_EXCEPTION.error_code; }
+    return exception_cpu_last_error_code(exception_current_cpu_slot());
 }
 
 @system
 pub fn exception_last_rip() -> u64 {
-    unsafe { return LAST_EXCEPTION.rip; }
+    let slot = exception_current_cpu_slot();
+    unsafe { return CPU_LAST_EXCEPTIONS[slot].rip; }
 }
 
 @system
 pub fn exception_last_cr2() -> u64 {
-    unsafe { return LAST_EXCEPTION.cr2; }
+    let slot = exception_current_cpu_slot();
+    unsafe { return CPU_LAST_EXCEPTIONS[slot].cr2; }
+}
+
+@system
+pub fn exception_cpu_last_was_user(cpu_slot: usize) -> bool {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return false; }
+    unsafe {
+        return CPU_LAST_EXCEPTIONS[cpu_slot].valid && CPU_LAST_EXCEPTIONS[cpu_slot].user;
+    }
 }
 
 @system
 pub fn exception_last_was_user() -> bool {
-    unsafe { return LAST_EXCEPTION.valid && LAST_EXCEPTION.user; }
+    return exception_cpu_last_was_user(exception_current_cpu_slot());
+}
+
+@system
+pub fn exception_cpu_last_process_id(cpu_slot: usize) -> u64 {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
+    unsafe { return CPU_LAST_EXCEPTIONS[cpu_slot].process_id; }
 }
 
 @system
 pub fn exception_last_process_id() -> u64 {
-    unsafe { return LAST_EXCEPTION.process_id; }
+    return exception_cpu_last_process_id(exception_current_cpu_slot());
+}
+
+// Somente exceções síncronas que podem ser atribuídas ao fluxo CPL3 são
+// recuperáveis. NMI, double fault, machine check e vetores reservados nunca
+// viram simples encerramento de processo, mesmo se o CS interrompido for CPL3.
+@system
+pub fn exception_user_fault_recoverable(vector: u64) -> bool {
+    return vector == EXCEPTION_DIVIDE_ERROR || vector == EXCEPTION_DEBUG ||
+           vector == EXCEPTION_BREAKPOINT || vector == EXCEPTION_OVERFLOW ||
+           vector == EXCEPTION_BOUND_RANGE || vector == EXCEPTION_INVALID_OPCODE ||
+           vector == EXCEPTION_DEVICE_NOT_AVAILABLE || vector == EXCEPTION_INVALID_TSS ||
+           vector == EXCEPTION_SEGMENT_NOT_PRESENT || vector == EXCEPTION_STACK_SEGMENT ||
+           vector == EXCEPTION_GENERAL_PROTECTION || vector == EXCEPTION_PAGE_FAULT ||
+           vector == EXCEPTION_X87_FLOATING_POINT || vector == EXCEPTION_ALIGNMENT_CHECK ||
+           vector == EXCEPTION_SIMD_FLOATING_POINT || vector == EXCEPTION_VIRTUALIZATION ||
+           vector == EXCEPTION_CONTROL_PROTECTION;
 }
 
 @system
@@ -190,32 +285,38 @@ pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> u64 {
 
     if frame == (null as *const ExceptionSavedFrame) { return exception_terminal(0xFFFFFFFFFFFFFFFF); }
 
+    let cpu_slot = exception_current_cpu_slot();
     let mut user = false;
     let mut pid: u64 = 0;
+    let mut vector: u64 = 0;
     unsafe {
-        LAST_EXCEPTION.vector = frame.vector;
-        LAST_EXCEPTION.error_code = frame.error_code;
-        LAST_EXCEPTION.rip = frame.rip;
-        LAST_EXCEPTION.cs = frame.cs;
-        LAST_EXCEPTION.rflags = frame.rflags;
-        LAST_EXCEPTION.cr2 = 0;
+        CPU_LAST_EXCEPTIONS[cpu_slot].valid = false;
+        vector = frame.vector;
+        CPU_LAST_EXCEPTIONS[cpu_slot].vector = vector;
+        CPU_LAST_EXCEPTIONS[cpu_slot].error_code = frame.error_code;
+        CPU_LAST_EXCEPTIONS[cpu_slot].rip = frame.rip;
+        CPU_LAST_EXCEPTIONS[cpu_slot].cs = frame.cs;
+        CPU_LAST_EXCEPTIONS[cpu_slot].rflags = frame.rflags;
+        CPU_LAST_EXCEPTIONS[cpu_slot].cr2 = 0;
 
-        if frame.vector == EXCEPTION_PAGE_FAULT {
-            LAST_EXCEPTION.cr2 = x86_read_cr2();
+        if vector == EXCEPTION_PAGE_FAULT {
+            CPU_LAST_EXCEPTIONS[cpu_slot].cr2 = x86_read_cr2();
         }
         user = (frame.cs & 3) == 3;
         if user { pid = process_current_id(); }
-        LAST_EXCEPTION.user = user;
-        LAST_EXCEPTION.process_id = pid;
-        LAST_EXCEPTION.valid = true;
+        CPU_LAST_EXCEPTIONS[cpu_slot].user = user;
+        CPU_LAST_EXCEPTIONS[cpu_slot].process_id = pid;
+        __dma_fence();
+        CPU_LAST_EXCEPTIONS[cpu_slot].valid = true;
     }
 
-    if user && pid != 0 && scheduler_terminate_current() {
+    if user && exception_user_fault_recoverable(vector) && pid != 0 &&
+       scheduler_terminate_current() {
         let selected = irq_schedule_terminated_current(frame_address);
         if selected != 0 {
             exception_write_user_exit_marker();
             return selected;
         }
     }
-    return exception_terminal(unsafe { LAST_EXCEPTION.vector });
+    return exception_terminal(vector);
 }
