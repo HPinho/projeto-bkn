@@ -4,18 +4,18 @@ Atualizado em 2026-09-09. Este documento separa **implementado**,
 **certificado** e **planejado**. Um item só muda para certificado quando os
 gates exigidos passam no mesmo commit da `main`.
 
-## Marco imediato — Fechar auditoria rigorosa do Kernel Core
+## Fase 1 — Kernel Core
 
-**Estado: bloqueadores implementados localmente; nova certificação pendente.**
+**Estado: ✅ CONCLUÍDA E CERTIFICADA em 2026-09-09.**
 
-O commit `b703cb2e77442873910268532d6fc5272a51873f` passou nos três gates
+O commit `18343b99920c24deb3f27af0926202247206f69d` passou nos três gates
 obrigatórios do mesmo SHA em 2026-09-09:
 
 | Gate | Resultado |
 |---|---|
-| CI principal #1017 / `34336389649` | ✅ PASS |
-| SMP #120 / `34336389592` | ✅ PASS |
-| NVMe-only #217 / `34336389646` | ✅ PASS |
+| CI principal #1019 / `34342318146` | ✅ PASS |
+| SMP #122 / `34342318148` | ✅ PASS |
+| NVMe-only #219 / `34342318359` | ✅ PASS |
 
 O Kernel Core já contém boot sem runtime UEFI, PMM/VMM, SMP, scheduler,
 processos, address spaces privados, Ring 3, syscall, FPU/SIMD e drivers de
@@ -32,8 +32,8 @@ Critério de saída:
   um fault CPL3 executado em AP;
 - o workflow deve identificar explicitamente o primeiro marker ausente.
 
-Os três bloqueadores técnicos encontrados pela auditoria agora estão
-implementados no working tree e aguardam certificação:
+Os três bloqueadores técnicos encontrados pela auditoria foram implementados e
+certificados:
 
 - snapshot de exceção por CPU, indexado pelo registro SMP antes mesmo da
   liberação dos APs ao scheduler;
@@ -42,10 +42,12 @@ implementados no working tree e aguardam certificação:
 - segundo processo de prova pinned no CPU 1, com #PF CPL3, teardown/reaper e o
   marker obrigatório `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
 
-Para encerrar o marco, CI principal, SMP e NVMe-only precisam passar novamente
-no mesmo SHA que contenha essas três mudanças.
+O critério de saída foi integralmente satisfeito. Alterações futuras nesta base
+devem preservar os três gates, mas não reabrem a Fase 1 sem regressão comprovada.
 
 ## Fase 2 — Platform e drivers de produção
+
+**Estado: ▶️ PRÓXIMA FASE ATIVA.**
 
 Objetivo: transformar o hardware já certificado em serviços estáveis de
 plataforma, com descoberta, recuperação e contratos de driver.

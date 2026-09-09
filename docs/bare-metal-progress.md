@@ -55,12 +55,12 @@ Não significa que todos os recursos futuros do sistema operacional estão concl
 
 ## Fase 1 — Kernel Core
 
-**Estado: implementação atual certificada pelos gates; auditoria rigorosa ainda
-aberta.** No commit `b703cb2e77442873910268532d6fc5272a51873f`, o CI
-principal #1017, o SMP #120 e o NVMe-only #217 passaram no mesmo SHA.
+**Estado: ✅ 100% / CONCLUÍDA E CERTIFICADA.** No commit
+`18343b99920c24deb3f27af0926202247206f69d`, o CI principal #1019, o SMP
+#122 e o NVMe-only #219 passaram no mesmo SHA.
 
-A auditoria encontrou três bloqueadores de qualidade. Eles agora estão
-implementados localmente: snapshot de exceção por CPU, política que preserva
+A auditoria encontrou três bloqueadores de qualidade. Eles foram implementados
+e certificados: snapshot de exceção por CPU, política que preserva
 NMI/double fault/machine check como terminais e uma falha CPL3 real executada
 no AP. A nova prova SMP publica `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
 
@@ -70,10 +70,9 @@ frame de exceção completo, encerra a thread/processo culpado, passa pelo reape
 libera as páginas e o address space privados, e retorna pelo scheduler a um
 frame de kernel válido. Falhas em CPL0 continuam `fail-closed` (`CLI` + `HLT`).
 
-O gate de runtime exige `BAKEN:USER_FAULT_ISOLATED_READY` e rejeita
-`BAKEN:HEX=E:`. Essa implementação está certificada pelos três gates atuais.
-O selo formal de **Kernel Core concluído** permanece reservado até repetir CI,
-SMP e NVMe-only no mesmo SHA desta implementação.
+Os gates de runtime exigem `BAKEN:USER_FAULT_ISOLATED_READY` e
+`BAKEN:SMP_USER_FAULT_ISOLATED_READY`, rejeitam `BAKEN:HEX=E:` e concluíram
+com sucesso. O selo formal de **Kernel Core concluído** está concedido.
 
 ## Fases seguintes
 

@@ -327,7 +327,7 @@ Esta fundação não equivale ao sistema operacional completo. O próximo trabal
 deve concentrar-se em rede, áudio, GPU/aceleração, política de processos e
 serviços de userspace, mantendo os três gates CI/NVMe/SMP obrigatórios.
 
-## Fechamento do Kernel Core — gates certificados, auditoria ainda aberta
+## Fechamento do Kernel Core — concluído e certificado
 
 A fronteira que faltava para isolar uma falha de userspace foi implementada no
 commit atual: o stub de exceção salva todos os GPRs, identifica CPL3
@@ -339,14 +339,15 @@ ele só é aprovado após teardown completo do address space e o marker
 
 O comportamento de CPL0 não muda: exceções do kernel continuam terminais para
 não ocultar corrupção de memória ou de controle. O commit
-`b703cb2e77442873910268532d6fc5272a51873f` foi aprovado pelo CI principal
-#1017, SMP #120 e NVMe-only #217 no mesmo SHA.
+`18343b99920c24deb3f27af0926202247206f69d` foi aprovado pelo CI principal
+#1019, SMP #122 e NVMe-only #219 no mesmo SHA.
 
-Os bloqueadores da auditoria foram implementados no working tree: snapshots de
+Os bloqueadores da auditoria foram implementados e certificados: snapshots de
 exceção são por CPU; somente uma allowlist de exceções síncronas CPL3 pode
 encerrar o processo; NMI, double fault e machine check permanecem fatais; e um
 segundo processo pinned no CPU 1 causa #PF em sua guard page, passa por
 teardown/reaper e publica `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
 
-O encerramento rigoroso agora depende apenas da repetição do CI principal, SMP
-e NVMe-only no mesmo SHA que contenha essa implementação.
+O encerramento rigoroso está completo. O desenvolvimento pode avançar para a
+Fase 2 — Platform e drivers de produção, mantendo esses três gates como proteção
+obrigatória contra regressões do Kernel Core.
