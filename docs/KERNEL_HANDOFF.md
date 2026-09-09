@@ -209,6 +209,19 @@ para `ANY` antes de page-table coherence, locks e FPU ownership estarem comprova
 
 ## Validação obrigatória para mudanças futuras
 
+### Reprodução rápida do gate SMP no Windows
+
+Após alterar o kernel, compile e execute os mesmos três boots independentes e
+marcadores exigidos por `baken_smp.yml`:
+
+```powershell
+python tools/scripts/run_smp_qemu.py --build
+```
+
+Para repetir rapidamente uma ISO já compilada, omita `--build`. Durante uma
+investigação, `--runs 1 --timeout 120` fornece um ciclo curto. Os logs serial e
+stderr de cada boot ficam preservados em um diretório `build/smp-local-*`.
+
 Antes de chamar um novo checkpoint de estável, executar e conferir o SHA exato em:
 
 ```text

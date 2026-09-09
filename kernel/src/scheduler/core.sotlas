@@ -451,6 +451,7 @@ fn scheduler_reap_terminated_noncurrent() -> u64 {
 
 @system
 pub fn scheduler_initialize() -> bool {
+    x86_serial_write_hex32_marker('J' as u8, 0x10);
     unsafe {
         if SCHEDULER_ACTIVE { return true; }
         SCHEDULER_KERNEL_ROOT = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
@@ -471,24 +472,32 @@ pub fn scheduler_initialize() -> bool {
         SCHEDULER_RUN_QUEUE_PROBE_THREAD_ID = 0;
     }
     unsafe { if !spinlock_init(&mut SCHEDULER_LOCK) { return false; } }
+    x86_serial_write_hex32_marker('J' as u8, 0x11);
     scheduler_reset_thread_slots();
+    x86_serial_write_hex32_marker('J' as u8, 0x12);
     if !scheduler_reset_cpu_state() { return false; }
+    x86_serial_write_hex32_marker('J' as u8, 0x13);
     scheduler_stack_cache_reset();
+    x86_serial_write_hex32_marker('J' as u8, 0x14);
 
     if !pmm_allocator_is_active() { return false; }
+    x86_serial_write_hex32_marker('J' as u8, 0x15);
     let stack_physical = pmm_alloc_pages(SCHEDULER_IDLE_STACK_PAGES);
     if stack_physical == 0 { return false; }
+    x86_serial_write_hex32_marker('J' as u8, 0x16);
     let stack_virtual = direct_map_virtual_address(stack_physical);
     if stack_virtual == 0 { pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES); return false; }
     let stack_bytes = SCHEDULER_IDLE_STACK_PAGES * 4096;
     if stack_bytes / 4096 != SCHEDULER_IDLE_STACK_PAGES { pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES); return false; }
     let stack_top = stack_virtual + stack_bytes;
     if stack_top <= stack_virtual { pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES); return false; }
+    x86_serial_write_hex32_marker('J' as u8, 0x17);
 
     let idle_entry = x86_scheduler_idle_entry_address();
     if idle_entry == 0 { pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES); return false; }
     let idle_frame = x86_kernel_thread_prepare_frame(stack_top, idle_entry);
     if idle_frame == 0 { pmm_free_pages_lifo(stack_physical, SCHEDULER_IDLE_STACK_PAGES); return false; }
+    x86_serial_write_hex32_marker('J' as u8, 0x18);
 
     unsafe {
         SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].state = KERNEL_THREAD_READY;
@@ -498,6 +507,7 @@ pub fn scheduler_initialize() -> bool {
         SCHEDULER_THREADS[SCHEDULER_IDLE_SLOT].stack_pages = SCHEDULER_IDLE_STACK_PAGES;
         SCHEDULER_ACTIVE = true;
     }
+    x86_serial_write_hex32_marker('J' as u8, 0x19);
     return true;
 }
 
