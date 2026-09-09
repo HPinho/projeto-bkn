@@ -12,7 +12,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
     def test_scheduler_can_publish_process_thread_to_registered_ap_atomically(self):
         text = CORE.read_text(encoding="utf-8")
         body = text.split("pub fn scheduler_create_process_thread_on_cpu", 1)[1].split(
-            "pub fn scheduler_block_current", 1
+            "pub fn scheduler_set_thread_affinity", 1
         )[0]
         for token in (
             "cpu_slot >= SCHEDULER_CPU_SLOT_COUNT",
@@ -33,21 +33,77 @@ class KernelSmpRing3Tests(unittest.TestCase):
         self.assertLess(body.index("SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32"),
                         body.rindex("x86_irq_restore(flags)"))
 
-    def test_probe_uses_real_process_thread_and_scheduler_owned_cr3(self):
+    def test_scheduler_can_publish_fully_initialized_process_thread_as_any(self):
+        text = CORE.read_text(encoding="utf-8")
+        body = text.split("pub fn scheduler_create_process_thread_any", 1)[1].split(
+            "pub fn scheduler_create_process_thread_on_cpu", 1
+        )[0]
+        for token in (
+            "let flags = x86_irq_save_disable();",
+            "scheduler_create_process_thread(pid, entry_rip, stack_pages)",
+            "scheduler_switch_lock()",
+            "SCHEDULER_THREADS[slot].process_id != pid",
+            "SCHEDULER_THREADS[slot].address_space_root == 0",
+            "SCHEDULER_THREADS[slot].state != KERNEL_THREAD_READY",
+            "SCHEDULER_THREADS[slot].saved_frame == 0",
+            "SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE",
+            "SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY",
+            "scheduler_switch_unlock()",
+            "x86_irq_restore(flags)",
+        ):
+            self.assertIn(token, body)
+        publish = body.index("SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY")
+        self.assertLess(body.index("scheduler_switch_lock()"), publish)
+        self.assertLess(publish, body.index("scheduler_switch_unlock()", publish))
+        self.assertLess(body.index("scheduler_switch_unlock()", publish),
+                        body.rindex("x86_irq_restore(flags)"))
+
+    def test_releasing_affinity_to_any_requires_ready_unowned_frame(self):
+        text = CORE.read_text(encoding="utf-8")
+        body = text.split("pub fn scheduler_set_thread_affinity_any", 1)[1].split(
+            "pub fn scheduler_block_current", 1
+        )[0]
+        for token in (
+            "scheduler_switch_lock()",
+            "KERNEL_THREAD_READY",
+            "saved_frame == 0",
+            "SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE",
+            "SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY",
+            "scheduler_switch_unlock()",
+        ):
+            self.assertIn(token, body)
+
+    def test_probe_uses_real_any_process_thread_and_scheduler_owned_cr3(self):
         text = PROBE.read_text(encoding="utf-8")
         run = text.split("fn scheduler_smp_probe_run_ring3", 1)[1].split(
-            "fn scheduler_smp_probe_run_tlb", 1
+            "fn scheduler_smp_probe_run_heap", 1
         )[0]
         for token in (
             "process_create()",
             "process_map_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS, code, false, true)",
             "process_map_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS, data, true, false)",
             "process_map_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS, stack, true, false)",
-            "scheduler_create_process_thread_on_cpu(pid, entry",
-            "SCHEDULER_SMP_PROBE_CPU_SLOT",
-            "if process_destroy(pid) { return false; }",
+            "let bsp_irq_flags = x86_irq_save_disable();",
+            "scheduler_create_process_thread_any(",
+            "scheduler_thread_affinity_cpu(tid) != SCHEDULER_CPU_AFFINITY_ANY",
+            "lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)",
+            "scheduler_smp_probe_wait_flag(started_address)",
+            "x86_irq_restore(bsp_irq_flags)",
+            "if process_destroy(pid) {",
         ):
             self.assertIn(token, run)
+
+        create = run.index("scheduler_create_process_thread_any(")
+        affinity = run.index("scheduler_thread_affinity_cpu(tid) != SCHEDULER_CPU_AFFINITY_ANY")
+        ipi = run.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)")
+        started = run.index("scheduler_smp_probe_wait_flag(started_address)")
+        restore = run.index("x86_irq_restore(bsp_irq_flags)", started)
+        self.assertLess(run.index("let bsp_irq_flags = x86_irq_save_disable();"), create)
+        self.assertLess(create, affinity)
+        self.assertLess(affinity, ipi)
+        self.assertLess(ipi, started)
+        self.assertLess(started, restore)
+        self.assertNotIn("scheduler_create_process_thread_on_cpu(pid, entry", run)
 
         entry = text.split("if mode == SCHEDULER_SMP_PROBE_MODE_RING3", 1)[1].split(
             "if mode != SCHEDULER_SMP_PROBE_MODE_THREAD", 1
@@ -63,7 +119,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
     def test_user_data_remap_requires_real_root_aware_tlb_invalidation(self):
         text = PROBE.read_text(encoding="utf-8")
         run = text.split("fn scheduler_smp_probe_run_ring3", 1)[1].split(
-            "fn scheduler_smp_probe_run_tlb", 1
+            "fn scheduler_smp_probe_run_heap", 1
         )[0]
         for token in (
             "let data_new = pmm_alloc_page();",
@@ -98,7 +154,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
     def test_exit_requires_idle_reaper_and_full_address_space_teardown(self):
         text = PROBE.read_text(encoding="utf-8")
         body = text.split("fn scheduler_smp_probe_run_ring3", 1)[1].split(
-            "fn scheduler_smp_probe_run_tlb", 1
+            "fn scheduler_smp_probe_run_heap", 1
         )[0]
         for token in (
             "let syscall_before = syscall_count();",

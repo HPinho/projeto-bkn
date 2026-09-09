@@ -584,9 +584,8 @@ pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u6
     if !process_retain(pid) { x86_irq_restore(flags); return 0; }
     let root = process_borrow_root(pid);
     if root == 0 { process_release(pid); x86_irq_restore(flags); return 0; }
-    // Uma process thread nasce pinned no BSP. O helper publica READY+affinity
-    // sob o switch lock e o IF externo permanece 0 até PID/CR3 serem anexados.
-    // Assim nenhum AP observa READY/ANY e o BSP não pode despachá-la cedo.
+    // Compatibilidade: a API historica nasce pinned no BSP. Wrappers podem
+    // publicar outra afinidade antes de restaurar o IF externo.
     let tid = scheduler_create_kernel_thread_with_affinity(entry_rip, stack_pages, 0);
     if tid == 0 { process_release(pid); x86_irq_restore(flags); return 0; }
     if !scheduler_switch_lock() { process_release(pid); x86_irq_restore(flags); return 0; }
@@ -598,6 +597,34 @@ pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u6
         SCHEDULER_THREAD_AFFINITY_CPU[slot] = 0;
     }
     scheduler_switch_unlock();
+    x86_irq_restore(flags);
+    return tid;
+}
+
+// Publica uma process thread totalmente inicializada no pool SMP compartilhado.
+// O wrapper mantém IF=0 no BSP enquanto a base pinned anexa PID/root; somente
+// depois, sob o mesmo switch lock observado pelos IRQs, muda a afinidade para
+// ANY. Assim nenhum CPU pode executar uma thread com address_space incompleto.
+@system
+pub fn scheduler_create_process_thread_any(pid: u64, entry_rip: u64,
+                                           stack_pages: u64) -> u64 {
+    let flags = x86_irq_save_disable();
+    let tid = scheduler_create_process_thread(pid, entry_rip, stack_pages);
+    if tid == 0 { x86_irq_restore(flags); return 0; }
+    if !scheduler_switch_lock() { loop { x86_cpu_pause(); } }
+    let slot = scheduler_find_thread_slot(tid);
+    if slot == SCHEDULER_INVALID_SLOT { loop { x86_cpu_pause(); } }
+    unsafe {
+        if SCHEDULER_THREADS[slot].process_id != pid ||
+           SCHEDULER_THREADS[slot].address_space_root == 0 ||
+           SCHEDULER_THREADS[slot].state != KERNEL_THREAD_READY ||
+           SCHEDULER_THREADS[slot].saved_frame == 0 ||
+           SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE {
+            loop { x86_cpu_pause(); }
+        }
+        SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY;
+    }
+    if !scheduler_switch_unlock() { loop { x86_cpu_pause(); } }
     x86_irq_restore(flags);
     return tid;
 }
@@ -655,6 +682,35 @@ pub fn scheduler_set_thread_affinity(thread_id: u64, cpu_slot: usize) -> bool {
             return false;
         }
         SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32;
+    }
+    scheduler_switch_unlock();
+    x86_irq_restore(flags);
+    return true;
+}
+
+// Devolve uma thread preemptada e sem owner ao pool compartilhado. A troca só
+// acontece em READY sob o switch lock, portanto dois CPUs nunca podem adquirir
+// ownership concorrente da mesma thread durante a mudança de política.
+@system
+pub fn scheduler_set_thread_affinity_any(thread_id: u64) -> bool {
+    if !scheduler_is_active() || thread_id < SCHEDULER_FIRST_DYNAMIC_THREAD_ID { return false; }
+    let flags = x86_irq_save_disable();
+    if !scheduler_switch_lock() { x86_irq_restore(flags); return false; }
+    let slot = scheduler_find_thread_slot(thread_id);
+    if slot == SCHEDULER_INVALID_SLOT {
+        scheduler_switch_unlock();
+        x86_irq_restore(flags);
+        return false;
+    }
+    unsafe {
+        if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_READY ||
+           SCHEDULER_THREADS[slot].saved_frame == 0 ||
+           SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE {
+            scheduler_switch_unlock();
+            x86_irq_restore(flags);
+            return false;
+        }
+        SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY;
     }
     scheduler_switch_unlock();
     x86_irq_restore(flags);

@@ -546,17 +546,36 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     let reap_before = scheduler_reap_count();
     let idle_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
     let entry = x86_scheduler_smp_probe_entry_address();
-    let tid = scheduler_create_process_thread_on_cpu(pid, entry,
-                                                     SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
-                                                     SCHEDULER_SMP_PROBE_CPU_SLOT);
+
+    // Prova a política geral de processos migráveis. O BSP permanece com IF=0
+    // enquanto a thread é publicada como ANY; assim somente o AP pode capturá-la
+    // nessa janela. O mesmo processo então atravessa CPL3, timer e TLB root-aware.
+    let bsp_irq_flags = x86_irq_save_disable();
+    let tid = scheduler_create_process_thread_any(
+        pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES
+    );
     if tid == 0 {
+        x86_irq_restore(bsp_irq_flags);
         scheduler_smp_probe_cleanup_unstarted_ring3(pid, code, data, data_new, stack);
         return false;
     }
-    if process_destroy(pid) { return false; }
-    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
-    if !scheduler_smp_probe_wait_flag(started_address) { return false; }
-    if x86_mmio_read32(scheduler_smp_ring3_cpu_address()) != SCHEDULER_SMP_PROBE_CPU_SLOT as u32 { return false; }
+    if scheduler_thread_affinity_cpu(tid) != SCHEDULER_CPU_AFFINITY_ANY {
+        x86_irq_restore(bsp_irq_flags);
+        return false;
+    }
+    if process_destroy(pid) {
+        x86_irq_restore(bsp_irq_flags);
+        return false;
+    }
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) {
+        x86_irq_restore(bsp_irq_flags);
+        return false;
+    }
+    let started_on_ap = scheduler_smp_probe_wait_flag(started_address);
+    let ran_on_ap = x86_mmio_read32(scheduler_smp_ring3_cpu_address()) ==
+                    SCHEDULER_SMP_PROBE_CPU_SLOT as u32;
+    x86_irq_restore(bsp_irq_flags);
+    if !started_on_ap || !ran_on_ap { return false; }
 
     let timer_after_user_start = irq_timer_count_for_cpu(SCHEDULER_SMP_PROBE_CPU_SLOT);
     if !scheduler_smp_probe_wait_timer_tick(SCHEDULER_SMP_PROBE_CPU_SLOT, timer_after_user_start) { return false; }
