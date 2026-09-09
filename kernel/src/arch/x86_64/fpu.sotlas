@@ -3,8 +3,8 @@
 // FXSAVE/FXRSTOR exigem area de 512 bytes alinhada em 16. O frontend Sotlas
 // nao depende de um atributo de alinhamento: cada slot reserva 512+15 bytes e
 // calcula internamente um endereco alinhado, garantindo espaco integral.
-// A habilitacao de CR0/CR4 e feita por CPU; o storage de contextos continua
-// global e so e usado pelo scheduler BSP nesta fase SMP.
+// A habilitacao de CR0/CR4 e feita por CPU. O slot zero e reservado ao estado
+// do kernel; threads de scheduler usam exclusivamente os slots 1..N-1.
 
 module kernel::arch::x86_64::fpu;
 
@@ -13,8 +13,15 @@ import kernel::arch::x86_64::serial::*;
 pub const FPU_STATE_BYTES: usize = 512;
 pub const FPU_STATE_STORAGE_BYTES: usize = 527;
 pub const FPU_CONTEXT_SLOTS: usize = 16;
+pub const FPU_KERNEL_SLOT: usize = 0;
+pub const FPU_FIRST_THREAD_SLOT: usize = 1;
 pub const FPU_INVALID_SLOT: usize = FPU_CONTEXT_SLOTS;
 pub const FPU_ALIGNMENT_MASK: u64 = 0xFFFFFFFFFFFFFFF0;
+
+pub const FPU_INIT_FAIL_ENABLE: u32 = 1;
+pub const FPU_INIT_FAIL_ROUND_TRIP: u32 = 2;
+pub const FPU_INIT_FAIL_KERNEL_SLOT: u32 = 3;
+pub const FPU_INIT_FAIL_STATE_ADDRESS: u32 = 4;
 
 @repr(C)
 pub struct FxStateStorage {
@@ -31,10 +38,22 @@ static mut FPU_READY: bool = false;
 static mut FPU_SELF_TEST_PASSED: bool = false;
 
 @system
+fn fpu_emit_init_failure(stage: u32) -> void {
+    x86_serial_write_hex32_marker('F' as u8, stage);
+}
+
+@system
 fn fpu_find_slot(thread_id: u64) -> usize {
-    if thread_id == 0 { return 0; }
+    if thread_id == 0 {
+        unsafe {
+            if FPU_VALID[FPU_KERNEL_SLOT] && FPU_THREAD_IDS[FPU_KERNEL_SLOT] == 0 {
+                return FPU_KERNEL_SLOT;
+            }
+        }
+        return FPU_INVALID_SLOT;
+    }
     unsafe {
-        let mut slot: usize = 0;
+        let mut slot: usize = FPU_FIRST_THREAD_SLOT;
         while slot < FPU_CONTEXT_SLOTS {
             if FPU_VALID[slot] && FPU_THREAD_IDS[slot] == thread_id { return slot; }
             slot += 1;
@@ -47,8 +66,9 @@ fn fpu_find_slot(thread_id: u64) -> usize {
 fn fpu_allocate_slot(thread_id: u64) -> usize {
     let existing = fpu_find_slot(thread_id);
     if existing != FPU_INVALID_SLOT { return existing; }
+    if thread_id == 0 { return FPU_INVALID_SLOT; }
     unsafe {
-        let mut slot: usize = 0;
+        let mut slot: usize = FPU_FIRST_THREAD_SLOT;
         while slot < FPU_CONTEXT_SLOTS {
             if !FPU_VALID[slot] {
                 FPU_THREAD_IDS[slot] = thread_id;
@@ -78,7 +98,7 @@ fn fpu_state_address(slot: usize) -> u64 {
 }
 
 // CR0/CR4 e o estado inicial x87/SSE sao locais ao processador logico.
-// APs chamam esta rotina antes de qualquer futura execucao de threads.
+// BSP e APs chamam esta rotina antes de qualquer execucao de threads.
 @system
 pub fn fpu_enable_current_cpu() -> bool {
     if !__fpu_supported() { return false; }
@@ -91,12 +111,28 @@ pub fn fpu_initialize() -> bool {
     unsafe {
         if FPU_READY { return FPU_SELF_TEST_PASSED; }
     }
-    if !fpu_enable_current_cpu() { return false; }
-    if !__fpu_round_trip_test() { return false; }
-    let slot = fpu_allocate_slot(0);
-    if slot == FPU_INVALID_SLOT { return false; }
-    let address = fpu_state_address(slot);
-    if address == 0 { return false; }
+    if !fpu_enable_current_cpu() {
+        fpu_emit_init_failure(FPU_INIT_FAIL_ENABLE);
+        return false;
+    }
+    if !__fpu_round_trip_test() {
+        fpu_emit_init_failure(FPU_INIT_FAIL_ROUND_TRIP);
+        return false;
+    }
+    unsafe {
+        if FPU_VALID[FPU_KERNEL_SLOT] {
+            fpu_emit_init_failure(FPU_INIT_FAIL_KERNEL_SLOT);
+            return false;
+        }
+        FPU_THREAD_IDS[FPU_KERNEL_SLOT] = 0;
+        FPU_VALID[FPU_KERNEL_SLOT] = true;
+    }
+    let address = fpu_state_address(FPU_KERNEL_SLOT);
+    if address == 0 {
+        unsafe { FPU_VALID[FPU_KERNEL_SLOT] = false; }
+        fpu_emit_init_failure(FPU_INIT_FAIL_STATE_ADDRESS);
+        return false;
+    }
     __fxsave(address);
     unsafe {
         FPU_SELF_TEST_PASSED = true;
@@ -108,7 +144,7 @@ pub fn fpu_initialize() -> bool {
 @system
 pub fn fpu_save_thread(thread_id: u64) -> bool {
     unsafe { if !FPU_READY { return false; } }
-    let slot = fpu_allocate_slot(thread_id);
+    let slot = if thread_id == 0 { fpu_find_slot(0) } else { fpu_allocate_slot(thread_id) };
     if slot == FPU_INVALID_SLOT { return false; }
     let address = fpu_state_address(slot);
     if address == 0 { return false; }
@@ -121,6 +157,7 @@ pub fn fpu_restore_thread(thread_id: u64) -> bool {
     unsafe { if !FPU_READY { return false; } }
     let mut slot = fpu_find_slot(thread_id);
     if slot == FPU_INVALID_SLOT {
+        if thread_id == 0 { return false; }
         slot = fpu_allocate_slot(thread_id);
         if slot == FPU_INVALID_SLOT { return false; }
         __fpu_reset();
@@ -139,6 +176,7 @@ pub fn fpu_release_thread(thread_id: u64) -> bool {
     if thread_id == 0 { return false; }
     let slot = fpu_find_slot(thread_id);
     if slot == FPU_INVALID_SLOT { return true; }
+    if slot < FPU_FIRST_THREAD_SLOT { return false; }
     unsafe {
         FPU_THREAD_IDS[slot] = 0;
         FPU_VALID[slot] = false;
@@ -153,7 +191,7 @@ pub fn fpu_release_thread(thread_id: u64) -> bool {
 
 @system
 pub fn fpu_is_ready() -> bool {
-    unsafe { return FPU_READY && FPU_SELF_TEST_PASSED; }
+    unsafe { return FPU_READY && FPU_SELF_TEST_PASSED && FPU_VALID[FPU_KERNEL_SLOT]; }
 }
 
 @system
