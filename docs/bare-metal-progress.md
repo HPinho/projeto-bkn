@@ -78,8 +78,9 @@ com sucesso. O selo formal de **Kernel Core concluído** está concedido.
 
 **FASE 2 — PLATFORM / DRIVERS**
 
-- AML: catálogo DSDT/SSDT implementado localmente e aguardando gates QEMU;
-- decoder/namespace/métodos AML ainda pendentes;
+- AML: catálogo DSDT/SSDT e decoder estrutural básico implementados localmente,
+  aguardando gates QEMU;
+- namespace e execução de métodos AML ainda pendentes;
 - I2C-HID;
 - rede;
 - áudio;

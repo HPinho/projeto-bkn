@@ -1,0 +1,388 @@
+// Baken OS — primitives decoder AML fail-closed (ACPI 6.6, seção 20.2).
+//
+// Nenhuma função executa AML ou acessa hardware. O cursor carrega um limite
+// imutável; qualquer truncamento, overflow, byte reservado ou nome inválido
+// invalida a leitura inteira.
+
+module kernel::acpi::aml_decoder;
+
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_NAME_MAX_SEGMENTS: usize = 16;
+
+pub const AML_ROOT_CHAR: u8 = 0x5C;
+pub const AML_PARENT_PREFIX_CHAR: u8 = 0x5E;
+pub const AML_DUAL_NAME_PREFIX: u8 = 0x2E;
+pub const AML_MULTI_NAME_PREFIX: u8 = 0x2F;
+pub const AML_NULL_NAME: u8 = 0x00;
+
+pub const AML_ZERO_OP: u8 = 0x00;
+pub const AML_ONE_OP: u8 = 0x01;
+pub const AML_BYTE_PREFIX: u8 = 0x0A;
+pub const AML_WORD_PREFIX: u8 = 0x0B;
+pub const AML_DWORD_PREFIX: u8 = 0x0C;
+pub const AML_QWORD_PREFIX: u8 = 0x0E;
+pub const AML_ONES_OP: u8 = 0xFF;
+
+pub const AML_INTEGER_KIND_ZERO: u8 = 1;
+pub const AML_INTEGER_KIND_ONE: u8 = 2;
+pub const AML_INTEGER_KIND_ONES: u8 = 3;
+pub const AML_INTEGER_KIND_BYTE: u8 = 4;
+pub const AML_INTEGER_KIND_WORD: u8 = 5;
+pub const AML_INTEGER_KIND_DWORD: u8 = 6;
+pub const AML_INTEGER_KIND_QWORD: u8 = 7;
+
+pub struct AmlCursor {
+    pub base: *const u8;
+    pub length: usize;
+    pub offset: usize;
+    pub valid: bool;
+}
+
+pub struct AmlPkgLength {
+    pub package_bytes: usize;
+    pub encoded_bytes: usize;
+    pub body_bytes: usize;
+    pub valid: bool;
+}
+
+pub struct AmlNameString {
+    pub rooted: bool;
+    pub parent_prefixes: usize;
+    pub segment_count: usize;
+    pub segments: [u32; AML_NAME_MAX_SEGMENTS];
+    pub encoded_bytes: usize;
+    pub valid: bool;
+}
+
+pub struct AmlInteger {
+    pub value: u64;
+    pub encoded_bytes: usize;
+    pub kind: u8;
+    pub valid: bool;
+}
+
+static mut AML_DECODER_READY: bool = false;
+
+@system
+pub fn aml_cursor_new(base: *const u8, length: usize) -> AmlCursor {
+    return AmlCursor {
+        base: base,
+        length: length,
+        offset: 0,
+        valid: base != (null as *const u8) && length != 0
+    };
+}
+
+@system
+pub fn aml_cursor_remaining(cursor: *const AmlCursor) -> usize {
+    if cursor == (null as *const AmlCursor) { return 0; }
+    unsafe {
+        if !(*cursor).valid || (*cursor).offset > (*cursor).length { return 0; }
+        return (*cursor).length - (*cursor).offset;
+    }
+}
+
+@system
+fn aml_cursor_fail(cursor: *mut AmlCursor) -> void {
+    if cursor == (null as *mut AmlCursor) { return; }
+    unsafe { (*cursor).valid = false; }
+}
+
+@system
+fn aml_cursor_can_read(cursor: *const AmlCursor, count: usize) -> bool {
+    if cursor == (null as *const AmlCursor) { return false; }
+    unsafe {
+        return (*cursor).valid && (*cursor).offset <= (*cursor).length &&
+            count <= (*cursor).length - (*cursor).offset;
+    }
+}
+
+@system
+pub fn aml_cursor_peek_u8(cursor: *const AmlCursor) -> u8 {
+    if !aml_cursor_can_read(cursor, 1) { return 0; }
+    unsafe { return (*cursor).base[(*cursor).offset]; }
+}
+
+@system
+pub fn aml_cursor_read_u8(cursor: *mut AmlCursor) -> u8 {
+    if !aml_cursor_can_read(cursor as *const AmlCursor, 1) {
+        aml_cursor_fail(cursor);
+        return 0;
+    }
+    unsafe {
+        let value = (*cursor).base[(*cursor).offset];
+        (*cursor).offset += 1;
+        return value;
+    }
+}
+
+@system
+pub fn aml_cursor_take(cursor: *mut AmlCursor, count: usize) -> AmlCursor {
+    if !aml_cursor_can_read(cursor as *const AmlCursor, count) {
+        aml_cursor_fail(cursor);
+        return AmlCursor { base: null as *const u8, length: 0, offset: 0, valid: false };
+    }
+    unsafe {
+        let base_address = (*cursor).base as u64;
+        let offset = (*cursor).offset as u64;
+        if offset > 0xFFFFFFFFFFFFFFFF - base_address {
+            (*cursor).valid = false;
+            return AmlCursor { base: null as *const u8, length: 0, offset: 0, valid: false };
+        }
+        let child_address = base_address + offset;
+        (*cursor).offset += count;
+        return AmlCursor {
+            base: child_address as *const u8,
+            length: count,
+            offset: 0,
+            valid: true
+        };
+    }
+}
+
+@system
+fn aml_cursor_read_integer_bytes(cursor: *mut AmlCursor, count: usize) -> u64 {
+    if count == 0 || count > 8 ||
+       !aml_cursor_can_read(cursor as *const AmlCursor, count) {
+        aml_cursor_fail(cursor);
+        return 0;
+    }
+    let mut value: u64 = 0;
+    let mut index: usize = 0;
+    while index < count {
+        value = value | ((aml_cursor_read_u8(cursor) as u64) << (index * 8));
+        index += 1;
+    }
+    return value;
+}
+
+@system
+fn aml_pkg_length_invalid() -> AmlPkgLength {
+    return AmlPkgLength { package_bytes: 0, encoded_bytes: 0, body_bytes: 0, valid: false };
+}
+
+@system
+pub fn aml_decode_pkg_length(cursor: *mut AmlCursor) -> AmlPkgLength {
+    if !aml_cursor_can_read(cursor as *const AmlCursor, 1) {
+        aml_cursor_fail(cursor);
+        return aml_pkg_length_invalid();
+    }
+    let lead = aml_cursor_read_u8(cursor);
+    let follow = ((lead >> 6) & 3) as usize;
+    let encoded = follow + 1;
+    let mut package_bytes: usize = 0;
+    if follow == 0 {
+        package_bytes = (lead & 0x3F) as usize;
+    } else {
+        // Bits 5:4 são reservados em encodings multi-byte.
+        if (lead & 0x30) != 0 ||
+           !aml_cursor_can_read(cursor as *const AmlCursor, follow) {
+            aml_cursor_fail(cursor);
+            return aml_pkg_length_invalid();
+        }
+        package_bytes = (lead & 0x0F) as usize;
+        let mut index: usize = 0;
+        while index < follow {
+            let part = aml_cursor_read_u8(cursor) as usize;
+            package_bytes = package_bytes | (part << (4 + index * 8));
+            index += 1;
+        }
+    }
+    if package_bytes < encoded { aml_cursor_fail(cursor); return aml_pkg_length_invalid(); }
+    let body = package_bytes - encoded;
+    if !aml_cursor_can_read(cursor as *const AmlCursor, body) {
+        aml_cursor_fail(cursor);
+        return aml_pkg_length_invalid();
+    }
+    return AmlPkgLength {
+        package_bytes: package_bytes,
+        encoded_bytes: encoded,
+        body_bytes: body,
+        valid: true
+    };
+}
+
+@system
+fn aml_name_string_invalid() -> AmlNameString {
+    return AmlNameString {
+        rooted: false, parent_prefixes: 0, segment_count: 0,
+        segments: [0; AML_NAME_MAX_SEGMENTS], encoded_bytes: 0, valid: false
+    };
+}
+
+@system
+fn aml_name_lead_valid(value: u8) -> bool {
+    return value == '_' as u8 || (value >= 'A' as u8 && value <= 'Z' as u8);
+}
+
+@system
+fn aml_name_char_valid(value: u8) -> bool {
+    return aml_name_lead_valid(value) || (value >= '0' as u8 && value <= '9' as u8);
+}
+
+@system
+fn aml_decode_name_seg(cursor: *mut AmlCursor) -> u32 {
+    if !aml_cursor_can_read(cursor as *const AmlCursor, 4) {
+        aml_cursor_fail(cursor);
+        return 0;
+    }
+    let first = aml_cursor_read_u8(cursor);
+    let second = aml_cursor_read_u8(cursor);
+    let third = aml_cursor_read_u8(cursor);
+    let fourth = aml_cursor_read_u8(cursor);
+    if !aml_name_lead_valid(first) || !aml_name_char_valid(second) ||
+       !aml_name_char_valid(third) || !aml_name_char_valid(fourth) {
+        aml_cursor_fail(cursor);
+        return 0;
+    }
+    return (first as u32) | ((second as u32) << 8) |
+        ((third as u32) << 16) | ((fourth as u32) << 24);
+}
+
+@system
+pub fn aml_decode_name_string(cursor: *mut AmlCursor) -> AmlNameString {
+    if !aml_cursor_can_read(cursor as *const AmlCursor, 1) {
+        aml_cursor_fail(cursor);
+        return aml_name_string_invalid();
+    }
+    let mut result = aml_name_string_invalid();
+    let start = unsafe { (*cursor).offset };
+    if aml_cursor_peek_u8(cursor as *const AmlCursor) == AML_ROOT_CHAR {
+        aml_cursor_read_u8(cursor);
+        result.rooted = true;
+    } else {
+        while aml_cursor_can_read(cursor as *const AmlCursor, 1) &&
+              aml_cursor_peek_u8(cursor as *const AmlCursor) == AML_PARENT_PREFIX_CHAR {
+            aml_cursor_read_u8(cursor);
+            result.parent_prefixes += 1;
+        }
+    }
+    if !aml_cursor_can_read(cursor as *const AmlCursor, 1) {
+        aml_cursor_fail(cursor);
+        return aml_name_string_invalid();
+    }
+    let prefix = aml_cursor_peek_u8(cursor as *const AmlCursor);
+    let mut segment_count: usize = 1;
+    if prefix == AML_NULL_NAME {
+        aml_cursor_read_u8(cursor);
+        segment_count = 0;
+    } else if prefix == AML_DUAL_NAME_PREFIX {
+        aml_cursor_read_u8(cursor);
+        segment_count = 2;
+    } else if prefix == AML_MULTI_NAME_PREFIX {
+        aml_cursor_read_u8(cursor);
+        if !aml_cursor_can_read(cursor as *const AmlCursor, 1) {
+            aml_cursor_fail(cursor);
+            return aml_name_string_invalid();
+        }
+        segment_count = aml_cursor_read_u8(cursor) as usize;
+        if segment_count == 0 || segment_count > AML_NAME_MAX_SEGMENTS {
+            aml_cursor_fail(cursor);
+            return aml_name_string_invalid();
+        }
+    }
+    let mut index: usize = 0;
+    while index < segment_count {
+        let segment = aml_decode_name_seg(cursor);
+        unsafe { if !(*cursor).valid { return aml_name_string_invalid(); } }
+        result.segments[index] = segment;
+        index += 1;
+    }
+    result.segment_count = segment_count;
+    result.encoded_bytes = unsafe { (*cursor).offset - start };
+    result.valid = true;
+    return result;
+}
+
+@system
+fn aml_integer_invalid() -> AmlInteger {
+    return AmlInteger { value: 0, encoded_bytes: 0, kind: 0, valid: false };
+}
+
+@system
+pub fn aml_decode_integer(cursor: *mut AmlCursor) -> AmlInteger {
+    if !aml_cursor_can_read(cursor as *const AmlCursor, 1) {
+        aml_cursor_fail(cursor);
+        return aml_integer_invalid();
+    }
+    let opcode = aml_cursor_read_u8(cursor);
+    if opcode == AML_ZERO_OP {
+        return AmlInteger { value: 0, encoded_bytes: 1, kind: AML_INTEGER_KIND_ZERO, valid: true };
+    }
+    if opcode == AML_ONE_OP {
+        return AmlInteger { value: 1, encoded_bytes: 1, kind: AML_INTEGER_KIND_ONE, valid: true };
+    }
+    if opcode == AML_ONES_OP {
+        return AmlInteger { value: 0xFFFFFFFFFFFFFFFF, encoded_bytes: 1, kind: AML_INTEGER_KIND_ONES, valid: true };
+    }
+    let mut byte_count: usize = 0;
+    let mut kind: u8 = 0;
+    if opcode == AML_BYTE_PREFIX { byte_count = 1; kind = AML_INTEGER_KIND_BYTE; }
+    else if opcode == AML_WORD_PREFIX { byte_count = 2; kind = AML_INTEGER_KIND_WORD; }
+    else if opcode == AML_DWORD_PREFIX { byte_count = 4; kind = AML_INTEGER_KIND_DWORD; }
+    else if opcode == AML_QWORD_PREFIX { byte_count = 8; kind = AML_INTEGER_KIND_QWORD; }
+    else { aml_cursor_fail(cursor); return aml_integer_invalid(); }
+    if !aml_cursor_can_read(cursor as *const AmlCursor, byte_count) {
+        aml_cursor_fail(cursor);
+        return aml_integer_invalid();
+    }
+    let value = aml_cursor_read_integer_bytes(cursor, byte_count);
+    unsafe { if !(*cursor).valid { return aml_integer_invalid(); } }
+    return AmlInteger {
+        value: value,
+        encoded_bytes: byte_count + 1,
+        kind: kind,
+        valid: true
+    };
+}
+
+@system
+pub fn aml_decoder_self_test() -> bool {
+    unsafe { AML_DECODER_READY = false; }
+    let mut package_bytes: [u8; 65] = [0; 65];
+    package_bytes[0] = 0x41;
+    package_bytes[1] = 0x04;
+    let mut package_cursor = aml_cursor_new(&package_bytes[0], 65);
+    let package = aml_decode_pkg_length(&mut package_cursor);
+    if !package.valid || package.package_bytes != 65 || package.encoded_bytes != 2 ||
+       package.body_bytes != 63 || package_cursor.offset != 2 { return false; }
+    let package_body = aml_cursor_take(&mut package_cursor, package.body_bytes);
+    if !package_body.valid || aml_cursor_remaining(&package_body) != 63 ||
+       package_cursor.offset != 65 { return false; }
+
+    let name_bytes: [u8; 10] = [0x5C,0x2E,65,66,67,68,95,69,70,48];
+    let mut name_cursor = aml_cursor_new(&name_bytes[0], 10);
+    let name = aml_decode_name_string(&mut name_cursor);
+    if !name.valid || !name.rooted || name.parent_prefixes != 0 ||
+       name.segment_count != 2 || name.segments[0] != 0x44434241 ||
+       name.segments[1] != 0x3046455F || name_cursor.offset != 10 { return false; }
+
+    let integer_bytes: [u8; 9] = [0x0E,8,7,6,5,4,3,2,1];
+    let mut integer_cursor = aml_cursor_new(&integer_bytes[0], 9);
+    let integer = aml_decode_integer(&mut integer_cursor);
+    if !integer.valid || integer.kind != AML_INTEGER_KIND_QWORD ||
+       integer.value != 0x0102030405060708 || integer_cursor.offset != 9 { return false; }
+
+    let invalid_package: [u8; 2] = [0x70,0];
+    let mut invalid_cursor = aml_cursor_new(&invalid_package[0], 2);
+    let invalid = aml_decode_pkg_length(&mut invalid_cursor);
+    if invalid.valid || invalid_cursor.valid { return false; }
+    unsafe { AML_DECODER_READY = true; }
+    return true;
+}
+
+@system
+pub fn aml_decoder_emit_ready_marker() -> bool {
+    unsafe { if !AML_DECODER_READY { return false; } }
+    let marker: [u8; 29] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,68,69,67,79,68,69,82,
+        95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 29 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}

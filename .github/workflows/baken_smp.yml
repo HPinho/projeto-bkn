@@ -121,6 +121,7 @@ jobs:
           }
           require_marker 'BAKEN:SMP_BASE_READY'
           require_marker 'BAKEN:ACPI_AML_TABLES_READY'
+          require_marker 'BAKEN:ACPI_AML_DECODER_READY'
           require_marker 'BAKEN:SMP_AP_ONLINE'
           require_marker 'BAKEN:SMP_AP_RUNTIME_READY'
           require_marker 'BAKEN:SMP_THREAD_ON_AP'

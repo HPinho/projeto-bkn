@@ -52,8 +52,10 @@ devem preservar os três gates, mas não reabrem a Fase 1 sem regressão comprov
 Primeiro incremento implementado localmente: catálogo seguro de definition
 blocks AML. O kernel prefere `X_DSDT`, valida/faz fallback para `DSDT`, enumera
 SSDTs com capacidade limitada, publica somente payloads catalogados e exige o
-marker QEMU `BAKEN:ACPI_AML_TABLES_READY`. Ainda não há execução de opcodes AML
-nem construção de namespace; essas são as próximas camadas deste marco.
+marker QEMU `BAKEN:ACPI_AML_TABLES_READY`. O segundo incremento adiciona um
+cursor limitado e decoder fail-closed de `PkgLength`, `NameString` e constantes
+inteiras, certificado por `BAKEN:ACPI_AML_DECODER_READY`. Ainda não há execução
+de opcodes AML nem construção de namespace; essas são as próximas camadas.
 
 Objetivo: transformar o hardware já certificado em serviços estáveis de
 plataforma, com descoberta, recuperação e contratos de driver.

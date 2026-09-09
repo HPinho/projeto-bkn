@@ -361,6 +361,8 @@ ao catálogo validado. O inventário de plataforma registra a presença e a
 quantidade de definition blocks. Os três smokes QEMU exigem agora
 `BAKEN:ACPI_AML_TABLES_READY`.
 
-Este incremento ainda não interpreta AML. A próxima fronteira é um decoder
-limitado e fail-closed para `PkgLength`, `NameString` e objetos constantes,
-seguido pela construção read-only do namespace antes de implementar métodos.
+O decoder estrutural seguinte implementa cursor limitado, `PkgLength`,
+`NameString` e constantes inteiras little-endian, com self-test bare-metal e o
+marker obrigatório `BAKEN:ACPI_AML_DECODER_READY`. Ele ainda não executa AML.
+A próxima fronteira é a construção read-only do namespace antes de implementar
+métodos e acessos a regiões de operação.

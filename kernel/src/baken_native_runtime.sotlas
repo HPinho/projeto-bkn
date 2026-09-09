@@ -19,6 +19,7 @@ import kernel::arch::x86_64::fpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::smp::*;
 import kernel::acpi::aml_tables::*;
+import kernel::acpi::aml_decoder::*;
 import kernel::process::address_space::*;
 import kernel::process::registry::*;
 import kernel::process::userspace_loader::*;
@@ -183,6 +184,7 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     // Cataloga DSDT/SSDTs validados antes de publicar a plataforma. Nenhum
     // opcode AML é executado nesta etapa.
     if !aml_tables_init() || !aml_tables_emit_ready_marker() { loop {} }
+    if !aml_decoder_self_test() || !aml_decoder_emit_ready_marker() { loop {} }
 
     // Consolida ACPI/APIC/PCI antes de liberar APs ou inicializar serviços.
     if !platform_inventory_init() || !platform_inventory_emit_ready_marker() { loop {} }
