@@ -961,6 +961,15 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
         let current_terminated = SCHEDULER_THREADS[current].state == KERNEL_THREAD_TERMINATED;
         if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
             SCHEDULER_THREADS[current].state = KERNEL_THREAD_READY;
+            // Boot/idle possuem stacks permanentes e afinidade BSP; não existe
+            // risco de reutilização física por outro CPU. O owner deles continua
+            // sendo ownership lógico e deve ser liberado no mesmo handoff.
+            if current < SCHEDULER_FIRST_DYNAMIC_SLOT {
+                SCHEDULER_THREAD_OWNER_CPU[current] = SCHEDULER_CPU_NONE;
+            }
+        } else if SCHEDULER_THREADS[current].state == KERNEL_THREAD_BLOCKED &&
+                  current < SCHEDULER_FIRST_DYNAMIC_SLOT {
+            SCHEDULER_THREAD_OWNER_CPU[current] = SCHEDULER_CPU_NONE;
         }
 
         let mut start = current + 1;
