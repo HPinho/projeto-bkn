@@ -298,8 +298,10 @@ fn scheduler_smp_probe_wait_idle(thread_id: u64, cpu_slot: usize, idle_epoch_bef
     let mut spins: u64 = 0;
     while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
         __dma_fence();
-        if scheduler_secondary_idle_epoch(cpu_slot) > idle_epoch_before &&
-           scheduler_thread_owner_cpu(thread_id) == SCHEDULER_CPU_NONE { return true; }
+        // idle_epoch prova que a CPU já selecionou seu idle frame. A publicação
+        // owner=NONE é deliberadamente posterior e pertence ao switch-commit;
+        // o probe não deve confundir "não é current" com "stack reaproveitável".
+        if scheduler_secondary_idle_epoch(cpu_slot) > idle_epoch_before { return true; }
         x86_cpu_pause();
         spins += 1;
     }
