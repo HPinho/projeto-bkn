@@ -104,8 +104,6 @@ extern void sotlas_x86_scheduler_smp_probe_entry(void);
 static inline uint64_t __scheduler_smp_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_smp_probe_entry; }
 extern void sotlas_x86_scheduler_wait_probe_entry(void);
 static inline uint64_t __scheduler_wait_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wait_probe_entry; }
-extern void sotlas_x86_scheduler_wake_probe_entry(void);
-static inline uint64_t __scheduler_wake_probe_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_scheduler_wake_probe_entry; }
 extern void sotlas_x86_userspace_bootstrap_entry(void);
 static inline uint64_t __userspace_bootstrap_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_userspace_bootstrap_entry; }
 
@@ -198,7 +196,6 @@ def install(bootstrap) -> None:
         "__smp_ap_runtime_entry_address": Function("__smp_ap_runtime_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_smp_probe_entry_address": Function("__scheduler_smp_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_wait_probe_entry_address": Function("__scheduler_wait_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
-        "__scheduler_wake_probe_entry_address": Function("__scheduler_wake_probe_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__userspace_bootstrap_entry_address": Function("__userspace_bootstrap_entry_address", [], Type("u64"), [], public=True, attributes=["@system"]),
         "__scheduler_yield_interrupt": Function("__scheduler_yield_interrupt", [], Type("void"), [], public=True, attributes=["@system"]),
         "__scheduler_block_switch": Function("__scheduler_block_switch", [], Type("void"), [], public=True, attributes=["@system"]),

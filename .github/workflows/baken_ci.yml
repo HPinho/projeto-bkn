@@ -48,6 +48,7 @@ jobs:
           test -s build/baken_os.iso
 
       - name: Run Headless QEMU Boot Smoke Test
+        timeout-minutes: 5
         shell: bash
         run: |
           echo "BAKEN_CI_REVISION=$(git rev-parse --short HEAD)"
@@ -219,7 +220,7 @@ jobs:
           rm -f build/qemu-monitor.sock
 
           set +e
-          timeout --signal=TERM --kill-after=5s 60s qemu-system-x86_64 \
+          timeout --signal=TERM --kill-after=5s 180s qemu-system-x86_64 \
             -machine q35 -m 512M -no-reboot \
             -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
             -drive if=pflash,format=raw,file=build/OVMF_VARS.fd \

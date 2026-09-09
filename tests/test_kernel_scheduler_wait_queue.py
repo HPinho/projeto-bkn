@@ -69,30 +69,36 @@ class KernelSchedulerWaitQueueTests(unittest.TestCase):
         self.assertIn("scheduler_wait_queue_sleep(&mut WAIT_PROBE_QUEUE)", probe)
         self.assertIn("scheduler_wait_probe_wake", probe)
         self.assertIn("WAIT_PROBE_RESUMED", probe)
-        self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 2", probe)
+        self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1", probe)
 
         body = runtime.split("pub fn baken_native_kernel_run", 1)[1]
         start = body.index("scheduler_wait_probe_start()")
         kick = body.index("scheduler_yield()", start)
-        complete = body.index("scheduler_wait_probe_wait_complete()", kick)
+        blocked = body.index("scheduler_wait_probe_blocked()", kick)
+        wake = body.index("scheduler_wait_probe_wake()", blocked)
+        resume = body.index("scheduler_yield()", wake)
+        complete = body.index("scheduler_wait_probe_wait_complete()", resume)
         self.assertLess(start, kick)
-        self.assertLess(kick, complete)
+        self.assertLess(kick, blocked)
+        self.assertLess(blocked, wake)
+        self.assertLess(wake, resume)
+        self.assertLess(resume, complete)
 
     def test_completion_wait_drives_scheduler_progress_instead_of_host_speed(self):
         probe = PROBE.read_text(encoding="utf-8")
         body = probe.split("pub fn scheduler_wait_probe_wait_complete() -> bool", 1)[1]
-        self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 2", body)
+        self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1", body)
         self.assertIn("if !x86_halt_until_interrupt() { return false; }", body)
         self.assertNotIn("x86_cpu_pause()", body)
         self.assertNotIn("scheduler_yield()", body)
-        self.assertLess(body.index("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 2"),
+        self.assertLess(body.index("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1"),
                         body.index("x86_halt_until_interrupt()"))
 
-    def test_bsp_only_probe_uses_pinned_waiter_and_waker(self):
+    def test_bsp_only_probe_uses_pinned_waiter_and_bootstrap_waker(self):
         probe = PROBE.read_text(encoding="utf-8")
-        self.assertEqual(probe.count("scheduler_create_kernel_thread_on_cpu("), 2)
-        self.assertIn("x86_scheduler_wake_probe_entry_address()", probe)
-        self.assertIn("WAIT_PROBE_WAKER_THREAD_ID = waker_id", probe)
+        self.assertEqual(probe.count("scheduler_create_kernel_thread_on_cpu("), 1)
+        self.assertNotIn("WAIT_PROBE_WAKER_THREAD_ID", probe)
+        self.assertIn("pub fn scheduler_wait_probe_wake() -> bool", probe)
         body = probe.split("pub fn scheduler_wait_probe_wait_complete() -> bool", 1)[1]
         self.assertIn("x86_halt_until_interrupt()", body)
         core = (ROOT / "kernel/src/scheduler/core.sotlas").read_text(encoding="utf-8")

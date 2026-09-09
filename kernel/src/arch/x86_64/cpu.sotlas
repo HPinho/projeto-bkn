@@ -77,11 +77,6 @@ pub fn x86_scheduler_wait_probe_entry_address() -> u64 {
 }
 
 @system
-pub fn x86_scheduler_wake_probe_entry_address() -> u64 {
-    return __scheduler_wake_probe_entry_address();
-}
-
-@system
 pub fn x86_scheduler_yield_interrupt() -> void { __scheduler_yield_interrupt(); }
 
 @system

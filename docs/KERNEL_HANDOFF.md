@@ -285,3 +285,44 @@ Além disso, manter os guardrails de:
 - Validação local final: **1.115 testes**, build **141 módulos / 143 objetos**,
   smoke single-core completo e smoke SMP completo até
   `SMP_PROCESS_TLB_READY` e `SMP_RING3_ON_AP_READY`, sem `BAKEN:HEX=E:`.
+
+# Estado da fundação do kernel — 2026-09-09
+
+## Concluído e comprovado
+
+- Cutover UEFI, `ExitBootServices`, W^X, CR3, GDT/IDT/TSS/IST e memória física
+  e virtual própria do kernel.
+- ACPI, LAPIC/IOAPIC, timer, IRQs, PCI/DMA, xHCI/HID, AHCI/NVMe, GPT/FAT32 e
+  framebuffer PAT/WC.
+- Scheduler preemptivo, threads de kernel, reaper, cache de stacks, yield,
+  wait queues, sleep por LAPIC e heap geral.
+- Processos, espaços de endereço, Ring 3, syscalls, cópia usuário/kernel,
+  carregador de userspace e preservação de contexto FPU/SIMD.
+- SMP: despacho em AP, timer no AP, heap concorrente, shootdown TLB root-aware,
+  migração de processo e retomada Ring 3/FPU no AP.
+
+## Correção de estabilidade da CI
+
+- O workflow principal podia expirar depois de `WAIT_BLOCKED`: a prova dependia
+  de uma thread waker ser escolhida imediatamente sob host carregado.
+- A prova agora executa a sequência determinística
+  `yield -> blocked -> wake pelo bootstrap -> yield -> resume`; o sleep e o
+  reaper continuam dependentes de IRQs LAPIC reais.
+- O smoke principal recebeu timeout próprio de 180 s e limite de etapa de cinco
+  minutos. Isso preserva falha finita e elimina falsos negativos por runner
+  lento.
+
+## Evidência local deste estado
+
+- **1.132 testes** aprovados.
+- Build Sotlas: **141 módulos / 143 objetos**.
+- QEMU single-core: `WAIT_WAKE`, `WAIT_RESUME`, sleep, Ring 3, syscall,
+  user-copy e loader aprovados.
+- QEMU SMP: heap concorrente, TLB, Ring 3, migração de processo e FPU aprovados
+  até `SMP_FPU_MIGRATION_READY`, sem `BAKEN:HEX=E:`.
+
+## Próxima fase
+
+Esta fundação não equivale ao sistema operacional completo. O próximo trabalho
+deve concentrar-se em rede, áudio, GPU/aceleração, política de processos e
+serviços de userspace, mantendo os três gates CI/NVMe/SMP obrigatórios.

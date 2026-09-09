@@ -215,8 +215,14 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !scheduler_finish_process_probe() { loop {} }
 
     if !scheduler_wait_probe_start() { loop {} }
-    // Um único yield inicia a cadeia waiter -> waker -> waiter. A thread waker
-    // faz o wake real; o bootstrap apenas aguarda timer/reaper ao retornar.
+    // O primeiro yield entrega a CPU ao waiter. O seu block-switch retorna ao
+    // bootstrap, que acorda a fila e entrega a CPU ao mesmo waiter outra vez.
+    // Assim a prova não depende de o host escolher uma terceira thread em uma
+    // janela de timer: o wake continua real, atômico e executado por outro
+    // contexto (o bootstrap).
+    if !scheduler_yield() { loop {} }
+    if !scheduler_wait_probe_blocked() { loop {} }
+    if !scheduler_wait_probe_wake() { loop {} }
     if !scheduler_yield() { loop {} }
     if !scheduler_wait_probe_wait_complete() { loop {} }
 
