@@ -106,6 +106,7 @@ jobs:
           grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log
           grep -Fxq 'BAKEN:SMP_PROCESS_MIGRATED' build/qemu-smp-serial.log
           grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' build/qemu-smp-serial.log
+          grep -Fxq 'BAKEN:USER_FAULT_ISOLATED_READY' build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
             echo '::error::CPU exception reported during SMP/heap/TLB/Ring3/FPU migration proof.'
             exit 1

@@ -1,15 +1,17 @@
 // Baken OS - x86_64 exception dispatcher foundation.
 //
-// Os stubs 0-31 sao emitidos pelo backend x86-64 e normalizam o topo da
-// pilha para ExceptionRawFrame. Nesta fase o dispatcher e terminal: registra
-// o estado e para a CPU. Retorno por IRETQ so sera implementado quando o frame
-// completo de registradores e as stacks IST estiverem estabilizados.
+// Os stubs 0-31 salvam todos os GPRs e normalizam vector/error/IRET frame.
+// Falhas de CPL3 encerram apenas a thread culpada; falhas de CPL0 seguem
+// terminais para não ocultar corrupção da fundação do kernel.
 
 module kernel::arch::x86_64::exceptions;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::thread_context::*;
+import kernel::interrupts::irq::*;
+import kernel::process::registry::*;
+import kernel::scheduler::core::*;
 
 pub const EXCEPTION_VECTOR_COUNT: u16 = 32;
 pub const EXCEPTION_GENERAL_PROTECTION: u64 = 13;
@@ -25,12 +27,29 @@ pub const PAGE_FAULT_SHADOW_STACK: u64 = 64;
 
 @repr(C)
 @packed
-pub struct ExceptionRawFrame {
+pub struct ExceptionSavedFrame {
+    pub r15: u64;
+    pub r14: u64;
+    pub r13: u64;
+    pub r12: u64;
+    pub r11: u64;
+    pub r10: u64;
+    pub r9: u64;
+    pub r8: u64;
+    pub rdi: u64;
+    pub rsi: u64;
+    pub rbp: u64;
+    pub rbx: u64;
+    pub rdx: u64;
+    pub rcx: u64;
+    pub rax: u64;
     pub vector: u64;
     pub error_code: u64;
     pub rip: u64;
     pub cs: u64;
     pub rflags: u64;
+    pub rsp: u64;
+    pub ss: u64;
 }
 
 pub struct ExceptionSnapshot {
@@ -40,6 +59,8 @@ pub struct ExceptionSnapshot {
     pub cs: u64;
     pub rflags: u64;
     pub cr2: u64;
+    pub user: bool;
+    pub process_id: u64;
     pub valid: bool;
 }
 
@@ -50,6 +71,8 @@ static mut LAST_EXCEPTION: ExceptionSnapshot = ExceptionSnapshot {
     cs: 0,
     rflags: 0,
     cr2: 0,
+    user: false,
+    process_id: 0,
     valid: false
 };
 
@@ -62,6 +85,8 @@ pub fn exception_state_reset() -> void {
         LAST_EXCEPTION.cs = 0;
         LAST_EXCEPTION.rflags = 0;
         LAST_EXCEPTION.cr2 = 0;
+        LAST_EXCEPTION.user = false;
+        LAST_EXCEPTION.process_id = 0;
         LAST_EXCEPTION.valid = false;
     }
 }
@@ -89,6 +114,16 @@ pub fn exception_last_rip() -> u64 {
 @system
 pub fn exception_last_cr2() -> u64 {
     unsafe { return LAST_EXCEPTION.cr2; }
+}
+
+@system
+pub fn exception_last_was_user() -> bool {
+    unsafe { return LAST_EXCEPTION.valid && LAST_EXCEPTION.user; }
+}
+
+@system
+pub fn exception_last_process_id() -> u64 {
+    unsafe { return LAST_EXCEPTION.process_id; }
 }
 
 @system
@@ -126,19 +161,37 @@ pub fn page_fault_was_shadow_stack(error_code: u64) -> bool {
     return (error_code & PAGE_FAULT_SHADOW_STACK) != 0;
 }
 
-// Callback ABI generico esperado pelo backend x86-64 da linguagem Sotlas.
-// A implementacao pertence ao kernel Baken, mas o backend nao conhece o nome
-// do sistema operacional. O argumento aponta para ExceptionRawFrame.
+@system
+fn exception_terminal(vector: u64) -> u64 {
+    x86_serial_write_hex32_marker('E' as u8, vector as u32);
+    if vector == EXCEPTION_GENERAL_PROTECTION { x86_kernel_thread_dump_last_prepared_frame(); }
+    return 0;
+}
+
+@system
+fn exception_write_user_exit_marker() -> void {
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 22] = [
+        66,65,75,69,78,58,85,83,69,82,95,70,65,85,76,84,95,69,88,73,84,10
+    ];
+    let mut index: usize = 0;
+    while index < 22 {
+        if !x86_serial_write_byte(marker[index]) { return; }
+        index += 1;
+    }
+}
+
+// ABI genérica do backend: retorna um frame normalizado do scheduler para
+// IRETQ, ou zero para manter a exceção terminal em CPL0.
 @system
 @export
-pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> void {
-    let frame = unsafe { frame_address as *const ExceptionRawFrame };
+pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> u64 {
+    let frame = unsafe { frame_address as *const ExceptionSavedFrame };
 
-    if frame == (null as *const ExceptionRawFrame) {
-        __cli();
-        loop { __hlt(); }
-    }
+    if frame == (null as *const ExceptionSavedFrame) { return exception_terminal(0xFFFFFFFFFFFFFFFF); }
 
+    let mut user = false;
+    let mut pid: u64 = 0;
     unsafe {
         LAST_EXCEPTION.vector = frame.vector;
         LAST_EXCEPTION.error_code = frame.error_code;
@@ -150,24 +203,19 @@ pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> void {
         if frame.vector == EXCEPTION_PAGE_FAULT {
             LAST_EXCEPTION.cr2 = x86_read_cr2();
         }
-
+        user = (frame.cs & 3) == 3;
+        if user { pid = process_current_id(); }
+        LAST_EXCEPTION.user = user;
+        LAST_EXCEPTION.process_id = pid;
         LAST_EXCEPTION.valid = true;
     }
 
-    // Exceções são terminais nesta fase, portanto emitir o vetor é seguro e
-    // transforma um freeze silencioso em diagnóstico verificável no QEMU.
-    // BAKEN:HEX=E:XXXXXXXX, onde E identifica o vetor de exceção.
-    x86_serial_write_hex32_marker('E' as u8, unsafe { LAST_EXCEPTION.vector as u32 });
-
-    // Durante o bring-up do scheduler, um #GP no primeiro IRETQ precisa ser
-    // distinguido de corrupção aleatória. O dump lê o último frame sintético
-    // preparado e não o modifica: F=frame, K=R10, N=R11, R=RIP, S=CS, L=RFLAGS.
-    if unsafe { LAST_EXCEPTION.vector == EXCEPTION_GENERAL_PROTECTION } {
-        x86_kernel_thread_dump_last_prepared_frame();
+    if user && pid != 0 && scheduler_terminate_current() {
+        let selected = irq_schedule_terminated_current(frame_address);
+        if selected != 0 {
+            exception_write_user_exit_marker();
+            return selected;
+        }
     }
-
-    // Primeira ABI de excecao e deliberadamente terminal. Nenhum IRETQ e
-    // permitido ate preservarmos todos os GPRs e validarmos RSP/SS/CPL/IST.
-    __cli();
-    loop { __hlt(); }
+    return exception_terminal(unsafe { LAST_EXCEPTION.vector });
 }

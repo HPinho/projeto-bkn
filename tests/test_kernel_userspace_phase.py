@@ -51,7 +51,8 @@ class KernelUserspacePhaseTests(unittest.TestCase):
     def test_smoke_gate_requires_runtime_userspace_proof(self):
         from tools.scripts.verify_kernel_smoke import REQUIRED
         for marker in ("FPU_CONTEXT_READY", "RING3_ENTERED", "RING3_READY",
-                       "SYSCALL_READY", "USER_COPY_READY", "USERSPACE_LOADER_READY"):
+                       "SYSCALL_READY", "USER_COPY_READY", "USERSPACE_LOADER_READY",
+                       "USER_FAULT_ISOLATED_READY"):
             self.assertIn(marker, REQUIRED)
 
     def test_madt_records_processor_lapic_entries(self):

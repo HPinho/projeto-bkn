@@ -55,18 +55,18 @@ Não significa que todos os recursos futuros do sistema operacional estão concl
 
 ## Fase 1 — Kernel Core
 
-A Fase 1 já começa com bastante infraestrutura pronta, mas ainda possui trabalho arquitetural relevante:
+**Estado: implementação concluída; certificação do commit atual pendente dos três
+workflows GitHub.**
 
-- afinidade e migração genérica de process threads entre CPUs;
-- rastreamento da raiz de address space ativa por CPU;
-- TLB shootdown seletivo por address space para mappings de usuário;
-- locks de processo/address-space compatíveis com espera de IPI/ACK;
-- sincronização SMP completa do heap;
-- ownership e migração de estado FPU/SIMD;
-- política de scheduling e load balancing além dos probes controlados;
-- amadurecimento do modelo de processos e serviços de userspace.
+Além da infraestrutura já comprovada, o último limite do Kernel Core agora tem
+implementação e contrato de teste: um `#PF` vindo de CPL3 é identificado pelo
+frame de exceção completo, encerra a thread/processo culpado, passa pelo reaper,
+libera as páginas e o address space privados, e retorna pelo scheduler a um
+frame de kernel válido. Falhas em CPL0 continuam `fail-closed` (`CLI` + `HLT`).
 
-A regra é: não mudar processos para afinidade `ANY` de forma irrestrita antes de fechar coerência de page tables/TLB e ownership de estado por CPU.
+O gate de runtime exige `BAKEN:USER_FAULT_ISOLATED_READY` e rejeita
+`BAKEN:HEX=E:`. O selo formal de **Kernel Core concluído** depende de CI,
+SMP e NVMe-only verdes no mesmo SHA que contém essa mudança.
 
 ## Fases seguintes
 

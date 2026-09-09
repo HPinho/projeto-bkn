@@ -129,6 +129,16 @@ fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
     return selected;
 }
 
+// Compartilhado por syscall EXIT e por exceções originadas em CPL3. O caller
+// já marcou a thread atual como terminada; esta rotina salva FPU, escolhe um
+// frame seguro e permite ao reaper liberar a referência do processo depois.
+@system
+pub fn irq_schedule_terminated_current(frame_address: u64) -> u64 {
+    if frame_address == 0 || !scheduler_is_active() { return 0; }
+    if !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
+    return irq_schedule_with_fpu(frame_address);
+}
+
 @system
 @export
 pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
@@ -142,7 +152,7 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             let action = syscall_dispatch_frame(frame_address);
             if action == SYSCALL_ACTION_EXIT {
                 if !scheduler_terminate_current() { loop {} }
-                return irq_schedule_with_fpu(frame_address);
+                return irq_schedule_terminated_current(frame_address);
             }
             return frame_address;
         }

@@ -78,7 +78,11 @@ class ActiveAddressSpaceTrackingTests(unittest.TestCase):
         irq = IRQ.read_text(encoding="utf-8")
         self.assertEqual(
             irq.count("return irq_schedule_publish_root(frame_address);"),
-            2,
+            3,
+        )
+        self.assertIn(
+            "pub fn irq_schedule_terminated_current(frame_address: u64) -> u64",
+            irq,
         )
         self.assertIn(
             "let selected = scheduler_on_timer_interrupt(frame_address);\n    if scheduler_is_active() && !tlb_shootdown_publish_current_root()",

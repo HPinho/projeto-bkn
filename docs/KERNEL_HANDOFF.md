@@ -326,3 +326,19 @@ Além disso, manter os guardrails de:
 Esta fundação não equivale ao sistema operacional completo. O próximo trabalho
 deve concentrar-se em rede, áudio, GPU/aceleração, política de processos e
 serviços de userspace, mantendo os três gates CI/NVMe/SMP obrigatórios.
+
+## Fechamento do Kernel Core — pendente de certificação GitHub
+
+A fronteira que faltava para isolar uma falha de userspace foi implementada no
+commit atual: o stub de exceção salva todos os GPRs, identifica CPL3
+pelo `CS`, termina a thread atual, permite o reaper soltar a referência do
+processo e retorna ao scheduler por `IRETQ` usando o frame normalizado da
+próxima thread. O probe lê deliberadamente a guard page de stack não mapeada;
+ele só é aprovado após teardown completo do address space e o marker
+`BAKEN:USER_FAULT_ISOLATED_READY`.
+
+O comportamento de CPL0 não muda: exceções do kernel continuam terminais para
+não ocultar corrupção de memória ou de controle. A suíte local e o grafo Sotlas
+passaram; esta máquina não possui o cross-compiler UEFI, portanto a confirmação
+de boot cabe aos três workflows GitHub do mesmo SHA. Até eles passarem, não
+tratar este fechamento como certificado.

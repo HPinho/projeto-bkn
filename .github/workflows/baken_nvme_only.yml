@@ -147,6 +147,7 @@ jobs:
             'BAKEN:THREAD_EXIT'
             'BAKEN:THREAD_REAP'
             'BAKEN:STACK_RELEASE'
+            'BAKEN:USER_FAULT_ISOLATED_READY'
           )
           for marker in "${markers[@]}"; do
             require_serial_marker "$marker"

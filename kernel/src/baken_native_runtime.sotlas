@@ -232,6 +232,13 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !userspace_loader_finish_probe() { loop {} }
     if !userspace_loader_emit_ready_markers() { loop {} }
 
+    // A última fronteira do Kernel Core: #PF vindo de CPL3 encerra somente o
+    // processo culpado, retorna ao scheduler e libera a address space.
+    if !userspace_loader_start_fault_probe() { loop {} }
+    if !userspace_loader_wait_fault_probe() { loop {} }
+    if !userspace_loader_finish_fault_probe() { loop {} }
+    if !userspace_loader_emit_fault_isolation_marker() { loop {} }
+
     // So agora, com os contratos BSP/Ring3 encerrados, uma kernel thread pinned
     // e realmente despachada para o primeiro AP via IPI 0x44.
     if !scheduler_smp_probe_run() { loop {} }

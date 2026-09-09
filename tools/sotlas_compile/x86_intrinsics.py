@@ -107,9 +107,15 @@ static inline uint64_t __scheduler_wait_probe_entry_address(void) { return (uint
 extern void sotlas_x86_userspace_bootstrap_entry(void);
 static inline uint64_t __userspace_bootstrap_entry_address(void) { return (uint64_t)(uintptr_t)&sotlas_x86_userspace_bootstrap_entry; }
 
-extern void sotlas_x86_exception_dispatch(uint64_t frame_address);
+extern uint64_t sotlas_x86_exception_dispatch(uint64_t frame_address);
 __attribute__((naked,used)) static void __sotlas_x86_exception_common(void) {
-    __asm__("movq %rsp, %rcx\n\t" "andq $-16, %rsp\n\t" "subq $32, %rsp\n\t" "call sotlas_x86_exception_dispatch\n\t" "cli\n\t" "1: hlt\n\t" "jmp 1b\n\t");
+    __asm__("pushq %rax\n\t" "pushq %rcx\n\t" "pushq %rdx\n\t" "pushq %rbx\n\t" "pushq %rbp\n\t" "pushq %rsi\n\t" "pushq %rdi\n\t"
+            "pushq %r8\n\t" "pushq %r9\n\t" "pushq %r10\n\t" "pushq %r11\n\t" "pushq %r12\n\t" "pushq %r13\n\t" "pushq %r14\n\t" "pushq %r15\n\t"
+            "movq %rsp, %r12\n\t" "movq %r12, %rcx\n\t" "andq $-16, %rsp\n\t" "subq $32, %rsp\n\t"
+            "call sotlas_x86_exception_dispatch\n\t" "testq %rax, %rax\n\t" "jz 2f\n\t" "movq %rax, %rsp\n\t"
+            "popq %r15\n\t" "popq %r14\n\t" "popq %r13\n\t" "popq %r12\n\t" "popq %r11\n\t" "popq %r10\n\t" "popq %r9\n\t" "popq %r8\n\t"
+            "popq %rdi\n\t" "popq %rsi\n\t" "popq %rbp\n\t" "popq %rbx\n\t" "popq %rdx\n\t" "popq %rcx\n\t" "popq %rax\n\t" "addq $8, %rsp\n\t" "iretq\n\t"
+            "2: cli\n\t" "1: hlt\n\t" "jmp 1b\n\t");
 }
 #define SOTLAS_X86_ISR_NOERR(n) __attribute__((naked,unused)) static void __sotlas_x86_isr_##n(void) { __asm__("pushq $0\n\tpushq $" #n "\n\tjmp __sotlas_x86_exception_common"); }
 #define SOTLAS_X86_ISR_ERR(n) __attribute__((naked,unused)) static void __sotlas_x86_isr_##n(void) { __asm__("pushq $" #n "\n\tjmp __sotlas_x86_exception_common"); }
