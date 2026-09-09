@@ -55,8 +55,13 @@ Não significa que todos os recursos futuros do sistema operacional estão concl
 
 ## Fase 1 — Kernel Core
 
-**Estado: implementação concluída; certificação do commit atual pendente dos três
-workflows GitHub.**
+**Estado: implementação concluída, mas ainda não certificada.** O CI principal
+#1014 e o NVMe-only #214 passaram para `834bb4d`; o SMP #117 falhou no QEMU.
+Enquanto esse gate não passar no mesmo SHA, a Fase 1 não recebe selo de conclusão.
+
+A auditoria também mantém três bloqueadores de qualidade: snapshot de exceção
+por-CPU/sincronizado, política que preserve NMI/double fault/machine check como
+terminais e prova de uma falha CPL3 executada no AP.
 
 Além da infraestrutura já comprovada, o último limite do Kernel Core agora tem
 implementação e contrato de teste: um `#PF` vindo de CPL3 é identificado pelo

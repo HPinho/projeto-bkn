@@ -92,21 +92,29 @@ jobs:
           wait "$qemu_pid" 2>/dev/null || true
           test -f build/qemu-smp-serial.log
           cat build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_BASE_READY' build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_AP_ONLINE' build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_AP_RUNTIME_READY' build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_THREAD_ON_AP' build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_TIMER_ON_AP' build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_ANY_THREAD_ON_AP' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_HEAP_READY' build/qemu-smp-serial.log
-          grep -Fq 'BAKEN:SMP_TLB_SHOOTDOWN_READY' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_RING3_ON_AP' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_RING3_RESUMED_ON_AP' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_PROCESS_TLB_READY' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_PROCESS_MIGRATED' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' build/qemu-smp-serial.log
-          grep -Fxq 'BAKEN:USER_FAULT_ISOLATED_READY' build/qemu-smp-serial.log
+          require_marker() {
+            if ! grep -Fxq "$1" build/qemu-smp-serial.log; then
+              echo "::error::Missing $1 in SMP QEMU proof."
+              echo '--- last Baken checkpoints ---' >&2
+              grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-smp-serial.log | tail -n 48 >&2 || true
+              exit 1
+            fi
+          }
+          require_marker 'BAKEN:SMP_BASE_READY'
+          require_marker 'BAKEN:SMP_AP_ONLINE'
+          require_marker 'BAKEN:SMP_AP_RUNTIME_READY'
+          require_marker 'BAKEN:SMP_THREAD_ON_AP'
+          require_marker 'BAKEN:SMP_TIMER_ON_AP'
+          require_marker 'BAKEN:SMP_ANY_THREAD_ON_AP'
+          require_marker 'BAKEN:SMP_HEAP_READY'
+          require_marker 'BAKEN:SMP_TLB_SHOOTDOWN_READY'
+          require_marker 'BAKEN:SMP_RING3_ON_AP'
+          require_marker 'BAKEN:SMP_RING3_RESUMED_ON_AP'
+          require_marker 'BAKEN:SMP_PROCESS_TLB_READY'
+          require_marker 'BAKEN:SMP_RING3_ON_AP_READY'
+          require_marker 'BAKEN:SMP_PROCESS_MIGRATED'
+          require_marker 'BAKEN:SMP_FPU_MIGRATION_READY'
+          require_marker 'BAKEN:USER_FAULT_ISOLATED_READY'
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
             echo '::error::CPU exception reported during SMP/heap/TLB/Ring3/FPU migration proof.'
             exit 1
