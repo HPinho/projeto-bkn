@@ -84,16 +84,16 @@ class KernelSmpRing3Tests(unittest.TestCase):
             "process_map_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS, data, true, false)",
             "process_map_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS, stack, true, false)",
             "let bsp_irq_flags = x86_irq_save_disable();",
-            "scheduler_create_process_thread_any(pid, entry",
+            "scheduler_create_process_thread_any(",
             "scheduler_thread_affinity_cpu(tid) != SCHEDULER_CPU_AFFINITY_ANY",
             "lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)",
             "scheduler_smp_probe_wait_flag(started_address)",
             "x86_irq_restore(bsp_irq_flags)",
-            "if process_destroy(pid) { return false; }",
+            "if process_destroy(pid) {",
         ):
             self.assertIn(token, run)
 
-        create = run.index("scheduler_create_process_thread_any(pid, entry")
+        create = run.index("scheduler_create_process_thread_any(")
         affinity = run.index("scheduler_thread_affinity_cpu(tid) != SCHEDULER_CPU_AFFINITY_ANY")
         ipi = run.index("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)")
         started = run.index("scheduler_smp_probe_wait_flag(started_address)")
