@@ -1,6 +1,6 @@
 # Baken OS — Bare-Metal Foundation Progress
 
-Atualizado em 2026-09-08.
+Atualizado em 2026-09-09.
 
 ## Estado geral
 
@@ -55,9 +55,9 @@ Não significa que todos os recursos futuros do sistema operacional estão concl
 
 ## Fase 1 — Kernel Core
 
-**Estado: implementação concluída, mas ainda não certificada.** O CI principal
-#1014 e o NVMe-only #214 passaram para `834bb4d`; o SMP #117 falhou no QEMU.
-Enquanto esse gate não passar no mesmo SHA, a Fase 1 não recebe selo de conclusão.
+**Estado: implementação atual certificada pelos gates; auditoria rigorosa ainda
+aberta.** No commit `b703cb2e77442873910268532d6fc5272a51873f`, o CI
+principal #1017, o SMP #120 e o NVMe-only #217 passaram no mesmo SHA.
 
 A auditoria também mantém três bloqueadores de qualidade: snapshot de exceção
 por-CPU/sincronizado, política que preserve NMI/double fault/machine check como
@@ -70,8 +70,9 @@ libera as páginas e o address space privados, e retorna pelo scheduler a um
 frame de kernel válido. Falhas em CPL0 continuam `fail-closed` (`CLI` + `HLT`).
 
 O gate de runtime exige `BAKEN:USER_FAULT_ISOLATED_READY` e rejeita
-`BAKEN:HEX=E:`. O selo formal de **Kernel Core concluído** depende de CI,
-SMP e NVMe-only verdes no mesmo SHA que contém essa mudança.
+`BAKEN:HEX=E:`. Essa implementação está certificada pelos três gates atuais.
+O selo formal de **Kernel Core concluído** permanece reservado até fechar os
+três bloqueadores arquiteturais acima e repetir a certificação no mesmo SHA.
 
 ## Fases seguintes
 

@@ -4,9 +4,18 @@ Atualizado em 2026-09-09. Este documento separa **implementado**,
 **certificado** e **planejado**. Um item só muda para certificado quando os
 gates exigidos passam no mesmo commit da `main`.
 
-## Marco imediato — Certificar Kernel Core
+## Marco imediato — Fechar auditoria rigorosa do Kernel Core
 
-**Estado: em validação; bloqueia o início formal da próxima fase.**
+**Estado: gates atuais certificados; fechamento arquitetural ainda pendente.**
+
+O commit `b703cb2e77442873910268532d6fc5272a51873f` passou nos três gates
+obrigatórios do mesmo SHA em 2026-09-09:
+
+| Gate | Resultado |
+|---|---|
+| CI principal #1017 / `34336389649` | ✅ PASS |
+| SMP #120 / `34336389592` | ✅ PASS |
+| NVMe-only #217 / `34336389646` | ✅ PASS |
 
 O Kernel Core já contém boot sem runtime UEFI, PMM/VMM, SMP, scheduler,
 processos, address spaces privados, Ring 3, syscall, FPU/SIMD e drivers de
@@ -30,8 +39,8 @@ Bloqueadores técnicos ainda abertos pela auditoria:
 - classificar vetores: somente falhas síncronas recuperáveis de CPL3 podem
   terminar o processo. NMI, double fault e machine check precisam permanecer
   terminais, mesmo quando interrompem CPL3;
-- resolver e reproduzir o primeiro marker ausente do SMP #117 com o serial do
-  QEMU, antes de aceitar qualquer novo checkpoint.
+- executar a prova de fault CPL3 também em AP. O SMP #120 voltou a passar e
+  certifica o gate atual, mas ainda não cobre essa combinação arquitetural.
 
 ## Fase 2 — Platform e drivers de produção
 
