@@ -178,6 +178,29 @@ fn scheduler_set_current_slot_for_cpu(cpu_slot: usize, slot: usize) -> void {
     }
 }
 
+// Ownership de uma thread dinâmica só pode ser publicado como NONE depois de
+// uma nova entrada do scheduler na CPU que a executava. Nesse ponto o stub de
+// IRQ já completou o IRET anterior e a CPU está fisicamente em outro frame.
+// Isso transforma a troca de contexto em duas fases e impede outra CPU/reaper
+// de reutilizar a stack enquanto o epílogo do IRQ anterior ainda a consome.
+@system
+fn scheduler_confirm_switched_away_for_cpu(cpu_slot: usize) -> void {
+    if cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return; }
+    let current = scheduler_current_slot_for_cpu(cpu_slot);
+    unsafe {
+        let mut slot: usize = SCHEDULER_FIRST_DYNAMIC_SLOT;
+        while slot < SCHEDULER_THREAD_SLOT_COUNT {
+            if slot != current && SCHEDULER_THREAD_OWNER_CPU[slot] == cpu_slot as u32 &&
+               (SCHEDULER_THREADS[slot].state == KERNEL_THREAD_READY ||
+                SCHEDULER_THREADS[slot].state == KERNEL_THREAD_BLOCKED ||
+                SCHEDULER_THREADS[slot].state == KERNEL_THREAD_TERMINATED) {
+                SCHEDULER_THREAD_OWNER_CPU[slot] = SCHEDULER_CPU_NONE;
+            }
+            slot += 1;
+        }
+    }
+}
+
 @system
 pub fn scheduler_secondary_idle_epoch(cpu_slot: usize) -> u64 {
     if cpu_slot == 0 || cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return 0; }
@@ -742,8 +765,10 @@ pub fn scheduler_wake_thread(thread_id: u64) -> bool {
     if slot == SCHEDULER_INVALID_SLOT || slot == SCHEDULER_IDLE_SLOT { scheduler_switch_unlock(); x86_irq_restore(flags); return false; }
     unsafe {
         if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_BLOCKED { scheduler_switch_unlock(); x86_irq_restore(flags); return false; }
+        // Se a thread ainda tem owner, ela está no intervalo entre a decisão
+        // lógica de switch e a confirmação física numa entrada posterior. O
+        // wakeup muda somente o estado; ownership será publicado pelo commit.
         SCHEDULER_THREADS[slot].state = KERNEL_THREAD_READY;
-        SCHEDULER_THREAD_OWNER_CPU[slot] = SCHEDULER_CPU_NONE;
     }
     scheduler_switch_unlock();
     x86_irq_restore(flags);
@@ -878,11 +903,9 @@ fn scheduler_on_secondary_interrupt(cpu_slot: usize, frame_address: u64) -> u64 
         if current < SCHEDULER_FIRST_DYNAMIC_SLOT || current >= SCHEDULER_THREAD_SLOT_COUNT { return frame_address; }
         SCHEDULER_THREADS[current].saved_frame = frame_address;
         if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
+            // READY ainda pertence fisicamente a esta CPU até uma entrada
+            // posterior confirmar que o epílogo do IRQ abandonou sua stack.
             SCHEDULER_THREADS[current].state = KERNEL_THREAD_READY;
-            SCHEDULER_THREAD_OWNER_CPU[current] = SCHEDULER_CPU_NONE;
-        } else if SCHEDULER_THREADS[current].state == KERNEL_THREAD_BLOCKED ||
-                  SCHEDULER_THREADS[current].state == KERNEL_THREAD_TERMINATED {
-            SCHEDULER_THREAD_OWNER_CPU[current] = SCHEDULER_CPU_NONE;
         }
         let mut start = current + 1;
         if start >= SCHEDULER_THREAD_SLOT_COUNT { start = SCHEDULER_FIRST_DYNAMIC_SLOT; }
@@ -905,6 +928,11 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
     if frame_address == 0 || !scheduler_is_active() { return frame_address; }
     let cpu_slot = scheduler_current_cpu_slot();
     if cpu_slot == SCHEDULER_INVALID_CPU_SLOT { return frame_address; }
+
+    // O IRQ anterior desta CPU já retornou antes desta nova entrada. Só agora
+    // é seguro tornar migrável/reaproveitável o frame que deixou de ser current.
+    scheduler_confirm_switched_away_for_cpu(cpu_slot);
+
     if cpu_slot != 0 { return scheduler_on_secondary_interrupt(cpu_slot, frame_address); }
 
     unsafe {
@@ -933,9 +961,6 @@ pub fn scheduler_on_timer_interrupt(frame_address: u64) -> u64 {
         let current_terminated = SCHEDULER_THREADS[current].state == KERNEL_THREAD_TERMINATED;
         if SCHEDULER_THREADS[current].state == KERNEL_THREAD_RUNNING {
             SCHEDULER_THREADS[current].state = KERNEL_THREAD_READY;
-            SCHEDULER_THREAD_OWNER_CPU[current] = SCHEDULER_CPU_NONE;
-        } else if current_terminated || SCHEDULER_THREADS[current].state == KERNEL_THREAD_BLOCKED {
-            SCHEDULER_THREAD_OWNER_CPU[current] = SCHEDULER_CPU_NONE;
         }
 
         let mut start = current + 1;
