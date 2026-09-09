@@ -69,7 +69,8 @@ class KernelSmpBaseTests(unittest.TestCase):
         self.assertIn("BAKEN:SMP_AP_ONLINE", workflow)
         self.assertIn("BAKEN:SMP_AP_RUNTIME_READY", workflow)
         self.assertIn("BAKEN:SMP_BASE_READY", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_AP_RUNTIME_READY'", workflow)
+        self.assertIn("require_marker()", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_AP_RUNTIME_READY'", workflow)
 
     def test_standard_smoke_requires_smp_base_even_on_uniprocessor(self):
         smoke = SMOKE.read_text(encoding="utf-8")

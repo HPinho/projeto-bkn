@@ -230,6 +230,7 @@ class KernelSchedulerTests(unittest.TestCase):
         self.assertIn("scheduler_initialize()", body)
         self.assertIn("x86_sti_raw();", body)
         self.assertIn("scheduler_wait_first_round_trip()", body)
+        self.assertIn("scheduler_diag_initialized()", body)
         self.assertIn("scheduler_start_run_queue_probe()", body)
         self.assertIn("scheduler_wait_run_queue_probe()", body)
         self.assertIn("scheduler_wait_reaper_probe()", body)

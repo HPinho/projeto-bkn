@@ -8,6 +8,16 @@ module kernel::scheduler::diagnostics;
 import kernel::arch::x86_64::serial::*;
 
 @system
+pub fn scheduler_diag_initialized() -> void {
+    if !x86_serial_is_ready() { return; }
+    let marker: [u8; 28] = [
+        66, 65, 75, 69, 78, 58, 83, 67, 72, 69, 68, 85, 76, 69, 82,
+        95, 73, 78, 73, 84, 73, 65, 76, 73, 90, 69, 68, 10
+    ];
+    unsafe { x86_serial_write_buffer(&marker[0], 28); }
+}
+
+@system
 pub fn scheduler_diag_round_trip() -> void {
     if !x86_serial_is_ready() { return; }
     let marker: [u8; 27] = [

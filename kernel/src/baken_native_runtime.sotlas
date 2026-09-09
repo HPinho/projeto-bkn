@@ -16,6 +16,7 @@ import kernel::drivers::ps2_keyboard::*;
 import kernel::arch::x86_64::timer::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::fpu::*;
+import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::smp::*;
 import kernel::process::address_space::*;
 import kernel::process::registry::*;
@@ -200,7 +201,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     x86_cli_raw();
     let scheduler_ready = scheduler_initialize();
     x86_sti_raw();
-    if !scheduler_ready || !scheduler_wait_first_round_trip() { loop {} }
+    if !scheduler_ready { x86_serial_write_hex32_marker('J' as u8, 1); loop {} }
+    scheduler_diag_initialized();
+    if !scheduler_wait_first_round_trip() { x86_serial_write_hex32_marker('J' as u8, 2); loop {} }
     scheduler_diag_round_trip();
 
     x86_cli_raw();

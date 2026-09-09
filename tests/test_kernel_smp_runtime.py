@@ -129,7 +129,8 @@ class KernelSmpRuntimeTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("python3 tests/test_kernel_smp_runtime.py", workflow)
         self.assertIn("BAKEN:SMP_AP_RUNTIME_READY", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_AP_RUNTIME_READY'", workflow)
+        self.assertIn("require_marker()", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_AP_RUNTIME_READY'", workflow)
 
 
 if __name__ == "__main__":
