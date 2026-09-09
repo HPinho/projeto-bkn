@@ -203,9 +203,11 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !process_registry_activate() { loop {} }
     if !process_registry_emit_ready_marker() { loop {} }
 
-    if !fpu_initialize() || !fpu_emit_ready_marker() { loop {} }
-
+    // FPU_READY altera o caminho do IRQ de timer. Mantenha IF=0 desde antes da
+    // publicação desse estado até o scheduler estar integralmente ativo, para
+    // que nenhum tick observe FPU pronta com SCHEDULER_ACTIVE ainda falso.
     x86_cli_raw();
+    if !fpu_initialize() || !fpu_emit_ready_marker() { loop {} }
     let scheduler_ready = scheduler_initialize();
     x86_sti_raw();
     if !scheduler_ready { x86_serial_write_hex32_marker('J' as u8, 1); loop {} }
