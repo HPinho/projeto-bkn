@@ -107,6 +107,10 @@ fn irq_schedule_publish_root(frame_address: u64) -> u64 {
 
 @system
 fn irq_schedule_with_fpu(frame_address: u64) -> u64 {
+    // FPU_READY e SCHEDULER_ACTIVE sao estados distintos. Nunca adquira o lock
+    // do scheduler na janela de bootstrap em que a FPU ja foi publicada mas o
+    // scheduler ainda nao possui CPU slots/current thread validos.
+    if !scheduler_is_active() { return frame_address; }
     if !scheduler_switch_lock() { loop {} }
     let cpu_slot = scheduler_current_cpu_slot();
     if cpu_slot == SCHEDULER_INVALID_CPU_SLOT { loop {} }
@@ -156,13 +160,14 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             }
             return frame_address;
         }
-        if !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
+        if !scheduler_is_active() || !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
 
     if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64 {
         unsafe { IRQ_RESCHEDULE_IPI_COUNT += 1; }
         lapic_eoi();
+        if !scheduler_is_active() { return frame_address; }
         if !fpu_is_ready() { loop {} }
         return irq_schedule_with_fpu(frame_address);
     }
@@ -195,7 +200,7 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
             if timer_count <= 3 { x86_serial_write_hex32_marker('T' as u8, timer_count as u32); }
             scheduler_sleep_on_timer_tick(timer_count);
         }
-        if !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
+        if !scheduler_is_active() || !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }
         return irq_schedule_with_fpu(frame_address);
     }
     if vector == IRQ_VECTOR_KEYBOARD as u64 {
