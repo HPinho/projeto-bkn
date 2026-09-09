@@ -9,7 +9,6 @@ module kernel::arch::x86_64::exceptions;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::smp::*;
-import kernel::arch::x86_64::thread_context::*;
 import kernel::interrupts::irq::*;
 import kernel::process::registry::*;
 import kernel::scheduler::core::*;
@@ -256,10 +255,27 @@ pub fn page_fault_was_shadow_stack(error_code: u64) -> bool {
     return (error_code & PAGE_FAULT_SHADOW_STACK) != 0;
 }
 
+// Diagnóstico terminal usa o frame que causou a exceção, não um frame global
+// preparado anteriormente pelo scheduler. Isso evita atribuir #GP a uma thread
+// diferente em SMP e torna o gate fail-closed acionável em uma única execução.
 @system
-fn exception_terminal(vector: u64) -> u64 {
+fn exception_terminal(vector: u64, frame_address: u64) -> u64 {
     x86_serial_write_hex32_marker('E' as u8, vector as u32);
-    if vector == EXCEPTION_GENERAL_PROTECTION { x86_kernel_thread_dump_last_prepared_frame(); }
+    if frame_address != 0 {
+        let frame = unsafe { frame_address as *const ExceptionSavedFrame };
+        if frame != (null as *const ExceptionSavedFrame) {
+            unsafe {
+                x86_serial_write_hex32_marker('e' as u8, frame.error_code as u32);
+                x86_serial_write_hex32_marker('i' as u8, frame.rip as u32);
+                x86_serial_write_hex32_marker('c' as u8, frame.cs as u32);
+                x86_serial_write_hex32_marker('f' as u8, frame.rflags as u32);
+            }
+            x86_serial_write_hex32_marker('q' as u8, exception_current_cpu_slot() as u32);
+            if scheduler_is_active() {
+                x86_serial_write_hex32_marker('t' as u8, scheduler_current_thread_id() as u32);
+            }
+        }
+    }
     return 0;
 }
 
@@ -283,7 +299,9 @@ fn exception_write_user_exit_marker() -> void {
 pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> u64 {
     let frame = unsafe { frame_address as *const ExceptionSavedFrame };
 
-    if frame == (null as *const ExceptionSavedFrame) { return exception_terminal(0xFFFFFFFFFFFFFFFF); }
+    if frame == (null as *const ExceptionSavedFrame) {
+        return exception_terminal(0xFFFFFFFFFFFFFFFF, 0);
+    }
 
     let cpu_slot = exception_current_cpu_slot();
     let mut user = false;
@@ -318,5 +336,5 @@ pub fn sotlas_x86_exception_dispatch(frame_address: u64) -> u64 {
             return selected;
         }
     }
-    return exception_terminal(vector);
+    return exception_terminal(vector, frame_address);
 }
