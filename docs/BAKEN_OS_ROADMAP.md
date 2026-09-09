@@ -47,6 +47,36 @@ devem preservar os três gates, mas não reabrem a Fase 1 sem regressão comprov
 
 ## Fase 2 — Platform e drivers de produção
 
+### Manutenção da base durante a Fase 2 — 2026-09-09
+
+O SMP #125 (`34361644768`, SHA `3a744347345270ab2f9a413d421cde2d4a1420d2`)
+passou instalação, contratos e build, mas falhou por ausência de
+`BAKEN:SMP_PROCESS_MIGRATED`. A certificação da Fase 1 acima é histórica,
+específica ao SHA indicado; não certifica automaticamente commits posteriores.
+
+Correção em validação: após publicar a afinidade no scheduler, o timer do AP
+pode despachar imediatamente a thread. O probe não pode exigir owner `NONE`
+depois de liberar o lock; essa precondição continua exigida dentro do setter.
+A confirmação de owner AP, afinidade e CR3 agora usa o mesmo switch lock que
+protege o despacho e a publicação do root. O workflow também executa os
+contratos AML e de fault isolation e publica o último checkpoint de migração
+nas anotações de erro. O fechamento desta regressão exige nova prova QEMU;
+testes de contrato sozinhos não certificam concorrência.
+
+A prova local também detectou um imediato x86-64 errado no probe de #PF:
+`0x00200000001FE000` foi corrigido para a guard page `0x00002000001FE000`.
+O teste agora decodifica os bytes e compara o endereço com o layout de memória,
+em vez de exigir uma sequência literal. A CI SMP executa três boots independentes
+e exige sucesso em todos, preservando logs separados e parando na primeira falha.
+
+Validação local da correção: build nativo com 145 objetos/143 módulos e três
+boots QEMU q35, duas CPUs, 512 MiB, ISO UEFI e EDK2 x86-64 do host Windows.
+Todos os 18 marcadores obrigatórios foram observados nos três boots (~7 s cada),
+incluindo AML, fault isolation BSP/AP, migração e FPU. Logs locais:
+`build/smp-fix-1.log`, `build/smp-fix-2.log`, `build/smp-fix-3.log`.
+Os gates Linux do GitHub ainda precisam validar o novo commit; a evidência
+local não substitui essa certificação.
+
 **Estado: ▶️ EM DESENVOLVIMENTO.**
 
 Primeiro incremento implementado localmente: catálogo seguro de definition

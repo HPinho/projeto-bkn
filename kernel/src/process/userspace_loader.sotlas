@@ -116,7 +116,7 @@ fn userspace_materialize_fault_probe(code_physical: u64) -> bool {
     // mov rax, USERSPACE_STACK_GUARD; mov al, [rax]. A guard page não existe,
     // portanto a leitura produz #PF com origem CPL3 e bit USER definido.
     let code: [u8; USERSPACE_FAULT_PROBE_CODE_BYTES] = [
-        72,184,0,224,31,0,0,0,32,0,138,0
+        72,184,0,224,31,0,0,32,0,0,138,0
     ];
     unsafe {
         let mut index: usize = 0;
@@ -510,11 +510,17 @@ fn userspace_migration_wait_ap(thread_id: u64, root: u64) -> bool {
     let mut spins: u64 = 0;
     while spins < SCHEDULER_ROUND_TRIP_SPIN_LIMIT {
         __dma_fence();
-        if scheduler_thread_owner_cpu(thread_id) == USERSPACE_MIGRATION_CPU_SLOT as u32 &&
+        let flags = x86_irq_save_disable();
+        if !scheduler_switch_lock() { x86_irq_restore(flags); return false; }
+        // O IRQ publica owner, CR3 e FPU sob este mesmo lock. Uma leitura
+        // composta fora dele pode misturar duas decisoes de scheduling.
+        let observed = scheduler_thread_owner_cpu(thread_id) == USERSPACE_MIGRATION_CPU_SLOT as u32 &&
            scheduler_thread_affinity_cpu(thread_id) == USERSPACE_MIGRATION_CPU_SLOT as u32 &&
-           tlb_shootdown_cpu_root(USERSPACE_MIGRATION_CPU_SLOT) == root {
-            return true;
-        }
+           tlb_shootdown_cpu_root(USERSPACE_MIGRATION_CPU_SLOT) == root;
+        let unlocked = scheduler_switch_unlock();
+        x86_irq_restore(flags);
+        if !unlocked { return false; }
+        if observed { return true; }
         x86_cpu_pause();
         spins += 1;
     }
@@ -652,16 +658,16 @@ pub fn userspace_loader_run_migration_probe() -> bool {
             repinned = scheduler_set_thread_affinity(tid, USERSPACE_MIGRATION_CPU_SLOT);
         }
         x86_irq_restore(flags);
-        // `started == 1` pode ser observado enquanto a thread ainda pertence ao
-        // BSP. Nesse caso o repin deve falhar atomicamente e ser repetido depois
-        // de outro yield, quando o timer a devolver a READY/unowned. Contenção
-        // transitória não é falha do contrato de migração.
+        // Mantem tentativas limitadas; a precondicao READY/unowned pertence
+        // exclusivamente ao scheduler_set_thread_affinity sob o switch lock.
         if repinned { break; }
         handoffs += 1;
     }
+    // A publicacao da afinidade permite despacho imediato pelo timer do AP,
+    // inclusive antes do IPI abaixo. Nao exigir owner NONE depois do unlock:
+    // o destino ja pode ser owner. A prova seguinte exige owner AP + CR3 real.
     if !repinned ||
-       scheduler_thread_affinity_cpu(tid) != USERSPACE_MIGRATION_CPU_SLOT as u32 ||
-       scheduler_thread_owner_cpu(tid) != SCHEDULER_CPU_NONE { return false; }
+       scheduler_thread_affinity_cpu(tid) != USERSPACE_MIGRATION_CPU_SLOT as u32 { return false; }
     userspace_migration_diag(5);
 
     let apic_id = smp_cpu_apic_id(USERSPACE_MIGRATION_CPU_SLOT);

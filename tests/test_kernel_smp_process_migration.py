@@ -99,7 +99,6 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
             "scheduler_yield()",
             "let flags = x86_irq_save_disable();",
             "scheduler_set_thread_affinity(tid, USERSPACE_MIGRATION_CPU_SLOT)",
-            "scheduler_thread_owner_cpu(tid) != SCHEDULER_CPU_NONE",
             "lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)",
             "userspace_migration_wait_ap(tid, root)",
             "x86_mmio_write32(release_address, 1)",
@@ -130,6 +129,23 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
         self.assertIn("scheduler_thread_owner_cpu(thread_id) == USERSPACE_MIGRATION_CPU_SLOT as u32", wait_ap)
         self.assertIn("scheduler_thread_affinity_cpu(thread_id) == USERSPACE_MIGRATION_CPU_SLOT as u32", wait_ap)
         self.assertIn("tlb_shootdown_cpu_root(USERSPACE_MIGRATION_CPU_SLOT) == root", wait_ap)
+        self.assertLess(wait_ap.index("x86_irq_save_disable()"), wait_ap.index("scheduler_switch_lock()"))
+        self.assertLess(wait_ap.index("scheduler_switch_lock()"), wait_ap.index("let observed ="))
+        self.assertLess(wait_ap.index("== root;"), wait_ap.index("let unlocked = scheduler_switch_unlock()"))
+        self.assertLess(wait_ap.index("let unlocked = scheduler_switch_unlock()"), wait_ap.rindex("x86_irq_restore(flags)"))
+
+    def test_timer_may_claim_destination_before_reschedule_ipi(self):
+        body = LOADER.read_text(encoding="utf-8").split(
+            "pub fn userspace_loader_run_migration_probe() -> bool", 1
+        )[1]
+        # READY/unowned is checked inside the setter's lock (tested above).
+        # Once published, AP timer dispatch is legal even before the BSP's IPI.
+        # Do not reject that interleaving by testing a transient owner here.
+        published = body.split("if !repinned ||", 1)[1].split(
+            "userspace_migration_wait_ap(tid, root)", 1
+        )[0]
+        self.assertNotIn("scheduler_thread_owner_cpu", published)
+        self.assertIn("scheduler_thread_affinity_cpu(tid)", published)
 
     def test_irq_serializes_fxsave_schedule_and_fxrstor_for_all_cpus(self):
         text = IRQ.read_text(encoding="utf-8")

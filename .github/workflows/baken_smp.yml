@@ -49,6 +49,9 @@ jobs:
           python3 tests/test_kernel_smp_ring3.py
           python3 tests/test_process_smp_tlb_coherence.py
           python3 tests/test_kernel_smp_process_migration.py
+          python3 tests/test_kernel_user_fault_isolation.py
+          python3 tests/test_acpi_aml_tables.py
+          python3 tests/test_acpi_aml_decoder.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -63,16 +66,17 @@ jobs:
           test -s build/baken_os.iso
 
       - name: Prove AP Dispatch, Heap, TLB, Ring3 Migration and FPU Context
-        # O TCG do runner agora executa dois processos de fault isolation além
-        # das provas de heap/TLB/Ring3/FPU. Reserve cinco minutos ao QEMU e um
-        # minuto adicional ao diagnóstico/cleanup do step.
-        timeout-minutes: 6
+        # Tres boots independentes: todos devem provar os contratos de SMP.
+        # Uma falha encerra o gate; nao e uma retentativa para esconder corridas.
+        timeout-minutes: 18
         shell: bash
         run: |
           OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
           test -n "$OVMF_CODE"
           OVMF_VARS="${OVMF_CODE/CODE/VARS}"
           test -f "$OVMF_VARS"
+          for proof in 1 2 3; do
+          echo "SMP proof ${proof}/3 revision $(git rev-parse HEAD)"
           cp "$OVMF_VARS" build/OVMF_VARS_SMP.fd
           rm -f build/qemu-smp-serial.log
 
@@ -106,6 +110,7 @@ jobs:
           kill "$qemu_pid" 2>/dev/null || true
           wait "$qemu_pid" 2>/dev/null || true
           test -f build/qemu-smp-serial.log
+          cp build/qemu-smp-serial.log "build/qemu-smp-serial-${proof}.log"
           cat build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
             echo '::error::CPU exception reported during SMP/heap/TLB/Ring3/FPU migration proof.'
@@ -126,6 +131,10 @@ jobs:
           require_marker() {
             if ! grep -Fxq "$1" build/qemu-smp-serial.log; then
               echo "::error::Missing $1 in SMP QEMU proof."
+              migration_stage=$(grep -E '^BAKEN:HEX=M:[0-9A-Fa-f]{8}$' build/qemu-smp-serial.log | tail -n 1 || true)
+              if test -n "$migration_stage"; then
+                echo "::error::Last migration checkpoint: $migration_stage (1=start, 2=process, 3=mappings, 4=thread, 5=repin, 6=IPI, 7=AP/root, 8=FPU result, 9=reaped, A=cleanup)."
+              fi
               echo '--- last Baken checkpoints ---' >&2
               grep -Eo 'BAKEN:[^[:space:]]+' build/qemu-smp-serial.log | tail -n 64 >&2 || true
               exit 1
@@ -150,12 +159,13 @@ jobs:
           require_marker 'BAKEN:USER_FAULT_ISOLATED_READY'
           require_marker 'BAKEN:SMP_USER_FAULT_ISOLATED_READY'
           test "$found" -eq 1
+          done
 
       - name: Upload SMP diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
           name: qemu-smp-diagnostics
-          path: build/qemu-smp-serial.log
+          path: build/qemu-smp-serial*.log
           if-no-files-found: warn
           retention-days: 7

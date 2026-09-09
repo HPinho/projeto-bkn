@@ -1,5 +1,6 @@
 """Contratos da recuperação de page fault CPL3 sem derrubar o kernel."""
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,7 +17,17 @@ class KernelUserFaultIsolationTests(unittest.TestCase):
         )[0]
         self.assertIn("USERSPACE_STACK_GUARD", body)
         self.assertIn("USERSPACE_FAULT_PROBE_CODE_BYTES", body)
-        self.assertIn("72,184,0,224,31,0,0,0,32,0,138,0", body)
+        payload = re.search(r"let code:.*?=\s*\[([^]]+)\]", body, re.S).group(1)
+        code = bytes(int(byte.strip()) for byte in payload.split(",") if byte.strip())
+        self.assertEqual(code[:2], bytes.fromhex("48 b8"))  # movabs rax, imm64
+        self.assertEqual(code[10:], bytes.fromhex("8a 00"))  # mov al, [rax]
+        address_space = (ROOT / "kernel/src/process/address_space.sotlas").read_text()
+        def constant(name):
+            return int(re.search(rf"{name}: u64 = (0x[0-9A-Fa-f]+);", address_space).group(1), 16)
+        expected_guard = constant("PROCESS_USER_BASE") + constant("PROCESS_USER_WINDOW_SIZE") - 0x2000
+        address = int.from_bytes(code[2:10], "little")
+        self.assertEqual(address, expected_guard)
+        self.assertLess(address, 1 << 47, "probe must address canonical low-half memory")
 
     def test_user_fault_requires_cpl3_pf_reaper_and_address_space_teardown(self):
         loader = LOADER.read_text(encoding="utf-8")
@@ -65,7 +76,8 @@ class KernelUserFaultIsolationTests(unittest.TestCase):
         self.assertLess(run.index("scheduler_smp_probe_run()"), run.index("userspace_loader_run_ap_fault_probe()"))
         self.assertLess(run.index("userspace_loader_run_ap_fault_probe()"), run.index("userspace_loader_run_migration_probe()"))
         self.assertIn("require_marker 'BAKEN:SMP_USER_FAULT_ISOLATED_READY'", workflow)
-        self.assertIn("timeout-minutes: 6", workflow)
+        self.assertIn("timeout-minutes: 18", workflow)
+        self.assertIn("for proof in 1 2 3; do", workflow)
         self.assertIn("for i in $(seq 1 3000); do", workflow)
 
     def test_runtime_requires_fault_isolation_before_smp_probes(self):
