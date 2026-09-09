@@ -51,7 +51,10 @@ jobs:
           test -s build/baken_os.iso
 
       - name: Prove AP Dispatch, Heap, TLB, Ring3 Migration and FPU Context
-        timeout-minutes: 4
+        # O TCG do runner agora executa dois processos de fault isolation além
+        # das provas de heap/TLB/Ring3/FPU. Reserve cinco minutos ao QEMU e um
+        # minuto adicional ao diagnóstico/cleanup do step.
+        timeout-minutes: 6
         shell: bash
         run: |
           OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
@@ -74,7 +77,7 @@ jobs:
           qemu_pid=$!
 
           found=0
-          for i in $(seq 1 1200); do
+          for i in $(seq 1 3000); do
             if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' build/qemu-smp-serial.log; then
               found=1
               break

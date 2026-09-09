@@ -65,6 +65,8 @@ class KernelUserFaultIsolationTests(unittest.TestCase):
         self.assertLess(run.index("scheduler_smp_probe_run()"), run.index("userspace_loader_run_ap_fault_probe()"))
         self.assertLess(run.index("userspace_loader_run_ap_fault_probe()"), run.index("userspace_loader_run_migration_probe()"))
         self.assertIn("require_marker 'BAKEN:SMP_USER_FAULT_ISOLATED_READY'", workflow)
+        self.assertIn("timeout-minutes: 6", workflow)
+        self.assertIn("for i in $(seq 1 3000); do", workflow)
 
     def test_runtime_requires_fault_isolation_before_smp_probes(self):
         body = RUNTIME.read_text(encoding="utf-8").split("pub fn baken_native_kernel_run", 1)[1]
