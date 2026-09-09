@@ -92,6 +92,22 @@ jobs:
           wait "$qemu_pid" 2>/dev/null || true
           test -f build/qemu-smp-serial.log
           cat build/qemu-smp-serial.log
+          if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
+            echo '::error::CPU exception reported during SMP/heap/TLB/Ring3/FPU migration proof.'
+            exit 1
+          fi
+          if grep -Fxq 'BAKEN:HEX=J:00000001' build/qemu-smp-serial.log; then
+            echo '::error::scheduler_initialize() failed before the first SMP context switch.'
+            exit 1
+          fi
+          if grep -Fxq 'BAKEN:HEX=J:00000002' build/qemu-smp-serial.log; then
+            echo '::error::Scheduler initialized, but the BSP never completed its first IRQ round-trip.'
+            exit 1
+          fi
+          if ! grep -Fxq 'BAKEN:SCHEDULER_INITIALIZED' build/qemu-smp-serial.log; then
+            echo '::error::Kernel stalled between FPU_CONTEXT_READY and scheduler initialization diagnostics.'
+            exit 1
+          fi
           require_marker() {
             if ! grep -Fxq "$1" build/qemu-smp-serial.log; then
               echo "::error::Missing $1 in SMP QEMU proof."
@@ -115,10 +131,6 @@ jobs:
           require_marker 'BAKEN:SMP_PROCESS_MIGRATED'
           require_marker 'BAKEN:SMP_FPU_MIGRATION_READY'
           require_marker 'BAKEN:USER_FAULT_ISOLATED_READY'
-          if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
-            echo '::error::CPU exception reported during SMP/heap/TLB/Ring3/FPU migration proof.'
-            exit 1
-          fi
           test "$found" -eq 1
 
       - name: Upload SMP diagnostics
