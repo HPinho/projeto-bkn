@@ -116,6 +116,14 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
         self.assertLess(ap, release)
         self.assertNotIn("x86_write_cr3_raw", body)
 
+        retry = body.split("while handoffs < SCHEDULER_ROUND_TRIP_SPIN_LIMIT && !repinned", 1)[1].split(
+            "if !repinned ||", 1
+        )[0]
+        self.assertIn("repinned = scheduler_set_thread_affinity", retry)
+        self.assertIn("if repinned { break; }", retry)
+        self.assertNotIn("if !repinned { return false; }", retry)
+        self.assertLess(retry.index("scheduler_yield()"), retry.index("scheduler_set_thread_affinity"))
+
         wait_ap = text.split("fn userspace_migration_wait_ap", 1)[1].split(
             "fn userspace_migration_wait_result", 1
         )[0]
@@ -148,6 +156,23 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
         self.assertIn("BAKEN:SMP_PROCESS_MIGRATED", workflow)
         self.assertIn("BAKEN:SMP_FPU_MIGRATION_READY", workflow)
         self.assertIn("require_marker 'BAKEN:SMP_FPU_MIGRATION_READY'", workflow)
+
+    def test_migration_probe_has_stage_diagnostics_and_ci_retries_runner_packages(self):
+        loader = LOADER.read_text(encoding="utf-8")
+        body = loader.split("pub fn userspace_loader_run_migration_probe() -> bool", 1)[1]
+        self.assertIn("fn userspace_migration_diag(stage: u32) -> void", loader)
+        self.assertIn("x86_serial_write_hex32_marker('M' as u8, stage)", loader)
+        for stage in range(1, 11):
+            self.assertIn(f"userspace_migration_diag({stage});", body)
+
+        workflow = WORKFLOW.read_text(encoding="utf-8")
+        self.assertIn("apt_retry()", workflow)
+        self.assertIn("Acquire::Retries=5", workflow)
+        self.assertIn("apt_retry update", workflow)
+        self.assertIn("apt_retry install -y qemu-system-x86", workflow)
+        self.assertIn("actions/checkout@v6", workflow)
+        self.assertIn("actions/setup-python@v6", workflow)
+        self.assertIn("actions/upload-artifact@v6", workflow)
 
 
 if __name__ == "__main__":

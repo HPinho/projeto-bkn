@@ -70,7 +70,7 @@ class PostCutoverSerialCheckpointTests(unittest.TestCase):
         self.assertIn("printf 'sendkey a\\n' | socat - UNIX-CONNECT:build/qemu-monitor.sock", text)
         self.assertIn("BAKEN_CI_REVISION=$(git rev-parse --short HEAD)", text)
         self.assertIn("QEMU não alcançou BAKEN:${marker}", text)
-        self.assertIn("uses: actions/upload-artifact@v4", text)
+        self.assertIn("uses: actions/upload-artifact@v6", text)
         self.assertIn("name: qemu-boot-diagnostics", text)
         self.assertIn("for marker in TIMER_READY STEP=T STEP=K STEP=X STEP=D STEP=N", text)
         self.assertIn('grep -q "BAKEN:${marker}" build/qemu-serial.log', text)

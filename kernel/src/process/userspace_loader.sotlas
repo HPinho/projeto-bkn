@@ -58,6 +58,11 @@ fn userspace_diag(stage: u32) -> void {
 }
 
 @system
+fn userspace_migration_diag(stage: u32) -> void {
+    if x86_serial_is_ready() { x86_serial_write_hex32_marker('M' as u8, stage); }
+}
+
+@system
 fn userspace_zero_frame(physical: u64) -> bool {
     let virtual_address = direct_map_virtual_address(physical);
     if virtual_address == 0 { return false; }
@@ -558,6 +563,7 @@ fn userspace_emit_migration_markers() -> bool {
 
 @system
 pub fn userspace_loader_run_migration_probe() -> bool {
+    userspace_migration_diag(1);
     unsafe { if !USERSPACE_FINISHED || USERSPACE_PID != 0 { return false; } }
     if smp_runtime_ap_count() == 0 { return true; }
     if USERSPACE_MIGRATION_CPU_SLOT >= SCHEDULER_CPU_SLOT_COUNT ||
@@ -565,6 +571,7 @@ pub fn userspace_loader_run_migration_probe() -> bool {
 
     let pid = process_create();
     if pid == 0 { return false; }
+    userspace_migration_diag(2);
     let code = pmm_alloc_page();
     let data = pmm_alloc_page();
     let stack = pmm_alloc_page();
@@ -590,6 +597,7 @@ pub fn userspace_loader_run_migration_probe() -> bool {
         userspace_teardown_mapping(pid, code, data, stack);
         return false;
     }
+    userspace_migration_diag(3);
 
     let data_virtual = direct_map_virtual_address(data);
     if data_virtual == 0 {
@@ -632,6 +640,7 @@ pub fn userspace_loader_run_migration_probe() -> bool {
     if !process_release(pid) { loop { x86_cpu_pause(); } }
     unsafe { USERSPACE_TID = tid; }
     if scheduler_thread_affinity_cpu(tid) != 0 { return false; }
+    userspace_migration_diag(4);
 
     let reap_before = scheduler_reap_count();
     let mut handoffs: u64 = 0;
@@ -641,25 +650,32 @@ pub fn userspace_loader_run_migration_probe() -> bool {
         let flags = x86_irq_save_disable();
         if x86_mmio_read32(started_address) == 1 {
             repinned = scheduler_set_thread_affinity(tid, USERSPACE_MIGRATION_CPU_SLOT);
-            x86_irq_restore(flags);
-            if !repinned { return false; }
-            break;
         }
         x86_irq_restore(flags);
+        // `started == 1` pode ser observado enquanto a thread ainda pertence ao
+        // BSP. Nesse caso o repin deve falhar atomicamente e ser repetido depois
+        // de outro yield, quando o timer a devolver a READY/unowned. Contenção
+        // transitória não é falha do contrato de migração.
+        if repinned { break; }
         handoffs += 1;
     }
     if !repinned ||
        scheduler_thread_affinity_cpu(tid) != USERSPACE_MIGRATION_CPU_SLOT as u32 ||
        scheduler_thread_owner_cpu(tid) != SCHEDULER_CPU_NONE { return false; }
+    userspace_migration_diag(5);
 
     let apic_id = smp_cpu_apic_id(USERSPACE_MIGRATION_CPU_SLOT);
     if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    userspace_migration_diag(6);
     if !userspace_migration_wait_ap(tid, root) { return false; }
+    userspace_migration_diag(7);
 
     x86_mmio_write32(release_address, 1);
     __dma_fence();
     if !userspace_migration_wait_result(passed_address, failed_address) { return false; }
+    userspace_migration_diag(8);
     if !userspace_migration_wait_reaped(pid, reap_before) { return false; }
+    userspace_migration_diag(9);
     if syscall_last_exit_code() != 0 { return false; }
 
     if !userspace_teardown_mapping(pid, code, data, stack) { return false; }
@@ -667,5 +683,6 @@ pub fn userspace_loader_run_migration_probe() -> bool {
         USERSPACE_PID = 0;
         USERSPACE_TID = 0;
     }
+    userspace_migration_diag(10);
     return userspace_emit_migration_markers();
 }

@@ -37,12 +37,19 @@ class KernelSmokeGateTests(unittest.TestCase):
                 gate = f"python3 tools/scripts/verify_kernel_smoke.py build/{log}"
                 self.assertIn(gate, source)
                 self.assertLess(source.index(gate), source.index("--verify build/"))
-                self.assertIn("timeout-minutes: 10", source)
+                self.assertIn("timeout-minutes: 20", source)
 
     def test_all_qemu_workflows_retry_transient_apt_downloads(self):
         root = Path(__file__).resolve().parents[1]
         for workflow in ("baken_ci.yml", "baken_nvme_only.yml", "baken_smp.yml"):
             with self.subTest(workflow=workflow):
                 source = (root / ".github" / "workflows" / workflow).read_text(encoding="utf-8")
-                self.assertIn("apt-get -o Acquire::Retries=3 update", source)
-                self.assertIn("apt-get -o Acquire::Retries=3 install", source)
+                self.assertIn("apt_retry()", source)
+                self.assertIn("Acquire::Retries=5", source)
+                self.assertIn("apt_retry update", source)
+                self.assertIn("apt_retry install -y qemu-system-x86", source)
+                self.assertIn('test "$attempt" -ge 3', source)
+                self.assertIn("timeout-minutes: 20", source)
+                self.assertIn("actions/checkout@v6", source)
+                self.assertIn("actions/setup-python@v6", source)
+                self.assertIn("actions/upload-artifact@v6", source)

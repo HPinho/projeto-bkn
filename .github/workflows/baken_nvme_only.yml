@@ -12,18 +12,30 @@ jobs:
 
     steps:
       - name: Checkout Codebase
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Python 3.11
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
       - name: Install System Dependencies & QEMU
-        timeout-minutes: 10
+        timeout-minutes: 20
         run: |
-          timeout --foreground 4m sudo apt-get -o Acquire::Retries=3 update
-          timeout --foreground 6m sudo apt-get -o Acquire::Retries=3 install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
+          apt_retry() {
+            local attempt=1
+            while ! timeout --foreground 6m sudo apt-get -o Acquire::Retries=5 "$@"; do
+              if test "$attempt" -ge 3; then
+                echo "::error::apt-get $1 failed after $attempt attempts."
+                return 1
+              fi
+              echo "::warning::apt-get $1 attempt $attempt failed; retrying in 10 seconds."
+              attempt=$((attempt + 1))
+              sleep 10
+            done
+          }
+          apt_retry update
+          apt_retry install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
 
       - name: Verify NVMe Storage Contracts
         run: |
@@ -162,7 +174,7 @@ jobs:
 
       - name: Upload NVMe-only boot diagnostics
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: qemu-nvme-only-diagnostics
           path: |
