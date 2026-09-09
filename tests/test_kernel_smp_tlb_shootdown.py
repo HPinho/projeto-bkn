@@ -111,7 +111,7 @@ class KernelSmpTlbShootdownTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("python3 tests/test_kernel_smp_tlb_shootdown.py", workflow)
         self.assertIn("BAKEN:SMP_TLB_SHOOTDOWN_READY", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_TLB_SHOOTDOWN_READY'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_TLB_SHOOTDOWN_READY'", workflow)
 
 
 if __name__ == "__main__":

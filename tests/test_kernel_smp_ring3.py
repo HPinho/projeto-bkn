@@ -141,10 +141,10 @@ class KernelSmpRing3Tests(unittest.TestCase):
             "BAKEN:SMP_RING3_ON_AP_READY",
         ):
             self.assertIn(marker, workflow)
-        self.assertIn("grep -Fxq 'BAKEN:SMP_RING3_ON_AP'", workflow)
-        self.assertIn("grep -Fxq 'BAKEN:SMP_RING3_RESUMED_ON_AP'", workflow)
-        self.assertIn("grep -Fxq 'BAKEN:SMP_PROCESS_TLB_READY'", workflow)
-        self.assertIn("grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_RING3_ON_AP'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_RING3_RESUMED_ON_AP'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_PROCESS_TLB_READY'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_RING3_ON_AP_READY'", workflow)
 
 
 if __name__ == "__main__":

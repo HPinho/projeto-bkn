@@ -97,7 +97,7 @@ class KernelSmpHeapTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("python3 tests/test_kernel_smp_heap.py", workflow)
         self.assertIn("BAKEN:SMP_HEAP_READY", workflow)
-        self.assertIn("grep -Fxq 'BAKEN:SMP_HEAP_READY'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_HEAP_READY'", workflow)
 
 
 if __name__ == "__main__":

@@ -147,7 +147,7 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
         self.assertIn("python3 tests/test_kernel_smp_process_migration.py", workflow)
         self.assertIn("BAKEN:SMP_PROCESS_MIGRATED", workflow)
         self.assertIn("BAKEN:SMP_FPU_MIGRATION_READY", workflow)
-        self.assertIn("grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_FPU_MIGRATION_READY'", workflow)
 
 
 if __name__ == "__main__":

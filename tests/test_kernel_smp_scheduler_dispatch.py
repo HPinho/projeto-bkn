@@ -95,7 +95,7 @@ class KernelSmpSchedulerDispatchTests(unittest.TestCase):
         workflow = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("python3 tests/test_kernel_smp_scheduler_dispatch.py", workflow)
         self.assertIn("BAKEN:SMP_THREAD_ON_AP", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_THREAD_ON_AP'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_THREAD_ON_AP'", workflow)
 
 if __name__ == "__main__":
     unittest.main()

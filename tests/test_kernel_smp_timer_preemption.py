@@ -78,7 +78,7 @@ class KernelSmpTimerPreemptionTests(unittest.TestCase):
         self.assertIn("BAKEN:SMP_THREAD_ON_AP", workflow)
         self.assertIn("BAKEN:SMP_TIMER_ON_AP", workflow)
         self.assertIn("BAKEN:SMP_ANY_THREAD_ON_AP", workflow)
-        self.assertIn("grep -Fq 'BAKEN:SMP_ANY_THREAD_ON_AP'", workflow)
+        self.assertIn("require_marker 'BAKEN:SMP_ANY_THREAD_ON_AP'", workflow)
 
 if __name__ == "__main__":
     unittest.main()
