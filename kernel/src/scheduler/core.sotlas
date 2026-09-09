@@ -574,7 +574,10 @@ pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u6
     if !process_retain(pid) { x86_irq_restore(flags); return 0; }
     let root = process_borrow_root(pid);
     if root == 0 { process_release(pid); x86_irq_restore(flags); return 0; }
-    let tid = scheduler_create_kernel_thread(entry_rip, stack_pages);
+    // Uma process thread nasce pinned no BSP. O helper publica READY+affinity
+    // sob o switch lock e o IF externo permanece 0 até PID/CR3 serem anexados.
+    // Assim nenhum AP observa READY/ANY e o BSP não pode despachá-la cedo.
+    let tid = scheduler_create_kernel_thread_with_affinity(entry_rip, stack_pages, 0);
     if tid == 0 { process_release(pid); x86_irq_restore(flags); return 0; }
     if !scheduler_switch_lock() { process_release(pid); x86_irq_restore(flags); return 0; }
     let slot = scheduler_find_thread_slot(tid);
@@ -589,9 +592,8 @@ pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u6
     return tid;
 }
 
-// Publica uma process thread no AP sem abrir uma janela READY com afinidade
-// incorreta. O wrapper mantém IF=0 no BSP enquanto a criação histórica fixa
-// temporariamente a thread em CPU0; APs não podem capturá-la antes do repin.
+// Publica uma process thread no AP sem abrir janela READY/ANY. A criação base
+// permanece pinned em CPU0 com IF=0; este wrapper repina antes de restaurar IF.
 @system
 pub fn scheduler_create_process_thread_on_cpu(pid: u64, entry_rip: u64,
                                               stack_pages: u64, cpu_slot: usize) -> u64 {
@@ -614,6 +616,39 @@ pub fn scheduler_create_process_thread_on_cpu(pid: u64, entry_rip: u64,
     if !scheduler_switch_unlock() { loop { x86_cpu_pause(); } }
     x86_irq_restore(flags);
     return tid;
+}
+
+// Migração controlada: somente uma thread dinâmica já preemptada (READY), com
+// frame salvo e sem owner, pode trocar de CPU. O switch lock torna state/owner/
+// affinity uma única decisão; o caller pode então enviar o reschedule IPI.
+@system
+pub fn scheduler_set_thread_affinity(thread_id: u64, cpu_slot: usize) -> bool {
+    if !scheduler_is_active() || thread_id < SCHEDULER_FIRST_DYNAMIC_THREAD_ID ||
+       cpu_slot >= SCHEDULER_CPU_SLOT_COUNT { return false; }
+    unsafe {
+        if cpu_slot != 0 && !SCHEDULER_CPU_REGISTERED[cpu_slot] { return false; }
+    }
+    let flags = x86_irq_save_disable();
+    if !scheduler_switch_lock() { x86_irq_restore(flags); return false; }
+    let slot = scheduler_find_thread_slot(thread_id);
+    if slot == SCHEDULER_INVALID_SLOT {
+        scheduler_switch_unlock();
+        x86_irq_restore(flags);
+        return false;
+    }
+    unsafe {
+        if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_READY ||
+           SCHEDULER_THREADS[slot].saved_frame == 0 ||
+           SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE {
+            scheduler_switch_unlock();
+            x86_irq_restore(flags);
+            return false;
+        }
+        SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32;
+    }
+    scheduler_switch_unlock();
+    x86_irq_restore(flags);
+    return true;
 }
 
 @system
@@ -723,6 +758,13 @@ pub fn scheduler_thread_owner_cpu(thread_id: u64) -> u32 {
     let slot = scheduler_find_thread_slot(thread_id);
     if slot == SCHEDULER_INVALID_SLOT { return SCHEDULER_CPU_NONE; }
     unsafe { return SCHEDULER_THREAD_OWNER_CPU[slot]; }
+}
+
+@system
+pub fn scheduler_thread_affinity_cpu(thread_id: u64) -> u32 {
+    let slot = scheduler_find_thread_slot(thread_id);
+    if slot == SCHEDULER_INVALID_SLOT { return SCHEDULER_CPU_NONE; }
+    unsafe { return SCHEDULER_THREAD_AFFINITY_CPU[slot]; }
 }
 
 @system

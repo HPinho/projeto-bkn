@@ -32,14 +32,21 @@ class ProcessSmpTlbCoherenceTests(unittest.TestCase):
         self.assertIn("x86_mmio_write32(tlb_u32_address(ack), generation);", body)
         self.assertLess(body.index(conditional), body.index("x86_mmio_write32(tlb_u32_address(ack), generation);"))
 
-    def test_local_requester_uses_same_root_filter(self):
+    def test_local_requester_uses_same_root_filter_and_selective_remote_transport(self):
         text = TLB.read_text(encoding="utf-8")
         body = text.split("fn tlb_shootdown_page(address: u64, root: u64) -> bool", 1)[1]
         body = body.split("pub fn tlb_shootdown_kernel_page", 1)[0]
         self.assertIn("let current_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;", body)
         self.assertIn("if root == 0 || current_root == root { x86_invlpg(address); }", body)
+        self.assertIn("tlb_shootdown_send_address_space_targets(root, requester_slot)", body)
         self.assertIn("xapic_ipi_send_fixed_all_excluding_self", body)
         self.assertIn("tlb_shootdown_wait_ack", body)
+
+        selective = text.split("fn tlb_shootdown_send_address_space_targets", 1)[1]
+        selective = selective.split("fn tlb_shootdown_page", 1)[0]
+        self.assertIn("published_root == 0 || published_root == root", selective)
+        self.assertIn("xapic_ipi_send_fixed(", selective)
+        self.assertNotIn("xapic_ipi_send_fixed_all_excluding_self", selective)
 
     def test_process_registry_vm_pins_lifetime_but_releases_lock_before_shootdown(self):
         text = REGISTRY.read_text(encoding="utf-8")

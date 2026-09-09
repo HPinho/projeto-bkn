@@ -13,10 +13,15 @@ class ProcessSchedulerTests(unittest.TestCase):
     def test_retain_precedes_ready_publication_and_pid_binding_is_irq_off(self):
         body = self.code.split("pub fn scheduler_create_process_thread", 1)[1].split(
             "pub fn scheduler_block_current", 1)[0]
+        helper = "scheduler_create_kernel_thread_with_affinity(entry_rip, stack_pages, 0)"
         self.assertLess(body.index("x86_irq_save_disable()"), body.index("process_retain(pid)"))
-        self.assertLess(body.index("process_retain(pid)"), body.index("scheduler_create_kernel_thread("))
+        self.assertLess(body.index("process_retain(pid)"), body.index(helper))
+        self.assertNotIn("scheduler_create_kernel_thread(entry_rip, stack_pages)", body)
         self.assertIn("SCHEDULER_THREADS[slot].process_id = pid", body)
         self.assertIn("SCHEDULER_THREADS[slot].address_space_root = root", body)
+        self.assertLess(body.index(helper), body.index("SCHEDULER_THREADS[slot].process_id = pid"))
+        self.assertLess(body.index("SCHEDULER_THREADS[slot].address_space_root = root"),
+                        body.rindex("x86_irq_restore(flags)"))
 
         # Every failure after process_retain() must drop the acquired reference
         # before restoring IRQ state and returning.  Do not pin this invariant to
@@ -78,3 +83,7 @@ class ProcessSchedulerTests(unittest.TestCase):
         self.assertNotIn("if 'BAKEN:BARE_METAL_READY' in text:", source)
         self.assertIn("'-smp', str(args.smp)", source)
         self.assertIn("all(marker in text for marker in args.required_marker)", source)
+
+
+if __name__ == "__main__":
+    unittest.main()

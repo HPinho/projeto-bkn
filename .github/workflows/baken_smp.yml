@@ -35,6 +35,7 @@ jobs:
           python3 tests/test_active_address_space_tracking.py
           python3 tests/test_kernel_smp_ring3.py
           python3 tests/test_process_smp_tlb_coherence.py
+          python3 tests/test_kernel_smp_process_migration.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -48,7 +49,7 @@ jobs:
           python3 tools/scripts/create_uefi_iso.py
           test -s build/baken_os.iso
 
-      - name: Prove AP Dispatch, Timer, Kernel TLB, Process TLB and Preempted Ring3
+      - name: Prove AP Dispatch, TLB, Ring3 Migration and FPU Context
         timeout-minutes: 4
         shell: bash
         run: |
@@ -73,7 +74,7 @@ jobs:
 
           found=0
           for i in $(seq 1 1200); do
-            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log; then
+            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' build/qemu-smp-serial.log; then
               found=1
               break
             fi
@@ -101,8 +102,10 @@ jobs:
           grep -Fxq 'BAKEN:SMP_RING3_RESUMED_ON_AP' build/qemu-smp-serial.log
           grep -Fxq 'BAKEN:SMP_PROCESS_TLB_READY' build/qemu-smp-serial.log
           grep -Fxq 'BAKEN:SMP_RING3_ON_AP_READY' build/qemu-smp-serial.log
+          grep -Fxq 'BAKEN:SMP_PROCESS_MIGRATED' build/qemu-smp-serial.log
+          grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
-            echo '::error::CPU exception reported during SMP/TLB/Ring3 preemption proof.'
+            echo '::error::CPU exception reported during SMP/TLB/Ring3/FPU migration proof.'
             exit 1
           fi
           test "$found" -eq 1

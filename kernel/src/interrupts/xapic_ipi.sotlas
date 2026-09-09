@@ -1,8 +1,8 @@
-// Baken OS — transporte xAPIC mínimo para IPIs arquiteturais globais.
+// Baken OS — transporte xAPIC minimo para IPIs arquiteturais globais e dirigidos.
 //
-// Este módulo conhece somente o MMIO/ICR do Local APIC. Ele não importa a
-// política de IRQ, scheduler ou page tables, evitando ciclos entre essas
-// camadas. O LAPIC principal publica a base já mapeada no bootstrap.
+// Este modulo conhece somente o MMIO/ICR do Local APIC. Ele nao importa a
+// politica de IRQ, scheduler ou page tables, evitando ciclos entre essas
+// camadas. O LAPIC principal publica a base ja mapeada no bootstrap.
 module kernel::interrupts::xapic_ipi;
 
 import kernel::arch::x86_64::cpu::*;
@@ -71,8 +71,24 @@ fn xapic_ipi_wait_idle() -> bool {
     return false;
 }
 
+// Entrega fixed dirigida a um Local APIC especifico. O destination field xAPIC
+// ocupa os bits 31:24 de ICR_HIGH; nenhum shorthand e usado neste caminho.
+@system
+pub fn xapic_ipi_send_fixed(destination_apic_id: u8, vector: u8) -> bool {
+    if vector < XAPIC_IPI_FIXED_VECTOR_MIN || vector > XAPIC_IPI_FIXED_VECTOR_MAX {
+        return false;
+    }
+    if !xapic_ipi_wait_idle() { return false; }
+    if !xapic_ipi_write(
+        XAPIC_IPI_REG_ICR_HIGH,
+        (destination_apic_id as u32) << 24
+    ) { return false; }
+    if !xapic_ipi_write(XAPIC_IPI_REG_ICR_LOW, vector as u32) { return false; }
+    return xapic_ipi_wait_idle();
+}
+
 // O destination shorthand 11b entrega a todos os Local APICs exceto o atual.
-// ICR_HIGH é zerado por clareza; com shorthand o destination field é ignorado.
+// ICR_HIGH e zerado por clareza; com shorthand o destination field e ignorado.
 @system
 pub fn xapic_ipi_send_fixed_all_excluding_self(vector: u8) -> bool {
     if vector < XAPIC_IPI_FIXED_VECTOR_MIN || vector > XAPIC_IPI_FIXED_VECTOR_MAX {

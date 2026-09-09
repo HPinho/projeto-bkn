@@ -31,6 +31,22 @@ class ActiveAddressSpaceTrackingTests(unittest.TestCase):
         self.assertIn("TLB_SHOOTDOWN_CPU_ROOT[slot] = root", body)
         self.assertIn("__dma_fence()", body)
 
+    def test_unknown_root_is_conservative_for_selective_shootdown(self):
+        text = TLB.read_text(encoding="utf-8")
+        body = text.split("fn tlb_shootdown_send_address_space_targets", 1)[1]
+        body = body.split("fn tlb_shootdown_page", 1)[0]
+        self.assertIn("let published_root = TLB_SHOOTDOWN_CPU_ROOT[slot]", body)
+        self.assertIn("published_root == 0 || published_root == root", body)
+        self.assertIn("xapic_ipi_send_fixed(", body)
+        self.assertNotIn("xapic_ipi_send_fixed_all_excluding_self", body)
+
+    def test_ipi_handler_refreshes_observed_root_before_ack(self):
+        text = TLB.read_text(encoding="utf-8")
+        handler = text.split("pub fn tlb_shootdown_handle_ipi() -> bool", 1)[1]
+        refresh = handler.index("TLB_SHOOTDOWN_CPU_ROOT[slot] = current_root")
+        ack = handler.index("x86_mmio_write32(tlb_u32_address(ack), generation)")
+        self.assertLess(refresh, ack)
+
     def test_irq_paths_publish_only_after_scheduler_selected_cr3(self):
         irq = IRQ.read_text(encoding="utf-8")
         plain = irq.split("fn irq_schedule_publish_root(frame_address: u64) -> u64", 1)[1]

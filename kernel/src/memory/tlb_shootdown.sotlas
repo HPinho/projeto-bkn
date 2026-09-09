@@ -1,11 +1,12 @@
 // Baken OS — shootdown de TLB SMP para mappings globais e address spaces.
 //
-// Sem dependência de scheduler/SMP de alto nível: a topologia é registrada pelo
-// bring-up e o handler identifica a CPU pelo APIC ID. O caminho de interrupção
-// não aloca, não adquire locks e só executa INVLPG + acknowledgement volátil.
-// O protocolo é simétrico: BSP e APs podem iniciar uma invalidação depois de
+// Sem dependencia de scheduler/SMP de alto nivel: a topologia e registrada pelo
+// bring-up e o handler identifica a CPU pelo APIC ID. O caminho de interrupcao
+// nao aloca, nao adquire locks e so executa INVLPG + acknowledgement volatil.
+// O protocolo e simetrico: BSP e APs podem iniciar uma invalidacao depois de
 // entrarem no conjunto ativo. Root 0 significa mapping compartilhado por todas
-// as raízes; root != 0 limita o INVLPG aos CPUs que executam aquele CR3.
+// as raizes; root != 0 usa tracking do CR3 ativo para dirigir somente as CPUs
+// que podem possuir uma traducao daquele address space.
 module kernel::memory::tlb_shootdown;
 
 import kernel::arch::x86_64::cpu::*;
@@ -16,6 +17,7 @@ import kernel::sync::spinlock::*;
 pub const TLB_SHOOTDOWN_VECTOR: u16 = 0x45;
 pub const TLB_SHOOTDOWN_MAX_CPUS: usize = 32;
 pub const TLB_SHOOTDOWN_SPIN_LIMIT: u64 = 10000000;
+pub const TLB_SHOOTDOWN_TARGET_FAILURE: u32 = 0xFFFFFFFF;
 
 static mut TLB_SHOOTDOWN_LOCK: SpinLock = SpinLock { state: 0 };
 static mut TLB_SHOOTDOWN_READY: bool = false;
@@ -23,7 +25,8 @@ static mut TLB_SHOOTDOWN_CPU_REGISTERED: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false
 static mut TLB_SHOOTDOWN_CPU_ACTIVE: [bool; TLB_SHOOTDOWN_MAX_CPUS] = [false; TLB_SHOOTDOWN_MAX_CPUS];
 static mut TLB_SHOOTDOWN_CPU_APIC_ID: [u8; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
 // Root realmente carregado em cada CPU na ultima decisao de scheduling. Zero
-// significa desconhecido e permanece conservador para o futuro filtro seletivo.
+// significa desconhecido e deve ser tratado conservadoramente como possivel
+// portador da traducao no shootdown seletivo.
 static mut TLB_SHOOTDOWN_CPU_ROOT: [u64; TLB_SHOOTDOWN_MAX_CPUS] = [0; TLB_SHOOTDOWN_MAX_CPUS];
 static mut TLB_SHOOTDOWN_ADDRESS_LO: u32 = 0;
 static mut TLB_SHOOTDOWN_ADDRESS_HI: u32 = 0;
@@ -80,8 +83,8 @@ pub fn tlb_shootdown_register_cpu(slot: usize, apic_id: u8) -> bool {
         TLB_SHOOTDOWN_CPU_APIC_ID[slot] = apic_id;
         TLB_SHOOTDOWN_CPU_ROOT[slot] = 0;
         TLB_SHOOTDOWN_CPU_REGISTERED[slot] = true;
-        // O BSP já está executando com IRQ/IDT/LAPIC prontos quando o bring-up
-        // SMP registra o slot 0. APs só entram no conjunto após release.
+        // O BSP ja esta executando com IRQ/IDT/LAPIC prontos quando o bring-up
+        // SMP registra o slot 0. APs so entram no conjunto apos release.
         if slot == 0 { TLB_SHOOTDOWN_CPU_ACTIVE[slot] = true; }
     }
     __dma_fence();
@@ -140,9 +143,7 @@ fn tlb_shootdown_slot_for_current_cpu() -> usize {
     return TLB_SHOOTDOWN_MAX_CPUS;
 }
 
-// Publicado depois que o scheduler terminou de selecionar o frame/CR3. O
-// shootdown atual ainda faz broadcast; este tracking é a precondição para
-// restringir destinos sem criar dependência memory -> scheduler.
+// Publicado depois que o scheduler terminou de selecionar o frame/CR3.
 @system
 pub fn tlb_shootdown_publish_current_root() -> bool {
     if !tlb_shootdown_is_ready() { return false; }
@@ -253,6 +254,34 @@ fn tlb_shootdown_wait_ack(generation: u32, requester_slot: usize, expected: u32)
     return false;
 }
 
+// Decide o conjunto remoto uma unica vez por slot. Root desconhecido (0) entra
+// sempre no conjunto: a seletividade pode gerar trabalho extra, nunca falso
+// negativo. Sem PCID, uma futura carga de CR3 descarta traducoes non-global de
+// CPUs que nao estavam executando o root no instante desta publicacao.
+@system
+fn tlb_shootdown_send_address_space_targets(root: u64, requester_slot: usize) -> u32 {
+    if root == 0 || requester_slot >= TLB_SHOOTDOWN_MAX_CPUS { return TLB_SHOOTDOWN_TARGET_FAILURE; }
+    let mut expected: u32 = 0;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            if slot != requester_slot && TLB_SHOOTDOWN_CPU_REGISTERED[slot] &&
+               TLB_SHOOTDOWN_CPU_ACTIVE[slot] {
+                let published_root = TLB_SHOOTDOWN_CPU_ROOT[slot];
+                if published_root == 0 || published_root == root {
+                    if !xapic_ipi_send_fixed(
+                        TLB_SHOOTDOWN_CPU_APIC_ID[slot],
+                        TLB_SHOOTDOWN_VECTOR as u8
+                    ) { return TLB_SHOOTDOWN_TARGET_FAILURE; }
+                    expected += 1;
+                }
+            }
+            slot += 1;
+        }
+    }
+    return expected;
+}
+
 @system
 fn tlb_shootdown_page(address: u64, root: u64) -> bool {
     if !tlb_shootdown_is_ready() || !x86_page_aligned(address) { return false; }
@@ -277,11 +306,28 @@ fn tlb_shootdown_page(address: u64, root: u64) -> bool {
                 tlb_shootdown_unlock_irq(flags);
                 return false;
             }
+            // O requester tambem refresca seu snapshot com o CR3 observado na
+            // operacao, reduzindo estados desconhecidos sem depender do scheduler.
+            TLB_SHOOTDOWN_CPU_ROOT[requester_slot] = current_root;
         }
-        let expected = active_count - 1;
-        if !xapic_ipi_is_ready() ||
-           !xapic_ipi_send_fixed_all_excluding_self(TLB_SHOOTDOWN_VECTOR as u8) ||
-           !tlb_shootdown_wait_ack(generation, requester_slot, expected) {
+        __dma_fence();
+
+        let mut expected: u32 = 0;
+        if root == 0 {
+            expected = active_count - 1;
+            if !xapic_ipi_is_ready() ||
+               !xapic_ipi_send_fixed_all_excluding_self(TLB_SHOOTDOWN_VECTOR as u8) {
+                tlb_shootdown_unlock_irq(flags);
+                return false;
+            }
+        } else {
+            expected = tlb_shootdown_send_address_space_targets(root, requester_slot);
+            if expected == TLB_SHOOTDOWN_TARGET_FAILURE {
+                tlb_shootdown_unlock_irq(flags);
+                return false;
+            }
+        }
+        if !tlb_shootdown_wait_ack(generation, requester_slot, expected) {
             tlb_shootdown_unlock_irq(flags);
             return false;
         }
@@ -290,14 +336,15 @@ fn tlb_shootdown_page(address: u64, root: u64) -> bool {
     return true;
 }
 
-// Mapping compartilhado pela raiz do kernel e pelas cópias supervisor herdadas.
+// Mapping compartilhado pela raiz do kernel e pelas copias supervisor herdadas.
+// Continua broadcast: qualquer CPU ativa pode possuir uma traducao global.
 @system
 pub fn tlb_shootdown_kernel_page(address: u64) -> bool {
     return tlb_shootdown_page(address, 0);
 }
 
-// Mapping privado de processo. Sem PCID, CPUs fora desta raiz apenas ACKam; uma
-// futura carga de CR3 descarta traduções non-global antigas antes de executar.
+// Mapping privado de processo. O transporte consulta o root publicado por CPU e
+// envia IPI apenas para quem executa o root alvo ou ainda esta desconhecido.
 @system
 pub fn tlb_shootdown_address_space_page(root: u64, address: u64) -> bool {
     if root == 0 || !x86_page_aligned(root) { return false; }
@@ -326,6 +373,7 @@ pub fn tlb_shootdown_handle_ipi() -> bool {
         if address == 0 || generation == 0 || !x86_page_aligned(address) { return false; }
         if target_root != 0 && !x86_page_aligned(target_root) { return false; }
         let current_root = x86_read_cr3_raw() & X86_PAGE_ADDRESS_MASK;
+        TLB_SHOOTDOWN_CPU_ROOT[slot] = current_root;
         if target_root == 0 || current_root == target_root { x86_invlpg(address); }
         __dma_fence();
         let ack: *mut u32 = &mut TLB_SHOOTDOWN_ACK[slot];

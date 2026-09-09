@@ -13,6 +13,7 @@ PROBE = ROOT / "kernel/src/scheduler/smp_probe.sotlas"
 BACKEND = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
 WORKFLOW = ROOT / ".github/workflows/baken_smp.yml"
 
+
 class KernelSmpTlbShootdownTests(unittest.TestCase):
     def test_dedicated_ipi_vector_has_real_arch_stub(self):
         irq = IRQ.read_text(encoding="utf-8")
@@ -35,8 +36,9 @@ class KernelSmpTlbShootdownTests(unittest.TestCase):
         self.assertIn("x86_invlpg(address)", handler)
         self.assertIn("TLB_SHOOTDOWN_ACK", handler)
         self.assertIn("x86_mmio_write32", handler)
+        self.assertIn("TLB_SHOOTDOWN_CPU_ROOT[slot] = current_root", handler)
 
-    def test_shootdown_transport_is_decoupled_from_scheduler_and_page_tables(self):
+    def test_shootdown_transport_is_decoupled_and_supports_broadcast_and_directed_ipi(self):
         text = TLB.read_text(encoding="utf-8")
         xapic = XAPIC.read_text(encoding="utf-8")
         self.assertNotIn("scheduler::", text)
@@ -44,7 +46,31 @@ class KernelSmpTlbShootdownTests(unittest.TestCase):
         self.assertNotIn("active_page_tables", text)
         self.assertNotIn("active_page_tables", xapic)
         self.assertIn("XAPIC_IPI_DEST_ALL_EXCLUDING_SELF", xapic)
+        self.assertIn("pub fn xapic_ipi_send_fixed(destination_apic_id: u8, vector: u8) -> bool", xapic)
+        self.assertIn("(destination_apic_id as u32) << 24", xapic)
         self.assertIn("xapic_ipi_send_fixed_all_excluding_self", xapic)
+
+    def test_process_root_targets_only_matching_or_unknown_cpus(self):
+        text = TLB.read_text(encoding="utf-8")
+        selective = text.split("fn tlb_shootdown_send_address_space_targets", 1)[1]
+        selective = selective.split("fn tlb_shootdown_page", 1)[0]
+        self.assertIn("slot != requester_slot", selective)
+        self.assertIn("let published_root = TLB_SHOOTDOWN_CPU_ROOT[slot]", selective)
+        self.assertIn("if published_root == 0 || published_root == root", selective)
+        self.assertIn("xapic_ipi_send_fixed(", selective)
+        self.assertIn("TLB_SHOOTDOWN_CPU_APIC_ID[slot]", selective)
+        self.assertNotIn("xapic_ipi_send_fixed_all_excluding_self", selective)
+        self.assertIn("return TLB_SHOOTDOWN_TARGET_FAILURE", selective)
+
+    def test_kernel_root_keeps_global_broadcast(self):
+        text = TLB.read_text(encoding="utf-8")
+        body = text.split("fn tlb_shootdown_page(address: u64, root: u64) -> bool", 1)[1]
+        body = body.split("pub fn tlb_shootdown_kernel_page", 1)[0]
+        self.assertIn("if root == 0", body)
+        self.assertIn("expected = active_count - 1", body)
+        self.assertIn("xapic_ipi_send_fixed_all_excluding_self", body)
+        self.assertIn("tlb_shootdown_send_address_space_targets(root, requester_slot)", body)
+        self.assertIn("tlb_shootdown_wait_ack(generation, requester_slot, expected)", body)
 
     def test_page_table_mutation_uses_irq_safe_try_lock_and_shootdown(self):
         active = ACTIVE.read_text(encoding="utf-8")
@@ -63,9 +89,7 @@ class KernelSmpTlbShootdownTests(unittest.TestCase):
         text = TLB.read_text(encoding="utf-8")
         self.assertIn("if slot == 0 { TLB_SHOOTDOWN_CPU_ACTIVE[slot] = true; }", text)
         self.assertIn("pub fn tlb_shootdown_active_cpu_count() -> u32", text)
-        self.assertIn("let mut slot: usize = 0;", text)
         self.assertIn("slot != requester_slot", text)
-        self.assertIn("let expected = active_count - 1;", text)
         handler = text.split("pub fn tlb_shootdown_handle_ipi() -> bool", 1)[1]
         self.assertNotIn("slot == 0", handler)
         self.assertIn("TLB_SHOOTDOWN_CPU_ACTIVE[slot]", handler)
@@ -88,6 +112,7 @@ class KernelSmpTlbShootdownTests(unittest.TestCase):
         self.assertIn("python3 tests/test_kernel_smp_tlb_shootdown.py", workflow)
         self.assertIn("BAKEN:SMP_TLB_SHOOTDOWN_READY", workflow)
         self.assertIn("grep -Fq 'BAKEN:SMP_TLB_SHOOTDOWN_READY'", workflow)
+
 
 if __name__ == "__main__":
     unittest.main()
