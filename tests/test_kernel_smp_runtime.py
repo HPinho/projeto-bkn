@@ -13,6 +13,7 @@ LAPIC = ROOT / "kernel/src/interrupts/lapic.sotlas"
 LAPIC_TIMER = ROOT / "kernel/src/interrupts/lapic_timer.sotlas"
 IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
 USERSPACE = ROOT / "kernel/src/process/userspace_loader.sotlas"
+RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
 INTRINSICS = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
 WORKFLOW = ROOT / ".github/workflows/baken_smp.yml"
 
@@ -85,6 +86,36 @@ class KernelSmpRuntimeTests(unittest.TestCase):
         timer = LAPIC_TIMER.read_text(encoding="utf-8")
         self.assertIn("pub fn lapic_timer_prepare_current_cpu_masked() -> bool", timer)
         self.assertIn("LAPIC_TIMER_MASKED | LAPIC_TIMER_PERIODIC", timer)
+
+    def test_bootstrap_masks_irqs_across_fpu_publication_and_scheduler_activation(self):
+        text = RUNTIME.read_text(encoding="utf-8")
+        body = text.split("pub fn baken_native_kernel_run", 1)[1]
+        registry_ready = body.index("process_registry_emit_ready_marker()")
+        cli = body.index("x86_cli_raw();", registry_ready)
+        fpu = body.index("fpu_initialize()", cli)
+        scheduler = body.index("scheduler_initialize()", fpu)
+        sti = body.index("x86_sti_raw();", cli)
+        self.assertLess(registry_ready, cli)
+        self.assertLess(cli, fpu)
+        self.assertLess(fpu, scheduler)
+        self.assertLess(scheduler, sti)
+
+    def test_irq_fpu_path_requires_scheduler_activation_before_switch_lock(self):
+        text = IRQ.read_text(encoding="utf-8")
+        body = text.split("fn irq_schedule_with_fpu", 1)[1].split("@system\npub fn irq_schedule_terminated_current", 1)[0]
+        guard = "if !scheduler_is_active() { return frame_address; }"
+        self.assertIn(guard, body)
+        self.assertLess(body.index(guard), body.index("scheduler_switch_lock()"))
+
+        dispatch = text.split("pub fn sotlas_x86_irq_dispatch", 1)[1]
+        timer = dispatch.split("if vector == IRQ_VECTOR_TIMER as u64", 1)[1].split("if vector == IRQ_VECTOR_KEYBOARD as u64", 1)[0]
+        preinit = "if !scheduler_is_active() || !fpu_is_ready() { return irq_schedule_publish_root(frame_address); }"
+        self.assertIn(preinit, timer)
+        self.assertLess(timer.index(preinit), timer.index("return irq_schedule_with_fpu(frame_address);"))
+
+        reschedule_ipi = dispatch.split("if vector == IRQ_VECTOR_RESCHEDULE_IPI as u64", 1)[1].split("if vector == IRQ_VECTOR_TLB_SHOOTDOWN_IPI as u64", 1)[0]
+        self.assertIn(guard, reschedule_ipi)
+        self.assertLess(reschedule_ipi.index(guard), reschedule_ipi.index("return irq_schedule_with_fpu(frame_address);"))
 
     def test_irq_switch_updates_cpu_local_user_rsp0_and_releases_terminated_fpu_slot(self):
         text = IRQ.read_text(encoding="utf-8")
