@@ -1,4 +1,4 @@
-// Baken OS — provas reais de dispatch, timer, TLB e processo Ring 3 em AP.
+// Baken OS — provas reais de dispatch, heap, timer, TLB e processo Ring 3 em AP.
 //
 // O fechamento SMP usa uma process thread real: o scheduler publica PID/root,
 // carrega o CR3 no CPU 1, entra em CPL3 e deixa o LAPIC timer preemptar o frame
@@ -17,6 +17,7 @@ import kernel::interrupts::lapic::*;
 import kernel::interrupts::lapic_timer::*;
 import kernel::memory::active_page_tables::*;
 import kernel::memory::direct_map::*;
+import kernel::memory::kernel_heap::*;
 import kernel::memory::pmm_allocator::*;
 import kernel::memory::tlb_shootdown::*;
 import kernel::process::address_space::*;
@@ -30,6 +31,10 @@ pub const SCHEDULER_SMP_PROBE_MODE_THREAD: u32 = 1;
 pub const SCHEDULER_SMP_PROBE_MODE_TIMER: u32 = 2;
 pub const SCHEDULER_SMP_PROBE_MODE_TLB: u32 = 3;
 pub const SCHEDULER_SMP_PROBE_MODE_RING3: u32 = 4;
+pub const SCHEDULER_SMP_PROBE_MODE_HEAP: u32 = 5;
+pub const SCHEDULER_SMP_HEAP_ITERATIONS: u32 = 64;
+pub const SCHEDULER_SMP_HEAP_BSP_PATTERN: u64 = 0x42414B454E425350;
+pub const SCHEDULER_SMP_HEAP_AP_PATTERN: u64 = 0x42414B454E415050;
 pub const SCHEDULER_SMP_TLB_ADDRESS: u64 = VMM_RUNTIME_BASE + 4096;
 pub const SCHEDULER_SMP_TLB_OLD_VALUE: u32 = 0x13572468;
 pub const SCHEDULER_SMP_TLB_NEW_VALUE: u32 = 0x24681357;
@@ -48,6 +53,10 @@ static mut SCHEDULER_SMP_PROBE_EXECUTED: u32 = 0;
 static mut SCHEDULER_SMP_PROBE_CPU: u32 = 0xFFFFFFFF;
 static mut SCHEDULER_SMP_PROBE_MODE: u32 = 0;
 static mut SCHEDULER_SMP_TIMER_ENABLED: u32 = 0;
+static mut SCHEDULER_SMP_HEAP_READY: u32 = 0;
+static mut SCHEDULER_SMP_HEAP_GO: u32 = 0;
+static mut SCHEDULER_SMP_HEAP_DONE: u32 = 0;
+static mut SCHEDULER_SMP_HEAP_FAILED: u32 = 0;
 static mut SCHEDULER_SMP_TLB_PRIMED: u32 = 0;
 static mut SCHEDULER_SMP_TLB_RELEASE: u32 = 0;
 static mut SCHEDULER_SMP_TLB_OBSERVED: u32 = 0;
@@ -70,6 +79,22 @@ fn scheduler_smp_probe_mode_address() -> u64 {
 @system
 fn scheduler_smp_timer_enabled_address() -> u64 {
     unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_TIMER_ENABLED; return value as u64; }
+}
+@system
+fn scheduler_smp_heap_ready_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_HEAP_READY; return value as u64; }
+}
+@system
+fn scheduler_smp_heap_go_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_HEAP_GO; return value as u64; }
+}
+@system
+fn scheduler_smp_heap_done_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_HEAP_DONE; return value as u64; }
+}
+@system
+fn scheduler_smp_heap_failed_address() -> u64 {
+    unsafe { let value: *mut u32 = &mut SCHEDULER_SMP_HEAP_FAILED; return value as u64; }
 }
 @system
 fn scheduler_smp_tlb_primed_address() -> u64 {
@@ -97,6 +122,45 @@ fn scheduler_smp_ring3_pid_hi_address() -> u64 {
 }
 
 @system
+fn scheduler_smp_heap_stress(pattern: u64) -> bool {
+    let mut iteration: u32 = 0;
+    while iteration < SCHEDULER_SMP_HEAP_ITERATIONS {
+        let first = kernel_heap_alloc(64);
+        if first == (null as *mut u8) { return false; }
+        let second = kernel_heap_alloc(128);
+        if second == (null as *mut u8) {
+            kernel_heap_free(first);
+            return false;
+        }
+        if (first as u64) == (second as u64) {
+            kernel_heap_free(first);
+            return false;
+        }
+
+        let first_value = pattern + iteration as u64;
+        let second_value = pattern + 0x1000 + iteration as u64;
+        let first_word = first as *mut u64;
+        let second_word = second as *mut u64;
+        unsafe {
+            *first_word = first_value;
+            *second_word = second_value;
+        }
+        __dma_fence();
+
+        let mut intact = true;
+        unsafe {
+            if *first_word != first_value || *second_word != second_value { intact = false; }
+        }
+        let mut released = true;
+        if !kernel_heap_free(second) { released = false; }
+        if !kernel_heap_free(first) { released = false; }
+        if !intact || !released { return false; }
+        iteration += 1;
+    }
+    return true;
+}
+
+@system
 @export
 pub fn sotlas_x86_scheduler_smp_probe_entry() -> void {
     let cpu_slot = scheduler_current_cpu_slot();
@@ -113,6 +177,44 @@ pub fn sotlas_x86_scheduler_smp_probe_entry() -> void {
         if enabled_address == 0 || !lapic_timer_unmask_periodic() { return; }
         __dma_fence();
         x86_mmio_write32(enabled_address, 1);
+        __dma_fence();
+        return;
+    }
+
+    if mode == SCHEDULER_SMP_PROBE_MODE_HEAP {
+        if cpu_slot != SCHEDULER_SMP_PROBE_CPU_SLOT { return; }
+        let ready_address = scheduler_smp_heap_ready_address();
+        let go_address = scheduler_smp_heap_go_address();
+        let done_address = scheduler_smp_heap_done_address();
+        let failed_address = scheduler_smp_heap_failed_address();
+        if ready_address == 0 || go_address == 0 || done_address == 0 || failed_address == 0 { return; }
+
+        let held = kernel_heap_alloc(96);
+        if held == (null as *mut u8) {
+            x86_mmio_write32(failed_address, 1);
+            __dma_fence();
+            x86_mmio_write32(done_address, 1);
+            __dma_fence();
+            return;
+        }
+        let held_word = held as *mut u64;
+        unsafe { *held_word = SCHEDULER_SMP_HEAP_AP_PATTERN; }
+        __dma_fence();
+        x86_mmio_write32(ready_address, 1);
+        __dma_fence();
+
+        let mut spins: u64 = 0;
+        while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT && x86_mmio_read32(go_address) != 1 {
+            x86_cpu_pause();
+            spins += 1;
+        }
+        let mut passed = x86_mmio_read32(go_address) == 1;
+        if passed { passed = scheduler_smp_heap_stress(SCHEDULER_SMP_HEAP_AP_PATTERN); }
+        unsafe { if *held_word != SCHEDULER_SMP_HEAP_AP_PATTERN { passed = false; } }
+        if !kernel_heap_free(held) { passed = false; }
+        if !passed { x86_mmio_write32(failed_address, 1); }
+        __dma_fence();
+        x86_mmio_write32(done_address, 1);
         __dma_fence();
         return;
     }
@@ -278,6 +380,14 @@ fn scheduler_smp_probe_emit_any_thread_marker() -> bool {
     let marker: [u8; 27] = [66,65,75,69,78,58,83,77,80,95,65,78,89,95,84,72,82,69,65,68,95,79,78,95,65,80,10];
     let mut index: usize = 0;
     while index < 27 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
+    return true;
+}
+@system
+fn scheduler_smp_probe_emit_heap_marker() -> bool {
+    if !x86_serial_is_ready() { return false; }
+    let marker: [u8; 21] = [66,65,75,69,78,58,83,77,80,95,72,69,65,80,95,82,69,65,68,89,10];
+    let mut index: usize = 0;
+    while index < 21 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
     return true;
 }
 @system
@@ -476,6 +586,63 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
 }
 
 @system
+fn scheduler_smp_probe_run_heap(apic_id: u8, entry: u64) -> bool {
+    if entry == 0 || !kernel_heap_is_active() || !kernel_heap_self_test_passed() { return false; }
+    let before_bytes = kernel_heap_allocated_bytes();
+    let before_count = kernel_heap_allocation_count();
+    let ready_address = scheduler_smp_heap_ready_address();
+    let go_address = scheduler_smp_heap_go_address();
+    let done_address = scheduler_smp_heap_done_address();
+    let failed_address = scheduler_smp_heap_failed_address();
+    if ready_address == 0 || go_address == 0 || done_address == 0 || failed_address == 0 { return false; }
+
+    x86_mmio_write32(ready_address, 0);
+    x86_mmio_write32(go_address, 0);
+    x86_mmio_write32(done_address, 0);
+    x86_mmio_write32(failed_address, 0);
+    x86_mmio_write32(scheduler_smp_probe_mode_address(), SCHEDULER_SMP_PROBE_MODE_HEAP);
+    __dma_fence();
+
+    let idle_epoch_before = scheduler_secondary_idle_epoch(SCHEDULER_SMP_PROBE_CPU_SLOT);
+    let thread_id = scheduler_create_kernel_thread_on_cpu(
+        entry,
+        SCHEDULER_DEFAULT_THREAD_STACK_PAGES,
+        SCHEDULER_SMP_PROBE_CPU_SLOT
+    );
+    if thread_id == 0 { return false; }
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_flag(ready_address) { return false; }
+
+    // O AP já mantém uma alocação viva. O BSP mantém outra e libera ambos para
+    // loops concorrentes, exercitando o mesmo heap global a partir de dois CPUs.
+    let held = kernel_heap_alloc(160);
+    if held == (null as *mut u8) {
+        x86_mmio_write32(go_address, 1);
+        __dma_fence();
+        scheduler_smp_probe_wait_flag(done_address);
+        return false;
+    }
+    let held_word = held as *mut u64;
+    unsafe { *held_word = SCHEDULER_SMP_HEAP_BSP_PATTERN; }
+    __dma_fence();
+    x86_mmio_write32(go_address, 1);
+    __dma_fence();
+
+    let mut passed = scheduler_smp_heap_stress(SCHEDULER_SMP_HEAP_BSP_PATTERN);
+    unsafe { if *held_word != SCHEDULER_SMP_HEAP_BSP_PATTERN { passed = false; } }
+    if !kernel_heap_free(held) { passed = false; }
+    if !scheduler_smp_probe_wait_flag(done_address) { return false; }
+    if x86_mmio_read32(failed_address) != 0 { passed = false; }
+    if !scheduler_smp_probe_wait_terminated(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT) { return false; }
+    if !lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8) { return false; }
+    if !scheduler_smp_probe_wait_idle(thread_id, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_epoch_before) { return false; }
+    if !passed { return false; }
+    if kernel_heap_allocated_bytes() != before_bytes ||
+       kernel_heap_allocation_count() != before_count { return false; }
+    return scheduler_smp_probe_emit_heap_marker();
+}
+
+@system
 fn scheduler_smp_probe_run_tlb(apic_id: u8) -> bool {
     if tlb_shootdown_active_ap_count() == 0 { return false; }
     let first = pmm_alloc_page();
@@ -599,6 +766,7 @@ pub fn scheduler_smp_probe_run() -> bool {
     if !any_executed || !any_terminated || !any_idle { return false; }
     if !scheduler_smp_probe_emit_any_thread_marker() { return false; }
 
+    if !scheduler_smp_probe_run_heap(apic_id, entry) { return false; }
     if !scheduler_smp_probe_run_tlb(apic_id) { return false; }
     return scheduler_smp_probe_run_ring3(apic_id);
 }
