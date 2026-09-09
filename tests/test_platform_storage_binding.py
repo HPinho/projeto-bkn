@@ -1,8 +1,10 @@
 """Contrato do primeiro driver migrado para ownership da plataforma."""
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 SOURCE = ROOT / "kernel/src/platform/storage_binding.sotlas"
 
 

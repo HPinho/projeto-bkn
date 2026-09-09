@@ -1,8 +1,10 @@
 """Contratos de ownership e ciclo de vida do catálogo de dispositivos."""
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 SOURCE = ROOT / "kernel/src/platform/device_catalog.sotlas"
 
 

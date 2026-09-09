@@ -1,8 +1,10 @@
 """Contratos do decoder estrutural AML fail-closed."""
+import sys
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 DECODER = ROOT / "kernel/src/acpi/aml_decoder.sotlas"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
 

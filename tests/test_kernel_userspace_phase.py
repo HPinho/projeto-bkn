@@ -1,8 +1,10 @@
 """Guardrails da fase userspace/FPU do kernel."""
+import sys
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 
 class KernelUserspacePhaseTests(unittest.TestCase):

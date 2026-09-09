@@ -1,8 +1,10 @@
 """Contratos do catálogo seguro de definition blocks AML."""
+import sys
 from pathlib import Path
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 TABLES = ROOT / "kernel/src/acpi/tables.sotlas"
 FADT = ROOT / "kernel/src/acpi/fadt.sotlas"
 AML = ROOT / "kernel/src/acpi/aml_tables.sotlas"
