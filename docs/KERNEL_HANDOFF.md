@@ -156,7 +156,7 @@ Objetivo global: remover singletons de transporte xHCI ainda existentes e permit
 
 ### HID-4c.1 — multi-slot transport core
 
-**⏳ IMPLEMENTADO E EM VALIDAÇÃO.** Candidato de runtime inicial: `bd6f1708`.
+**✅ VALIDADO NA BRANCH; NÃO PROMOVIDO ISOLADAMENTE.** Implementação inicial `bd6f1708`; head final revalidado da subfatia `22ede5d7`.
 
 Implementação presente:
 - novo `xhci_device_table.sotlas`, fixed-capacity de 256 Slot IDs e sem heap;
@@ -167,45 +167,68 @@ Implementação presente:
 - segunda associação para uma porta já ocupada é rejeitada;
 - `xhci_slot_enable_first_port()` continua disponível como wrapper do bring-up atual;
 - `xhci_slot_id/port_id/slot_type` permanecem wrappers sobre o slot ativo, preservando contratos antigos sem reintroduzir storage singleton;
-- `xhci_context` passa a armazenar arena DMA, Device Context, Input Context, EP0 ring, Context Size e EP0 Max Packet por Slot ID;
-- `xhci_context_prepare_slot(slot_id)` prepara contexto do slot selecionado e publica `DCBAA[slot]` no índice correto;
+- `xhci_context` armazena arena DMA, Device Context, Input Context, EP0 ring, Context Size e EP0 Max Packet por Slot ID;
+- `xhci_context_prepare_for_slot(slot_id)` prepara contexto do slot selecionado e publica `DCBAA[slot]` no índice correto;
 - wrappers `xhci_context_*()` antigos resolvem o slot ativo para não quebrar EP0/descriptor existentes enquanto as próximas subfatias são migradas;
 - `xhci_address_slot(slot_id)` envia Address Device usando o Input Context daquele slot;
 - estado Addressed e USB Device Address são armazenados por Slot ID + epoch;
 - `xhci_address_first_slot()` e getters antigos permanecem como wrappers do slot ativo;
 - `kernel/src/main.sotlas` importa `xhci_device_table` no grafo canônico;
-- guardrails `test_xhci_slot.py`, `test_xhci_context.py` e `test_xhci_address.py` foram atualizados para exigir a arquitetura por-slot e impedir regressão aos antigos singletons desses estágios.
+- guardrails `test_xhci_slot.py`, `test_xhci_context.py` e `test_xhci_address.py` exigem a arquitetura por-slot e impedem regressão aos antigos singletons desses estágios.
 
 ### Validação HID-4c.1
 
-Gates disparados pela PR #22 sobre `bd6f1708`:
+Head `22ede5d7`:
+- CI #1078 / `34530989194` ✅;
+- SMP #181 / `34530989212` ✅ — 3/3 boots;
+- NVMe-only #278 / `34530989192` ✅.
 
-- CI #1076 / `34530534046` ⏳;
-- SMP #179 / `34530534016` ⏳;
-- NVMe-only #276 / `34530534020` ⏳.
-
-Esses gates são apenas da primeira subfatia. Mesmo que fiquem verdes, HID-4c ainda não deve ser promovido enquanto os recursos HID de transporte restantes continuarem globais.
-
-### Limite atual do HID-4c.1
-
-A arquitetura multi-slot já existe para Enable Slot, Device/Input/EP0 Context e Address Device, mas o runtime normal ainda seleciona o primeiro device através dos wrappers de compatibilidade. `xhci_hid_context`, `xhci_hid_report`, Configuration Descriptor e parte do estado HID xHCI ainda precisam ser migrados para contexto por slot/interface.
+Esses gates validam somente a primeira subfatia. HID-4c continua fora da `main` até o fechamento integral das subfatias multi-device.
 
 ### HID-4c.2 — HID Interrupt IN por slot/interface
 
-**⬜ PRÓXIMA SUBFATIA.**
+**⏳ IMPLEMENTADO E EM VALIDAÇÃO.**
 
-Migrar:
-- `xhci_hid_context` para estado por Slot ID + interface/DCI;
-- Transfer Ring Interrupt IN própria por contexto HID;
-- producer cycle/enqueue por ring;
-- report DMA buffer por contexto;
-- polling/completion usando `slot_id + dci` do contexto correto;
-- remover do caminho multi-device os singletons `XHCI_HID_CONTEXT_RING`, `XHCI_HID_REPORT_ENQUEUE_INDEX`, `XHCI_HID_REPORT_PRODUCER_CYCLE` e `XHCI_HID_REPORT_BUFFER`;
-- manter wrappers temporários somente onde forem necessários para o boot single-device já certificado.
+Implementação:
+- `xhci_hid_context` troca os singletons persistentes por `XHCI_HID_CONTEXTS[slot_id]` com epoch;
+- cada slot mantém DCI, endpoint address, Max Packet, interval, `DmaBuffer` da Transfer Ring e ring physical próprios;
+- `xhci_hid_context_prepare_for_slot(slot_id, endpoint_address, max_packet, usb_interval)` escreve o Endpoint Context no Input Context correspondente ao mesmo slot;
+- o wrapper `xhci_hid_context_prepare()` usa o slot ativo e a configuração atual, preservando o bring-up certificado;
+- `xhci_configure_endpoint` passa a manter READY/epoch/DCI por Slot ID;
+- `xhci_configure_hid_endpoint_for_slot(slot_id)` envia Configure Endpoint com o Input Context daquele slot e verifica Endpoint State=Running no Output Device Context correspondente;
+- sucesso avança o registro de transporte para `XHCI_DEVICE_STATE_HID_READY`;
+- `xhci_hid_report` passa a usar `XHCI_HID_REPORT_STATES[slot_id]` com epoch;
+- producer cycle, enqueue index, event marker state, report DMA buffer, last length e fallback Boot keyboard/mouse ficam separados por slot;
+- helpers de ring usam `xhci_hid_context_ring_physical_for(slot_id)` e nunca o ring de outro slot;
+- `xhci_hid_report_poll_slot_once(slot_id)` toca o doorbell do slot/DCI correto e espera `xhci_transfer_wait_completion(slot_id, dci, physical)`;
+- antes de aceitar/publish um report, `input_device_snapshot(device_id, generation)` precisa provar `INPUT_TRANSPORT_USB` e `transport_address == slot_id`;
+- wrappers legados continuam delegando ao slot ativo, portanto o smoke QEMU single-device atravessa as mesmas APIs por-slot usadas pela futura enumeração múltipla;
+- guardrails de `xhci_hid_context`, `xhci_configure_endpoint`, `xhci_hid_report` e `test_hid4_runtime_contract.py` foram atualizados para impedir retorno aos singletons anteriores.
+
+Commits centrais:
+```text
+e2486b2b feat(xhci): isolate HID endpoint contexts per slot
+d3fcaf8e feat(xhci): configure HID endpoints per slot
+0dd3ea5a feat(xhci): isolate HID report rings per slot
+f51f5cb0 test(hid): advance runtime contract to HID-4c transport
+```
+
+### Validação HID-4c.2
+
+Candidato de código `f51f5cb0`:
+- CI #1085 / `34533310356` ⏳;
+- SMP #188 / `34533310323` ⏳;
+- NVMe-only #285 / `34533310320` ⏳.
+
+O head documental posterior também deve ser revalidado antes de esta subfatia ser marcada verde. Nenhum destes commits altera a baseline da `main`.
+
+### Limite atual do HID-4c.2
+
+A camada de slot/context/address e a camada de Endpoint Context/Interrupt IN ring/report já possuem storage por Slot ID. O bloqueio seguinte é o estado persistente de `xhci_configuration` e `xhci_hid_descriptor`, que ainda representa uma única configuração/interface ativa. Por isso o sistema ainda não declara keyboard+mouse USB simultâneos mesmo com rings separados.
 
 ### HID-4c.3 — Configuration/HID descriptor por device/interface
 
-**⬜ PLANEJADO.**
+**⬜ PRÓXIMA SUBFATIA.**
 
 Migrar o estado persistente de Configuration Descriptor, interface HID, endpoint, Report Descriptor transport state e bindings xHCI para o slot/interface correspondentes. HID-1 parser, HID-2/HID-4b maps e HID-3 event model continuam transport-agnostic e não devem ser reabertos.
 
@@ -225,7 +248,7 @@ Migrar o estado persistente de Configuration Descriptor, interface HID, endpoint
 - HID-4c: slot/context/address/HID rings/buffers xHCI por device/interface e enumeração de múltiplos HID simultâneos;
 - HID-4d: detach físico, cancel/recovery de Interrupt IN e hot-plug/re-enumeração bounded/fail-closed.
 
-Critério de promoção HID-4c: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final **depois do fechamento das subfatias multi-device**, não apenas da primeira migração de slot/context/address. Até isso ocorrer, `main` permanece na baseline HID-4b `dbc5669a`.
+Critério de promoção HID-4c: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final **depois do fechamento das subfatias multi-device**, não apenas das migrações intermediárias. Até isso ocorrer, `main` permanece na baseline HID-4b `dbc5669a`.
 
 I2C-HID continua somente após transporte I2C/ACPI seguro.
 
