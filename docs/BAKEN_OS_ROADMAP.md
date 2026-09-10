@@ -13,15 +13,15 @@ Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. 
 ## Baseline de runtime certificada
 
 ```text
-12c308b3d0d4a6bb3b17397ca74bfe4bcc95327c
-docs: note HID-4a revalidation runs
+dbc5669aebd635b4e94c6e18e209f306cba5837f
+feat(hid): isolate input maps per device
 ```
 
-- CI #1072 / `34516628427` ✅;
-- SMP #175 / `34516628437` ✅ — 3/3;
-- NVMe #272 / `34516628445` ✅.
+- CI #1074 / `34520772415` ✅;
+- SMP #177 / `34520772429` ✅ — 3/3;
+- NVMe #274 / `34520772422` ✅.
 
-HID-4a foi promovido para `main` por fast-forward no próprio SHA certificado.
+HID-4b foi promovido para `main` por fast-forward no próprio SHA certificado. A baseline anterior HID-4a `12c308b3` permanece preservada no histórico abaixo.
 
 ---
 
@@ -50,8 +50,8 @@ HID-4a foi promovido para `main` por fast-forward no próprio SHA certificado.
 | HID-2 Field map / decoder | ✅ | Report ID, Usage, bit offsets, flags e valores |
 | HID-3 Input event model | ✅ | fila e eventos normalizados keyboard/mouse |
 | HID-4a Identity/lifecycle core | ✅ | device_id+generation, SMP-safe queue, bind/unbind |
-| HID-4b Per-device HID map | ⏳ | snapshots de field map/decoder por device+generation |
-| HID-4c Multi-slot xHCI | ⬜ | slot/context/rings/buffers por device/interface |
+| HID-4b Per-device HID map | ✅ | snapshots de field map/decoder por device+generation |
+| HID-4c Multi-slot xHCI | ⏳ | slot/context/rings/buffers por device/interface |
 | HID-4d Hot-plug/recovery | ⬜ | detach físico, cancel/recovery e reenumeração |
 | I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
 
@@ -83,11 +83,11 @@ HID-4a entrega registro de 16 devices, `device_id + generation`, lifecycle expl�
 
 Histórico: CI #1069 / SMP #172 / NVMe #269 falharam antes do QEMU pela sintaxe `return` dentro de `if`-expressão em `xhci_hid_descriptor.sotlas`; `a4762cf6` corrigiu somente essa forma de controle de fluxo. A correção passou SMP #173 3/3 e depois o head final passou os três gates oficiais.
 
-### HID-4b — candidato atual
+### HID-4b — certificado
 
-Branch: `hid4b-validation`, criada diretamente da baseline certificada `12c308b3`.
+Branch de validação: `hid4b-validation`, criada diretamente da baseline certificada `12c308b3`.
 
-Escopo candidato:
+Escopo candidato preservado e agora certificado:
 - `hid_input_device_map.sotlas` fixed-capacity, sem heap e transport-agnostic;
 - snapshot HID-2 independente por `device_id + generation`;
 - fields, Report IDs e expected bytes separados por device;
@@ -100,9 +100,63 @@ Escopo candidato:
 - marker novo `BAKEN:USB_HID_DEVICE_MAP_READY`; falha `BAKEN:USB_HID_DEVICE_MAP_FAILED`;
 - smoke/SMP/NVMe passam a bloquear ausência ou falha do mapa específico.
 
-**Limite:** xHCI ainda é single-slot/single-endpoint nesta fatia. HID-4b não declara múltiplos dispositivos USB simultâneos no transporte; ele remove o bloqueio semântico do mapa para que HID-4c possa fazê-lo corretamente.
+**Limite certificado:** xHCI ainda era single-slot/single-endpoint nesta fatia. HID-4b não declarou múltiplos dispositivos USB simultâneos no transporte; ele removeu o bloqueio semântico do mapa para que HID-4c pudesse fazê-lo corretamente.
 
-**Critério:** CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch. Só então promover HID-4b e iniciar HID-4c.
+Head certificado/promovido:
+
+```text
+dbc5669aebd635b4e94c6e18e209f306cba5837f
+feat(hid): isolate input maps per device
+```
+
+- CI #1074 / `34520772415` ✅;
+- SMP #177 / `34520772429` ✅ 3/3;
+- NVMe #274 / `34520772422` ✅.
+
+HID-4b foi promovido para `main` por fast-forward sem criar merge commit diferente do SHA testado.
+
+### HID-4c — candidato atual
+
+Branch: `hid4c-validation`, criada diretamente da baseline HID-4b certificada `dbc5669a`. PR de validação: **#22 — `HID-4c: multi-slot xHCI transport state`**.
+
+Objetivo completo do HID-4c: retirar os singletons restantes do transporte xHCI e permitir slot/context/address/HID rings/buffers por device/interface, culminando em enumeração de múltiplos HID simultâneos.
+
+#### HID-4c.1 — multi-slot transport core — implementado, em validação
+
+Implementado até o candidato de runtime `bd6f1708`:
+- novo `xhci_device_table.sotlas` fixed-capacity de 256 Slot IDs, sem heap;
+- associação explícita `slot_id <-> port_id` e `slot_type`;
+- `epoch` por Slot ID para impedir reutilização stale;
+- lifecycle de transporte `ENABLED`, `CONTEXT_READY`, `ADDRESSED`, `HID_READY` e `FAILED`;
+- `xhci_slot_enable_port(port_id, slot_type)` registra Enable Slot sem sobrescrever outros devices;
+- `xhci_slot_enable_first_port()` permanece como wrapper de compatibilidade para o bring-up certificado;
+- Device Context, Input Context e EP0 Transfer Ring armazenados por Slot ID;
+- arena DMA/context size/EP0 max packet separados por slot;
+- DCBAA publicado no índice do Slot ID correspondente;
+- `xhci_address_slot(slot_id)` executa Address Device usando o Input Context daquele slot;
+- endereço USB armazenado por Slot ID + epoch;
+- wrappers legados de context/address continuam apontando para o slot ativo para evitar regressão do boot atual;
+- grafo canônico importa `xhci_device_table`;
+- guardrails de slot/context/address atualizados para exigir as novas APIs e impedir retorno aos singletons antigos.
+
+Gates do candidato `bd6f1708` disparados pela PR #22:
+- CI #1076 / `34530534046` ⏳;
+- SMP #179 / `34530534016` ⏳;
+- NVMe #276 / `34530534020` ⏳.
+
+#### HID-4c.2 — próximo
+
+**⬜ PLANEJADO.** Migrar `xhci_hid_context` e `xhci_hid_report` para contexto/ring/buffer Interrupt IN por Slot ID + interface/DCI, eliminando `XHCI_HID_CONTEXT_RING`, enqueue/cycle e report buffer globais do caminho multi-device.
+
+#### HID-4c.3 — depois
+
+**⬜ PLANEJADO.** Migrar Configuration Descriptor, HID descriptor e estado de interface/endpoint para contexto por device/interface, preservando HID-1/HID-2/HID-3/HID-4a/HID-4b como camadas transport-agnostic.
+
+#### HID-4c.4 — fechamento
+
+**⬜ PLANEJADO.** Enumerar múltiplas portas/devices conectados no runtime normal e provar pelo menos keyboard + mouse simultâneos no mesmo xHC, cada um com Slot ID, contexto, endpoint/ring, mapa HID e geração próprios.
+
+**Critério de promoção HID-4c:** CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch, com os contratos multi-slot/multi-device e a prova runtime preservando toda a baseline anterior. Só então promover HID-4c e iniciar HID-4d.
 
 ## Trilha C — Storage de produção
 
