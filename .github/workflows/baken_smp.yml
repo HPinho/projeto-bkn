@@ -59,6 +59,7 @@ jobs:
           python3 tests/test_kernel_user_fault_isolation.py
           python3 tests/test_acpi_aml_tables.py
           python3 tests/test_acpi_aml_decoder.py
+          python3 tests/test_acpi_aml_data.py
           python3 tests/test_acpi_aml_namespace.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
@@ -165,6 +166,7 @@ jobs:
           require_marker 'BAKEN:SMP_BASE_READY'
           require_marker 'BAKEN:ACPI_AML_TABLES_READY'
           require_marker 'BAKEN:ACPI_AML_DECODER_READY'
+          require_marker 'BAKEN:ACPI_AML_DATA_READY'
           require_marker 'BAKEN:ACPI_AML_NAMESPACE_READY'
           require_marker 'BAKEN:SMP_AP_ONLINE'
           require_marker 'BAKEN:SMP_AP_RUNTIME_READY'
