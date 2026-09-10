@@ -232,10 +232,7 @@ b32cad41 fix(test): align HID-3 event guardrail with per-slot report state
 
 O primeiro guardrail agora inspeciona `xhci_hid_report_parse_for_slot(slot_id, length)` e mantém a exigência semântica de que o marker real só seja publicado quando `after_events > before_events`. O segundo exige a assinatura pública do getter `_for(slot_id)` e que ele retorne `XHCI_HID_CONTEXTS[slot].ring_physical`; nenhum contrato runtime foi removido ou relaxado.
 
-Revalidação do candidato corrigido `18b6e308`:
-- CI #1089 ⏳;
-- SMP #192 ⏳;
-- NVMe-only #289 ⏳.
+Revalidação iniciada no candidato corrigido `18b6e308`: CI #1089, SMP #192 e NVMe-only #289. O head documental final também precisa passar os três gates antes de HID-4c.2 receber ✅.
 
 ### Limite atual do HID-4c.2
 
