@@ -16,15 +16,24 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 ## Baseline de runtime certificada e integrada em `main`
 
 ```text
+1b3f94ccca5e399550d0951fc2c9f133a768440c
+feat(hid): parse real report descriptors
+```
+
+- CI #1059 / `34497000191` ✅;
+- SMP #162 / `34497000136` ✅ — 3/3 boots;
+- NVMe-only #259 / `34497000185` ✅.
+
+A PR #17 foi integrada por fast-forward no próprio SHA validado. O commit documental posterior não substitui a baseline de runtime.
+
+## Baseline anterior
+
+```text
 7803447a4c2179d088948b3c4288b6e3655bc1d5
 fix(acpi): preserve bool type in PRT lowering
 ```
 
-- CI #1056 / `34493002949` ✅;
-- SMP #159 / `34493003041` ✅ — 3/3 boots;
-- NVMe-only #256 / `34493002936` ✅.
-
-PR #16 foi integrada por fast-forward no próprio SHA validado. `ead13903` é apenas a consolidação documental posterior e não substitui a baseline de runtime.
+AML-0..AML-8 permanecem certificados nesse checkpoint e foram novamente exercitados pelos gates do HID-1.
 
 ## Invariantes congelados do Kernel Core
 
@@ -41,11 +50,11 @@ PR #16 foi integrada por fast-forward no próprio SHA validado. `ead13903` é ap
 
 # ACPI/AML
 
-**✅ CORE CONCLUÍDO E CERTIFICADO em `7803447a`.**
+**✅ CORE CONCLUÍDO E CERTIFICADO.**
 
 AML-0..AML-8 estão fechados. AML-7 entrega OperationRegion/Field bounded para SystemMemory/SystemIO/PCIConfig; AML-8 entrega `_PIC`, `_PRT` e `_S5` no subconjunto fail-closed. EC/GPE/GlobalLock e transições físicas de energia ficam para power/hot-plug.
 
-Histórico final: CI #1055 / `34491870501` detectou lowering `int* -> _Bool*`; a tipagem explícita de `source_is_link` produziu o candidato `7803447a`, aprovado por CI #1056 + SMP #159 3/3 + NVMe #256.
+Histórico final AML: CI #1055 / `34491870501` detectou lowering `int* -> _Bool*`; a tipagem explícita de `source_is_link` produziu `7803447a`, aprovado por CI #1056 + SMP #159 3/3 + NVMe #256.
 
 ---
 
@@ -53,37 +62,37 @@ Histórico final: CI #1055 / `34491870501` detectou lowering `int* -> _Bool*`; a
 
 ## HID-0 — Boot HID xHCI
 
-**✅ BASELINE EXISTENTE.**
+**✅ COMPROVADO.**
 
-O xHCI atual já enumera o primeiro HID Boot keyboard/mouse, configura Interrupt IN e prova report real no QEMU. O parser de report atual ainda usa o formato fixo Boot: keyboard 8 bytes e mouse >=3 bytes.
+O xHCI enumera HID Boot keyboard/mouse, configura Interrupt IN e prova report real em QEMU.
 
 ## HID-1 — Report Descriptor genérico
 
-**⏳ EM VALIDAÇÃO na branch `hid-input-validation`.**
+**✅ COMPROVADO em `1b3f94cc`.**
 
-Escopo do candidato:
-- novo `kernel/src/drivers/hid_report_descriptor.sotlas`, independente de transporte;
-- parser bounded de HID short items com limite de 4096 bytes, 512 itens e collection depth 16;
-- valida item size/type/tag e falha fechado em truncamento, reserved/long item e Push/Pop ainda não implementado;
+Implementado:
+- `kernel/src/drivers/hid_report_descriptor.sotlas` independente de transporte;
+- parser bounded de HID short items: máximo 4096 bytes, 512 itens e collection depth 16;
+- valida item size/type/tag e falha fechado em truncamento, reserved/long item e Push/Pop não suportado;
 - extrai Usage Page/Application para keyboard/mouse, ReportSize/ReportCount, Report ID e geometria input/output/feature;
-- self-test com descriptor Boot Keyboard realista de 63 bytes, 64 input bits e 8 output bits;
-- novo `kernel/src/drivers/xhci_hid_descriptor.sotlas` busca o Report Descriptor real via EP0 usando `GET_DESCRIPTOR`, `bmRequestType=0x81`, `wValue=0x2200`, `wIndex=interface` e o `wDescriptorLength` descoberto no HID descriptor;
-- o descriptor real é validado antes de `XHCI_SET_CONFIGURATION_READY`;
-- Boot protocol serve apenas como checagem de consistência da Application Usage, não como fonte do layout;
-- sem Report ID, o input report calculado deve caber no max packet do Interrupt IN endpoint;
-- nenhum mock substitui a leitura real no QEMU.
+- `kernel/src/drivers/xhci_hid_descriptor.sotlas` busca o Report Descriptor real via EP0 com `GET_DESCRIPTOR`, `bmRequestType=0x81`, `wValue=0x2200`, `wIndex=interface` e comprimento do HID descriptor;
+- descriptor real é validado antes de publicar `XHCI_SET_CONFIGURATION_READY`;
+- Boot protocol serve apenas como checagem de consistência, nunca como descriptor sintético;
+- marker `BAKEN:USB_HID_DESCRIPTOR_READY` é obrigatório no smoke e SMP;
+- `BAKEN:USB_HID_DESCRIPTOR_FAILED` é terminal para essa prova.
 
-Markers:
-```text
-BAKEN:USB_HID_DESCRIPTOR_READY
-BAKEN:USB_HID_DESCRIPTOR_FAILED
-```
+Prova no mesmo SHA:
+- CI #1059 / `34497000191` ✅ — suíte, grafo, build PE, ISO e QEMU;
+- SMP #162 / `34497000136` ✅ — 3/3 e invariantes Kernel Core;
+- NVMe #259 / `34497000185` ✅.
 
-O marker READY foi adicionado ao smoke geral e ao gate SMP; FAILED é terminal para essa prova. A `main` permanece em `ead13903`/runtime `7803447a` até CI + SMP 3/3 + NVMe-only fecharem no mesmo SHA desta branch.
+## Próximo incremento — HID-2
 
-## Próximos passos após HID-1
+**⬜ PLANEJADO / próxima branch.**
 
-- HID-2: field map por Report ID/Usage e decoder genérico de Input reports;
+Objetivo: construir field map bounded por Report ID/Usage e decoder genérico de Input reports. O decoder deverá operar sobre a geometria real do HID-1, preservar o caminho Boot atual como fallback e nunca ler além do tamanho real recebido pelo Interrupt IN.
+
+Depois:
 - HID-3: fila/event model unificada para keyboard, mouse, touchpad e touchscreen;
 - HID-4: lifecycle/hot-plug xHCI;
 - I2C-HID somente após transporte I2C/ACPI seguro.
