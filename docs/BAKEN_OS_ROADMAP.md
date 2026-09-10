@@ -2,7 +2,7 @@
 
 Atualizado em 2026-09-10 (America/Fortaleza).
 
-Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. Uma feature só vira baseline integrada quando CI principal + SMP 3/3 + NVMe-only passam no mesmo candidato.
+Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. Uma feature só vira baseline integrada quando CI principal + SMP 3/3 + NVMe-only passam no mesmo candidato de runtime.
 
 ## Estado geral
 
@@ -10,23 +10,18 @@ Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. 
 **Fase 1 — Kernel Core: ✅ CONCLUÍDA E CERTIFICADA**  
 **Fase 2 — Platform/Drivers: ▶️ EM DESENVOLVIMENTO**
 
-## Baseline integrada em `main`
+## Baseline de runtime certificada integrada em `main`
 
 ```text
-3f02decb2cacc94975113e1886ae3ed74cf8a698
-fix(acpi): mark AML pointer conversion unsafe
+7803447a4c2179d088948b3c4288b6e3655bc1d5
+fix(acpi): preserve bool type in PRT lowering
 ```
 
-- CI #1048 / `34471015124` ✅;
-- SMP #151 / `34471015170` ✅ — 3/3;
-- NVMe #248 / `34471015070` ✅.
+- CI #1056 / `34493002949` ✅;
+- SMP #159 / `34493003041` ✅ — 3/3;
+- NVMe #256 / `34493002936` ✅.
 
-`main` permanece congelada enquanto a PR #16 termina AML.
-
-## Baselines verdes da PR #16
-
-AML-6a `8e553f79`: #1051 / #154 / #251 ✅.  
-AML-6b `4e90ec22`: #1052 / #155 / #252 ✅.
+A PR #16 foi integrada por fast-forward no próprio SHA validado. Commits posteriores somente de documentação não alteram esta baseline de runtime.
 
 ---
 
@@ -56,105 +51,68 @@ Checkpoint histórico: `72422a79dfcec4c9c43bd3a83ef8a9ad90c7c2c8`.
 | AML-5 Discovery estático | ✅ | `3f02decb` |
 | AML-6a Evaluator bounded | ✅ | `8e553f79` |
 | AML-6b Discovery dinâmico | ✅ | `4e90ec22` |
-| AML-7 OperationRegion/Field core | ⏳ | PR #16 |
-| AML-8 `_PIC`/`_PRT`/`_S5` | ⏳ | PR #16 |
+| AML-7 OperationRegion/Field core | ✅ | `7803447a` |
+| AML-8 `_PIC`/`_PRT`/`_S5` | ✅ | `7803447a` |
 
-### AML-6b — checkpoint certificado
+**Trilha A — ACPI/AML CORE: ✅ CONCLUÍDA E CERTIFICADA.**
+
+### Certificação final AML-7/8
 
 ```text
-4e90ec22097c71950dcfa9f84b734568d87ae022
-feat(acpi): evaluate bounded discovery methods
+7803447a4c2179d088948b3c4288b6e3655bc1d5
+fix(acpi): preserve bool type in PRT lowering
 ```
 
-- CI #1052 / `34484777900` ✅;
-- SMP #155 / `34484777931` ✅ — 3/3;
-- NVMe #252 / `34484777902` ✅.
+- CI #1056 / `34493002949` ✅;
+- SMP #159 / `34493003041` ✅ — 3/3;
+- NVMe #256 / `34493002936` ✅.
 
-### AML-7 — OperationRegion / Field core
+AML-7 entrega SystemMemory/SystemIO/PCIConfig mediados, bounds/overflow antes de hardware, Field <=32 bits dentro de um dword e init sem side effect. IndexField/BankField não são emulados sem backing dedicado.
 
-**⏳ EM VALIDAÇÃO.**
+AML-8 entrega `_PIC`, `_PRT` e `_S5` em subconjunto bounded/fail-closed. Unsupported permanece unresolved. EC/GPE/GlobalLock e transições físicas de energia ficam para power/hot-plug.
 
-- SystemMemory/SystemIO/PCIConfig mediados;
-- bounds/overflow antes de hardware;
-- MMIO 32-bit alinhado via backend `volatile`;
-- I/O via `__inl/__outl`;
-- PCI config via backend existente e BDF explícito;
-- Field <=32 bits dentro de um único dword;
-- init sem side effect de hardware;
-- IndexField/BankField não emulados sem backing dedicado.
-
-Markers:
+Markers finais:
 ```text
 BAKEN:ACPI_AML_REGIONS_READY
-BAKEN:ACPI_AML_REGIONS_FAILED
-```
-
-### AML-8 — ACPI platform objects
-
-**⏳ EM VALIDAÇÃO.**
-
-- `_PIC`: APIC mode (`Arg0=1`) somente se AML-6a executar com segurança;
-- `_PRT`: Package de entradas de quatro elementos, Pin 0..3, máximo 256;
-- `_S5`: dois SleepTypes 0..7;
-- unsupported permanece unresolved;
-- EC/GPE/GlobalLock e sleep transition física ficam para power/hot-plug.
-
-Markers:
-```text
 BAKEN:ACPI_AML_PLATFORM_READY
-BAKEN:ACPI_AML_PLATFORM_FAILED
 ```
 
-Barreira:
-```text
-AML tables/decoder/data/namespace
--> AML static discovery
--> AML evaluator
--> AML dynamic discovery
--> AML region core
--> AML platform objects
--> PLATFORM_READY
-```
+Histórico: CI #1055 / `34491870501` ❌ detectou lowering `int* -> _Bool*` no candidato `1e333594`. A anotação explícita `let mut source_is_link: bool = false;` e teste de regressão produziram o candidato final verde `7803447a`.
 
-### Validação do candidato AML-7/8
+## Trilha B — HID adicional / input de produção
 
-Candidato inicial integrado:
-```text
-1e3335948e8cf412e8866e06a0224627b325fff8
-feat(acpi): complete bounded AML platform core
-```
+**▶️ PRÓXIMA ETAPA.**
 
-CI #1055 / `34491870501` ❌ em `Run Complete Test Suite` antes de QEMU. `test_build_modular_compiles_kernel_objects` mostrou que o C gerado para `aml_platform_append_prt_entry` passava `int*` para parâmetro `_Bool*`: a variável `source_is_link` estava declarada como `let mut ... = false` e o lowering mutável inferiu `int`.
+Objetivos:
+- parser bounded de HID report descriptors;
+- input genérico além do boot protocol;
+- keyboard/mouse report protocol real sem quebrar o caminho atual;
+- touchpad/touchscreen sobre HID quando transporte apropriado estiver disponível;
+- I2C-HID somente após transporte I2C/ACPI seguro;
+- hot-plug, attach/detach e lifecycle previsível;
+- markers e provas QEMU sem mocks substituindo hardware real.
 
-Correção aplicada no próximo candidato:
-```text
-let mut source_is_link: bool = false;
-```
-
-Foi adicionado teste de regressão exigindo tipagem explícita desse boolean mutável passado por ponteiro. Não houve alteração em scheduler, IRQ, CR3/TLB, FPU, storage ou lógica de acesso de hardware AML.
-
-SMP #158 já havia passado `Verify SMP Contracts` + `compiler.py check` no candidato inicial antes de entrar no build completo; isso confirma que a falha específica era do lowering/C modular e não do grafo de imports.
-
-Os commits `770176be` e `123cd564` são intermediários da branch e não são baselines.
-
-**Critério de encerramento AML:** head final da PR #16 com CI + SMP 3/3 + NVMe verdes no mesmo SHA; então atualizar os dois documentos com os run IDs finais e fast-forward `main` para esse SHA validado.
-
-Após isso: **Trilha A — ACPI/AML CORE = ✅ CONCLUÍDO.** EC/GPE/GlobalLock e firmware-specific AML passam para power/hot-plug.
-
-## Trilha B — HID adicional
-**⬜ APÓS MERGE AML.** I2C-HID, report descriptors, touchpad/touchscreen, hot-plug.
+Critério de promoção: novo candidato em branch/PR, CI + SMP 3/3 + NVMe-only no mesmo SHA e nenhuma regressão no xHCI/HID atual.
 
 ## Trilha C — Storage de produção
-**⬜ PLANEJADO.** Block cache, VFS, FAT32 robusto, handles e async.
+
+**⬜ PLANEJADO.** Block cache, VFS, FAT32 robusto, handles, async e lifecycle de volumes.
 
 ## Trilha D — Rede
+
 **⬜ PLANEJADO.** NIC, Ethernet/ARP, IPv4/IPv6, ICMP, UDP/TCP, DHCP/DNS.
 
 ## Trilha E — Áudio
+
 **⬜ PLANEJADO.** HDA, DMA/ring buffer, codec/mixer e API userspace.
 
 ## Trilha F — GPU/composição
+
 **⬜ PLANEJADO.** Framebuffer fallback, aceleração/compositor depois do modelo de memória seguro; zero lógica visual no compilador.
+
+## Trilha G — Power / hot-plug ACPI avançado
+
+**⬜ PLANEJADO.** EC, GPE, GlobalLock, transições físicas de energia e extensões firmware-specific estritamente necessárias.
 
 ---
 
@@ -171,9 +129,9 @@ Após isso: **Trilha A — ACPI/AML CORE = ✅ CONCLUÍDO.** EC/GPE/GlobalLock e
 1. `main` não recebe candidato vermelho;
 2. runtime real vale mais que teste textual;
 3. Kernel Core permanece congelado;
-4. toda camada AML tem bounds/marker/fail-closed;
-5. nunca scan cego de AML;
-6. firmware AML é input não confiável;
+4. toda camada de firmware/hardware tem bounds/marker/fail-closed;
+5. nunca fazer scan cego de AML/HID;
+6. firmware e descriptors são input não confiável;
 7. hardware opcional degrada com diagnóstico;
 8. unsupported = unresolved, nunca retorno inventado;
-9. falha/correção deve constar aqui e em `KERNEL_HANDOFF.md`.
+9. toda falha/correção/certificação deve constar aqui e em `KERNEL_HANDOFF.md`.
