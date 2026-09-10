@@ -66,6 +66,7 @@ import kernel::drivers::xhci_hid_context::*;
 import kernel::drivers::xhci_configure_endpoint::*;
 import kernel::drivers::hid_report_descriptor::*;
 import kernel::drivers::hid_input_report::*;
+import kernel::drivers::input_device::*;
 import kernel::drivers::input_event::*;
 import kernel::drivers::hid_input_events::*;
 import kernel::drivers::xhci_hid_descriptor::*;

@@ -19,6 +19,8 @@ REQUIRED_MARKERS = (
     "BAKEN:ACPI_AML_NAMESPACE_READY", "BAKEN:ACPI_AML_NAMESPACE_LOADED",
     "BAKEN:ACPI_AML_DEVICES_READY", "BAKEN:ACPI_AML_EVALUATOR_READY",
     "BAKEN:ACPI_AML_DYNAMIC_READY", "BAKEN:USB_HID_DESCRIPTOR_READY",
+    "BAKEN:USB_HID_INPUT_MAP_READY", "BAKEN:USB_HID_EVENT_MODEL_READY",
+    "BAKEN:USB_HID_DEVICE_READY",
     "BAKEN:SMP_AP_ONLINE", "BAKEN:SMP_AP_RUNTIME_READY", "BAKEN:SMP_THREAD_ON_AP",
     "BAKEN:SMP_TIMER_ON_AP", "BAKEN:SMP_ANY_THREAD_ON_AP",
     "BAKEN:SMP_HEAP_READY", "BAKEN:SMP_TLB_SHOOTDOWN_READY",
@@ -74,6 +76,12 @@ def validate(serial: str) -> list[str]:
         errors.append("AML dynamic discovery failed (BAKEN:ACPI_AML_DYNAMIC_FAILED)")
     if "BAKEN:USB_HID_DESCRIPTOR_FAILED" in lines:
         errors.append("USB HID report descriptor fetch/parser failed")
+    if "BAKEN:USB_HID_INPUT_MAP_FAILED" in lines:
+        errors.append("USB HID input field map failed")
+    if "BAKEN:USB_HID_EVENT_MODEL_FAILED" in lines:
+        errors.append("USB HID event model initialization failed")
+    if "BAKEN:USB_HID_DEVICE_FAILED" in lines:
+        errors.append("USB HID device identity/lifecycle binding failed")
     failures = re.findall(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M)
     errors.extend(f"Ring3/TLB probe failed: {marker}" for marker in failures)
     errors.extend(f"missing {marker}" for marker in REQUIRED_MARKERS if marker not in lines)
@@ -115,6 +123,15 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
                     break
                 if "BAKEN:USB_HID_DESCRIPTOR_FAILED" in lines:
                     stop_reason = "USB HID descriptor failure"
+                    break
+                if "BAKEN:USB_HID_INPUT_MAP_FAILED" in lines:
+                    stop_reason = "USB HID input map failure"
+                    break
+                if "BAKEN:USB_HID_EVENT_MODEL_FAILED" in lines:
+                    stop_reason = "USB HID event model failure"
+                    break
+                if "BAKEN:USB_HID_DEVICE_FAILED" in lines:
+                    stop_reason = "USB HID device lifecycle failure"
                     break
                 if "BAKEN:HEX=E:" in serial or re.search(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M):
                     stop_reason = "kernel failure"

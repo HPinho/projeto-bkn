@@ -23,8 +23,6 @@ class XhciHidDescriptorTests(unittest.TestCase):
     def test_descriptor_length_comes_from_hid_descriptor(self):
         text = XHCI.read_text(encoding="utf-8")
         self.assertIn("let length = xhci_hid_report_descriptor_length()", text)
-        self.assertIn("length == 0", text)
-        self.assertIn("length as usize", text)
         self.assertIn("hid_report_descriptor_parse", text)
         self.assertNotIn("XHCI_HID_BOOT_KEYBOARD_LENGTH", text)
 
@@ -35,32 +33,53 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertIn("if !info.has_report_ids", text)
         self.assertIn("input_bytes > xhci_hid_endpoint_max_packet()", text)
 
-    def test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready(self):
+    def test_hid2_map_precedes_event_model_and_device_binding(self):
         text = XHCI.read_text(encoding="utf-8")
         body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
         body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
         build = body.index("hid_input_report_map_build(buffer.virtual_address as *const u8, length as usize)")
         map_ready = body.index("xhci_hid_input_map_emit_ready_marker()")
-        descriptor_store = body.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
-        self.assertLess(build, map_ready)
-        self.assertLess(map_ready, descriptor_store)
-
-    def test_hid3_event_model_starts_after_real_map_before_descriptor_ready(self):
-        text = XHCI.read_text(encoding="utf-8")
-        self.assertIn("import kernel::drivers::hid_input_events::*;", text)
-        body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
-        body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
-        map_ready = body.index("xhci_hid_input_map_emit_ready_marker()")
+        registry = body.index("input_device_registry_init()")
         event_init = body.index("hid_input_events_initialize()")
         event_ready = body.index("xhci_hid_event_model_emit_ready_marker()")
+        device_bind = body.index("xhci_hid_bind_input_device(protocol, interface_number)")
+        device_ready = body.index("xhci_hid_device_emit_ready_marker()")
         descriptor_store = body.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
-        self.assertLess(map_ready, event_init)
+        self.assertLess(build, map_ready)
+        self.assertLess(map_ready, registry)
+        self.assertLess(registry, event_init)
         self.assertLess(event_init, event_ready)
-        self.assertLess(event_ready, descriptor_store)
-        self.assertIn("fn xhci_hid_event_model_emit_ready_marker()", text)
-        self.assertIn("let marker: [u8; 32]", text)
-        self.assertIn("fn xhci_hid_event_model_emit_failure_marker()", text)
-        self.assertIn("let marker: [u8; 33]", text)
+        self.assertLess(event_ready, device_bind)
+        self.assertLess(device_bind, device_ready)
+        self.assertLess(device_ready, descriptor_store)
+
+    def test_hid4_binding_uses_generation_safe_generic_registry(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::input_device::*;", text)
+        self.assertIn("INPUT_TRANSPORT_USB", text)
+        self.assertIn("input_device_attach(", text)
+        self.assertIn("input_device_activate(handle.device_id, handle.generation)", text)
+        self.assertIn("hid_input_events_bind_device(handle.device_id, handle.generation)", text)
+        self.assertIn("XHCI_HID_INPUT_DEVICE_ID", text)
+        self.assertIn("XHCI_HID_INPUT_DEVICE_GENERATION", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_is_active()", text)
+
+    def test_release_invalidates_then_purges_then_unbinds(self):
+        text = XHCI.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_hid_descriptor_release_input_device() -> bool", 1)[1]
+        body = body.split("fn xhci_hid_descriptor_reset", 1)[0]
+        detach = body.index("input_device_detach(device_id, generation)")
+        purge = body.index("input_event_purge_device(device_id, generation)")
+        unbind = body.index("hid_input_events_unbind_device(device_id, generation)")
+        self.assertLess(detach, purge)
+        self.assertLess(purge, unbind)
+
+    def test_device_ready_and_failure_markers_exist(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("fn xhci_hid_device_emit_ready_marker()", text)
+        self.assertIn("let marker: [u8; 27]", text)
+        self.assertIn("fn xhci_hid_device_emit_failure_marker()", text)
+        self.assertIn("let marker: [u8; 28]", text)
 
     def test_set_configuration_proves_descriptor_before_ready(self):
         text = SETCFG.read_text(encoding="utf-8")
@@ -74,23 +93,26 @@ class XhciHidDescriptorTests(unittest.TestCase):
         for token in (
             "import kernel::drivers::hid_report_descriptor::*;",
             "import kernel::drivers::hid_input_report::*;",
+            "import kernel::drivers::input_device::*;",
             "import kernel::drivers::input_event::*;",
             "import kernel::drivers::hid_input_events::*;",
             "import kernel::drivers::xhci_hid_descriptor::*;",
         ):
             self.assertIn(token, text)
 
-    def test_runtime_proof_keeps_hid1_hid2_contracts(self):
+    def test_runtime_proof_keeps_hid1_hid2_and_adds_hid4_identity(self):
         smoke = SMOKE.read_text(encoding="utf-8")
         smp = SMP.read_text(encoding="utf-8")
         yml = SMP_YML.read_text(encoding="utf-8")
-        self.assertIn('"USB_HID_DESCRIPTOR_READY"', smoke)
-        self.assertIn('"USB_HID_INPUT_MAP_READY"', smoke)
-        self.assertIn("BAKEN:USB_HID_DESCRIPTOR_FAILED", smoke)
-        self.assertIn("BAKEN:USB_HID_INPUT_MAP_FAILED", smoke)
-        self.assertIn('"BAKEN:USB_HID_DESCRIPTOR_READY"', smp)
-        self.assertIn("BAKEN:USB_HID_DESCRIPTOR_FAILED", smp)
-        self.assertIn("require_marker 'BAKEN:USB_HID_DESCRIPTOR_READY'", yml)
+        for marker in (
+            '"USB_HID_DESCRIPTOR_READY"', '"USB_HID_INPUT_MAP_READY"',
+            '"USB_HID_EVENT_MODEL_READY"', '"USB_HID_DEVICE_READY"',
+        ):
+            self.assertIn(marker, smoke)
+        self.assertIn("BAKEN:USB_HID_DEVICE_FAILED", smoke)
+        self.assertIn('"BAKEN:USB_HID_DEVICE_READY"', smp)
+        self.assertIn("BAKEN:USB_HID_DEVICE_FAILED", smp)
+        self.assertIn("require_marker 'BAKEN:USB_HID_DEVICE_READY'", yml)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,340 @@
+// Baken OS — HID-4a: identidade e lifecycle transport-agnostic de input.
+//
+// O registro separa identidade lógica do endereço do transporte. device_id pode
+// ser reutilizado, mas somente com nova generation; portanto uma referência
+// antiga nunca volta a autorizar publicação após detach/re-attach. Sem heap.
+
+module kernel::drivers::input_device;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const INPUT_DEVICE_CAPACITY: usize = 16;
+pub const INPUT_DEVICE_ID_NONE: u32 = 0;
+pub const INPUT_DEVICE_GENERATION_INVALID: u32 = 0;
+
+pub const INPUT_DEVICE_STATE_EMPTY: u8 = 0;
+pub const INPUT_DEVICE_STATE_ATTACHED: u8 = 1;
+pub const INPUT_DEVICE_STATE_ACTIVE: u8 = 2;
+pub const INPUT_DEVICE_STATE_DETACHED: u8 = 3;
+pub const INPUT_DEVICE_STATE_FAILED: u8 = 4;
+
+pub const INPUT_TRANSPORT_NONE: u8 = 0;
+pub const INPUT_TRANSPORT_USB: u8 = 1;
+pub const INPUT_TRANSPORT_I2C: u8 = 2;
+
+@repr(C)
+pub struct InputDeviceHandle {
+    pub device_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct InputDeviceRecord {
+    pub device_id: u32;
+    pub generation: u32;
+    pub state: u8;
+    pub device_class: u8;
+    pub transport_kind: u8;
+    pub transport_instance: u32;
+    pub transport_address: u32;
+    pub interface_number: u16;
+    pub valid: bool;
+}
+
+static mut INPUT_DEVICES: [InputDeviceRecord; INPUT_DEVICE_CAPACITY] = [
+    InputDeviceRecord {
+        device_id: INPUT_DEVICE_ID_NONE,
+        generation: INPUT_DEVICE_GENERATION_INVALID,
+        state: INPUT_DEVICE_STATE_EMPTY,
+        device_class: 0,
+        transport_kind: INPUT_TRANSPORT_NONE,
+        transport_instance: 0,
+        transport_address: 0,
+        interface_number: 0,
+        valid: false
+    };
+    INPUT_DEVICE_CAPACITY
+];
+static mut INPUT_DEVICE_READY: bool = false;
+static mut INPUT_DEVICE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut INPUT_DEVICE_LOCK_READY: bool = false;
+static mut INPUT_DEVICE_ACTIVE_COUNT: usize = 0;
+
+@system
+pub fn input_device_invalid_handle() -> InputDeviceHandle {
+    return InputDeviceHandle {
+        device_id: INPUT_DEVICE_ID_NONE,
+        generation: INPUT_DEVICE_GENERATION_INVALID,
+        valid: false
+    };
+}
+
+@system
+pub fn input_device_invalid_record() -> InputDeviceRecord {
+    return InputDeviceRecord {
+        device_id: INPUT_DEVICE_ID_NONE,
+        generation: INPUT_DEVICE_GENERATION_INVALID,
+        state: INPUT_DEVICE_STATE_EMPTY,
+        device_class: 0,
+        transport_kind: INPUT_TRANSPORT_NONE,
+        transport_instance: 0,
+        transport_address: 0,
+        interface_number: 0,
+        valid: false
+    };
+}
+
+@system
+fn input_device_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !INPUT_DEVICE_LOCK_READY || !spinlock_lock(&mut INPUT_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn input_device_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut INPUT_DEVICE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn input_device_slot(device_id: u32) -> usize {
+    if device_id == INPUT_DEVICE_ID_NONE || device_id > INPUT_DEVICE_CAPACITY as u32 {
+        return INPUT_DEVICE_CAPACITY;
+    }
+    return (device_id - 1) as usize;
+}
+
+@system
+fn input_device_class_valid(device_class: u8) -> bool {
+    // As classes públicas do InputEvent são 0=generic, 1=keyboard,
+    // 2=pointer e 3=touch. O registro não depende do módulo de eventos.
+    return device_class <= 3;
+}
+
+@system
+fn input_device_transport_valid(transport_kind: u8) -> bool {
+    return transport_kind == INPUT_TRANSPORT_USB || transport_kind == INPUT_TRANSPORT_I2C;
+}
+
+@system
+fn input_device_generation_next(current: u32) -> u32 {
+    let mut next = current + 1;
+    if next == INPUT_DEVICE_GENERATION_INVALID { next = 1; }
+    return next;
+}
+
+@system
+pub fn input_device_registry_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !INPUT_DEVICE_LOCK_READY {
+            if !spinlock_init(&mut INPUT_DEVICE_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            INPUT_DEVICE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut INPUT_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if INPUT_DEVICE_READY {
+            spinlock_unlock(&mut INPUT_DEVICE_LOCK);
+            x86_irq_restore(flags);
+            return true;
+        }
+
+        let mut index: usize = 0;
+        while index < INPUT_DEVICE_CAPACITY {
+            INPUT_DEVICES[index] = input_device_invalid_record();
+            INPUT_DEVICES[index].device_id = (index + 1) as u32;
+            INPUT_DEVICES[index].generation = 1;
+            index += 1;
+        }
+        INPUT_DEVICE_ACTIVE_COUNT = 0;
+        INPUT_DEVICE_READY = true;
+        spinlock_unlock(&mut INPUT_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn input_device_registry_is_ready() -> bool {
+    unsafe { return INPUT_DEVICE_READY; }
+}
+
+@system
+pub fn input_device_attach(device_class: u8,
+                           transport_kind: u8,
+                           transport_instance: u32,
+                           transport_address: u32,
+                           interface_number: u16) -> InputDeviceHandle {
+    if !input_device_registry_is_ready() || !input_device_class_valid(device_class) ||
+       !input_device_transport_valid(transport_kind) {
+        return input_device_invalid_handle();
+    }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return input_device_invalid_handle(); }
+    let mut result = input_device_invalid_handle();
+    unsafe {
+        let mut index: usize = 0;
+        while index < INPUT_DEVICE_CAPACITY {
+            let state = INPUT_DEVICES[index].state;
+            if !INPUT_DEVICES[index].valid &&
+               (state == INPUT_DEVICE_STATE_EMPTY || state == INPUT_DEVICE_STATE_DETACHED) {
+                if INPUT_DEVICES[index].generation == INPUT_DEVICE_GENERATION_INVALID {
+                    INPUT_DEVICES[index].generation = 1;
+                }
+                INPUT_DEVICES[index].state = INPUT_DEVICE_STATE_ATTACHED;
+                INPUT_DEVICES[index].device_class = device_class;
+                INPUT_DEVICES[index].transport_kind = transport_kind;
+                INPUT_DEVICES[index].transport_instance = transport_instance;
+                INPUT_DEVICES[index].transport_address = transport_address;
+                INPUT_DEVICES[index].interface_number = interface_number;
+                INPUT_DEVICES[index].valid = true;
+                result.device_id = INPUT_DEVICES[index].device_id;
+                result.generation = INPUT_DEVICES[index].generation;
+                result.valid = true;
+                break;
+            }
+            index += 1;
+        }
+    }
+    input_device_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn input_device_activate(device_id: u32, generation: u32) -> bool {
+    if generation == INPUT_DEVICE_GENERATION_INVALID { return false; }
+    let slot = input_device_slot(device_id);
+    if slot >= INPUT_DEVICE_CAPACITY { return false; }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return false; }
+    let mut activated = false;
+    unsafe {
+        if INPUT_DEVICE_READY && INPUT_DEVICES[slot].valid &&
+           INPUT_DEVICES[slot].device_id == device_id &&
+           INPUT_DEVICES[slot].generation == generation &&
+           INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ATTACHED {
+            INPUT_DEVICES[slot].state = INPUT_DEVICE_STATE_ACTIVE;
+            INPUT_DEVICE_ACTIVE_COUNT += 1;
+            activated = true;
+        }
+    }
+    input_device_unlock_irq(flags);
+    return activated;
+}
+
+@system
+pub fn input_device_mark_failed(device_id: u32, generation: u32) -> bool {
+    let slot = input_device_slot(device_id);
+    if slot >= INPUT_DEVICE_CAPACITY || generation == INPUT_DEVICE_GENERATION_INVALID { return false; }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return false; }
+    let mut changed = false;
+    unsafe {
+        if INPUT_DEVICE_READY && INPUT_DEVICES[slot].valid &&
+           INPUT_DEVICES[slot].generation == generation &&
+           (INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ATTACHED ||
+            INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ACTIVE) {
+            if INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ACTIVE && INPUT_DEVICE_ACTIVE_COUNT != 0 {
+                INPUT_DEVICE_ACTIVE_COUNT -= 1;
+            }
+            INPUT_DEVICES[slot].state = INPUT_DEVICE_STATE_FAILED;
+            changed = true;
+        }
+    }
+    input_device_unlock_irq(flags);
+    return changed;
+}
+
+@system
+pub fn input_device_detach(device_id: u32, generation: u32) -> bool {
+    let slot = input_device_slot(device_id);
+    if slot >= INPUT_DEVICE_CAPACITY || generation == INPUT_DEVICE_GENERATION_INVALID { return false; }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return false; }
+    let mut detached = false;
+    unsafe {
+        if INPUT_DEVICE_READY && INPUT_DEVICES[slot].valid &&
+           INPUT_DEVICES[slot].device_id == device_id &&
+           INPUT_DEVICES[slot].generation == generation &&
+           (INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ATTACHED ||
+            INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ACTIVE ||
+            INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_FAILED) {
+            if INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ACTIVE && INPUT_DEVICE_ACTIVE_COUNT != 0 {
+                INPUT_DEVICE_ACTIVE_COUNT -= 1;
+            }
+            INPUT_DEVICES[slot].state = INPUT_DEVICE_STATE_DETACHED;
+            INPUT_DEVICES[slot].device_class = 0;
+            INPUT_DEVICES[slot].transport_kind = INPUT_TRANSPORT_NONE;
+            INPUT_DEVICES[slot].transport_instance = 0;
+            INPUT_DEVICES[slot].transport_address = 0;
+            INPUT_DEVICES[slot].interface_number = 0;
+            INPUT_DEVICES[slot].valid = false;
+            INPUT_DEVICES[slot].generation = input_device_generation_next(generation);
+            detached = true;
+        }
+    }
+    input_device_unlock_irq(flags);
+    return detached;
+}
+
+@system
+pub fn input_device_is_active(device_id: u32, generation: u32) -> bool {
+    let slot = input_device_slot(device_id);
+    if slot >= INPUT_DEVICE_CAPACITY || generation == INPUT_DEVICE_GENERATION_INVALID { return false; }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return false; }
+    let mut active = false;
+    unsafe {
+        active = INPUT_DEVICE_READY && INPUT_DEVICES[slot].valid &&
+            INPUT_DEVICES[slot].device_id == device_id &&
+            INPUT_DEVICES[slot].generation == generation &&
+            INPUT_DEVICES[slot].state == INPUT_DEVICE_STATE_ACTIVE;
+    }
+    input_device_unlock_irq(flags);
+    return active;
+}
+
+@system
+pub fn input_device_snapshot(device_id: u32, generation: u32) -> InputDeviceRecord {
+    let slot = input_device_slot(device_id);
+    if slot >= INPUT_DEVICE_CAPACITY || generation == INPUT_DEVICE_GENERATION_INVALID {
+        return input_device_invalid_record();
+    }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return input_device_invalid_record(); }
+    let mut result = input_device_invalid_record();
+    unsafe {
+        if INPUT_DEVICE_READY && INPUT_DEVICES[slot].valid &&
+           INPUT_DEVICES[slot].device_id == device_id &&
+           INPUT_DEVICES[slot].generation == generation {
+            result = INPUT_DEVICES[slot];
+        }
+    }
+    input_device_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn input_device_active_count() -> usize {
+    let flags = input_device_lock_irq();
+    if flags == 0 { return 0; }
+    let mut count: usize = 0;
+    unsafe { if INPUT_DEVICE_READY { count = INPUT_DEVICE_ACTIVE_COUNT; } }
+    input_device_unlock_irq(flags);
+    return count;
+}

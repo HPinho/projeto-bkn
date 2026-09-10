@@ -1,15 +1,15 @@
-// Baken OS — transporte xHCI para HID Report Descriptor real via EP0.
+// Baken OS — xHCI HID descriptor + HID-4a identity/lifecycle binding.
 //
-// SET_CONFIGURATION continua sendo feito pelo estágio anterior. Depois que o
-// dispositivo aceitou a configuração, este módulo envia GET_DESCRIPTOR(Report)
-// ao recipient Interface, lê exatamente o wDescriptorLength descoberto no HID
-// descriptor e entrega os bytes ao parser genérico. HID-2 constrói o field map
-// sobre os mesmos bytes e HID-3 inicializa o event model somente depois do mapa.
+// O Report Descriptor continua vindo do EP0 real. HID-2 constrói o field map,
+// HID-3/HID-4 inicializam a fila e o estado por device; então este transporte
+// registra a interface USB com device_id+generation antes de aceitar Interrupt IN.
 
 module kernel::drivers::xhci_hid_descriptor;
 
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::dma::*;
+import kernel::drivers::input_device::*;
+import kernel::drivers::input_event::*;
 import kernel::drivers::hid_report_descriptor::*;
 import kernel::drivers::hid_input_report::*;
 import kernel::drivers::hid_input_events::*;
@@ -26,6 +26,8 @@ pub const USB_HID_REPORT_DESCRIPTOR_VALUE: u16 = 0x2200;
 pub const XHCI_HID_DESCRIPTOR_DMA_SIZE: u64 = 4096;
 
 static mut XHCI_HID_DESCRIPTOR_READY: bool = false;
+static mut XHCI_HID_INPUT_DEVICE_ID: u32 = INPUT_DEVICE_ID_NONE;
+static mut XHCI_HID_INPUT_DEVICE_GENERATION: u32 = INPUT_DEVICE_GENERATION_INVALID;
 static mut XHCI_HID_DESCRIPTOR_BUFFER: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -49,12 +51,35 @@ static mut XHCI_HID_DESCRIPTOR_INFO: HidReportDescriptorInfo = HidReportDescript
 };
 
 @system
-fn xhci_hid_descriptor_reset() -> void {
+pub fn xhci_hid_descriptor_release_input_device() -> bool {
+    let device_id = unsafe { XHCI_HID_INPUT_DEVICE_ID };
+    let generation = unsafe { XHCI_HID_INPUT_DEVICE_GENERATION };
+    if device_id == INPUT_DEVICE_ID_NONE || generation == INPUT_DEVICE_GENERATION_INVALID {
+        return true;
+    }
+
+    // Ordem de teardown: invalida a identidade primeiro (bloqueia novos
+    // publishers), remove eventos que possam ter vencido a corrida e só então
+    // apaga o estado HID daquela geração.
+    if !input_device_detach(device_id, generation) { return false; }
+    if !input_event_purge_device(device_id, generation) { return false; }
+    if !hid_input_events_unbind_device(device_id, generation) { return false; }
+    unsafe {
+        XHCI_HID_INPUT_DEVICE_ID = INPUT_DEVICE_ID_NONE;
+        XHCI_HID_INPUT_DEVICE_GENERATION = INPUT_DEVICE_GENERATION_INVALID;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_descriptor_reset() -> bool {
+    if !xhci_hid_descriptor_release_input_device() { return false; }
     unsafe {
         XHCI_HID_DESCRIPTOR_READY = false;
         XHCI_HID_DESCRIPTOR_BUFFER = dma_invalid_buffer();
         XHCI_HID_DESCRIPTOR_INFO = hid_report_descriptor_invalid();
     }
+    return true;
 }
 
 @system
@@ -173,6 +198,68 @@ fn xhci_hid_event_model_emit_failure_marker() -> bool {
 }
 
 @system
+fn xhci_hid_device_emit_ready_marker() -> bool {
+    let marker: [u8; 27] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,68,69,
+        86,73,67,69,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 27 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_device_emit_failure_marker() -> bool {
+    let marker: [u8; 28] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,68,69,
+        86,73,67,69,95,70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 28 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_bind_input_device(protocol: u8, interface_number: u8) -> bool {
+    let device_class = if protocol == USB_HID_PROTOCOL_KEYBOARD {
+        INPUT_DEVICE_CLASS_KEYBOARD
+    } else if protocol == USB_HID_PROTOCOL_MOUSE {
+        INPUT_DEVICE_CLASS_POINTER
+    } else {
+        return false;
+    };
+    let slot_id = xhci_address_slot_id();
+    if slot_id == 0 { return false; }
+
+    // transport_instance=0 significa o primeiro xHC ainda singleton. O par
+    // transport_address/interface já é preservado para a migração per-controller.
+    let handle = input_device_attach(
+        device_class, INPUT_TRANSPORT_USB, 0, slot_id as u32,
+        interface_number as u16);
+    if !handle.valid { return false; }
+    if !input_device_activate(handle.device_id, handle.generation) {
+        input_device_detach(handle.device_id, handle.generation);
+        return false;
+    }
+    if !hid_input_events_bind_device(handle.device_id, handle.generation) {
+        input_device_detach(handle.device_id, handle.generation);
+        input_event_purge_device(handle.device_id, handle.generation);
+        return false;
+    }
+    unsafe {
+        XHCI_HID_INPUT_DEVICE_ID = handle.device_id;
+        XHCI_HID_INPUT_DEVICE_GENERATION = handle.generation;
+    }
+    return true;
+}
+
+@system
 fn xhci_hid_descriptor_probe_internal() -> bool {
     if !hid_report_descriptor_self_test() || !xhci_configuration_is_ready() ||
        !xhci_ep0_is_ready() || !xhci_address_is_ready() {
@@ -209,13 +296,25 @@ fn xhci_hid_descriptor_probe_internal() -> bool {
     }
     if !xhci_hid_input_map_emit_ready_marker() { return false; }
 
-    // HID-3 nasce depois do mapa real e não reinterpreta o descriptor no
-    // transporte. A fila/core é zerada aqui, antes de qualquer Interrupt IN.
+    if !input_device_registry_init() || !input_device_registry_is_ready() {
+        xhci_hid_device_emit_failure_marker();
+        return false;
+    }
     if !hid_input_events_initialize() || !hid_input_events_is_ready() {
         xhci_hid_event_model_emit_failure_marker();
         return false;
     }
     if !xhci_hid_event_model_emit_ready_marker() { return false; }
+
+    if !xhci_hid_bind_input_device(protocol, interface_number) ||
+       !xhci_hid_descriptor_input_device_is_active() {
+        xhci_hid_device_emit_failure_marker();
+        return false;
+    }
+    if !xhci_hid_device_emit_ready_marker() {
+        xhci_hid_descriptor_release_input_device();
+        return false;
+    }
 
     unsafe {
         XHCI_HID_DESCRIPTOR_BUFFER = buffer;
@@ -254,7 +353,10 @@ pub fn xhci_hid_descriptor_emit_failure_marker() -> bool {
 
 @system
 pub fn xhci_hid_descriptor_initialize() -> bool {
-    xhci_hid_descriptor_reset();
+    if !xhci_hid_descriptor_reset() {
+        xhci_hid_descriptor_emit_failure_marker();
+        return false;
+    }
     if !xhci_hid_descriptor_probe_internal() {
         xhci_hid_descriptor_emit_failure_marker();
         return false;
@@ -270,6 +372,26 @@ pub fn xhci_hid_descriptor_initialize() -> bool {
 @system
 pub fn xhci_hid_descriptor_is_ready() -> bool {
     unsafe { return XHCI_HID_DESCRIPTOR_READY; }
+}
+
+@system
+pub fn xhci_hid_descriptor_input_device_id() -> u32 {
+    unsafe { return XHCI_HID_INPUT_DEVICE_ID; }
+}
+
+@system
+pub fn xhci_hid_descriptor_input_device_generation() -> u32 {
+    unsafe { return XHCI_HID_INPUT_DEVICE_GENERATION; }
+}
+
+@system
+pub fn xhci_hid_descriptor_input_device_is_active() -> bool {
+    let device_id = xhci_hid_descriptor_input_device_id();
+    let generation = xhci_hid_descriptor_input_device_generation();
+    return device_id != INPUT_DEVICE_ID_NONE &&
+           generation != INPUT_DEVICE_GENERATION_INVALID &&
+           input_device_is_active(device_id, generation) &&
+           hid_input_events_device_is_bound(device_id, generation);
 }
 
 @system

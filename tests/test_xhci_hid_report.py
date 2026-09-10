@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do produtor HID Interrupt IN e do event model HID-3."""
+"""Guardrails do produtor HID Interrupt IN com identidade HID-4a."""
 
 from pathlib import Path
 import unittest
@@ -11,14 +11,15 @@ MAIN = ROOT / "kernel/src/main.sotlas"
 
 
 class XhciHidReportTests(unittest.TestCase):
-    def test_report_path_requires_configured_hid_endpoint_map_and_events(self):
+    def test_report_path_requires_configured_endpoint_map_events_and_active_identity(self):
         text = HID.read_text(encoding="utf-8")
-        self.assertIn("xhci_hid_context_is_ready()", text)
-        self.assertIn("xhci_set_configuration_is_ready()", text)
-        self.assertIn("hid_input_report_map_is_ready()", text)
-        self.assertIn("hid_input_events_is_ready()", text)
-        self.assertIn("input_event_queue_is_ready()", text)
-        self.assertIn("xhci_hid_context_dci() <= 1", text)
+        for token in (
+            "xhci_hid_context_is_ready()", "xhci_set_configuration_is_ready()",
+            "hid_input_report_map_is_ready()", "hid_input_events_is_ready()",
+            "input_event_queue_is_ready()", "xhci_hid_descriptor_input_device_is_active()",
+            "xhci_hid_context_dci() <= 1",
+        ):
+            self.assertIn(token, text)
 
     def test_normal_trb_publication_precedes_doorbell_wait(self):
         text = HID.read_text(encoding="utf-8")
@@ -44,18 +45,21 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("xhci_transfer_wait_completion(slot_id, dci, physical)", text)
         self.assertIn("xhci_transfer_last_residual_length()", text)
 
-    def test_real_report_is_validated_then_translated_before_boot_fallback(self):
+    def test_real_report_is_validated_then_attributed_before_boot_fallback(self):
         text = HID.read_text(encoding="utf-8")
         body = text.split("fn xhci_hid_report_parse(length: u32) -> bool", 1)[1]
         body = body.split("pub fn xhci_hid_report_prepare", 1)[0]
         validate = body.index("hid_input_report_validate(base as *const u8, length as usize)")
-        translate = body.index("hid_input_events_process_report(base as *const u8, length as usize)")
+        identity = body.index("let device_id = xhci_hid_descriptor_input_device_id()")
+        translate = body.index("hid_input_events_process_report_for_device(")
         keyboard = body.index("protocol == USB_HID_PROTOCOL_KEYBOARD")
-        self.assertLess(validate, translate)
+        self.assertLess(validate, identity)
+        self.assertLess(identity, translate)
         self.assertLess(translate, keyboard)
+        self.assertIn("device_id, device_generation, base as *const u8", body)
         self.assertIn("if hid_input_report_has_report_ids() { return true; }", body)
 
-    def test_runtime_event_marker_requires_a_new_published_event(self):
+    def test_runtime_event_marker_still_requires_a_new_published_event(self):
         text = HID.read_text(encoding="utf-8")
         body = text.split("fn xhci_hid_report_parse(length: u32) -> bool", 1)[1]
         body = body.split("pub fn xhci_hid_report_prepare", 1)[0]
@@ -84,8 +88,9 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("xhci_hid_keyboard_key0() == USB_HID_USAGE_KEYBOARD_A", body)
         self.assertIn("POST_CUTOVER_HID_REPORT_ATTEMPTS", body)
 
-    def test_main_registers_hid3_and_transport(self):
+    def test_main_registers_hid4_identity_and_transport(self):
         text = MAIN.read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::input_device::*;", text)
         self.assertIn("import kernel::drivers::input_event::*;", text)
         self.assertIn("import kernel::drivers::hid_input_events::*;", text)
         self.assertIn("import kernel::drivers::xhci_hid_report::*;", text)

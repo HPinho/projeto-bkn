@@ -1,9 +1,8 @@
-// Baken OS — caminho polling de reports HID via Interrupt IN.
+// Baken OS — polling HID Interrupt IN com identidade HID-4a.
 //
-// Usa a Transfer Ring dedicada preparada pelo Endpoint Context HID, publica um
-// Normal TRB por report, toca o Doorbell do Slot/DCI e espera o Transfer Event.
-// HID-2 valida o report bruto; HID-3 traduz os campos para a fila genérica antes
-// do parser Boot legado, que permanece apenas para os getters do bringup.
+// O xHCI continua transportando um primeiro endpoint singleton nesta fatia, mas
+// cada report é atribuído à geração registrada pela camada de descriptor. HID-2
+// valida, HID-4 traduz/publica com identidade e só então o fallback Boot é lido.
 
 module kernel::drivers::xhci_hid_report;
 
@@ -19,6 +18,7 @@ import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_configuration::*;
 import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_set_configuration::*;
 import kernel::drivers::xhci_ring::*;
 import kernel::drivers::xhci_trb::*;
@@ -166,14 +166,18 @@ fn xhci_hid_report_emit_event_failure_marker() -> bool {
 fn xhci_hid_report_parse(length: u32) -> bool {
     let base = unsafe { XHCI_HID_REPORT_BUFFER.virtual_address };
     if base == (null as *mut u8) || length == 0 || !hid_input_report_map_is_ready() ||
-       !hid_input_events_is_ready() || !input_event_queue_is_ready() {
+       !hid_input_events_is_ready() || !input_event_queue_is_ready() ||
+       !xhci_hid_descriptor_input_device_is_active() {
         return false;
     }
 
     if !hid_input_report_validate(base as *const u8, length as usize) { return false; }
+    let device_id = xhci_hid_descriptor_input_device_id();
+    let device_generation = xhci_hid_descriptor_input_device_generation();
 
     let before_events = hid_input_events_events_published();
-    if !hid_input_events_process_report(base as *const u8, length as usize) {
+    if !hid_input_events_process_report_for_device(
+        device_id, device_generation, base as *const u8, length as usize) {
         xhci_hid_report_emit_event_failure_marker();
         return false;
     }
@@ -185,8 +189,6 @@ fn xhci_hid_report_parse(length: u32) -> bool {
         }
     }
 
-    // Reports com ID já foram totalmente validados/traduzidos pelo caminho
-    // genérico. O parser Boot fixo não deve deslocar campos nesses casos.
     if hid_input_report_has_report_ids() { return true; }
 
     let protocol = xhci_hid_protocol();
@@ -225,7 +227,7 @@ pub fn xhci_hid_report_prepare() -> bool {
     }
     if !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() ||
        !hid_input_report_map_is_ready() || !hid_input_events_is_ready() ||
-       !input_event_queue_is_ready() {
+       !input_event_queue_is_ready() || !xhci_hid_descriptor_input_device_is_active() {
         return false;
     }
     if xhci_hid_context_dci() <= 1 || xhci_slot_id() == 0 { return false; }
@@ -246,7 +248,9 @@ pub fn xhci_hid_report_prepare() -> bool {
 
 @system
 pub fn xhci_hid_report_poll_once() -> bool {
-    if !xhci_hid_report_is_ready() { return false; }
+    if !xhci_hid_report_is_ready() || !xhci_hid_descriptor_input_device_is_active() {
+        return false;
+    }
     let slot_id = xhci_slot_id();
     let dci = xhci_hid_context_dci();
     let transfer_length = xhci_hid_endpoint_max_packet() as u32;

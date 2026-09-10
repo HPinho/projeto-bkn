@@ -66,7 +66,12 @@ jobs:
           python3 tests/test_acpi_aml_evaluator.py
           python3 tests/test_acpi_aml_dynamic_discovery.py
           python3 tests/test_hid_report_descriptor.py
+          python3 tests/test_input_device.py
+          python3 tests/test_input_event.py
+          python3 tests/test_hid_input_events.py
           python3 tests/test_xhci_hid_descriptor.py
+          python3 tests/test_xhci_hid_report.py
+          python3 tests/test_hid4_runtime_contract.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -135,6 +140,18 @@ jobs:
               stop_reason=usb-hid-descriptor-failure
               break
             fi
+            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:USB_HID_INPUT_MAP_FAILED' build/qemu-smp-serial.log; then
+              stop_reason=usb-hid-input-map-failure
+              break
+            fi
+            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:USB_HID_EVENT_MODEL_FAILED' build/qemu-smp-serial.log; then
+              stop_reason=usb-hid-event-model-failure
+              break
+            fi
+            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:USB_HID_DEVICE_FAILED' build/qemu-smp-serial.log; then
+              stop_reason=usb-hid-device-failure
+              break
+            fi
             if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
               stop_reason=cpu-exception
               break
@@ -158,7 +175,7 @@ jobs:
           echo "SMP proof ${proof}: stop_reason=${stop_reason}"
           if test "$stop_reason" != complete; then
             checkpoint=$(grep -E '^BAKEN:HEX=Q:' build/qemu-smp-serial.log | tail -n 1 || true)
-            platform_error=$(grep -E '^BAKEN:(ACPI_AML_(EVALUATOR|DYNAMIC)_FAILED|USB_HID_DESCRIPTOR_FAILED|HEX=[ABRS]:)' build/qemu-smp-serial.log | tail -n 8 || true)
+            platform_error=$(grep -E '^BAKEN:(ACPI_AML_(EVALUATOR|DYNAMIC)_FAILED|USB_HID_(DESCRIPTOR|INPUT_MAP|EVENT_MODEL|DEVICE)_FAILED|HEX=[ABRS]:)' build/qemu-smp-serial.log | tail -n 8 || true)
             echo "::error::SMP stopped: ${stop_reason}; Ring3/TLB checkpoint=${checkpoint:-none}. Q stages: 1=publication, 2=remap, 3=resume, 4=reaper, 5=idle, 6=syscalls, 7/8/9=unmap, A=cleanup; bit31=failure."
             if test -n "$platform_error"; then echo "::error::Platform diagnostics: $platform_error"; fi
           fi
@@ -201,6 +218,9 @@ jobs:
           require_marker 'BAKEN:ACPI_AML_EVALUATOR_READY'
           require_marker 'BAKEN:ACPI_AML_DYNAMIC_READY'
           require_marker 'BAKEN:USB_HID_DESCRIPTOR_READY'
+          require_marker 'BAKEN:USB_HID_INPUT_MAP_READY'
+          require_marker 'BAKEN:USB_HID_EVENT_MODEL_READY'
+          require_marker 'BAKEN:USB_HID_DEVICE_READY'
           require_marker 'BAKEN:SMP_AP_ONLINE'
           require_marker 'BAKEN:SMP_AP_RUNTIME_READY'
           require_marker 'BAKEN:SMP_THREAD_ON_AP'
