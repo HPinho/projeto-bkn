@@ -227,13 +227,14 @@ fn xhci_hid_device_emit_failure_marker() -> bool {
 
 @system
 fn xhci_hid_bind_input_device(protocol: u8, interface_number: u8) -> bool {
-    let device_class = if protocol == USB_HID_PROTOCOL_KEYBOARD {
-        INPUT_DEVICE_CLASS_KEYBOARD
+    let mut device_class: u8 = INPUT_DEVICE_CLASS_GENERIC;
+    if protocol == USB_HID_PROTOCOL_KEYBOARD {
+        device_class = INPUT_DEVICE_CLASS_KEYBOARD;
     } else if protocol == USB_HID_PROTOCOL_MOUSE {
-        INPUT_DEVICE_CLASS_POINTER
+        device_class = INPUT_DEVICE_CLASS_POINTER;
     } else {
         return false;
-    };
+    }
     let slot_id = xhci_address_slot_id();
     if slot_id == 0 { return false; }
 
