@@ -9,6 +9,7 @@
 module kernel::acpi::aml_namespace;
 
 import kernel::acpi::aml_decoder::*;
+import kernel::acpi::aml_data::*;
 import kernel::arch::x86_64::serial::*;
 
 pub const AML_NAMESPACE_MAX_NODES: usize = 256;
@@ -249,9 +250,12 @@ pub fn aml_namespace_lookup(scope: usize, name: *const AmlNameString) -> usize {
 
 @system
 pub fn aml_namespace_foundation_init() -> bool {
+    // AML-3 é uma dependência estrutural do futuro loader. O namespace não
+    // publica READY se DataObject/Package não passar sua própria prova bounded.
+    if !aml_data_self_test() { return false; }
     aml_namespace_reset();
 
-    // Self-test estrutural: \_SB_ -> PCI0 -> _HID e resolução com ^.
+    // Self-test estrutural: \\_SB_ -> PCI0 -> _HID e resolução com ^.
     let sb_bytes: [u8; 5] = [0x5C,95,83,66,95];
     let mut sb_cursor = aml_cursor_new(&sb_bytes[0], 5);
     let sb_name = aml_decode_name_string(&mut sb_cursor);
@@ -326,6 +330,9 @@ pub fn aml_namespace_foundation_init() -> bool {
 @system
 pub fn aml_namespace_emit_ready_marker() -> bool {
     if !aml_namespace_is_ready() || aml_namespace_count() != 1 { return false; }
+    // O marker AML-3 é obrigatório e precede o marker do namespace. Se a UART
+    // não confirmar a publicação, não mascaramos a falha emitindo READY acima.
+    if !aml_data_emit_ready_marker() { return false; }
     let marker: [u8; 31] = [
         66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,78,65,77,69,83,80,65,
         67,69,95,82,69,65,68,89,10
