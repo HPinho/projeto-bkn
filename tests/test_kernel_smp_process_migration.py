@@ -27,7 +27,7 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
         self.assertLess(body.index("SCHEDULER_THREADS[slot].address_space_root = root"),
                         body.rindex("x86_irq_restore(flags)"))
 
-    def test_repin_only_accepts_ready_unowned_thread_under_scheduler_lock(self):
+    def test_repin_accepts_ready_thread_without_releasing_retirement_owner(self):
         text = CORE.read_text(encoding="utf-8")
         body = text.split("pub fn scheduler_set_thread_affinity", 1)[1].split(
             "pub fn scheduler_block_current", 1
@@ -38,7 +38,6 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
             "scheduler_find_thread_slot(thread_id)",
             "KERNEL_THREAD_READY",
             "saved_frame == 0",
-            "SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE",
             "SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32",
             "scheduler_switch_unlock()",
             "x86_irq_restore(flags)",
@@ -49,6 +48,7 @@ class KernelSmpProcessMigrationTests(unittest.TestCase):
         self.assertLess(body.index("SCHEDULER_THREAD_AFFINITY_CPU[slot] = cpu_slot as u32"),
                         body.rindex("scheduler_switch_unlock()"))
         self.assertIn("pub fn scheduler_thread_affinity_cpu(thread_id: u64) -> u32", text)
+        self.assertNotIn("SCHEDULER_THREAD_OWNER_CPU[slot]", body)
 
     def test_ring3_payload_uses_sse_compare_and_exits_only_after_result(self):
         text = LOADER.read_text(encoding="utf-8")

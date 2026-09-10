@@ -28,6 +28,14 @@ class LocalSmpRunnerTests(unittest.TestCase):
         source = (ROOT / "tools/scripts/run_smp_qemu.py").read_text(encoding="utf-8")
         self.assertIn('parser.add_argument("--runs", type=int, default=3)', source)
 
+    def test_probe_failure_rejected_even_when_all_success_markers_exist(self):
+        complete = "\n".join(REQUIRED_MARKERS) + "\n"
+        for stage in (2, 3, 4, 5, 6, 9, 10):
+            failure = f"BAKEN:HEX=Q:{0x80000000 | stage:08X}\n"
+            for log in (failure + complete, complete + failure):
+                self.assertTrue(any("Ring3/TLB probe failed" in e for e in validate(log)))
+        self.assertEqual(validate(complete + "BAKEN:HEX=Q:00000004\n"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

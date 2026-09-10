@@ -1,8 +1,55 @@
 # Baken OS / Sotlas — Kernel Handoff
 
-Atualizado em 2026-09-08.
+Atualizado em 2026-09-09.
 
 ## Estado atual
+
+### Atualização prioritária — regressão ANY/retirement após `35eb3f3`
+
+Esta atualização prevalece sobre os encerramentos históricos registrados abaixo.
+Fase 0 preservada; Fase 1 (consolidação de processos ANY e retirement SMP) aberta
+até os três gates aprovarem a correção no mesmo SHA. AML já tem catálogo/decoder
+implementados, mas a expansão da Fase 2 aguarda essa validação.
+
+SMP #140 (`34414300224`) falhou em `35eb3f3ae1f36a0e455155b18df694b1e5fa13b0`,
+com ausência de `SMP_PROCESS_TLB_READY` depois de `SMP_RING3_RESUMED_ON_AP`.
+O scheduler já existe em `kernel/src/scheduler/core.sotlas`; criar um segundo
+`scheduler.sotlas` não corrige os invariantes de concorrência.
+
+Correções em validação:
+
+- A flag `resumed` e o idle do AP não provam EXIT de uma thread ANY. O probe
+  espera o reaper liberar a referência do PID antes de validar contadores e
+  desmontar o address space. A espera cede ao scheduler para progredir no BSP.
+- Afinidade de thread READY pode ser solicitada durante retirement. Os setters
+  alteram somente afinidade; owner, stack e frame ficam intactos. Seleção/reaper
+  continuam exigindo owner NONE após confirmação pela CPU anterior.
+- Checkpoints `HEX=Q` distinguem publicação/remap/resume/reaper/idle/syscalls/unmap e
+  cleanup. Bit 31 indica falha explícita. CI e runner local rejeitam essa falha
+  mesmo se houver marcadores de sucesso, e distinguem timeout de término QEMU.
+- Não há prints de progresso BSP entre publicação da thread e confirmação do
+  reaper: a UART não serializa linhas de CPUs diferentes e os prints poderiam
+  corromper o marcador WRITE_SERIAL do usuário no AP. As falhas mantêm códigos
+  específicos, sem relaxar a exigência de marcadores completos no gate.
+
+LangSotlas foi consultada no commit `75c70166ff255830ef8c8bf0983848d6e099c320`.
+A atualização usa xchg em `stdlib/system/sync.sotlas` e adiciona intrínsecos
+atômicos. O Baken já utiliza xchg. O backend upstream restaura RFLAGS com POPFQ
+e seu helper FPU ainda difere dos hardenings locais. Não houve substituição do
+compilador/backend: estas correções pertencem ao protocolo do scheduler/probe,
+não dependem de novos recursos da linguagem. Uma integração futura precisa
+validar ABI, lowering dos métodos, IRQ/FPU e testes nativos por recurso.
+
+Validação local desta correção (2026-09-09):
+
+- Suíte Python: 1170 testes aprovados; contratos direcionados: 30 aprovados.
+- Build nativo: 143 módulos, 145 objetos; ISO isolada `build/smp-any-fix.iso`.
+- QEMU q35, 2 CPUs, OVMF: 10 boots independentes aprovados, com os 18 markers
+  exigidos, incluindo AML, Ring3, isolamento de falhas, TLB, migração e FPU.
+  Logs locais: `build/smp-local-8b_p1uq0/qemu-smp-serial-{1..10}.log`.
+- Sintaxe Bash dos 4 scripts do workflow aprovada; `git diff --check` aprovado.
+- CI principal, SMP e NVMe do novo commit: pendentes. Dez boots locais não são
+  prova de ausência de toda corrida nem certificação de hardware físico.
 
 A **Fase 0 — Fundação Bare-Metal está fechada**.
 

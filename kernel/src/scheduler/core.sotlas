@@ -678,9 +678,10 @@ pub fn scheduler_create_process_thread_on_cpu(pid: u64, entry_rip: u64,
     return tid;
 }
 
-// Migração controlada: somente uma thread dinâmica já preemptada (READY), com
-// frame salvo e sem owner, pode trocar de CPU. O switch lock torna state/owner/
-// affinity uma única decisão; o caller pode então enviar o reschedule IPI.
+// Afinidade solicita um destino; nao transfere ownership. READY com frame salvo
+// pode estar em retirement. Preservar o owner ate o commit permite solicitar
+// o destino sem esperar que o BSP redespache a mesma thread. A selecao continua
+// exigindo owner NONE sob o switch lock em qualquer CPU.
 @system
 pub fn scheduler_set_thread_affinity(thread_id: u64, cpu_slot: usize) -> bool {
     if !scheduler_is_active() || thread_id < SCHEDULER_FIRST_DYNAMIC_THREAD_ID ||
@@ -698,8 +699,7 @@ pub fn scheduler_set_thread_affinity(thread_id: u64, cpu_slot: usize) -> bool {
     }
     unsafe {
         if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_READY ||
-           SCHEDULER_THREADS[slot].saved_frame == 0 ||
-           SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE {
+           SCHEDULER_THREADS[slot].saved_frame == 0 {
             scheduler_switch_unlock();
             x86_irq_restore(flags);
             return false;
@@ -711,9 +711,8 @@ pub fn scheduler_set_thread_affinity(thread_id: u64, cpu_slot: usize) -> bool {
     return true;
 }
 
-// Devolve uma thread preemptada e sem owner ao pool compartilhado. A troca só
-// acontece em READY sob o switch lock, portanto dois CPUs nunca podem adquirir
-// ownership concorrente da mesma thread durante a mudança de política.
+// Solicita ANY para READY sem alterar o owner em retirement. O pool so pode
+// despachar a thread depois da confirmacao na CPU anterior.
 @system
 pub fn scheduler_set_thread_affinity_any(thread_id: u64) -> bool {
     if !scheduler_is_active() || thread_id < SCHEDULER_FIRST_DYNAMIC_THREAD_ID { return false; }
@@ -727,8 +726,7 @@ pub fn scheduler_set_thread_affinity_any(thread_id: u64) -> bool {
     }
     unsafe {
         if SCHEDULER_THREADS[slot].state != KERNEL_THREAD_READY ||
-           SCHEDULER_THREADS[slot].saved_frame == 0 ||
-           SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE {
+           SCHEDULER_THREADS[slot].saved_frame == 0 {
             scheduler_switch_unlock();
             x86_irq_restore(flags);
             return false;

@@ -4,9 +4,18 @@ Atualizado em 2026-09-09. Este documento separa **implementado**,
 **certificado** e **planejado**. Um item só muda para certificado quando os
 gates exigidos passam no mesmo commit da `main`.
 
+**Prioridade atual:** a consolidação do Kernel Core está reaberta pela regressão
+de processos ANY/retirement do SMP #140 no SHA `35eb3f3`. As certificações abaixo
+são históricas, não se aplicam automaticamente ao HEAD. Catálogo/decoder AML já
+existem, mas a expansão de Platform/Drivers aguarda CI + SMP 3/3 + NVMe no SHA
+corrigido. Consulte a atualização prioritária de `KERNEL_HANDOFF.md`.
+
 ## Fase 1 — Kernel Core
 
-**Estado: ✅ CONCLUÍDA E CERTIFICADA em 2026-09-09.**
+**Estado atual: em revalidação após a regressão ANY/retirement.**
+
+Certificação anterior registrada em 2026-09-09; o conjunto abaixo representa
+esse checkpoint histórico e não substitui os gates do commit corrigido.
 
 O commit `18343b99920c24deb3f27af0926202247206f69d` passou nos três gates
 obrigatórios do mesmo SHA em 2026-09-09:

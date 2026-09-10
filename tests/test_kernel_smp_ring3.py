@@ -58,7 +58,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
         self.assertLess(body.index("scheduler_switch_unlock()", publish),
                         body.rindex("x86_irq_restore(flags)"))
 
-    def test_releasing_affinity_to_any_requires_ready_unowned_frame(self):
+    def test_requesting_affinity_any_preserves_retirement_owner(self):
         text = CORE.read_text(encoding="utf-8")
         body = text.split("pub fn scheduler_set_thread_affinity_any", 1)[1].split(
             "pub fn scheduler_block_current", 1
@@ -67,11 +67,12 @@ class KernelSmpRing3Tests(unittest.TestCase):
             "scheduler_switch_lock()",
             "KERNEL_THREAD_READY",
             "saved_frame == 0",
-            "SCHEDULER_THREAD_OWNER_CPU[slot] != SCHEDULER_CPU_NONE",
             "SCHEDULER_THREAD_AFFINITY_CPU[slot] = SCHEDULER_CPU_AFFINITY_ANY",
             "scheduler_switch_unlock()",
         ):
             self.assertIn(token, body)
+
+        self.assertNotIn("SCHEDULER_THREAD_OWNER_CPU[slot]", body)
 
     def test_probe_uses_real_any_process_thread_and_scheduler_owned_cr3(self):
         text = PROBE.read_text(encoding="utf-8")
@@ -131,7 +132,7 @@ class KernelSmpRing3Tests(unittest.TestCase):
             "x86_mmio_write32(release_new_address, 1)",
             "process_remap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS",
             "data_new, true, false",
-            "if remapped_data != data { return false; }",
+            "if remapped_data != data { return scheduler_smp_ring3_fail(2); }",
             "scheduler_smp_probe_wait_flag(resumed_address)",
             "unmapped_data != data_new",
             "pmm_free_pages(data, 1)",
@@ -174,10 +175,31 @@ class KernelSmpRing3Tests(unittest.TestCase):
             self.assertIn(token, body)
         self.assertLess(body.index("scheduler_smp_probe_wait_process_reaped"),
                         body.index("process_unmap_user_page"))
+        self.assertLess(body.index("scheduler_smp_probe_wait_process_reaped"),
+                        body.index("syscall_exit_count() <= exit_before"))
+        self.assertLess(body.index("scheduler_smp_probe_wait_process_reaped"),
+                        body.index("scheduler_smp_probe_wait_idle"))
         self.assertLess(body.rindex("process_destroy(pid)"),
                         body.index("scheduler_smp_probe_emit_process_tlb_marker()"))
         self.assertLess(body.index("scheduler_smp_probe_emit_process_tlb_marker()"),
                         body.index("scheduler_smp_probe_emit_ring3_ready_marker()"))
+
+    def test_reap_wait_drives_bsp_scheduler_for_any_thread(self):
+        text = PROBE.read_text(encoding="utf-8")
+        wait = text.split("fn scheduler_smp_probe_wait_process_reaped", 1)[1].split("@system", 1)[0]
+        self.assertIn("process_reference_count(pid) == 0", wait)
+        self.assertIn("scheduler_reap_count() > reap_before", wait)
+        self.assertIn("if !scheduler_yield() { return false; }", wait)
+        self.assertNotIn("x86_irq_save_disable", wait)
+
+    def test_progress_diagnostics_do_not_race_user_serial(self):
+        text = PROBE.read_text(encoding="utf-8")
+        body = text.split("fn scheduler_smp_probe_run_ring3", 1)[1]
+        live = body.split("let tid = scheduler_create_process_thread_any(", 1)[1].split(
+            "scheduler_smp_ring3_diag(5)", 1
+        )[0]
+        self.assertNotIn("scheduler_smp_ring3_diag(", live)
+        self.assertIn("scheduler_smp_probe_wait_process_reaped(pid, reap_before)", live)
 
     def test_ring3_runs_only_after_existing_kernel_tlb_proof(self):
         text = PROBE.read_text(encoding="utf-8")

@@ -23,6 +23,7 @@ import kernel::memory::tlb_shootdown::*;
 import kernel::process::address_space::*;
 import kernel::process::registry::*;
 import kernel::scheduler::core::*;
+import kernel::scheduler::yield::*;
 import kernel::syscall::dispatch::*;
 
 pub const SCHEDULER_SMP_PROBE_CPU_SLOT: usize = 1;
@@ -63,6 +64,18 @@ static mut SCHEDULER_SMP_TLB_OBSERVED: u32 = 0;
 static mut SCHEDULER_SMP_RING3_CPU: u32 = 0xFFFFFFFF;
 static mut SCHEDULER_SMP_RING3_PID_LO: u32 = 0;
 static mut SCHEDULER_SMP_RING3_PID_HI: u32 = 0;
+
+// Q = etapa Ring3/TLB; bit 31 indica falha, preservando a etapa inferior.
+@system
+fn scheduler_smp_ring3_diag(stage: u32) -> void {
+    if x86_serial_is_ready() { x86_serial_write_hex32_marker('Q' as u8, stage); }
+}
+
+@system
+fn scheduler_smp_ring3_fail(stage: u32) -> bool {
+    scheduler_smp_ring3_diag(0x80000000 | stage);
+    return false;
+}
 
 @system
 fn scheduler_smp_probe_executed_address() -> u64 {
@@ -354,7 +367,9 @@ fn scheduler_smp_probe_wait_process_reaped(pid: u64, reap_before: u64) -> bool {
     while spins < SCHEDULER_SMP_PROBE_SPIN_LIMIT {
         __dma_fence();
         if process_reference_count(pid) == 0 && scheduler_reap_count() > reap_before { return true; }
-        x86_cpu_pause();
+        // ANY pode retomar no BSP. Ceder executa a fila e o reaper do BSP;
+        // nao depender apenas de quantas iteracoes o host executa entre ticks.
+        if !scheduler_yield() { return false; }
         spins += 1;
     }
     return false;
@@ -552,6 +567,7 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     // Prova a política geral de processos migráveis. O BSP permanece com IF=0
     // enquanto a thread é publicada como ANY; assim somente o AP pode capturá-la
     // nessa janela. O mesmo processo então atravessa CPL3, timer e TLB root-aware.
+    scheduler_smp_ring3_diag(1);
     let bsp_irq_flags = x86_irq_save_disable();
     let tid = scheduler_create_process_thread_any(
         pid, entry, SCHEDULER_DEFAULT_THREAD_STACK_PAGES
@@ -589,19 +605,29 @@ fn scheduler_smp_probe_run_ring3(apic_id: u8) -> bool {
     __dma_fence();
     let remapped_data = process_remap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS,
                                                 data_new, true, false);
-    if remapped_data != data { return false; }
-    if !scheduler_smp_probe_wait_flag(resumed_address) { return false; }
-    if !scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before) { return false; }
-    if syscall_count() < syscall_before + 3 || syscall_exit_count() <= exit_before { return false; }
-    if !scheduler_smp_probe_wait_process_reaped(pid, reap_before) { return false; }
+    if remapped_data != data { return scheduler_smp_ring3_fail(2); }
+    if !scheduler_smp_probe_wait_flag(resumed_address) { return scheduler_smp_ring3_fail(3); }
+    // Nao imprimir diagnosticos de progresso enquanto o usuario pode escrever
+    // na UART do AP: writes de CPUs diferentes podem intercalar um marker.
+    // resumed precede WRITE_SERIAL e EXIT no payload. Idle do AP tambem pode
+    // ser apenas preempcao: ANY permite que a thread retome no BSP. A barreira
+    // de conclusao e o reaper liberar a referencia deste PID apos retirement.
+    if !scheduler_smp_probe_wait_process_reaped(pid, reap_before) { return scheduler_smp_ring3_fail(4); }
+    scheduler_smp_ring3_diag(5);
+    if !scheduler_smp_probe_wait_idle(tid, SCHEDULER_SMP_PROBE_CPU_SLOT, idle_before) { return scheduler_smp_ring3_fail(5); }
+    if syscall_count() < syscall_before + 3 || syscall_exit_count() <= exit_before { return scheduler_smp_ring3_fail(6); }
 
+    scheduler_smp_ring3_diag(7);
     let unmapped_code = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_CODE_ADDRESS);
+    scheduler_smp_ring3_diag(8);
     let unmapped_data = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_DATA_ADDRESS);
+    scheduler_smp_ring3_diag(9);
     let unmapped_stack = process_unmap_user_page(pid, SCHEDULER_SMP_RING3_STACK_ADDRESS);
-    if unmapped_code != code || unmapped_data != data_new || unmapped_stack != stack { return false; }
+    if unmapped_code != code || unmapped_data != data_new || unmapped_stack != stack { return scheduler_smp_ring3_fail(9); }
+    scheduler_smp_ring3_diag(10);
     if !pmm_free_pages(code, 1) || !pmm_free_pages(data, 1) ||
        !pmm_free_pages(data_new, 1) || !pmm_free_pages(stack, 1) { return false; }
-    if !process_destroy(pid) { return false; }
+    if !process_destroy(pid) { return scheduler_smp_ring3_fail(10); }
     if !scheduler_smp_probe_emit_process_tlb_marker() { return false; }
     return scheduler_smp_probe_emit_ring3_ready_marker();
 }

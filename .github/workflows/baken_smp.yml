@@ -52,6 +52,8 @@ jobs:
           python3 tests/test_kernel_smp_tlb_shootdown.py
           python3 tests/test_active_address_space_tracking.py
           python3 tests/test_kernel_smp_ring3.py
+          python3 tests/test_kernel_switch_commit.py
+          python3 tests/test_local_smp_runner.py
           python3 tests/test_process_smp_tlb_coherence.py
           python3 tests/test_kernel_smp_process_migration.py
           python3 tests/test_kernel_user_fault_isolation.py
@@ -98,15 +100,23 @@ jobs:
           qemu_pid=$!
 
           found=0
+          stop_reason=timeout
           for i in $(seq 1 3000); do
             if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' build/qemu-smp-serial.log; then
               found=1
+              stop_reason=complete
               break
             fi
             if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
+              stop_reason=cpu-exception
+              break
+            fi
+            if test -f build/qemu-smp-serial.log && grep -Eq '^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$' build/qemu-smp-serial.log; then
+              stop_reason=ring3-probe-failure
               break
             fi
             if ! kill -0 "$qemu_pid" 2>/dev/null; then
+              stop_reason=qemu-exited
               break
             fi
             sleep 0.1
@@ -117,6 +127,12 @@ jobs:
           test -f build/qemu-smp-serial.log
           cp build/qemu-smp-serial.log "build/qemu-smp-serial-${proof}.log"
           cat build/qemu-smp-serial.log
+          echo "SMP proof ${proof}: stop_reason=${stop_reason}"
+          if test "$stop_reason" != complete; then
+            checkpoint=$(grep -E '^BAKEN:HEX=Q:' build/qemu-smp-serial.log | tail -n 1 || true)
+            echo "::error::SMP stopped: ${stop_reason}; Ring3/TLB checkpoint=${checkpoint:-none}. Q stages: 1=publication, 2=remap, 3=resume, 4=reaper, 5=idle, 6=syscalls, 7/8/9=unmap, A=cleanup; bit31=failure; progress is silent while user serial is active."
+          fi
+          python3 tools/scripts/run_smp_qemu.py --validate-log build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
             echo '::error::CPU exception reported during SMP/heap/TLB/Ring3/FPU migration proof.'
             exit 1

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -54,6 +55,8 @@ def validate(serial: str) -> list[str]:
     if "BAKEN:HEX=E:" in serial:
         errors.append("CPU exception reported (BAKEN:HEX=E:)")
     lines = marker_lines(serial)
+    failures = re.findall(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M)
+    errors.extend(f"Ring3/TLB probe failed: {marker}" for marker in failures)
     errors.extend(f"missing {marker}" for marker in REQUIRED_MARKERS if marker not in lines)
     return errors
 
@@ -71,19 +74,23 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
         "-display", "none", "-monitor", "none", "-serial", f"file:{serial_path}",
     ]
     started = time.monotonic()
+    stop_reason = "timeout"
     with qemu_log.open("w", encoding="utf-8") as output:
         process = subprocess.Popen(command, cwd=ROOT, stdout=output, stderr=output)
         try:
             deadline = started + args.timeout
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(errors="replace") if serial_path.exists() else ""
-                if "BAKEN:HEX=E:" in serial or FINAL_MARKER in marker_lines(serial):
+                if "BAKEN:HEX=E:" in serial or re.search(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M):
+                    stop_reason = "kernel failure"
+                    break
+                if FINAL_MARKER in marker_lines(serial):
+                    stop_reason = "final marker"
                     break
                 if process.poll() is not None:
+                    stop_reason = f"QEMU exited with status {process.returncode}"
                     break
                 time.sleep(args.poll_interval)
-            else:
-                raise RuntimeError(f"proof {proof} timed out after {args.timeout:.1f}s")
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -94,6 +101,8 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
                     process.wait(timeout=5)
     serial = serial_path.read_text(errors="replace") if serial_path.exists() else ""
     errors = validate(serial)
+    if stop_reason != "final marker":
+        errors.insert(0, stop_reason)
     elapsed = time.monotonic() - started
     if errors:
         checkpoints = "\n".join(line for line in serial.splitlines() if "BAKEN:" in line)[-8192:]
@@ -104,6 +113,7 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--validate-log", type=Path, help="Validate a saved serial log without launching QEMU")
     parser.add_argument("--qemu", default=shutil.which("qemu-system-x86_64") or
                         "C:/Program Files/qemu/qemu-system-x86_64.exe")
     parser.add_argument("--ovmf-code", type=Path,
@@ -116,6 +126,11 @@ def main() -> int:
     parser.add_argument("--poll-interval", type=float, default=0.05)
     parser.add_argument("--build", action="store_true")
     args = parser.parse_args()
+    if args.validate_log:
+        errors = validate(args.validate_log.read_text(errors="replace"))
+        for error in errors:
+            print(f"::error::{error}")
+        return 1 if errors else 0
     if args.runs < 1 or args.runs > 20:
         parser.error("--runs must be between 1 and 20")
     if args.build:
