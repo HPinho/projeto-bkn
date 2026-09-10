@@ -13,15 +13,15 @@ Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. 
 ## Baseline de runtime certificada
 
 ```text
-a2e04a7858443a837488ff39fc2c26df4261fa58
-test(hid): scope HID-2 runtime order assertion
+2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
+docs: track HID-3 input event validation
 ```
 
-- CI #1063 / `34501892035` ✅;
-- SMP #166 / `34501892066` ✅ — 3/3;
-- NVMe #263 / `34501892022` ✅.
+O runtime HID-3 está em `51631f23`; `2775c12a` adiciona somente documentação e é o head promovido após validação integrada.
 
-`89640db8` é somente o commit documental posterior.
+- CI #1066 / `34509266662` ✅;
+- SMP #169 / `34509266645` ✅ — 3/3, todos `stop_reason=complete`;
+- NVMe #266 / `34509266646` ✅.
 
 ---
 
@@ -48,8 +48,8 @@ test(hid): scope HID-2 runtime order assertion
 | HID-0 Boot HID xHCI | ✅ | keyboard/mouse Boot + Interrupt IN real |
 | HID-1 Report Descriptor | ✅ | fetch real + parser bounded transport-agnostic |
 | HID-2 Field map / decoder | ✅ | Report ID, Usage, bit offsets, flags e valores |
-| HID-3 Input event model | ⏳ | fila e eventos normalizados keyboard/mouse |
-| HID-4 Hot-plug/lifecycle | ⬜ | concorrência, attach/detach/recovery e múltiplos devices |
+| HID-3 Input event model | ✅ | fila e eventos normalizados keyboard/mouse |
+| HID-4 Hot-plug/lifecycle | ⬜ | concorrência, identidade, attach/detach/recovery e múltiplos devices |
 | I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
 
 ### HID-1 — certificado
@@ -60,9 +60,7 @@ test(hid): scope HID-2 runtime order assertion
 
 `a2e04a78`: CI #1063 / `34501892035` ✅; SMP #166 / `34501892066` ✅ 3/3; NVMe #263 / `34501892022` ✅. Runtime base em `7e3008ae`; correção final foi somente do guardrail textual.
 
-### HID-3 — candidato atual
-
-Branch: `hid3-validation`.
+### HID-3 — certificado
 
 Runtime:
 ```text
@@ -70,7 +68,13 @@ Runtime:
 feat(hid): add unified input event model
 ```
 
-Implementação:
+Head promovido/certificado:
+```text
+2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
+docs: track HID-3 input event validation
+```
+
+Implementação comprovada:
 - `input_event.sotlas`: fila FIFO 512, fixed-capacity, sem heap e independente de protocolo/transporte;
 - ABI de eventos com classes keyboard/pointer/touch e key/button/relative/absolute;
 - `hid_input_events.sotlas`: HID-2 -> eventos normalizados, sem dependência xHCI;
@@ -78,19 +82,33 @@ Implementação:
 - teclado por Usage Page 0x07 com press/release edge detection;
 - Variable exige valor != 0; Usage 0 não gera tecla;
 - mouse: botões + X/Y/Wheel relativos assinados;
-- xHCI continua apenas como produtor de reports;
+- xHCI permanece produtor de reports, não dono da semântica de input;
 - HID-2 continua autoridade de validação/decodificação antes do tradutor;
 - fallback Boot e a prova QEMU da tecla A permanecem.
 
-Markers:
+Markers obrigatórios no smoke:
 ```text
 BAKEN:USB_HID_EVENT_MODEL_READY
 BAKEN:USB_HID_EVENT_READY
 ```
 
-O segundo marker exige que um Interrupt IN real publique evento; CI/NVMe continuam usando `sendkey a`. Falhas `USB_HID_EVENT_MODEL_FAILED` e `USB_HID_EVENT_FAILED` são terminais no smoke.
+O segundo marker exige que um Interrupt IN real publique evento. CI #1066 e NVMe #266 passaram o smoke que exige os dois markers, usando a injeção real `sendkey a`. SMP #169 passou 3/3 e preservou migração de processo/FPU.
 
-**Critério:** CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch. `main` permanece no HID-2 até isso ocorrer.
+Certificação:
+- CI #1066 / `34509266662` ✅;
+- SMP #169 / `34509266645` ✅ 3/3;
+- NVMe #266 / `34509266646` ✅.
+
+### HID-4 — próximo
+
+**⬜ PLANEJADO.** Evoluir do primeiro HID global para lifecycle/múltiplos devices sem alterar o modelo de eventos já certificado:
+- identidade estável por dispositivo/interface;
+- estado HID separado por dispositivo e Report ID;
+- attach/detach e invalidação segura;
+- múltiplos keyboards/mice/HID simultâneos;
+- lifecycle/cancelamento/recovery dos Interrupt IN;
+- hot-plug e reenumeração bounded/fail-closed;
+- fila de eventos continua sendo a fronteira transport-agnostic.
 
 ## Trilha C — Storage de produção
 

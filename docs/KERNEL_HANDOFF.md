@@ -16,17 +16,17 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 ## Baseline de runtime certificada
 
 ```text
-a2e04a7858443a837488ff39fc2c26df4261fa58
-test(hid): scope HID-2 runtime order assertion
+2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
+docs: track HID-3 input event validation
 ```
 
-O runtime HID-2 foi introduzido em `7e3008ae`; `a2e04a78` alterou apenas o guardrail final e é o SHA certificado/promovido.
+O runtime HID-3 foi introduzido em `51631f23f8ffa3bd2593c405bfee90f0e5f2fe32`; `2775c12a` acrescenta somente documentação de validação e é o head efetivamente promovido para `main` após os três gates verdes.
 
-- CI #1063 / `34501892035` ✅;
-- SMP #166 / `34501892066` ✅ — 3/3 boots;
-- NVMe-only #263 / `34501892022` ✅.
+- CI #1066 / `34509266662` ✅;
+- SMP #169 / `34509266645` ✅ — 3/3 boots, todos `stop_reason=complete`;
+- NVMe-only #266 / `34509266646` ✅.
 
-`89640db8` é o commit documental posterior de certificação HID-2.
+O smoke CI/NVMe no mesmo head exige `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:USB_HID_EVENT_READY`, além dos markers HID-1/HID-2 e `BAKEN:BARE_METAL_READY`. O SMP 3/3 preservou `BAKEN:SMP_PROCESS_MIGRATED` e `BAKEN:SMP_FPU_MIGRATION_READY`.
 
 ## Invariantes congelados do Kernel Core
 
@@ -65,48 +65,58 @@ Histórico HID-2: SMP #165 `34501501476` falhou somente no guardrail textual ant
 
 ## HID-3 — modelo/fila unificada de input
 
-**⏳ EM VALIDAÇÃO na branch `hid3-validation`.**
+**✅ COMPROVADO em `2775c12a`.**
 
-Candidato de runtime:
+Runtime:
 ```text
 51631f23f8ffa3bd2593c405bfee90f0e5f2fe32
 feat(hid): add unified input event model
 ```
 
-Escopo:
-- novo `input_event.sotlas`: ABI comum de eventos e fila FIFO fixed-capacity de 512 entradas, sem heap;
-- core de eventos não importa HID, xHCI, DMA ou ACPI;
+Head certificado/promovido:
+```text
+2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
+docs: track HID-3 input event validation
+```
+
+Escopo comprovado:
+- `input_event.sotlas`: ABI comum de eventos e fila FIFO fixed-capacity de 512 entradas, sem heap;
+- core de eventos sem import de HID, xHCI, DMA ou ACPI;
 - classes generic/keyboard/pointer/touch e tipos key down/up, button down/up, relative/absolute;
 - sequência monotônica, `peek`, `pop`, contador e diagnóstico de overflow;
-- novo `hid_input_events.sotlas`: tradutor transport-agnostic HID-2 -> `InputEvent`;
-- estado de teclas e botões separado por Report ID, evitando releases fabricados entre reports compostos;
+- `hid_input_events.sotlas`: tradutor transport-agnostic HID-2 -> `InputEvent`;
+- estado de teclas e botões separado por Report ID;
 - teclado: Usage Page 0x07, transições reais e Usage 0 tratado como No Event;
 - campos Variable só são considerados pressionados com valor diferente de zero;
 - mouse: Button Page 0x09 + X/Y/Wheel relativos da Generic Desktop Page;
-- reports continuam obrigatoriamente validados/decodificados pelo HID-2 antes da tradução;
+- HID-2 continua obrigatoriamente validando/decodificando o Interrupt IN antes da tradução;
 - xHCI inicializa HID-3 somente depois do mapa HID-2 real;
-- Interrupt IN real passa por HID-3 antes do fallback Boot legado;
-- o fallback Boot e a prova física QEMU da tecla A permanecem intactos.
+- Interrupt IN real passa pelo tradutor HID-3 antes do fallback Boot legado;
+- fallback Boot e a prova física QEMU da tecla A permanecem intactos.
 
-Provas novas:
+Provas:
 ```text
 BAKEN:USB_HID_EVENT_MODEL_READY
 BAKEN:USB_HID_EVENT_READY
 ```
 
-`USB_HID_EVENT_MODEL_READY` prova que o core/fila foi inicializado sobre o mapa real. `USB_HID_EVENT_READY` só é emitido quando um Interrupt IN real aumenta o número de eventos publicados; report neutro não satisfaz esse gate. CI/NVMe continuam injetando `sendkey a`, então o smoke exige ambos os markers além do `STEP=W` existente.
+`USB_HID_EVENT_MODEL_READY` prova que o core/fila foi inicializado sobre o mapa real. `USB_HID_EVENT_READY` só é emitido quando um Interrupt IN real aumenta o número de eventos publicados. Como CI #1066 e NVMe #266 passaram o smoke que exige ambos os markers, a injeção `sendkey a` produziu a prova real de evento normalizado. SMP #169 confirmou ainda 3/3 boots do Kernel Core no mesmo candidato integrado.
 
-Falhas dedicadas:
-```text
-BAKEN:USB_HID_EVENT_MODEL_FAILED
-BAKEN:USB_HID_EVENT_FAILED
-```
+Certificação:
+- CI #1066 / `34509266662` ✅;
+- SMP #169 / `34509266645` ✅ — 3/3;
+- NVMe-only #266 / `34509266646` ✅.
 
-Critério de promoção HID-3: CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch, sem relaxar os gates HID-0/1/2 nem qualquer invariante do Kernel Core.
+## Próximo: HID-4 — lifecycle / múltiplos devices
 
-## Depois do HID-3
+**⬜ PLANEJADO.** A próxima etapa deve tratar concorrência e ciclo de vida do input sem reabrir HID-0..HID-3:
+- identidade estável por dispositivo/interface, não somente um primeiro HID global;
+- attach/detach e invalidação segura de estado/fila;
+- múltiplos HID simultâneos sem colisão de Report ID entre dispositivos;
+- cancelamento/recovery de Interrupt IN e endpoint lifecycle;
+- hot-plug com bounds e diagnóstico fail-closed;
+- preservar o event model genérico como fronteira entre transportes e consumers.
 
-- HID-4: concorrência/lifecycle, attach/detach/recovery e múltiplos devices;
-- I2C-HID somente após transporte I2C/ACPI seguro.
+I2C-HID continua somente após transporte I2C/ACPI seguro.
 
 `HPinho/LangSotlas` permanece somente leitura/referência salvo autorização explícita.
