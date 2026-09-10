@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails dos GET_DESCRIPTOR(Device) via EP0."""
+"""Guardrails dos GET_DESCRIPTOR(Device) via EP0, incluindo isolamento por Slot ID."""
 
 from pathlib import Path
 import unittest
@@ -19,46 +19,70 @@ class XhciDescriptorTests(unittest.TestCase):
         self.assertIn("USB_DEVICE_DESCRIPTOR_VALUE: u16 = 0x0100", text)
         self.assertIn("XHCI_SETUP_TRT_IN_DATA", text)
 
-    def test_first_probe_requests_exactly_eight_bytes(self):
+    def test_descriptor_state_is_bounded_per_slot_and_epoch(self):
+        text = DESC.read_text(encoding="utf-8")
+        self.assertIn("XHCI_DESCRIPTOR_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY", text)
+        self.assertIn("pub struct XhciDeviceDescriptorState", text)
+        self.assertIn("static mut XHCI_DEVICE_DESCRIPTOR_STATES:", text)
+        self.assertIn("pub epoch: u32", text)
+        self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
+        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch != epoch", text)
+        self.assertNotIn("static mut XHCI_DEVICE_DESCRIPTOR_PROBE_READY:", text)
+        self.assertNotIn("static mut XHCI_DEVICE_DESCRIPTOR_READY:", text)
+
+    def test_slot_probe_requests_exactly_eight_bytes(self):
         text = DESC.read_text(encoding="utf-8")
         self.assertIn("USB_DEVICE_DESCRIPTOR_PROBE_LENGTH: u16 = 8", text)
-        body = text.split("pub fn xhci_probe_first_device_descriptor_8()", 1)[1]
-        body = body.split("pub fn xhci_device_descriptor_probe_is_ready()", 1)[0]
+        body = text.split("pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_probe_first_device_descriptor_8()", 1)[0]
         self.assertIn("USB_DEVICE_DESCRIPTOR_PROBE_LENGTH", body)
         self.assertIn("xhci_trb_setup_stage", body)
         self.assertIn("xhci_trb_data_stage", body)
         self.assertIn("xhci_trb_status_stage(false, true", body)
-        self.assertIn("xhci_transfer_wait_ep0_completion", body)
-        self.assertIn("xhci_transfer_last_residual_length() != 0", body)
+        self.assertIn("xhci_ep0_producer_cycle_for(slot_id)", body)
+        self.assertIn("xhci_ep0_submit_control_td_for_slot(slot_id", body)
+        self.assertIn("xhci_transfer_wait_ep0_completion(slot_id", body)
+        self.assertIn("xhci_transfer_last_residual_length_for(slot_id) != 0", body)
 
-    def test_probe_validates_header_and_captures_bmaxpacketsize0(self):
+    def test_probe_validates_header_and_captures_bmaxpacketsize0_for_same_slot(self):
         text = DESC.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_probe_first_device_descriptor_8()", 1)[1]
-        body = body.split("pub fn xhci_device_descriptor_probe_is_ready()", 1)[0]
+        body = text.split("pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_probe_first_device_descriptor_8()", 1)[0]
         self.assertIn("descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE", body)
         self.assertIn("let max_packet0 = xhci_descriptor_read8(base, 7)", body)
         self.assertIn("max_packet0 == 0", body)
-        self.assertIn("XHCI_DEVICE_DESCRIPTOR_PROBE_MAX_PACKET0 = max_packet0", body)
+        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = max_packet0", body)
+        self.assertIn("xhci_descriptor_state_is_current(slot_id)", body)
 
-    def test_td_uses_setup_data_status_and_shared_transfer_waiter(self):
+    def test_legacy_probe_wrapper_delegates_to_addressed_first_slot(self):
         text = DESC.read_text(encoding="utf-8")
-        self.assertIn("xhci_trb_setup_stage", text)
-        self.assertIn("xhci_trb_data_stage", text)
-        self.assertIn("xhci_trb_status_stage(false, true", text)
-        self.assertIn("xhci_ep0_submit_control_td", text)
-        self.assertIn("xhci_transfer_wait_ep0_completion", text)
+        body = text.split("pub fn xhci_probe_first_device_descriptor_8()", 1)[1]
+        body = body.split("pub fn xhci_device_descriptor_probe_is_ready_for", 1)[0]
+        self.assertIn("let slot_id = xhci_address_slot_id()", body)
+        self.assertIn("xhci_probe_device_descriptor_8_for_slot(slot_id)", body)
 
-    def test_descriptor_validates_identity_and_exposes_core_fields(self):
+    def test_full_descriptor_uses_same_slot_ep0_and_transfer_result(self):
         text = DESC.read_text(encoding="utf-8")
-        self.assertIn("descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE", text)
+        body = text.split("pub fn xhci_get_device_descriptor_for_slot(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_get_first_device_descriptor()", 1)[0]
+        self.assertIn("xhci_ep0_producer_cycle_for(slot_id)", body)
+        self.assertIn("xhci_ep0_submit_control_td_for_slot(slot_id", body)
+        self.assertIn("xhci_transfer_wait_ep0_completion(slot_id", body)
+        self.assertIn("xhci_transfer_last_residual_length_for(slot_id)", body)
+        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer", body)
+
+    def test_descriptor_exposes_per_slot_core_fields_and_legacy_wrappers(self):
+        text = DESC.read_text(encoding="utf-8")
         for token in (
-            "XHCI_DEVICE_USB_VERSION",
-            "XHCI_DEVICE_VENDOR_ID",
-            "XHCI_DEVICE_PRODUCT_ID",
-            "XHCI_DEVICE_CLASS",
-            "XHCI_DEVICE_SUBCLASS",
-            "XHCI_DEVICE_PROTOCOL",
-            "XHCI_DEVICE_MAX_PACKET0",
+            "xhci_device_usb_version_for(slot_id: u8)",
+            "xhci_device_vendor_id_for(slot_id: u8)",
+            "xhci_device_product_id_for(slot_id: u8)",
+            "xhci_device_class_for(slot_id: u8)",
+            "xhci_device_subclass_for(slot_id: u8)",
+            "xhci_device_protocol_for(slot_id: u8)",
+            "xhci_device_max_packet0_for(slot_id: u8)",
+            "pub fn xhci_device_usb_version()",
+            "pub fn xhci_device_max_packet0()",
         ):
             self.assertIn(token, text)
 
