@@ -1,428 +1,347 @@
-# Baken OS / Sotlas — Kernel Handoff
+# Baken OS / Sotlas — Kernel & Platform Handoff
 
-Atualizado em 2026-09-09.
+Atualizado em 2026-09-09 (America/Fortaleza).
 
-## Estado atual
+Este é o documento operacional de continuidade do Baken OS. Ele deve registrar
+sempre o que está implementado, o que foi realmente comprovado, regressões
+observadas e o próximo passo. Não considerar um recurso certificado apenas por
+existir no código ou passar teste de fonte.
 
-### Atualização prioritária — regressão ANY/retirement após `35eb3f3`
+## Regra de registro obrigatória
 
-Esta atualização prevalece sobre os encerramentos históricos registrados abaixo.
-Fase 0 preservada; Fase 1 (consolidação de processos ANY e retirement SMP) aberta
-até os três gates aprovarem a correção no mesmo SHA. AML já tem catálogo/decoder
-implementados, mas a expansão da Fase 2 aguarda essa validação.
+A partir da Fase 2, toda alteração relevante deve deixar neste handoff e em
+`docs/BAKEN_OS_ROADMAP.md` um registro com:
 
-SMP #140 (`34414300224`) falhou em `35eb3f3ae1f36a0e455155b18df694b1e5fa13b0`,
-com ausência de `SMP_PROCESS_TLB_READY` depois de `SMP_RING3_RESUMED_ON_AP`.
-O scheduler já existe em `kernel/src/scheduler/core.sotlas`; criar um segundo
-`scheduler.sotlas` não corrige os invariantes de concorrência.
+- estado: `⏳ EM VALIDAÇÃO`, `✅ COMPROVADO` ou `❌ FALHOU`;
+- SHA exato;
+- gates executados e números dos runs quando disponíveis;
+- causa objetiva quando houver falha;
+- correção aplicada e o próximo passo ainda pendente.
 
-Correções em validação:
+Nunca esconder uma regressão relaxando marker, removendo teste ou substituindo
+hardware/protocolo real por mock que apenas retorna sucesso.
 
-- A flag `resumed` e o idle do AP não provam EXIT de uma thread ANY. O probe
-  espera o reaper liberar a referência do PID antes de validar contadores e
-  desmontar o address space. A espera cede ao scheduler para progredir no BSP.
-- Afinidade de thread READY pode ser solicitada durante retirement. Os setters
-  alteram somente afinidade; owner, stack e frame ficam intactos. Seleção/reaper
-  continuam exigindo owner NONE após confirmação pela CPU anterior.
-- Checkpoints `HEX=Q` distinguem publicação/remap/resume/reaper/idle/syscalls/unmap e
-  cleanup. Bit 31 indica falha explícita. CI e runner local rejeitam essa falha
-  mesmo se houver marcadores de sucesso, e distinguem timeout de término QEMU.
-- Não há prints de progresso BSP entre publicação da thread e confirmação do
-  reaper: a UART não serializa linhas de CPUs diferentes e os prints poderiam
-  corromper o marcador WRITE_SERIAL do usuário no AP. As falhas mantêm códigos
-  específicos, sem relaxar a exigência de marcadores completos no gate.
+---
 
-LangSotlas foi consultada no commit `75c70166ff255830ef8c8bf0983848d6e099c320`.
-A atualização usa xchg em `stdlib/system/sync.sotlas` e adiciona intrínsecos
-atômicos. O Baken já utiliza xchg. O backend upstream restaura RFLAGS com POPFQ
-e seu helper FPU ainda difere dos hardenings locais. Não houve substituição do
-compilador/backend: estas correções pertencem ao protocolo do scheduler/probe,
-não dependem de novos recursos da linguagem. Uma integração futura precisa
-validar ABI, lowering dos métodos, IRQ/FPU e testes nativos por recurso.
+## Baseline certificada — Fundação + Kernel Core
 
-Validação local desta correção (2026-09-09):
+**Estado: ✅ CERTIFICADO.**
 
-- Suíte Python: 1170 testes aprovados; contratos direcionados: 30 aprovados.
-- Build nativo: 143 módulos, 145 objetos; ISO isolada `build/smp-any-fix.iso`.
-- QEMU q35, 2 CPUs, OVMF: 10 boots independentes aprovados, com os 18 markers
-  exigidos, incluindo AML, Ring3, isolamento de falhas, TLB, migração e FPU.
-  Logs locais: `build/smp-local-8b_p1uq0/qemu-smp-serial-{1..10}.log`.
-- Sintaxe Bash dos 4 scripts do workflow aprovada; `git diff --check` aprovado.
-- CI principal, SMP e NVMe do novo commit: pendentes. Dez boots locais não são
-  prova de ausência de toda corrida nem certificação de hardware físico.
-
-A **Fase 0 — Fundação Bare-Metal está fechada**.
-
-Checkpoint técnico validado:
+Baseline atual:
 
 ```text
-d5ad8e9163ee10b5e6d84162bc43e5a7722a00f5
-feat(smp): preempt and resume real Ring 3 process on AP
+72422a79dfcec4c9c43bd3a83ef8a9ad90c7c2c8
+fix(ci): make SMP runner tests importable when executed directly
 ```
 
-Esse SHA passou simultaneamente:
+Os três gates obrigatórios passaram no MESMO SHA:
 
-- CI principal #987 — run `34271845602`;
-- SMP #90 — run `34271845718`;
-- NVMe-only #187 — run `34271845584`.
+- CI principal #1039 — run `34421209110` — ✅ PASS;
+- SMP #142 — run `34421209023` — ✅ PASS;
+- NVMe-only #239 — run `34421209039` — ✅ PASS.
 
-O CI principal passou suíte completa, grafo Sotlas, build nativo, ISO e smoke QEMU. O SMP passou dispatch em AP, timer, TLB shootdown e processo Ring 3 real preemptado e retomado no CPU 1. O NVMe-only passou contracts, build, fixture e boot proof.
+Esse checkpoint encerra a revalidação causada pela regressão ANY/retirement do
+SMP #140 e passa a ser a baseline da Fase 2.
 
-## Arquitetura que deve ser preservada
+### Regressão ANY/retirement encerrada
 
-- UEFI é somente bootstrap.
-- Depois de `ExitBootServices()`, o kernel não usa Boot Services, Runtime Services, Pointer Protocol, Block I/O UEFI ou `EFI_SYSTEM_TABLE`.
-- O kernel, drivers, gráficos, UI e serviços pertencem ao código Sotlas.
-- Python pertence ao host: compilador, build, testes e tooling.
-- O compilador Sotlas deve permanecer genérico: lexer/parser/AST/IR/lowering/ABI/backend/intrínsecos, sem lógica específica de UI ou drivers do Baken.
-- `BakenBootInfo` não pode voltar a transportar pontes executáveis para firmware.
-- W+X continua fail-closed.
-- PAT/WC, MMIO e page-table mutations pertencem ao VMM/active page tables.
+A regressão mostrava `SMP_RING3_RESUMED_ON_AP` sem alcançar
+`SMP_PROCESS_TLB_READY`. A correção preserva o ownership da thread até a CPU
+anterior confirmar que saiu fisicamente do frame/stack, enquanto permite que a
+afinidade de uma thread READY seja alterada durante o retirement sem transferir
+ownership prematuramente.
+
+Invariantes que NÃO podem regredir:
+
+1. afinidade não transfere ownership;
+2. thread dinâmica só é selecionável/reapable com owner `NONE`;
+3. owner é liberado apenas numa entrada posterior do scheduler da CPU anterior;
+4. BSP e AP usam o mesmo caminho FPU save -> schedule -> CR3/TSS -> restore;
+5. processo Ring 3 pode migrar BSP -> AP mantendo TID, root e SIMD;
+6. reaper/teardown ocorre somente depois da saída real da CPU anterior;
+7. `BAKEN:HEX=E:` continua terminal para o gate;
+8. falha `HEX=Q` continua fail-closed.
+
+### Proteção de regressão do Kernel Core
+
+Qualquer alteração em scheduler, IRQ, process registry, address spaces, CR3,
+TLB, FPU/SIMD, SMP ou storage só é considerada válida quando os três gates
+passarem no mesmo SHA novamente.
+
+O repositório ainda não possui ruleset/proteção administrativa da `main`.
+Portanto os gates detectam regressão, mas GitHub ainda permite que um push direto
+vermelho entre na branch. Isso não bloqueia a Fase 2, porém continua sendo uma
+melhoria administrativa recomendada.
+
+---
+
+## Arquitetura que deve permanecer congelada
+
+- UEFI somente bootstrap.
+- Após `ExitBootServices()`, zero Boot Services/Runtime Services no kernel.
+- Zero Pointer Protocol/Block I/O UEFI como ponte de runtime.
+- `BakenBootInfo` apenas transporta dados, nunca funções executáveis de firmware.
+- PMM/VMM/page tables são Baken-owned.
+- W^X fail-closed e guard stacks permanecem obrigatórios.
+- PAT/WC e MMIO pertencem à camada de memória/hardware nativa.
 - TSS/RSP0 é per-CPU.
-- Hardware da certificação não pode ser substituído por mocks que apenas retornam sucesso.
+- Python é ferramenta de host; kernel/drivers/UI são Sotlas nativo.
+- Compilador Sotlas deve permanecer genérico, sem lógica específica de UI ou
+  drivers Baken embutida no compilador.
 
-## Fundação comprovada
+---
 
-### Boot / CPU / memória
+## O que já está implementado e comprovado
+
+### Boot / CPU / memória — ✅
 
 - ExitBootServices real;
 - stack trampoline e stack própria;
 - CR3 Baken;
-- W^X e guard stack;
-- GDT, segment reload, TSS/LTR e IDT;
-- PMM, VMM, direct-map e active page tables;
-- PAT e framebuffer WC;
+- W^X;
+- guard stack;
+- GDT/segment reload;
+- TSS/LTR per-CPU;
+- IDT e política de exceções;
+- PMM;
+- VMM/direct map/active page tables;
+- PAT/framebuffer WC;
+- DMA;
 - auditoria zero-UEFI pós-cutover.
 
-### Plataforma / hardware
+### Plataforma/hardware de fundação — ✅
 
-- ACPI/MADT;
+- ACPI tables básicas;
+- MADT;
 - LAPIC/IOAPIC;
-- IRQ e LAPIC timer;
-- PCI e DMA;
+- IRQ;
+- LAPIC timer;
+- PCI;
 - xHCI/USB HID;
 - AHCI;
 - NVMe;
 - BlockDevice;
 - GPT/MBR/FAT32.
 
-### Kernel Core já existente
-
-Embora formalmente pertençam à evolução de Kernel Core, várias peças já estão implementadas e testadas:
+### Kernel Core — ✅
 
 - scheduler preemptivo;
 - threads de kernel;
-- wait/wakeup e sleep;
-- thread exit e reaper;
+- wait/wakeup/sleep;
+- exit/reaper/stack release;
 - heap PMM-backed;
-- registro de processos;
+- registry de processos;
+- PID/TID;
 - address spaces privados;
-- PID/TID e CR3 por processo;
+- CR3 por processo;
 - Ring 3;
 - syscalls;
 - user-copy;
-- contexto FPU/SIMD por thread no caminho do scheduler;
-- scheduler SMP;
-- TLB shootdown para mappings kernel-global;
-- processo real pinned em AP;
-- timer preemptando frame CPL3 no AP;
-- retorno comprovado ao mesmo processo em CPL3 antes do `exit`;
-- retorno ao kernel CR3, reaper e teardown.
+- isolamento de fault CPL3;
+- fault CPL3 também comprovado em AP;
+- FPU/SIMD por thread;
+- SMP scheduler;
+- active address-space tracking por CPU;
+- TLB shootdown root-aware;
+- processo Ring 3 no AP;
+- migração real BSP -> AP;
+- preservação FPU/SIMD na migração;
+- ownership/retirement sincronizado.
 
-## Limites atuais — não confundir com regressão da Fundação
+---
 
-O checkpoint não declara prontos os seguintes comportamentos genéricos:
+## Fase 2 — AML / Platform / Drivers
 
-1. **Migração irrestrita de processos entre CPUs**
-   - o processo SMP provado é explicitamente pinned no CPU 1;
-   - `scheduler_create_process_thread()` continua preservando o comportamento BSP histórico;
-   - a API `scheduler_create_process_thread_on_cpu()` permite prova controlada em AP.
+**Estado geral: ▶️ EM DESENVOLVIMENTO.**
 
-2. **TLB shootdown por address space de usuário**
-   - o shootdown kernel-global está implementado;
-   - mappings de usuário do probe são construídos antes do dispatch e desmontados depois que o AP voltou ao kernel root;
-   - ainda não liberar mutação concorrente de PTE de processo sem um protocolo root-aware.
+### AML-0 — Catálogo de definition blocks
 
-3. **Process registry lock + IPI**
-   - antes de esperar ACK remoto durante mutação de address space, a aquisição do lock deve ser compatível com recebimento de IPI;
-   - evitar spin com IF=0 que possa bloquear o próprio shootdown necessário para progredir.
+**Estado: ✅ IMPLEMENTADO E COBERTO PELA BASELINE.**
 
-4. **Heap SMP**
-   - revisar a sincronização do heap global antes de permitir uso concorrente amplo por processos/serviços em múltiplos CPUs.
+`kernel/src/acpi/aml_tables.sotlas`:
 
-5. **FPU/SIMD em migração**
-   - save/restore passa pelo scheduler e a prova CPL3/AP atravessa esse caminho;
-   - ainda falta prova explícita de migração da mesma thread entre CPUs preservando ownership e estado SIMD.
+- prefere DSDT validado pelo FADT;
+- enumera SSDTs com limite fixo;
+- aceita somente tabelas ACPI previamente validadas;
+- expõe payload/length somente de definition blocks catalogados;
+- não interpreta opcodes;
+- marker obrigatório `BAKEN:ACPI_AML_TABLES_READY`.
 
-## Próximo trabalho — Fase 1
+### AML-1 — Decoder estrutural mínimo
 
-A ordem recomendada é esta:
+**Estado: ✅ IMPLEMENTADO E COBERTO PELA BASELINE.**
 
-### 1. Active address-space tracking per CPU
+`kernel/src/acpi/aml_decoder.sotlas`:
 
-Adicionar uma camada baixa que saiba qual CR3/root está ativo em cada CPU sem criar dependência circular scheduler ↔ memory.
+- cursor limitado;
+- leitura fail-closed;
+- `PkgLength` 1..4 bytes;
+- valida bits reservados e limites;
+- `NameString` com root `\`, parent `^`, DualName e MultiName;
+- valida `NameSeg`;
+- constantes Zero/One/Ones/Byte/Word/DWord/QWord little-endian;
+- self-test bare-metal;
+- marker `BAKEN:ACPI_AML_DECODER_READY`.
 
-A atualização deve ocorrer sempre que o scheduler:
+### AML-2 — Namespace core read-only
 
-- seleciona uma process thread;
-- troca CR3;
-- retorna ao idle/kernel root.
+**Estado deste incremento: ⏳ EM VALIDAÇÃO.**
 
-### 2. Process-root TLB shootdown
+Novo módulo `kernel/src/acpi/aml_namespace.sotlas`:
 
-Criar uma operação conceitualmente equivalente a:
+- storage estático com capacidade limitada, sem heap;
+- raiz explícita;
+- nós tipados preparados para Scope/Device/Name/Method;
+- parent index e NameSeg por nó;
+- resolução absoluta e relativa de `NameString`;
+- suporte a prefixos `^` sem permitir subir acima da raiz;
+- detecção de duplicata;
+- falha explícita ao exceder capacidade;
+- API de construção privada;
+- API pública somente de consulta depois de READY;
+- self-test cria `\_SB_.PCI0._HID`, testa lookup absoluto e `^`, testa
+  duplicata e depois limpa os objetos sintéticos;
+- namespace publicado após o self-test contém somente a raiz, evitando contaminar
+  o futuro namespace real;
+- não executa métodos, não acessa OperationRegion e não toca hardware;
+- novo marker obrigatório `BAKEN:ACPI_AML_NAMESPACE_READY`.
 
-```text
-tlb_shootdown_address_space_page(root, virtual_address)
-```
+O marker foi promovido para:
 
-Requisitos:
+- smoke QEMU principal;
+- runner SMP local;
+- workflow SMP 3/3;
+- NVMe-only QEMU.
 
-- invalidar somente CPUs que podem possuir tradução daquele root;
-- permitir requester BSP ou AP;
-- ACK/generation sem depender de requester fixo;
-- funcionar se o requester não estiver usando o root alvo;
-- preservar o shootdown kernel-global existente.
+O SMP também passa a executar `tests/test_acpi_aml_namespace.py` explicitamente.
 
-### 3. Tornar locks envolvidos IPI-friendly
+### Limite intencional do AML-2
 
-Antes de segurar lock de processo enquanto espera shootdown remoto:
+`AML_NAMESPACE_READY` neste incremento certifica o **núcleo do namespace**, não
+a ingestão completa da DSDT/SSDT. O namespace real ainda fica vazio além da raiz.
+Isso é deliberado: varrer bytes desconhecidos procurando opcodes pode produzir
+falsos objetos dentro de buffers/métodos e não será usado.
 
-- usar política semelhante ao active-page-table lock;
-- `irq_save_disable` + `try_lock`;
-- se ocupado, restaurar IRQ e `pause` antes de tentar novamente;
-- nunca criar deadlock onde um CPU espera ACK de outro que está girando com IF=0.
+---
 
-### 4. Migração controlada BSP ↔ AP
+## Próximas sucessões AML
 
-Adicionar uma prova real:
+### AML-3 — Data objects e skip grammar-aware
 
-```text
-process thread em CPL3 no BSP
-→ timer/preempção
-→ thread volta READY
-→ scheduler a seleciona no AP
-→ CR3 correto
-→ TSS.RSP0 do AP correto
-→ user state continua
-→ syscall
-→ exit
-→ kernel root
-→ reaper
-```
+Pendências:
 
-A prova deve rejeitar qualquer `BAKEN:HEX=E:` e registrar CPU antes/depois.
+- StringPrefix;
+- BufferOp;
+- PackageOp / VarPackageOp;
+- PackageElement;
+- DataRefObject mínimo;
+- TermArg mínimo necessário para objetos de descoberta;
+- rotina de skip somente para produções AML conhecidas e limitadas, nunca scan
+  cego de bytes.
 
-### 5. FPU/SIMD migration proof
+### AML-4 — Loader real DSDT/SSDT -> namespace
 
-A mesma process thread deve:
+Implementar parser de declarations em ordem de definition block:
 
-- gravar estado XMM/x87 no primeiro CPU;
-- ser preemptada/migrada;
-- restaurar exatamente o estado no segundo CPU;
-- terminar sem dupla execução/ownership concorrente.
+- `NameOp`;
+- `ScopeOp`;
+- `MethodOp` como objeto armazenado, ainda não executado;
+- `ExtOpPrefix + DeviceOp`;
+- ThermalZone/Processor/PowerResource quando necessário;
+- regras de namespace e resolução corretas para `\` e `^`;
+- DSDT primeiro, SSDTs depois;
+- capacidade/duplicata/encodings inválidos fail-closed.
 
-### 6. Heap e estruturas globais SMP-safe
+Critério: namespace deve conter objetos reais do firmware QEMU e emitir um marker
+separado, por exemplo `BAKEN:ACPI_AML_NAMESPACE_LOADED`.
 
-Revisar estruturas globais que ainda dependem apenas de exclusão por IRQ local e convertê-las para sincronização SMP apropriada quando necessário.
+### AML-5 — Objetos de descoberta de dispositivo
 
-### 7. Só então liberar affinity ANY para processos
+Resolver sem executar métodos arbitrários, quando representados como dados:
 
-Não trocar globalmente:
+- `_HID`;
+- `_CID`;
+- `_UID`;
+- `_STA` quando constante;
+- `_ADR`;
+- `_CRS` estático.
 
-```text
-SCHEDULER_THREAD_AFFINITY_CPU = 0
-```
+Adicionar decodificação EISA ID e resource templates antes de conectar drivers.
 
-para `ANY` antes de page-table coherence, locks e FPU ownership estarem comprovados.
+### AML-6 — Evaluator controlado
 
-## Fases posteriores
+Somente depois do namespace real estar comprovado:
 
-### Fase 2 — Platform / Drivers
+- execution context com limites de profundidade/instruções;
+- Arg0..Arg6 e Local0..Local7;
+- Return;
+- Store;
+- operações aritméticas/lógicas necessárias;
+- CondRefOf/If/Else conforme demanda;
+- chamada de Method com aridade validada;
+- timeout/fuel para impedir firmware AML de prender o kernel.
 
-- AML;
-- I2C-HID;
-- rede;
-- áudio;
-- GPU/aceleração.
+### AML-7 — OperationRegion / Field
 
-### Fase 3 — User Experience
+Depois do evaluator:
 
-- compositor;
-- desktop/window manager;
-- installer/OOBE;
-- animações;
-- aplicativos.
+- SystemMemory;
+- SystemIO;
+- PCIConfig;
+- Field/IndexField quando necessário;
+- validação rigorosa de endereço/tamanho;
+- acesso por camada apropriada de MMIO/PIO/PCI;
+- nunca permitir AML escrever fora da região declarada.
 
-## Validação obrigatória para mudanças futuras
+### AML-8 — ACPI de produção e power management
 
-### Reprodução rápida do gate SMP no Windows
+- `_PIC`/routing quando necessário;
+- `_PRT`;
+- `_S5`/shutdown;
+- sleep/wake posterior;
+- EC apenas quando houver infraestrutura segura;
+- recursos para I2C-HID e outros dispositivos ACPI.
 
-Após alterar o kernel, compile e execute os mesmos três boots independentes e
-marcadores exigidos por `baken_smp.yml`:
+---
 
-```powershell
-python tools/scripts/run_smp_qemu.py --build
-```
+## Depois de AML
 
-Para repetir rapidamente uma ISO já compilada, omita `--build`. Durante uma
-investigação, `--runs 1 --timeout 120` fornece um ciclo curto. Os logs serial e
-stderr de cada boot ficam preservados em um diretório `build/smp-local-*`.
+Ordem recomendada da Fase 2:
 
-Antes de chamar um novo checkpoint de estável, executar e conferir o SHA exato em:
+1. AML namespace real + evaluator limitado;
+2. resource parser / `_CRS`;
+3. I2C-HID e HID adicional;
+4. VFS/cache/montagem de produção;
+5. rede (NIC -> ARP -> IPv4/IPv6 -> UDP/TCP -> DHCP);
+6. áudio;
+7. GPU/aceleração/composição;
+8. hot-plug, power e telemetria de drivers.
+
+A ausência de hardware opcional deve degradar com diagnóstico, nunca derrubar o
+kernel.
+
+---
+
+## Gates obrigatórios daqui em diante
+
+Antes de chamar qualquer checkpoint de Fase 2 de comprovado:
 
 ```text
 CI principal
-SMP verification
+SMP verification — 3/3 boots independentes
 NVMe-only verification
 ```
 
-Além disso, manter os guardrails de:
+Para AML, adicionalmente:
 
-- zero firmware reentry;
-- compilador sem UI/driver Baken específico;
-- W^X;
-- TLB/SMP;
-- storage real;
-- USB real;
-- PAT/WC;
-- processo/Ring3/syscall/reaper.
+```text
+BAKEN:ACPI_AML_TABLES_READY
+BAKEN:ACPI_AML_DECODER_READY
+BAKEN:ACPI_AML_NAMESPACE_READY
+```
 
-## LangSotlas
+Markers futuros devem ser adicionados quando cada sucessão ganhar prova de
+runtime. Nenhum marker antigo deve ser removido para fazer um gate passar.
 
-`HPinho/LangSotlas` permanece **somente leitura/referência** neste trabalho. Não modificar esse repositório sem instrução explícita do usuário.
-# Diagnóstico de CI — 2026-09-08 / HEAD 6efb9eb
-
-- Os três runs do HEAD falharam: CI #998 no smoke QEMU, SMP #101 durante a
-  instalação de dependências e NVMe-only #198 no smoke QEMU.
-- A suíte local do HEAD passou: **1.109 testes**; build EFI passou com **141
-  módulos / 143 objetos**; o smoke single-core local original também passou.
-- Causa de instabilidade isolada entre o último SHA verde e o HEAD: a espera
-  final da probe de wait/sleep executava `scheduler_yield()` em laço apertado,
-  gerando interrupções de software enquanto dependia de ticks LAPIC reais.
-- Correção local: `x86_halt_until_interrupt()` exige IF=1 e executa `HLT`;
-  a probe agora dorme até um IRQ real, sem medir tempo por velocidade de host e
-  sem tempestade de yield. Smoke single-core corrigido passou, incluindo Ring 3,
-  syscalls, user-copy e loader, sem `BAKEN:HEX=E:`.
-- O runner local ganhou `--smp` e `--required-marker`. O smoke local com 2 CPUs
-  passou exigindo `SMP_PROCESS_TLB_READY` e `SMP_RING3_ON_AP_READY`, além do
-  gate completo single-core; portanto cobriu AP dispatch, timer, TLB shootdown,
-  retomada CPL3 no AP e teardown sem marcador de exceção.
-- O CI #999 do primeiro patch mostrou a localização exata: parou em
-  `WAIT_BLOCKED`, antes de `WAIT_WAKE`. O HLT apenas no fechamento final não
-  cobria os dois handoffs anteriores, que ainda dependiam de yields síncronos.
-- Correção complementar: a probe declaradamente BSP-only agora é criada com
-  afinidade CPU 0, e as esperas por BLOCKED, RESUMED e reaper avançam todas por
-  IRQ LAPIC real via `x86_halt_until_interrupt()`. O runtime não usa mais yield
-  para orquestrar essa certificação. Validar novamente CI/SMP/NVMe no novo SHA.
-- Diagnóstico final refinado: a prova agora publica duas threads reais, waiter e
-  waker, ambas com afinidade BSP. Waiter bloqueia; waker executa o wake e termina;
-  o bootstrap aguarda timer/reaper. A criação ganhou helper interno que publica
-  `READY` e afinidade sob o mesmo scheduler lock, eliminando a janela `ANY`.
-- Validação final local: **1.111 testes em 68,931 s**, build **141 módulos / 143
-  objetos**, smoke single-core e smoke SMP com os marcadores finais completos.
-- A falha de instalação do SMP é independente do kernel. Os três workflows
-  agora usam `Acquire::Retries=3` tanto em `apt-get update` quanto em `install`,
-  preservando os timeouts existentes.
-- O acesso autenticado aos artefatos GitHub foi bloqueado pelo controle de
-  segurança do navegador. Diagnóstico baseado em etapas públicas, diff entre
-  SHAs e reprodução local; validar os três workflows no SHA novo antes de
-  declarar a correção definitivamente verde.
-
-# Diagnóstico de CI — 2026-09-08 / tracking de CR3 por CPU
-
-- Os runs CI #1002, NVMe-only #202 e SMP #105 falharam no SHA `915a0d6`.
-- A CI principal encontrou três contratos antigos que ainda exigiam a chamada
-  direta ao scheduler; eles agora validam o wrapper e a ordem seleção ->
-  publicação do CR3.
-- A falha bare-metal foi reproduzida localmente: o serial parava no primeiro
-  tick, em `BAKEN:HEX=T:00000001`. O timer podia chegar antes de o scheduler
-  estar ativo e antes do registro do BSP no shootdown, mas o wrapper tentava
-  publicar o CR3 e entrava no caminho fail-closed.
-- A publicação agora é obrigatória somente quando `scheduler_is_active()`;
-  antes disso não existe decisão de scheduling a publicar. Depois da ativação,
-  uma falha de tracking continua parando o kernel.
-- Validação local final: **1.115 testes**, build **141 módulos / 143 objetos**,
-  smoke single-core completo e smoke SMP completo até
-  `SMP_PROCESS_TLB_READY` e `SMP_RING3_ON_AP_READY`, sem `BAKEN:HEX=E:`.
-
-# Estado da fundação do kernel — 2026-09-09
-
-## Concluído e comprovado
-
-- Cutover UEFI, `ExitBootServices`, W^X, CR3, GDT/IDT/TSS/IST e memória física
-  e virtual própria do kernel.
-- ACPI, LAPIC/IOAPIC, timer, IRQs, PCI/DMA, xHCI/HID, AHCI/NVMe, GPT/FAT32 e
-  framebuffer PAT/WC.
-- Scheduler preemptivo, threads de kernel, reaper, cache de stacks, yield,
-  wait queues, sleep por LAPIC e heap geral.
-- Processos, espaços de endereço, Ring 3, syscalls, cópia usuário/kernel,
-  carregador de userspace e preservação de contexto FPU/SIMD.
-- SMP: despacho em AP, timer no AP, heap concorrente, shootdown TLB root-aware,
-  migração de processo e retomada Ring 3/FPU no AP.
-
-## Correção de estabilidade da CI
-
-- O workflow principal podia expirar depois de `WAIT_BLOCKED`: a prova dependia
-  de uma thread waker ser escolhida imediatamente sob host carregado.
-- A prova agora executa a sequência determinística
-  `yield -> blocked -> wake pelo bootstrap -> yield -> resume`; o sleep e o
-  reaper continuam dependentes de IRQs LAPIC reais.
-- O smoke principal recebeu timeout próprio de 180 s e limite de etapa de cinco
-  minutos. Isso preserva falha finita e elimina falsos negativos por runner
-  lento.
-
-## Evidência local deste estado
-
-- **1.132 testes** aprovados.
-- Build Sotlas: **141 módulos / 143 objetos**.
-- QEMU single-core: `WAIT_WAKE`, `WAIT_RESUME`, sleep, Ring 3, syscall,
-  user-copy e loader aprovados.
-- QEMU SMP: heap concorrente, TLB, Ring 3, migração de processo e FPU aprovados
-  até `SMP_FPU_MIGRATION_READY`, sem `BAKEN:HEX=E:`.
-
-## Próxima fase
-
-Esta fundação não equivale ao sistema operacional completo. O próximo trabalho
-deve concentrar-se em rede, áudio, GPU/aceleração, política de processos e
-serviços de userspace, mantendo os três gates CI/NVMe/SMP obrigatórios.
-
-## Fechamento do Kernel Core — concluído e certificado
-
-A fronteira que faltava para isolar uma falha de userspace foi implementada no
-commit atual: o stub de exceção salva todos os GPRs, identifica CPL3
-pelo `CS`, termina a thread atual, permite o reaper soltar a referência do
-processo e retorna ao scheduler por `IRETQ` usando o frame normalizado da
-próxima thread. O probe lê deliberadamente a guard page de stack não mapeada;
-ele só é aprovado após teardown completo do address space e o marker
-`BAKEN:USER_FAULT_ISOLATED_READY`.
-
-O comportamento de CPL0 não muda: exceções do kernel continuam terminais para
-não ocultar corrupção de memória ou de controle. O commit
-`18343b99920c24deb3f27af0926202247206f69d` foi aprovado pelo CI principal
-#1019, SMP #122 e NVMe-only #219 no mesmo SHA.
-
-Os bloqueadores da auditoria foram implementados e certificados: snapshots de
-exceção são por CPU; somente uma allowlist de exceções síncronas CPL3 pode
-encerrar o processo; NMI, double fault e machine check permanecem fatais; e um
-segundo processo pinned no CPU 1 causa #PF em sua guard page, passa por
-teardown/reaper e publica `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
-
-O encerramento rigoroso está completo. O desenvolvimento pode avançar para a
-Fase 2 — Platform e drivers de produção, mantendo esses três gates como proteção
-obrigatória contra regressões do Kernel Core.
-
-## Fase 2 — primeiro incremento AML/ACPI
-
-O catálogo de definition blocks foi iniciado em `kernel/src/acpi/aml_tables.sotlas`.
-Ele resolve o DSDT pelo FADT com preferência por `X_DSDT`, enumera SSDTs,
-rejeita tabelas inválidas ou capacidade excedida e só expõe payloads pertencentes
-ao catálogo validado. O inventário de plataforma registra a presença e a
-quantidade de definition blocks. Os três smokes QEMU exigem agora
-`BAKEN:ACPI_AML_TABLES_READY`.
-
-O decoder estrutural seguinte implementa cursor limitado, `PkgLength`,
-`NameString` e constantes inteiras little-endian, com self-test bare-metal e o
-marker obrigatório `BAKEN:ACPI_AML_DECODER_READY`. Ele ainda não executa AML.
-A próxima fronteira é a construção read-only do namespace antes de implementar
-métodos e acessos a regiões de operação.
+`HPinho/LangSotlas` continua somente leitura/referência salvo instrução explícita
+em contrário.

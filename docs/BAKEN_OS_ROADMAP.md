@@ -1,141 +1,360 @@
 # Baken OS — Roadmap de desenvolvimento
 
-Atualizado em 2026-09-09. Este documento separa **implementado**,
-**certificado** e **planejado**. Um item só muda para certificado quando os
-gates exigidos passam no mesmo commit da `main`.
+Atualizado em 2026-09-09 (America/Fortaleza).
 
-**Prioridade atual:** a consolidação do Kernel Core está reaberta pela regressão
-de processos ANY/retirement do SMP #140 no SHA `35eb3f3`. As certificações abaixo
-são históricas, não se aplicam automaticamente ao HEAD. Catálogo/decoder AML já
-existem, mas a expansão de Platform/Drivers aguarda CI + SMP 3/3 + NVMe no SHA
-corrigido. Consulte a atualização prioritária de `KERNEL_HANDOFF.md`.
+Este documento separa **implementado**, **em validação**, **comprovado** e
+**planejado**. Um recurso só é promovido a comprovado quando os gates exigidos
+passam no mesmo SHA da `main`.
 
-## Fase 1 — Kernel Core
+## Baseline atual
 
-**Estado atual: em revalidação após a regressão ANY/retirement.**
+**Fundação Bare-Metal: ✅ CONCLUÍDA**  
+**Kernel Core: ✅ CONCLUÍDO E CERTIFICADO**  
+**Platform/Drivers: ▶️ EM DESENVOLVIMENTO**
 
-Certificação anterior registrada em 2026-09-09; o conjunto abaixo representa
-esse checkpoint histórico e não substitui os gates do commit corrigido.
+Baseline certificada da Fundação + Kernel Core:
 
-O commit `18343b99920c24deb3f27af0926202247206f69d` passou nos três gates
-obrigatórios do mesmo SHA em 2026-09-09:
+```text
+72422a79dfcec4c9c43bd3a83ef8a9ad90c7c2c8
+```
+
+Gates no mesmo SHA:
 
 | Gate | Resultado |
 |---|---|
-| CI principal #1019 / `34342318146` | ✅ PASS |
-| SMP #122 / `34342318148` | ✅ PASS |
-| NVMe-only #219 / `34342318359` | ✅ PASS |
+| CI principal #1039 / `34421209110` | ✅ PASS |
+| SMP #142 / `34421209023` | ✅ PASS |
+| NVMe-only #239 / `34421209039` | ✅ PASS |
 
-O Kernel Core já contém boot sem runtime UEFI, PMM/VMM, SMP, scheduler,
-processos, address spaces privados, Ring 3, syscall, FPU/SIMD e drivers de
-certificação. A última fronteira adicionada é isolamento de exceções CPL3:
-uma falha de userspace deve encerrar apenas seu processo e voltar ao scheduler;
-uma falha CPL0 permanece terminal.
+A regressão ANY/retirement do SMP #140 está encerrada nessa baseline. Mudanças
+futuras em scheduler, processos, CR3/TLB, FPU/SIMD, SMP ou storage devem
+preservar os três gates; uma regressão comprovada reabre somente o componente
+afetado, não apaga a certificação histórica desta baseline.
 
-Critério de saída:
+## Política de acompanhamento
 
-- CI geral, NVMe-only e SMP verdes no mesmo SHA;
-- QEMU exige `BAKEN:USER_FAULT_ISOLATED_READY` e não pode emitir
-  `BAKEN:HEX=E:`;
-- prova SMP preserva heap, TLB, CR3, Ring 3 e FPU durante migração, incluindo
-  um fault CPL3 executado em AP;
-- o workflow deve identificar explicitamente o primeiro marker ausente.
+Toda alteração relevante deve ser registrada neste roadmap e em
+`docs/KERNEL_HANDOFF.md` como:
 
-Os três bloqueadores técnicos encontrados pela auditoria foram implementados e
-certificados:
+- `⏳ EM VALIDAÇÃO` enquanto o código já existe mas os gates ainda não fecharam;
+- `✅ COMPROVADO` com SHA e runs verdes;
+- `❌ FALHOU` com causa, diagnóstico e correção/next step.
 
-- snapshot de exceção por CPU, indexado pelo registro SMP antes mesmo da
-  liberação dos APs ao scheduler;
-- allowlist de exceções síncronas recuperáveis de CPL3; NMI, double fault,
-  machine check e vetores reservados continuam terminais;
-- segundo processo de prova pinned no CPU 1, com #PF CPL3, teardown/reaper e o
-  marker obrigatório `BAKEN:SMP_USER_FAULT_ISOLATED_READY`.
+Nunca remover um teste ou marker para mascarar regressão.
 
-O critério de saída foi integralmente satisfeito. Alterações futuras nesta base
-devem preservar os três gates, mas não reabrem a Fase 1 sem regressão comprovada.
+---
 
-## Fase 2 — Platform e drivers de produção
+## Fase 0 — Fundação Bare-Metal
 
-### Manutenção da base durante a Fase 2 — 2026-09-09
+**Estado: ✅ CONCLUÍDA.**
 
-O SMP #125 (`34361644768`, SHA `3a744347345270ab2f9a413d421cde2d4a1420d2`)
-passou instalação, contratos e build, mas falhou por ausência de
-`BAKEN:SMP_PROCESS_MIGRATED`. A certificação da Fase 1 acima é histórica,
-específica ao SHA indicado; não certifica automaticamente commits posteriores.
+Comprovado:
 
-Correção em validação: após publicar a afinidade no scheduler, o timer do AP
-pode despachar imediatamente a thread. O probe não pode exigir owner `NONE`
-depois de liberar o lock; essa precondição continua exigida dentro do setter.
-A confirmação de owner AP, afinidade e CR3 agora usa o mesmo switch lock que
-protege o despacho e a publicação do root. O workflow também executa os
-contratos AML e de fault isolation e publica o último checkpoint de migração
-nas anotações de erro. O fechamento desta regressão exige nova prova QEMU;
-testes de contrato sozinhos não certificam concorrência.
+- boot UEFI apenas como bootstrap;
+- ExitBootServices real;
+- zero UEFI pós-cutover;
+- stack própria/trampoline;
+- CR3 Baken;
+- PMM/VMM/direct-map;
+- W^X e guard stack;
+- GDT/TSS/LTR/IDT;
+- ACPI/MADT;
+- LAPIC/IOAPIC/IRQ/timer;
+- PCI/DMA;
+- xHCI/USB HID;
+- AHCI/NVMe/BlockDevice;
+- GPT/MBR/FAT32;
+- PAT/framebuffer WC.
 
-A prova local também detectou um imediato x86-64 errado no probe de #PF:
-`0x00200000001FE000` foi corrigido para a guard page `0x00002000001FE000`.
-O teste agora decodifica os bytes e compara o endereço com o layout de memória,
-em vez de exigir uma sequência literal. A CI SMP executa três boots independentes
-e exige sucesso em todos, preservando logs separados e parando na primeira falha.
+---
 
-Validação local da correção: build nativo com 145 objetos/143 módulos e três
-boots QEMU q35, duas CPUs, 512 MiB, ISO UEFI e EDK2 x86-64 do host Windows.
-Todos os 18 marcadores obrigatórios foram observados nos três boots (~7 s cada),
-incluindo AML, fault isolation BSP/AP, migração e FPU. Logs locais:
-`build/smp-fix-1.log`, `build/smp-fix-2.log`, `build/smp-fix-3.log`.
-Os gates Linux do GitHub ainda precisam validar o novo commit; a evidência
-local não substitui essa certificação.
+## Fase 1 — Kernel Core
+
+**Estado: ✅ CONCLUÍDA E CERTIFICADA em `72422a7`.**
+
+Comprovado:
+
+- scheduler preemptivo;
+- kernel threads;
+- wait/wakeup/sleep;
+- exit/reaper/stack release;
+- heap PMM-backed;
+- processos/PID/TID;
+- address spaces privados;
+- CR3 por processo;
+- Ring 3;
+- syscalls;
+- user-copy;
+- isolamento de exceções CPL3 no BSP e AP;
+- FPU/SIMD por thread;
+- scheduler SMP;
+- active address-space tracking por CPU;
+- TLB shootdown root-aware;
+- processo Ring 3 real no AP;
+- migração BSP -> AP do mesmo TID;
+- preservação de contexto FPU/SIMD na migração;
+- ownership/retirement sincronizado sem dupla execução.
+
+Critério permanente: qualquer alteração nessas áreas deve voltar a passar CI,
+SMP 3/3 e NVMe no mesmo SHA.
+
+---
+
+## Fase 2 — Platform e Drivers de produção
 
 **Estado: ▶️ EM DESENVOLVIMENTO.**
 
-Primeiro incremento implementado localmente: catálogo seguro de definition
-blocks AML. O kernel prefere `X_DSDT`, valida/faz fallback para `DSDT`, enumera
-SSDTs com capacidade limitada, publica somente payloads catalogados e exige o
-marker QEMU `BAKEN:ACPI_AML_TABLES_READY`. O segundo incremento adiciona um
-cursor limitado e decoder fail-closed de `PkgLength`, `NameString` e constantes
-inteiras, certificado por `BAKEN:ACPI_AML_DECODER_READY`. Ainda não há execução
-de opcodes AML nem construção de namespace; essas são as próximas camadas.
+Objetivo: transformar as fundações de hardware em serviços robustos de
+plataforma, com descoberta, recursos, power management, drivers opcionais e
+interfaces estáveis.
 
-Objetivo: transformar o hardware já certificado em serviços estáveis de
-plataforma, com descoberta, recuperação e contratos de driver.
+### Trilha A — ACPI/AML
 
-- AML/ACPI de produção e gerenciamento de energia;
-- rede: NIC, ARP, IPv4/IPv6, UDP/TCP e DHCP;
-- armazenamento de produção: cache, VFS inicial e montagem segura;
-- áudio; GPU/framebuffer acelerado e composição básica;
-- HID adicional (I2C-HID), hot-plug e telemetria de drivers.
+#### AML-0 — Catálogo DSDT/SSDT
 
-Saída: drivers possuem timeouts, erros explícitos, testes em QEMU e interfaces
-de kernel estáveis; a ausência de um dispositivo opcional não pode derrubar o
+**Estado: ✅ COMPROVADO na baseline `72422a7`.**
+
+Implementado em `kernel/src/acpi/aml_tables.sotlas`:
+
+- DSDT validado pelo FADT;
+- SSDTs enumerados com limite fixo;
+- payload somente de definition blocks catalogados;
+- sem execução de AML;
+- marker `BAKEN:ACPI_AML_TABLES_READY`.
+
+#### AML-1 — Decoder estrutural mínimo
+
+**Estado: ✅ COMPROVADO na baseline `72422a7`.**
+
+Implementado em `kernel/src/acpi/aml_decoder.sotlas`:
+
+- cursor limitado/fail-closed;
+- PkgLength;
+- NameString com `\`, `^`, DualName e MultiName;
+- validação NameSeg;
+- Zero/One/Ones/Byte/Word/DWord/QWord;
+- self-test bare-metal;
+- marker `BAKEN:ACPI_AML_DECODER_READY`.
+
+#### AML-2 — Namespace core read-only
+
+**Estado: ⏳ EM VALIDAÇÃO neste incremento.**
+
+Implementado:
+
+- novo `kernel/src/acpi/aml_namespace.sotlas`;
+- capacidade fixa de 256 nós;
+- raiz explícita;
+- tipos Scope/Device/Name/Method preparados;
+- parent + NameSeg por nó;
+- lookup absoluto/relativo;
+- suporte a parent prefix `^`;
+- detecção de duplicata;
+- fail-closed por capacidade;
+- API mutável privada durante construção;
+- API pública somente de consulta após READY;
+- self-test sintético para `\_SB_.PCI0._HID` e resolução via `^`;
+- limpeza do self-test antes da publicação;
+- zero execução AML e zero acesso a hardware;
+- marker `BAKEN:ACPI_AML_NAMESPACE_READY`.
+
+O novo marker passa a ser obrigatório em:
+
+- smoke QEMU principal;
+- SMP runner e workflow 3/3;
+- NVMe-only QEMU.
+
+`tests/test_acpi_aml_namespace.py` protege as invariantes e é executado
+explicitamente pelo workflow SMP, além da suíte geral.
+
+**Importante:** neste estágio o namespace real ainda contém apenas a raiz. O
+loader DSDT/SSDT real é o próximo incremento; isso evita scan cego de bytes AML.
+
+#### AML-3 — Data objects / parser grammar-aware
+
+**Estado: ⬜ PRÓXIMO.**
+
+Implementar antes do loader real:
+
+- StringPrefix;
+- BufferOp;
+- PackageOp;
+- VarPackageOp;
+- PackageElement;
+- DataRefObject mínimo;
+- TermArg mínimo para descoberta;
+- skip grammar-aware apenas de produções conhecidas e limitadas.
+
+Critério: truncamento/opcode inesperado deve falhar explicitamente, nunca pular
+bytes arbitrariamente.
+
+#### AML-4 — Loader DSDT/SSDT -> namespace real
+
+**Estado: ⬜ PLANEJADO.**
+
+- NameOp;
+- ScopeOp;
+- DeviceOp;
+- MethodOp armazenado, ainda sem execução;
+- demais objetos de escopo conforme necessidade;
+- DSDT primeiro, SSDTs depois;
+- namespace merge e resolução corretos;
+- duplicatas/overflow/encodings inválidos fail-closed;
+- marker futuro `BAKEN:ACPI_AML_NAMESPACE_LOADED`.
+
+#### AML-5 — Descoberta de dispositivos
+
+**Estado: ⬜ PLANEJADO.**
+
+- `_HID`;
+- `_CID`;
+- `_UID`;
+- `_ADR`;
+- `_STA` quando data object constante;
+- `_CRS` estático;
+- EISA ID decoder;
+- resource template parser.
+
+#### AML-6 — Evaluator controlado
+
+**Estado: ⬜ PLANEJADO.**
+
+Somente após namespace real:
+
+- execution context limitado;
+- Arg0..Arg6;
+- Local0..Local7;
+- Return/Store;
+- operações lógicas/aritméticas necessárias;
+- If/Else conforme demanda;
+- chamadas de Method com aridade validada;
+- fuel/limite de instruções e profundidade.
+
+#### AML-7 — OperationRegion / Field
+
+**Estado: ⬜ PLANEJADO.**
+
+- SystemMemory;
+- SystemIO;
+- PCIConfig;
+- Field/IndexField quando necessário;
+- validação de região e bounds;
+- integração com camadas nativas MMIO/PIO/PCI;
+- AML nunca escreve fora da região declarada.
+
+#### AML-8 — Power/routing ACPI de produção
+
+**Estado: ⬜ PLANEJADO.**
+
+- `_PRT`/routing conforme necessidade;
+- `_PIC` quando aplicável;
+- `_S5`/shutdown;
+- sleep/wake posterior;
+- EC somente após infraestrutura segura;
+- recursos necessários para I2C-HID e outros dispositivos ACPI.
+
+### Trilha B — HID adicional
+
+**Estado: ⬜ DEPOIS DO AML/RESOURCE CORE.**
+
+- I2C controller discovery;
+- I2C-HID;
+- HID report descriptor genérico;
+- touchpad/touchscreen;
+- hot-plug e erros recuperáveis.
+
+### Trilha C — Storage de produção
+
+**Estado: ⬜ PLANEJADO.**
+
+- cache de blocos;
+- VFS inicial;
+- montagem FAT32 robusta;
+- handles/arquivos;
+- async/completion posterior;
+- política de erro sem derrubar kernel por dispositivo opcional.
+
+### Trilha D — Rede
+
+**Estado: ⬜ PLANEJADO.**
+
+- driver NIC inicial;
+- Ethernet;
+- ARP;
+- IPv4/IPv6;
+- ICMP;
+- UDP;
+- TCP;
+- DHCP;
+- DNS posterior.
+
+### Trilha E — Áudio
+
+**Estado: ⬜ PLANEJADO.**
+
+- descoberta HDA/alternativa;
+- DMA/ring buffer;
+- codecs;
+- mixer;
+- userspace API posterior.
+
+### Trilha F — GPU / composição
+
+**Estado: ⬜ PLANEJADO.**
+
+- manter framebuffer funcional como fallback;
+- aceleração somente após driver/modelo de memória seguro;
+- compositor separado do kernel core;
+- nenhuma lógica gráfica específica dentro do compilador Sotlas.
+
+Saída da Fase 2: drivers possuem timeouts, diagnóstico explícito, QEMU tests e
+interfaces de kernel estáveis; ausência de dispositivo opcional não derruba o
 sistema.
+
+---
 
 ## Fase 3 — Serviços e userspace
 
-Objetivo: fazer processos reais úteis sobre a base de Ring 3.
+**Estado: ⬜ PLANEJADO.**
 
-- ABI de syscall versionada, handles e permissões;
-- VFS, arquivos, processos executáveis Sotlas e carregador de programas;
-- IPC, serviço de init, logging e gerenciamento de processos;
-- modelo de memória futuro: COW/demand paging somente após a política de
-  falhas e TLB estar comprovada;
-- empacotamento, atualização e diagnóstico em userspace.
+- ABI de syscall versionada;
+- handles/permissões;
+- VFS/file API;
+- executáveis Sotlas;
+- IPC;
+- init/service manager;
+- logging;
+- gerenciamento de processos;
+- COW/demand paging somente após política de faults/TLB comprovada.
 
-Saída: inicialização de serviços sem privilégios e aplicativos Sotlas isolados
-capazes de usar filesystem e IPC.
+---
 
 ## Fase 4 — Experiência Baken
 
-Objetivo: entregar um sistema utilizável, não apenas um kernel.
+**Estado: ⬜ PLANEJADO.**
 
-- compositor, janelas, input, fontes e acessibilidade;
-- desktop, shell, instalador e OOBE;
-- aplicativos-base, configurações e recuperação;
-- testes de jornada completa em imagem instalada.
+- compositor de produção;
+- window manager;
+- input unificado;
+- fontes/acessibilidade;
+- desktop/shell;
+- installer;
+- OOBE;
+- aplicativos-base;
+- configurações/recuperação;
+- testes end-to-end da imagem instalada.
+
+---
 
 ## Regras de prioridade
 
-1. Não iniciar funcionalidade de alto nível para contornar um gate vermelho.
+1. Não contornar gate vermelho com feature de alto nível.
 2. Cada marco precisa de prova de runtime, não apenas teste de fonte.
-3. Drivers e serviços opcionais degradam com diagnóstico; integridade de
-   memória, isolamento e scheduler permanecem fail-closed.
-4. Mudanças de processo, page table, CR3, TLB e FPU exigem CI geral + SMP.
+3. Kernel Core permanece congelado salvo extensão necessária e comprovada.
+4. Mudanças em scheduler/process/page-table/CR3/TLB/FPU exigem CI + SMP + NVMe.
+5. Cada sucessão AML recebe marker e teste antes de ser chamada de comprovada.
+6. Nunca fazer scan cego de AML desconhecido; parsing deve respeitar grammar e
+   limites do pacote.
+7. Firmware AML é input não confiável: bounds, fuel e fail-closed são regra.
+8. Drivers opcionais degradam com diagnóstico; memória, isolamento e scheduler
+   permanecem fail-closed.

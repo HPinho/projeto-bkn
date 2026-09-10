@@ -1,0 +1,339 @@
+// Baken OS — núcleo read-only do namespace AML.
+//
+// Esta camada NÃO executa AML e NÃO percorre DSDT/SSDT arbitrariamente. Ela
+// fornece a estrutura fixa, resolução de NameString e invariantes necessários
+// para o próximo incremento carregar declarações AML de forma grammar-aware.
+// A construção ocorre no BSP antes da liberação do SMP; após READY, a API
+// pública é somente de consulta.
+
+module kernel::acpi::aml_namespace;
+
+import kernel::acpi::aml_decoder::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_NAMESPACE_MAX_NODES: usize = 256;
+pub const AML_NAMESPACE_INVALID_INDEX: usize = AML_NAMESPACE_MAX_NODES;
+
+pub const AML_NAMESPACE_KIND_ROOT: u8 = 1;
+pub const AML_NAMESPACE_KIND_SCOPE: u8 = 2;
+pub const AML_NAMESPACE_KIND_DEVICE: u8 = 3;
+pub const AML_NAMESPACE_KIND_NAME: u8 = 4;
+pub const AML_NAMESPACE_KIND_METHOD: u8 = 5;
+
+pub const AML_NAMESPACE_VALUE_NONE: u8 = 0;
+pub const AML_NAMESPACE_VALUE_INTEGER: u8 = 1;
+
+pub struct AmlNamespaceNode {
+    pub segment: u32;
+    pub parent: usize;
+    pub kind: u8;
+    pub value_kind: u8;
+    pub flags: u8;
+    pub integer_value: u64;
+    pub aml_body: *const u8;
+    pub aml_body_length: usize;
+    pub valid: bool;
+}
+
+static mut AML_NAMESPACE_NODES: [AmlNamespaceNode; AML_NAMESPACE_MAX_NODES] = [
+    AmlNamespaceNode {
+        segment: 0,
+        parent: AML_NAMESPACE_INVALID_INDEX,
+        kind: 0,
+        value_kind: AML_NAMESPACE_VALUE_NONE,
+        flags: 0,
+        integer_value: 0,
+        aml_body: null as *const u8,
+        aml_body_length: 0,
+        valid: false
+    };
+    AML_NAMESPACE_MAX_NODES
+];
+static mut AML_NAMESPACE_COUNT: usize = 0;
+static mut AML_NAMESPACE_READY: bool = false;
+
+@system
+fn aml_namespace_reset() -> void {
+    unsafe {
+        AML_NAMESPACE_READY = false;
+        AML_NAMESPACE_COUNT = 1;
+        let mut index: usize = 0;
+        while index < AML_NAMESPACE_MAX_NODES {
+            AML_NAMESPACE_NODES[index].segment = 0;
+            AML_NAMESPACE_NODES[index].parent = AML_NAMESPACE_INVALID_INDEX;
+            AML_NAMESPACE_NODES[index].kind = 0;
+            AML_NAMESPACE_NODES[index].value_kind = AML_NAMESPACE_VALUE_NONE;
+            AML_NAMESPACE_NODES[index].flags = 0;
+            AML_NAMESPACE_NODES[index].integer_value = 0;
+            AML_NAMESPACE_NODES[index].aml_body = null as *const u8;
+            AML_NAMESPACE_NODES[index].aml_body_length = 0;
+            AML_NAMESPACE_NODES[index].valid = false;
+            index += 1;
+        }
+        AML_NAMESPACE_NODES[0].kind = AML_NAMESPACE_KIND_ROOT;
+        AML_NAMESPACE_NODES[0].parent = AML_NAMESPACE_INVALID_INDEX;
+        AML_NAMESPACE_NODES[0].valid = true;
+    }
+}
+
+@system
+fn aml_namespace_node_valid(index: usize) -> bool {
+    unsafe {
+        return index < AML_NAMESPACE_COUNT &&
+            index < AML_NAMESPACE_MAX_NODES &&
+            AML_NAMESPACE_NODES[index].valid;
+    }
+}
+
+@system
+fn aml_namespace_find_child_internal(parent: usize, segment: u32) -> usize {
+    if !aml_namespace_node_valid(parent) || segment == 0 {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    unsafe {
+        let mut index: usize = 1;
+        while index < AML_NAMESPACE_COUNT {
+            if AML_NAMESPACE_NODES[index].valid &&
+               AML_NAMESPACE_NODES[index].parent == parent &&
+               AML_NAMESPACE_NODES[index].segment == segment {
+                return index;
+            }
+            index += 1;
+        }
+    }
+    return AML_NAMESPACE_INVALID_INDEX;
+}
+
+@system
+fn aml_namespace_allocate_child(parent: usize, segment: u32, kind: u8,
+                                value_kind: u8, integer_value: u64,
+                                flags: u8, aml_body: *const u8,
+                                aml_body_length: usize) -> usize {
+    if !aml_namespace_node_valid(parent) || segment == 0 || kind == 0 {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    if aml_namespace_find_child_internal(parent, segment) != AML_NAMESPACE_INVALID_INDEX {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    unsafe {
+        if AML_NAMESPACE_COUNT >= AML_NAMESPACE_MAX_NODES {
+            return AML_NAMESPACE_INVALID_INDEX;
+        }
+        let index = AML_NAMESPACE_COUNT;
+        AML_NAMESPACE_NODES[index].segment = segment;
+        AML_NAMESPACE_NODES[index].parent = parent;
+        AML_NAMESPACE_NODES[index].kind = kind;
+        AML_NAMESPACE_NODES[index].value_kind = value_kind;
+        AML_NAMESPACE_NODES[index].flags = flags;
+        AML_NAMESPACE_NODES[index].integer_value = integer_value;
+        AML_NAMESPACE_NODES[index].aml_body = aml_body;
+        AML_NAMESPACE_NODES[index].aml_body_length = aml_body_length;
+        AML_NAMESPACE_NODES[index].valid = true;
+        AML_NAMESPACE_COUNT += 1;
+        return index;
+    }
+}
+
+@system
+fn aml_namespace_start_scope(requested_scope: usize,
+                             name: *const AmlNameString) -> usize {
+    if name == (null as *const AmlNameString) { return AML_NAMESPACE_INVALID_INDEX; }
+    unsafe {
+        if !(*name).valid { return AML_NAMESPACE_INVALID_INDEX; }
+        let mut scope: usize = requested_scope;
+        if (*name).rooted {
+            scope = 0;
+        } else {
+            if !aml_namespace_node_valid(scope) { return AML_NAMESPACE_INVALID_INDEX; }
+            let mut parents: usize = (*name).parent_prefixes;
+            while parents > 0 {
+                if scope == 0 { return AML_NAMESPACE_INVALID_INDEX; }
+                let parent = AML_NAMESPACE_NODES[scope].parent;
+                if parent == AML_NAMESPACE_INVALID_INDEX || !aml_namespace_node_valid(parent) {
+                    return AML_NAMESPACE_INVALID_INDEX;
+                }
+                scope = parent;
+                parents -= 1;
+            }
+        }
+        return scope;
+    }
+}
+
+@system
+fn aml_namespace_lookup_internal(requested_scope: usize,
+                                 name: *const AmlNameString) -> usize {
+    let mut scope = aml_namespace_start_scope(requested_scope, name);
+    if scope == AML_NAMESPACE_INVALID_INDEX { return scope; }
+    unsafe {
+        let mut index: usize = 0;
+        while index < (*name).segment_count {
+            scope = aml_namespace_find_child_internal(scope, (*name).segments[index]);
+            if scope == AML_NAMESPACE_INVALID_INDEX { return scope; }
+            index += 1;
+        }
+    }
+    return scope;
+}
+
+@system
+fn aml_namespace_define_path(requested_scope: usize,
+                             name: *const AmlNameString,
+                             kind: u8, value_kind: u8,
+                             integer_value: u64, flags: u8,
+                             aml_body: *const u8,
+                             aml_body_length: usize) -> usize {
+    let mut scope = aml_namespace_start_scope(requested_scope, name);
+    if scope == AML_NAMESPACE_INVALID_INDEX { return scope; }
+    unsafe {
+        if (*name).segment_count == 0 { return AML_NAMESPACE_INVALID_INDEX; }
+        let mut index: usize = 0;
+        while index < (*name).segment_count {
+            let segment = (*name).segments[index];
+            let last = index + 1 == (*name).segment_count;
+            let existing = aml_namespace_find_child_internal(scope, segment);
+            if last {
+                if existing != AML_NAMESPACE_INVALID_INDEX {
+                    return AML_NAMESPACE_INVALID_INDEX;
+                }
+                return aml_namespace_allocate_child(
+                    scope, segment, kind, value_kind, integer_value,
+                    flags, aml_body, aml_body_length
+                );
+            }
+            if existing != AML_NAMESPACE_INVALID_INDEX {
+                scope = existing;
+            } else {
+                scope = aml_namespace_allocate_child(
+                    scope, segment, AML_NAMESPACE_KIND_SCOPE,
+                    AML_NAMESPACE_VALUE_NONE, 0, 0,
+                    null as *const u8, 0
+                );
+                if scope == AML_NAMESPACE_INVALID_INDEX { return scope; }
+            }
+            index += 1;
+        }
+    }
+    return AML_NAMESPACE_INVALID_INDEX;
+}
+
+@system
+pub fn aml_namespace_is_ready() -> bool { unsafe { return AML_NAMESPACE_READY; } }
+
+@system
+pub fn aml_namespace_count() -> usize {
+    unsafe { if !AML_NAMESPACE_READY { return 0; } return AML_NAMESPACE_COUNT; }
+}
+
+@system
+pub fn aml_namespace_node(index: usize) -> *const AmlNamespaceNode {
+    unsafe {
+        if !AML_NAMESPACE_READY || !aml_namespace_node_valid(index) {
+            return null as *const AmlNamespaceNode;
+        }
+        return &AML_NAMESPACE_NODES[index];
+    }
+}
+
+@system
+pub fn aml_namespace_find_child(parent: usize, segment: u32) -> usize {
+    unsafe { if !AML_NAMESPACE_READY { return AML_NAMESPACE_INVALID_INDEX; } }
+    return aml_namespace_find_child_internal(parent, segment);
+}
+
+@system
+pub fn aml_namespace_lookup(scope: usize, name: *const AmlNameString) -> usize {
+    unsafe { if !AML_NAMESPACE_READY { return AML_NAMESPACE_INVALID_INDEX; } }
+    return aml_namespace_lookup_internal(scope, name);
+}
+
+@system
+pub fn aml_namespace_foundation_init() -> bool {
+    aml_namespace_reset();
+
+    // Self-test estrutural: \_SB_ -> PCI0 -> _HID e resolução com ^.
+    let sb_bytes: [u8; 5] = [0x5C,95,83,66,95];
+    let mut sb_cursor = aml_cursor_new(&sb_bytes[0], 5);
+    let sb_name = aml_decode_name_string(&mut sb_cursor);
+    if !sb_name.valid || sb_cursor.offset != 5 { return false; }
+    let sb = aml_namespace_define_path(
+        0, &sb_name, AML_NAMESPACE_KIND_SCOPE,
+        AML_NAMESPACE_VALUE_NONE, 0, 0, null as *const u8, 0
+    );
+    if sb == AML_NAMESPACE_INVALID_INDEX { return false; }
+
+    let pci_bytes: [u8; 4] = [80,67,73,48];
+    let mut pci_cursor = aml_cursor_new(&pci_bytes[0], 4);
+    let pci_name = aml_decode_name_string(&mut pci_cursor);
+    let pci = aml_namespace_define_path(
+        sb, &pci_name, AML_NAMESPACE_KIND_DEVICE,
+        AML_NAMESPACE_VALUE_NONE, 0, 0, null as *const u8, 0
+    );
+    if pci == AML_NAMESPACE_INVALID_INDEX { return false; }
+
+    let hid_bytes: [u8; 4] = [95,72,73,68];
+    let mut hid_cursor = aml_cursor_new(&hid_bytes[0], 4);
+    let hid_name = aml_decode_name_string(&mut hid_cursor);
+    let hid = aml_namespace_define_path(
+        pci, &hid_name, AML_NAMESPACE_KIND_NAME,
+        AML_NAMESPACE_VALUE_INTEGER, 0x1234, 0, null as *const u8, 0
+    );
+    if hid == AML_NAMESPACE_INVALID_INDEX { return false; }
+
+    let sta_bytes: [u8; 4] = [95,83,84,65];
+    let mut sta_cursor = aml_cursor_new(&sta_bytes[0], 4);
+    let sta_name = aml_decode_name_string(&mut sta_cursor);
+    let sta = aml_namespace_define_path(
+        sb, &sta_name, AML_NAMESPACE_KIND_NAME,
+        AML_NAMESPACE_VALUE_INTEGER, 0x0F, 0, null as *const u8, 0
+    );
+    if sta == AML_NAMESPACE_INVALID_INDEX { return false; }
+
+    let absolute_pci_bytes: [u8; 10] = [0x5C,0x2E,95,83,66,95,80,67,73,48];
+    let mut absolute_pci_cursor = aml_cursor_new(&absolute_pci_bytes[0], 10);
+    let absolute_pci = aml_decode_name_string(&mut absolute_pci_cursor);
+    if aml_namespace_lookup_internal(0, &absolute_pci) != pci { return false; }
+
+    let parent_sta_bytes: [u8; 5] = [0x5E,95,83,84,65];
+    let mut parent_sta_cursor = aml_cursor_new(&parent_sta_bytes[0], 5);
+    let parent_sta = aml_decode_name_string(&mut parent_sta_cursor);
+    if aml_namespace_lookup_internal(pci, &parent_sta) != sta { return false; }
+
+    // Duplicata deve falhar sem alterar o namespace.
+    let before_duplicate = unsafe { AML_NAMESPACE_COUNT };
+    if aml_namespace_define_path(
+        pci, &hid_name, AML_NAMESPACE_KIND_NAME,
+        AML_NAMESPACE_VALUE_INTEGER, 0x5678, 0, null as *const u8, 0
+    ) != AML_NAMESPACE_INVALID_INDEX { return false; }
+    unsafe { if AML_NAMESPACE_COUNT != before_duplicate { return false; } }
+
+    let hid_node = unsafe { &AML_NAMESPACE_NODES[hid] };
+    if !hid_node.valid || hid_node.parent != pci ||
+       hid_node.kind != AML_NAMESPACE_KIND_NAME ||
+       hid_node.value_kind != AML_NAMESPACE_VALUE_INTEGER ||
+       hid_node.integer_value != 0x1234 { return false; }
+
+    // O self-test não deve contaminar o namespace real futuro. Publicamos
+    // somente a raiz vazia; o loader de DSDT/SSDT será o próximo incremento.
+    aml_namespace_reset();
+    unsafe {
+        __dma_fence();
+        AML_NAMESPACE_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_namespace_emit_ready_marker() -> bool {
+    if !aml_namespace_is_ready() || aml_namespace_count() != 1 { return false; }
+    let marker: [u8; 31] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,78,65,77,69,83,80,65,
+        67,69,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 31 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
