@@ -119,7 +119,20 @@ a4762cf614a0748336040be8d15e7f352b17f25f
 fix(hid): avoid return in conditional expression
 ```
 
-A correção preserva a semântica: keyboard -> `INPUT_DEVICE_CLASS_KEYBOARD`, mouse -> `INPUT_DEVICE_CLASS_POINTER` e protocolo não suportado continua fail-closed. Não altera lifecycle, locking, ABI, Kernel Core, AML ou storage. HID-4a permanece **não certificado** até CI principal + SMP 3/3 + NVMe-only fecharem verdes no mesmo head final.
+A correção preserva a semântica: keyboard -> `INPUT_DEVICE_CLASS_KEYBOARD`, mouse -> `INPUT_DEVICE_CLASS_POINTER` e protocolo não suportado continua fail-closed. Não altera lifecycle, locking, ABI, Kernel Core, AML ou storage.
+
+Head final atualmente em revalidação:
+```text
+f9a2bf61a2b15ae3518e5a53f42827ec0ced5027
+docs: record HID-4a parser gate failure
+```
+
+Gates disparados no mesmo head final:
+- CI #1071 / `34516135043` ⏳;
+- SMP #174 / `34516135064` ⏳;
+- NVMe-only #271 / `34516135048` ⏳.
+
+HID-4a permanece **não certificado** até os três fecharem verdes no mesmo `f9a2bf61` (ou em um head corretivo posterior, caso surja outra falha).
 
 ### Limite honesto desta fatia
 
