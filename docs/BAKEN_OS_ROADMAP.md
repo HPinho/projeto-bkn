@@ -42,6 +42,32 @@ Toda alteração relevante deve ser registrada neste roadmap e em
 
 Nunca remover um teste ou marker para mascarar regressão.
 
+## Último ciclo de validação
+
+### SHA `26e56700e4542085eefedd21368ad07b5b445705` — AML-2
+
+- NVMe-only #240 / `34423442122`: ✅ PASS;
+- SMP #143 / `34423442160`: ✅ PASS (3/3 boots);
+- CI principal #1040 attempt 1 / `34423442134`: ❌ FAIL no smoke QEMU.
+
+O CI falho alcançou `BAKEN:ACPI_AML_NAMESPACE_READY` e não emitiu
+`BAKEN:HEX=E:`. O último marker foi `BAKEN:WAIT_BLOCKED`, antes de `WAIT_WAKE`.
+Logo o AML-2 executou; a falha ficou na antiga fronteira de handoff wait/wake do
+scheduler BSP. O mesmo SHA passou NVMe e SMP, confirmando caráter intermitente da
+fronteira em vez de falha determinística do namespace.
+
+### Correção de estabilidade em validação
+
+O próximo commit separa as duas provas que antes competiam temporalmente:
+
+- **wait/wake:** troca determinística por `INT 0x43`, com LAPIC timer mascarado;
+- **sleep:** depois que a waiter já registrou o deadline e emitiu
+  `SLEEP_BLOCKED`, o LAPIC periódico é reativado e deve produzir os ticks reais,
+  `SLEEP_WAKE`, `SLEEP_RESUME` e reaper.
+
+Não há aumento de timeout, remoção de marker ou rollback do ownership SMP. Novos
+checkpoints `BAKEN:HEX=W:` identificam a etapa exata; bit 31 indica falha.
+
 ---
 
 ## Fase 0 — Fundação Bare-Metal
@@ -138,9 +164,9 @@ Implementado em `kernel/src/acpi/aml_decoder.sotlas`:
 
 #### AML-2 — Namespace core read-only
 
-**Estado: ⏳ EM VALIDAÇÃO neste incremento.**
+**Estado: ⏳ IMPLEMENTADO; AGUARDANDO CHECKPOINT COM 3 GATES VERDES.**
 
-Implementado:
+Implementado em `26e5670`:
 
 - novo `kernel/src/acpi/aml_namespace.sotlas`;
 - capacidade fixa de 256 nós;
@@ -158,23 +184,18 @@ Implementado:
 - zero execução AML e zero acesso a hardware;
 - marker `BAKEN:ACPI_AML_NAMESPACE_READY`.
 
-O novo marker passa a ser obrigatório em:
-
-- smoke QEMU principal;
-- SMP runner e workflow 3/3;
-- NVMe-only QEMU.
-
-`tests/test_acpi_aml_namespace.py` protege as invariantes e é executado
-explicitamente pelo workflow SMP, além da suíte geral.
+O novo marker é obrigatório no smoke QEMU principal, SMP runner/workflow 3/3 e
+NVMe-only. `tests/test_acpi_aml_namespace.py` protege as invariantes.
 
 **Importante:** neste estágio o namespace real ainda contém apenas a raiz. O
-loader DSDT/SSDT real é o próximo incremento; isso evita scan cego de bytes AML.
+loader DSDT/SSDT real é um incremento posterior; isso evita scan cego de bytes
+AML desconhecidos.
 
 #### AML-3 — Data objects / parser grammar-aware
 
-**Estado: ⬜ PRÓXIMO.**
+**Estado: ⬜ PRÓXIMO, BLOQUEADO SOMENTE ATÉ AML-2 + FIX WAIT TEREM 3 GATES VERDES.**
 
-Implementar antes do loader real:
+Implementar:
 
 - StringPrefix;
 - BufferOp;

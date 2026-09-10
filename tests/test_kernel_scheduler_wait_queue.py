@@ -72,17 +72,51 @@ class KernelSchedulerWaitQueueTests(unittest.TestCase):
         self.assertIn("scheduler_reap_count() >= WAIT_PROBE_REAP_BASE + 1", probe)
 
         body = runtime.split("pub fn baken_native_kernel_run", 1)[1]
-        start = body.index("scheduler_wait_probe_start()")
+        mask = body.index("lapic_timer_mask()")
+        start = body.index("scheduler_wait_probe_start()", mask)
         kick = body.index("scheduler_yield()", start)
         blocked = body.index("scheduler_wait_probe_blocked()", kick)
         wake = body.index("scheduler_wait_probe_wake()", blocked)
         resume = body.index("scheduler_yield()", wake)
-        complete = body.index("scheduler_wait_probe_wait_complete()", resume)
+        unmask = body.index("lapic_timer_unmask_periodic()", resume)
+        complete = body.index("scheduler_wait_probe_wait_complete()", unmask)
+        self.assertLess(mask, start)
         self.assertLess(start, kick)
         self.assertLess(kick, blocked)
         self.assertLess(blocked, wake)
         self.assertLess(wake, resume)
-        self.assertLess(resume, complete)
+        self.assertLess(resume, unmask)
+        self.assertLess(unmask, complete)
+
+    def test_wait_handoff_masks_periodic_timer_until_waiter_enters_sleep(self):
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        body = runtime.split("pub fn baken_native_kernel_run", 1)[1]
+        self.assertIn("import kernel::interrupts::lapic_timer::*;", runtime)
+        mask = body.index("lapic_timer_mask()")
+        start = body.index("scheduler_wait_probe_start()", mask)
+        first_yield = body.index("scheduler_yield()", start)
+        wake = body.index("scheduler_wait_probe_wake()", first_yield)
+        second_yield = body.index("scheduler_yield()", wake)
+        unmask = body.index("lapic_timer_unmask_periodic()", second_yield)
+        complete = body.index("scheduler_wait_probe_wait_complete()", unmask)
+        self.assertLess(mask, start)
+        self.assertLess(second_yield, unmask)
+        self.assertLess(unmask, complete)
+
+        # A segunda metade continua sendo uma prova real de timer: a waiter
+        # registra o deadline e bloqueia antes de o BSP reativar o LAPIC.
+        probe = PROBE.read_text(encoding="utf-8")
+        self.assertIn("scheduler_sleep_ticks(SCHEDULER_SLEEP_PROBE_TICKS)", probe)
+        self.assertIn("if !x86_halt_until_interrupt() { return false; }", probe)
+
+    def test_wait_handoff_has_fail_closed_runtime_diagnostics(self):
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        body = runtime.split("pub fn baken_native_kernel_run", 1)[1]
+        for stage in ("0x80000001", "0x80000002", "0x80000003", "0x80000004",
+                      "0x80000005", "0x80000006", "0x80000007"):
+            self.assertIn(stage, body)
+        for progress in range(1, 7):
+            self.assertIn(f"x86_serial_write_hex32_marker('W' as u8, {progress})", body)
 
     def test_completion_wait_drives_scheduler_progress_instead_of_host_speed(self):
         probe = PROBE.read_text(encoding="utf-8")

@@ -75,6 +75,57 @@ melhoria administrativa recomendada.
 
 ---
 
+## Registro de validação mais recente
+
+### AML-2 / SHA `26e56700e4542085eefedd21368ad07b5b445705`
+
+**Estado do SHA: ❌ NÃO CERTIFICADO COMO CHECKPOINT, apesar de AML-2 ter alcançado o runtime.**
+
+Resultados observados:
+
+- NVMe-only #240 — run `34423442122` — ✅ PASS;
+- SMP #143 — run `34423442160` — ✅ PASS, incluindo os 3 boots independentes;
+- CI principal #1040 attempt 1 — run `34423442134` — ❌ FAIL no smoke QEMU.
+
+O CI principal completou suíte, grafo Sotlas, build e ISO. No QEMU, o novo
+`BAKEN:ACPI_AML_NAMESPACE_READY` apareceu normalmente, sem `BAKEN:HEX=E:`. O
+último checkpoint foi `BAKEN:WAIT_BLOCKED`; `WAIT_WAKE`, `WAIT_RESUME` e os
+marcadores posteriores não apareceram antes do timeout.
+
+Isso isola a falha fora do parser/namespace AML: o mesmo SHA passou NVMe e SMP
+3/3 e o namespace chegou a READY no smoke que falhou. A regressão é tratada
+como recorrência da fronteira sensível do probe wait/wake BSP.
+
+### Correção em validação — isolamento do handoff wait/wake
+
+**Estado: ⏳ EM VALIDAÇÃO no commit seguinte a `26e5670`.**
+
+O probe mistura duas provas distintas: handoff software por `INT 0x43` e sleep
+por IRQ periódico do LAPIC. Para remover a competição temporal sem enfraquecer
+a prova:
+
+1. o BSP mascara somente o LAPIC timer antes de publicar a waiter;
+2. executa `bootstrap -> waiter -> WAIT_BLOCKED -> bootstrap` por `INT 0x43`;
+3. o bootstrap faz o wake real e cede novamente;
+4. a waiter retoma, emite `WAIT_RESUME`, registra o deadline de sleep e bloqueia
+   em `SLEEP_BLOCKED` ainda com o timer mascarado;
+5. o segundo yield retorna ao bootstrap;
+6. somente então o LAPIC periódico é reativado;
+7. três ticks reais devem produzir `SLEEP_WAKE`, `SLEEP_RESUME` e o reaper.
+
+Assim wait/wake é uma prova determinística de troca software e sleep continua
+uma prova real de hardware/timer. Não houve aumento de timeout, remoção de marker
+ou rollback do ownership SMP.
+
+Foram adicionados checkpoints `BAKEN:HEX=W:`. Estágios 1..6 indicam progresso;
+bit 31 (`8xxxxxxx`) indica falha explícita no estágio correspondente. Isso evita
+que um futuro stall nessa fronteira termine apenas com um marker ambíguo.
+
+O Kernel Core certificado continua sendo `72422a7` até a correção passar os três
+gates no mesmo SHA.
+
+---
+
 ## Arquitetura que deve permanecer congelada
 
 - UEFI somente bootstrap.
@@ -185,9 +236,9 @@ melhoria administrativa recomendada.
 
 ### AML-2 — Namespace core read-only
 
-**Estado deste incremento: ⏳ EM VALIDAÇÃO.**
+**Estado do recurso: ⏳ EM VALIDAÇÃO FINAL.**
 
-Novo módulo `kernel/src/acpi/aml_namespace.sotlas`:
+Implementado em `26e5670`:
 
 - storage estático com capacidade limitada, sem heap;
 - raiz explícita;
@@ -201,26 +252,16 @@ Novo módulo `kernel/src/acpi/aml_namespace.sotlas`:
 - API pública somente de consulta depois de READY;
 - self-test cria `\_SB_.PCI0._HID`, testa lookup absoluto e `^`, testa
   duplicata e depois limpa os objetos sintéticos;
-- namespace publicado após o self-test contém somente a raiz, evitando contaminar
-  o futuro namespace real;
+- namespace publicado após o self-test contém somente a raiz;
 - não executa métodos, não acessa OperationRegion e não toca hardware;
-- novo marker obrigatório `BAKEN:ACPI_AML_NAMESPACE_READY`.
+- marker obrigatório `BAKEN:ACPI_AML_NAMESPACE_READY`.
 
-O marker foi promovido para:
+O marker é exigido no smoke QEMU principal, runner SMP local, workflow SMP 3/3
+e NVMe-only QEMU. O SMP executa `tests/test_acpi_aml_namespace.py` explicitamente.
 
-- smoke QEMU principal;
-- runner SMP local;
-- workflow SMP 3/3;
-- NVMe-only QEMU.
-
-O SMP também passa a executar `tests/test_acpi_aml_namespace.py` explicitamente.
-
-### Limite intencional do AML-2
-
-`AML_NAMESPACE_READY` neste incremento certifica o **núcleo do namespace**, não
-a ingestão completa da DSDT/SSDT. O namespace real ainda fica vazio além da raiz.
-Isso é deliberado: varrer bytes desconhecidos procurando opcodes pode produzir
-falsos objetos dentro de buffers/métodos e não será usado.
+`AML_NAMESPACE_READY` certifica o núcleo do namespace, não a ingestão completa
+da DSDT/SSDT. O namespace real ainda fica vazio além da raiz; scan cego de bytes
+AML desconhecidos continua proibido.
 
 ---
 

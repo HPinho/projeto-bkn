@@ -18,6 +18,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::fpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::arch::x86_64::smp::*;
+import kernel::interrupts::lapic_timer::*;
 import kernel::acpi::aml_tables::*;
 import kernel::acpi::aml_decoder::*;
 import kernel::acpi::aml_namespace::*;
@@ -228,17 +229,48 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !scheduler_wait_reaper_probe() { loop {} }
     if !scheduler_finish_process_probe() { loop {} }
 
-    if !scheduler_wait_probe_start() { loop {} }
-    // O primeiro yield entrega a CPU ao waiter. O seu block-switch retorna ao
-    // bootstrap, que acorda a fila e entrega a CPU ao mesmo waiter outra vez.
-    // Assim a prova não depende de o host escolher uma terceira thread em uma
-    // janela de timer: o wake continua real, atômico e executado por outro
-    // contexto (o bootstrap).
-    if !scheduler_yield() { loop {} }
-    if !scheduler_wait_probe_blocked() { loop {} }
-    if !scheduler_wait_probe_wake() { loop {} }
-    if !scheduler_yield() { loop {} }
-    if !scheduler_wait_probe_wait_complete() { loop {} }
+    // O handoff wait/wake é uma prova de troca por INT 0x43, enquanto o sleep
+    // subsequente é a prova de preempção por LAPIC. Não deixe o timer periódico
+    // competir com a janela waiter -> bootstrap -> waiter: ele fica mascarado
+    // até a mesma waiter registrar o deadline e bloquear em SLEEP_BLOCKED.
+    lapic_timer_mask();
+    x86_serial_write_hex32_marker('W' as u8, 1);
+    if !scheduler_wait_probe_start() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000001);
+        loop {}
+    }
+    if !scheduler_yield() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000002);
+        loop {}
+    }
+    x86_serial_write_hex32_marker('W' as u8, 2);
+    if !scheduler_wait_probe_blocked() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000003);
+        loop {}
+    }
+    if !scheduler_wait_probe_wake() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000004);
+        loop {}
+    }
+    x86_serial_write_hex32_marker('W' as u8, 3);
+    if !scheduler_yield() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000005);
+        loop {}
+    }
+    // O segundo yield só retorna ao bootstrap depois de a waiter retomar,
+    // publicar WAIT_RESUME e entrar em scheduler_sleep_ticks(), que emite
+    // SLEEP_BLOCKED antes do seu próprio block-switch.
+    x86_serial_write_hex32_marker('W' as u8, 4);
+    if !lapic_timer_unmask_periodic() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000006);
+        loop {}
+    }
+    x86_serial_write_hex32_marker('W' as u8, 5);
+    if !scheduler_wait_probe_wait_complete() {
+        x86_serial_write_hex32_marker('W' as u8, 0x80000007);
+        loop {}
+    }
+    x86_serial_write_hex32_marker('W' as u8, 6);
 
     // Prova real CPL3 -> syscall -> exit -> reaper -> teardown do address space.
     if !userspace_loader_start_probe() { loop {} }
