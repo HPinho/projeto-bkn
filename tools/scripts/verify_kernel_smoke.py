@@ -1,10 +1,10 @@
-"""Fail closed on incomplete kernel execution or any reported CPU exception."""
+"""Fail closed on incomplete kernel execution or any reported CPU/AML failure."""
 import argparse
 from pathlib import Path
 
 REQUIRED = (
     "PROCESS_SCHEDULER_READY", "ACPI_AML_TABLES_READY", "ACPI_AML_DECODER_READY",
-    "ACPI_AML_DATA_READY", "ACPI_AML_NAMESPACE_READY",
+    "ACPI_AML_DATA_READY", "ACPI_AML_NAMESPACE_READY", "ACPI_AML_NAMESPACE_LOADED",
     "HEAP_READY", "PLATFORM_READY", "DEVICE_CATALOG_READY", "STORAGE_DRIVER_BOUND", "PROCESS_ISOLATION_READY", "PROCESS_REGISTRY_READY", "BARE_METAL_READY",
     "SMP_BASE_READY",
     "SCHEDULER_SWITCH", "SCHEDULER_ROUND_TRIP", "RUN_QUEUE_CREATED",
@@ -22,6 +22,8 @@ def validate(serial: str) -> list[str]:
     errors = []
     if "BAKEN:HEX=E:" in serial:
         errors.append("CPU exception reported (BAKEN:HEX=E:)")
+    if "BAKEN:HEX=A:" in serial:
+        errors.append("AML namespace loader failed (BAKEN:HEX=A:, offset in BAKEN:HEX=B:)")
     errors.extend(f"Missing BAKEN:{marker}" for marker in REQUIRED
                   if f"BAKEN:{marker}" not in lines)
     return errors
@@ -44,7 +46,7 @@ def main() -> int:
         print("\n".join(line for line in serial.splitlines()
                         if "BAKEN:" in line)[-4096:])
         return 1
-    print("Kernel smoke passed: all milestones present, no CPU exception.")
+    print("Kernel smoke passed: all milestones present, no CPU/AML failure.")
     return 0
 
 

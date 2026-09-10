@@ -1,10 +1,9 @@
 // Baken OS — núcleo read-only do namespace AML.
 //
-// Esta camada NÃO executa AML e NÃO percorre DSDT/SSDT arbitrariamente. Ela
-// fornece a estrutura fixa, resolução de NameString e invariantes necessários
-// para o próximo incremento carregar declarações AML de forma grammar-aware.
-// A construção ocorre no BSP antes da liberação do SMP; após READY, a API
-// pública é somente de consulta.
+// A construção é privada por padrão. AML-4 recebe uma janela explícita de
+// loader: begin -> define/open scope -> finish. Fora dessa janela, nenhuma API
+// pública pode mutar o namespace. Após finish, a API pública volta a ser apenas
+// de consulta.
 
 module kernel::acpi::aml_namespace;
 
@@ -12,7 +11,7 @@ import kernel::acpi::aml_decoder::*;
 import kernel::acpi::aml_data::*;
 import kernel::arch::x86_64::serial::*;
 
-pub const AML_NAMESPACE_MAX_NODES: usize = 256;
+pub const AML_NAMESPACE_MAX_NODES: usize = 1024;
 pub const AML_NAMESPACE_INVALID_INDEX: usize = AML_NAMESPACE_MAX_NODES;
 
 pub const AML_NAMESPACE_KIND_ROOT: u8 = 1;
@@ -20,9 +19,18 @@ pub const AML_NAMESPACE_KIND_SCOPE: u8 = 2;
 pub const AML_NAMESPACE_KIND_DEVICE: u8 = 3;
 pub const AML_NAMESPACE_KIND_NAME: u8 = 4;
 pub const AML_NAMESPACE_KIND_METHOD: u8 = 5;
+pub const AML_NAMESPACE_KIND_PROCESSOR: u8 = 6;
+pub const AML_NAMESPACE_KIND_POWER_RESOURCE: u8 = 7;
+pub const AML_NAMESPACE_KIND_THERMAL_ZONE: u8 = 8;
 
 pub const AML_NAMESPACE_VALUE_NONE: u8 = 0;
 pub const AML_NAMESPACE_VALUE_INTEGER: u8 = 1;
+pub const AML_NAMESPACE_VALUE_STRING: u8 = 2;
+pub const AML_NAMESPACE_VALUE_BUFFER: u8 = 3;
+pub const AML_NAMESPACE_VALUE_PACKAGE: u8 = 4;
+pub const AML_NAMESPACE_VALUE_VAR_PACKAGE: u8 = 5;
+
+const AML_NAMESPACE_FLAG_IMPLICIT_SCOPE: u8 = 0x80;
 
 pub struct AmlNamespaceNode {
     pub segment: u32;
@@ -52,11 +60,13 @@ static mut AML_NAMESPACE_NODES: [AmlNamespaceNode; AML_NAMESPACE_MAX_NODES] = [
 ];
 static mut AML_NAMESPACE_COUNT: usize = 0;
 static mut AML_NAMESPACE_READY: bool = false;
+static mut AML_NAMESPACE_LOADING: bool = false;
 
 @system
 fn aml_namespace_reset() -> void {
     unsafe {
         AML_NAMESPACE_READY = false;
+        AML_NAMESPACE_LOADING = false;
         AML_NAMESPACE_COUNT = 1;
         let mut index: usize = 0;
         while index < AML_NAMESPACE_MAX_NODES {
@@ -84,6 +94,16 @@ fn aml_namespace_node_valid(index: usize) -> bool {
             index < AML_NAMESPACE_MAX_NODES &&
             AML_NAMESPACE_NODES[index].valid;
     }
+}
+
+@system
+fn aml_namespace_kind_opens_scope(kind: u8) -> bool {
+    return kind == AML_NAMESPACE_KIND_ROOT ||
+        kind == AML_NAMESPACE_KIND_SCOPE ||
+        kind == AML_NAMESPACE_KIND_DEVICE ||
+        kind == AML_NAMESPACE_KIND_PROCESSOR ||
+        kind == AML_NAMESPACE_KIND_POWER_RESOURCE ||
+        kind == AML_NAMESPACE_KIND_THERMAL_ZONE;
 }
 
 @system
@@ -203,11 +223,16 @@ fn aml_namespace_define_path(requested_scope: usize,
                 );
             }
             if existing != AML_NAMESPACE_INVALID_INDEX {
+                unsafe {
+                    if !aml_namespace_kind_opens_scope(AML_NAMESPACE_NODES[existing].kind) {
+                        return AML_NAMESPACE_INVALID_INDEX;
+                    }
+                }
                 scope = existing;
             } else {
                 scope = aml_namespace_allocate_child(
                     scope, segment, AML_NAMESPACE_KIND_SCOPE,
-                    AML_NAMESPACE_VALUE_NONE, 0, 0,
+                    AML_NAMESPACE_VALUE_NONE, 0, AML_NAMESPACE_FLAG_IMPLICIT_SCOPE,
                     null as *const u8, 0
                 );
                 if scope == AML_NAMESPACE_INVALID_INDEX { return scope; }
@@ -248,10 +273,98 @@ pub fn aml_namespace_lookup(scope: usize, name: *const AmlNameString) -> usize {
     return aml_namespace_lookup_internal(scope, name);
 }
 
+// Janela de mutação usada exclusivamente pelo loader AML-4. O loader só pode
+// começar a partir da fundação publicada (raiz única) e finish fecha a janela.
+@system
+pub fn aml_namespace_loader_begin() -> bool {
+    unsafe {
+        if !AML_NAMESPACE_READY || AML_NAMESPACE_LOADING || AML_NAMESPACE_COUNT != 1 {
+            return false;
+        }
+    }
+    aml_namespace_reset();
+    unsafe { AML_NAMESPACE_LOADING = true; }
+    return true;
+}
+
+@system
+pub fn aml_namespace_loader_abort() -> void {
+    unsafe { if !AML_NAMESPACE_LOADING { return; } }
+    aml_namespace_reset();
+    unsafe {
+        __dma_fence();
+        AML_NAMESPACE_READY = true;
+    }
+}
+
+@system
+pub fn aml_namespace_loader_define_leaf(requested_scope: usize,
+                                        name: *const AmlNameString,
+                                        kind: u8, value_kind: u8,
+                                        integer_value: u64, flags: u8,
+                                        aml_body: *const u8,
+                                        aml_body_length: usize) -> usize {
+    unsafe {
+        if !AML_NAMESPACE_LOADING || AML_NAMESPACE_READY {
+            return AML_NAMESPACE_INVALID_INDEX;
+        }
+    }
+    if kind != AML_NAMESPACE_KIND_NAME && kind != AML_NAMESPACE_KIND_METHOD {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    return aml_namespace_define_path(
+        requested_scope, name, kind, value_kind, integer_value,
+        flags, aml_body, aml_body_length
+    );
+}
+
+@system
+pub fn aml_namespace_loader_open_scope(requested_scope: usize,
+                                       name: *const AmlNameString,
+                                       kind: u8) -> usize {
+    unsafe {
+        if !AML_NAMESPACE_LOADING || AML_NAMESPACE_READY ||
+           !aml_namespace_kind_opens_scope(kind) || kind == AML_NAMESPACE_KIND_ROOT {
+            return AML_NAMESPACE_INVALID_INDEX;
+        }
+    }
+    let existing = aml_namespace_lookup_internal(requested_scope, name);
+    if existing != AML_NAMESPACE_INVALID_INDEX {
+        unsafe {
+            let existing_kind = AML_NAMESPACE_NODES[existing].kind;
+            if kind == AML_NAMESPACE_KIND_SCOPE && aml_namespace_kind_opens_scope(existing_kind) {
+                return existing;
+            }
+            if (AML_NAMESPACE_NODES[existing].flags & AML_NAMESPACE_FLAG_IMPLICIT_SCOPE) != 0 {
+                AML_NAMESPACE_NODES[existing].kind = kind;
+                AML_NAMESPACE_NODES[existing].flags =
+                    AML_NAMESPACE_NODES[existing].flags & 0x7F;
+                return existing;
+            }
+        }
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    return aml_namespace_define_path(
+        requested_scope, name, kind, AML_NAMESPACE_VALUE_NONE, 0, 0,
+        null as *const u8, 0
+    );
+}
+
+@system
+pub fn aml_namespace_loader_finish() -> bool {
+    unsafe {
+        if !AML_NAMESPACE_LOADING || AML_NAMESPACE_READY || AML_NAMESPACE_COUNT <= 1 {
+            return false;
+        }
+        AML_NAMESPACE_LOADING = false;
+        __dma_fence();
+        AML_NAMESPACE_READY = true;
+    }
+    return true;
+}
+
 @system
 pub fn aml_namespace_foundation_init() -> bool {
-    // AML-3 é uma dependência estrutural do futuro loader. O namespace não
-    // publica READY se DataObject/Package não passar sua própria prova bounded.
     if !aml_data_self_test() { return false; }
     aml_namespace_reset();
 
@@ -303,7 +416,6 @@ pub fn aml_namespace_foundation_init() -> bool {
     let parent_sta = aml_decode_name_string(&mut parent_sta_cursor);
     if aml_namespace_lookup_internal(pci, &parent_sta) != sta { return false; }
 
-    // Duplicata deve falhar sem alterar o namespace.
     let before_duplicate = unsafe { AML_NAMESPACE_COUNT };
     if aml_namespace_define_path(
         pci, &hid_name, AML_NAMESPACE_KIND_NAME,
@@ -317,8 +429,7 @@ pub fn aml_namespace_foundation_init() -> bool {
        hid_node.value_kind != AML_NAMESPACE_VALUE_INTEGER ||
        hid_node.integer_value != 0x1234 { return false; }
 
-    // O self-test não deve contaminar o namespace real futuro. Publicamos
-    // somente a raiz vazia; o loader de DSDT/SSDT será o próximo incremento.
+    // O self-test não contamina o namespace real: publica somente a raiz.
     aml_namespace_reset();
     unsafe {
         __dma_fence();
@@ -330,8 +441,6 @@ pub fn aml_namespace_foundation_init() -> bool {
 @system
 pub fn aml_namespace_emit_ready_marker() -> bool {
     if !aml_namespace_is_ready() || aml_namespace_count() != 1 { return false; }
-    // O marker AML-3 é obrigatório e precede o marker do namespace. Se a UART
-    // não confirmar a publicação, não mascaramos a falha emitindo READY acima.
     if !aml_data_emit_ready_marker() { return false; }
     let marker: [u8; 31] = [
         66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,78,65,77,69,83,80,65,

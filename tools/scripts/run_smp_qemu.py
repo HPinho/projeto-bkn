@@ -16,7 +16,7 @@ FINAL_MARKER = "BAKEN:SMP_FPU_MIGRATION_READY"
 REQUIRED_MARKERS = (
     "BAKEN:SMP_BASE_READY", "BAKEN:ACPI_AML_TABLES_READY",
     "BAKEN:ACPI_AML_DECODER_READY", "BAKEN:ACPI_AML_DATA_READY",
-    "BAKEN:ACPI_AML_NAMESPACE_READY",
+    "BAKEN:ACPI_AML_NAMESPACE_READY", "BAKEN:ACPI_AML_NAMESPACE_LOADED",
     "BAKEN:SMP_AP_ONLINE", "BAKEN:SMP_AP_RUNTIME_READY", "BAKEN:SMP_THREAD_ON_AP",
     "BAKEN:SMP_TIMER_ON_AP", "BAKEN:SMP_ANY_THREAD_ON_AP",
     "BAKEN:SMP_HEAP_READY", "BAKEN:SMP_TLB_SHOOTDOWN_READY",
@@ -55,6 +55,8 @@ def validate(serial: str) -> list[str]:
     errors: list[str] = []
     if "BAKEN:HEX=E:" in serial:
         errors.append("CPU exception reported (BAKEN:HEX=E:)")
+    aml_failures = re.findall(r"^BAKEN:HEX=A:[0-9A-Fa-f]{8}$", serial, re.M)
+    errors.extend(f"AML loader failed: {marker} (offset is BAKEN:HEX=B:)" for marker in aml_failures)
     lines = marker_lines(serial)
     failures = re.findall(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M)
     errors.extend(f"Ring3/TLB probe failed: {marker}" for marker in failures)
@@ -82,6 +84,9 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
             deadline = started + args.timeout
             while time.monotonic() < deadline:
                 serial = serial_path.read_text(errors="replace") if serial_path.exists() else ""
+                if re.search(r"^BAKEN:HEX=A:[0-9A-Fa-f]{8}$", serial, re.M):
+                    stop_reason = "AML loader failure"
+                    break
                 if "BAKEN:HEX=E:" in serial or re.search(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M):
                     stop_reason = "kernel failure"
                     break

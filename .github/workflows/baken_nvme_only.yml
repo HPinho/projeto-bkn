@@ -47,6 +47,7 @@ jobs:
           python3 tests/test_storage_native_readiness.py
           python3 tests/test_foundation_nvme_gate.py
           python3 tests/test_storage_discovery.py
+          python3 tests/test_acpi_aml_loader.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -150,7 +151,9 @@ jobs:
             'BAKEN:HEAP_READY'
             'BAKEN:ACPI_AML_TABLES_READY'
             'BAKEN:ACPI_AML_DECODER_READY'
+            'BAKEN:ACPI_AML_DATA_READY'
             'BAKEN:ACPI_AML_NAMESPACE_READY'
+            'BAKEN:ACPI_AML_NAMESPACE_LOADED'
             'BAKEN:PROCESS_ISOLATION_READY'
             'BAKEN:BARE_METAL_READY'
             'BAKEN:SCHEDULER_SWITCH'

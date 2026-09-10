@@ -15,14 +15,14 @@ class AcpiAmlNamespaceTests(unittest.TestCase):
         cls.source = NAMESPACE.read_text(encoding="utf-8")
 
     def test_namespace_is_fixed_capacity_and_does_not_depend_on_heap(self):
-        self.assertIn("AML_NAMESPACE_MAX_NODES: usize = 256", self.source)
+        self.assertIn("AML_NAMESPACE_MAX_NODES: usize = 1024", self.source)
         self.assertIn("static mut AML_NAMESPACE_NODES", self.source)
         self.assertIn("[AmlNamespaceNode; AML_NAMESPACE_MAX_NODES]", self.source)
         lower = self.source.lower()
         for forbidden in ("heap_alloc", "kmalloc", "malloc(", "free("):
             self.assertNotIn(forbidden, lower)
 
-    def test_public_api_is_read_only_after_foundation_ready(self):
+    def test_public_query_api_is_read_only_after_ready(self):
         for token in (
             "pub fn aml_namespace_is_ready",
             "pub fn aml_namespace_count",
@@ -34,6 +34,7 @@ class AcpiAmlNamespaceTests(unittest.TestCase):
         self.assertIn("fn aml_namespace_define_path", self.source)
         self.assertNotIn("pub fn aml_namespace_define_path", self.source)
         self.assertIn("if !AML_NAMESPACE_READY", self.source)
+        self.assertIn("static mut AML_NAMESPACE_LOADING: bool = false", self.source)
 
     def test_name_resolution_honors_root_and_parent_prefixes(self):
         start = self.source.split("fn aml_namespace_start_scope", 1)[1].split(
@@ -49,13 +50,18 @@ class AcpiAmlNamespaceTests(unittest.TestCase):
         self.assertIn("aml_namespace_find_child_internal", lookup)
         self.assertIn("(*name).segments[index]", lookup)
 
-    def test_duplicates_and_capacity_fail_closed(self):
+    def test_duplicates_capacity_and_non_scope_intermediates_fail_closed(self):
         allocator = self.source.split("fn aml_namespace_allocate_child", 1)[1].split(
             "fn aml_namespace_start_scope", 1
         )[0]
         self.assertIn("AML_NAMESPACE_COUNT >= AML_NAMESPACE_MAX_NODES", allocator)
         self.assertIn("aml_namespace_find_child_internal(parent, segment)", allocator)
         self.assertIn("return AML_NAMESPACE_INVALID_INDEX", allocator)
+        define = self.source.split("fn aml_namespace_define_path", 1)[1].split(
+            "pub fn aml_namespace_is_ready", 1
+        )[0]
+        self.assertIn("!aml_namespace_kind_opens_scope", define)
+        self.assertIn("AML_NAMESPACE_FLAG_IMPLICIT_SCOPE", define)
         init = self.source.split("pub fn aml_namespace_foundation_init", 1)[1].split(
             "pub fn aml_namespace_emit_ready_marker", 1
         )[0]
@@ -79,6 +85,19 @@ class AcpiAmlNamespaceTests(unittest.TestCase):
             self.assertIn(token, init)
         marker = self.source.split("pub fn aml_namespace_emit_ready_marker", 1)[1]
         self.assertIn("aml_namespace_count() != 1", marker)
+
+    def test_loader_mutation_window_is_guarded_and_reopen_scope_is_explicit(self):
+        for token in (
+            "pub fn aml_namespace_loader_begin",
+            "pub fn aml_namespace_loader_abort",
+            "pub fn aml_namespace_loader_define_leaf",
+            "pub fn aml_namespace_loader_open_scope",
+            "pub fn aml_namespace_loader_finish",
+            "if !AML_NAMESPACE_LOADING || AML_NAMESPACE_READY",
+            "kind == AML_NAMESPACE_KIND_SCOPE && aml_namespace_kind_opens_scope(existing_kind)",
+            "AML_NAMESPACE_FLAG_IMPLICIT_SCOPE",
+        ):
+            self.assertIn(token, self.source)
 
     def test_namespace_foundation_does_not_execute_aml_or_touch_hardware(self):
         lower = self.source.lower()
