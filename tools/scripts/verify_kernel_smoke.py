@@ -6,7 +6,9 @@ REQUIRED = (
     "PROCESS_SCHEDULER_READY", "ACPI_AML_TABLES_READY", "ACPI_AML_DECODER_READY",
     "ACPI_AML_DATA_READY", "ACPI_AML_NAMESPACE_READY", "ACPI_AML_NAMESPACE_LOADED",
     "ACPI_AML_DEVICES_READY", "ACPI_AML_EVALUATOR_READY", "ACPI_AML_DYNAMIC_READY",
-    "HEAP_READY", "PLATFORM_READY", "DEVICE_CATALOG_READY", "STORAGE_DRIVER_BOUND", "PROCESS_ISOLATION_READY", "PROCESS_REGISTRY_READY", "BARE_METAL_READY",
+    "ACPI_AML_REGIONS_READY", "ACPI_AML_PLATFORM_READY",
+    "HEAP_READY", "PLATFORM_READY", "DEVICE_CATALOG_READY", "STORAGE_DRIVER_BOUND",
+    "PROCESS_ISOLATION_READY", "PROCESS_REGISTRY_READY", "BARE_METAL_READY",
     "SMP_BASE_READY",
     "SCHEDULER_SWITCH", "SCHEDULER_ROUND_TRIP", "RUN_QUEUE_CREATED",
     "RUN_QUEUE_SWITCH", "YIELD_ROUND_TRIP", "WAIT_BLOCKED", "WAIT_WAKE",
@@ -34,6 +36,10 @@ def validate(serial: str) -> list[str]:
         )
     if "BAKEN:ACPI_AML_DYNAMIC_FAILED" in lines:
         errors.append("AML dynamic discovery failed (BAKEN:ACPI_AML_DYNAMIC_FAILED)")
+    if "BAKEN:ACPI_AML_REGIONS_FAILED" in lines:
+        errors.append("AML OperationRegion/Field core failed (BAKEN:ACPI_AML_REGIONS_FAILED)")
+    if "BAKEN:ACPI_AML_PLATFORM_FAILED" in lines:
+        errors.append("AML platform object pass failed (BAKEN:ACPI_AML_PLATFORM_FAILED)")
     # HEX=T is also the LAPIC timer checkpoint and HEX=U is userspace diagnostics.
     # They are intentionally non-terminal unless the evaluator publishes its
     # dedicated textual failure marker above.

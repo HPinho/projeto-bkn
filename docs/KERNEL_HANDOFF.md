@@ -6,246 +6,176 @@ Este é o registro operacional de continuidade. Código presente não equivale a
 
 ## Política de baseline verde
 
-A partir de AML-6, `main` permanece no último SHA comprovado integrado. Incrementos são desenvolvidos e corrigidos em branch/PR de validação. Um candidato só substitui a baseline integrada depois de fechar os três gates sem regressão.
-
-Registrar sempre em **este arquivo e `docs/BAKEN_OS_ROADMAP.md`**:
-
-- `⏳ EM VALIDAÇÃO`, `✅ COMPROVADO` ou `❌ FALHOU`;
-- SHA exato do código quando já conhecido;
-- runs/gates usados como prova;
-- causa objetiva da falha;
-- correção aplicada;
-- próximo passo.
-
-Nunca remover marker/teste, aumentar timeout sem causa ou trocar prova bare-metal por mock para esconder regressão.
-
----
+- `main` permanece no último SHA integrado e comprovado.
+- trabalho novo ocorre em branch/PR;
+- falhas são corrigidas fora de `main`;
+- nenhuma etapa é promovida removendo marker/teste ou aumentando timeout sem causa;
+- runtime QEMU vale mais do que teste textual;
+- toda implementação/falha/correção deve ser refletida aqui e em `docs/BAKEN_OS_ROADMAP.md`.
 
 ## Baseline integrada em `main`
 
-**Estado: ✅ CERTIFICADO**
+**✅ CERTIFICADO**
 
 ```text
 3f02decb2cacc94975113e1886ae3ed74cf8a698
 fix(acpi): mark AML pointer conversion unsafe
 ```
 
+Gates:
+- CI #1048 / `34471015124` ✅;
+- SMP #151 / `34471015170` ✅ — 3/3 boots;
+- NVMe-only #248 / `34471015070` ✅.
+
+A `main` continua congelada durante a finalização da PR #16.
+
+## Baseline verde da PR #16
+
+### AML-6a
+
+**✅ COMPROVADO**
+
+```text
+8e553f791a8e67fa3dd673700077b6c28b485a71
+fix(ci): align SMP AML evaluator proof contract
+```
+
+- CI #1051 / `34480220577` ✅;
+- SMP #154 / `34480220696` ✅ — 3/3;
+- NVMe #251 / `34480220755` ✅.
+
+### AML-6b
+
+**✅ COMPROVADO**
+
+```text
+4e90ec22097c71950dcfa9f84b734568d87ae022
+feat(acpi): evaluate bounded discovery methods
+```
+
 Gates no mesmo SHA:
+- CI principal #1052 / `34484777900` ✅ PASS — suíte completa, grafo modular, build Sotlas, ISO e QEMU;
+- SMP #155 / `34484777931` ✅ PASS — 3/3 boots com AP dispatch, TLB, Ring3 migration e FPU;
+- NVMe-only #252 / `34484777902` ✅ PASS.
 
-- CI principal #1048 — run `34471015124` — ✅ PASS;
-- SMP #151 — run `34471015170` — ✅ PASS, incluindo 3/3 boots e migração Ring3/FPU;
-- NVMe-only #248 — run `34471015070` — ✅ PASS.
+AML-6b mantém AML-5 como fonte estática e usa AML-6a apenas em `_HID`, `_CID`, `_UID`, `_STA` e `_CRS` marcados `requires_evaluator`. Métodos fora do subconjunto ficam unresolved; nenhum valor é fabricado.
 
-A `main` continua propositalmente congelada nesse checkpoint durante a validação AML-6. O checkpoint histórico de conclusão inicial do Kernel Core continua sendo `72422a79dfcec4c9c43bd3a83ef8a9ad90c7c2c8`.
+## Histórico de falhas relevante
 
-### Invariantes congelados do Kernel Core
+- AML-4: `Scope(\)` foi inicialmente rejeitado. Corrigido em `2a9974ad`; #1046/#149/#246 verdes.
+- AML-5: CI #1047 detectou conversão de ponteiro fora de `unsafe`. Corrigido em `3f02decb`.
+- AML-6a: CI #1049 e NVMe #249 foram falsos positivos por colisão `HEX=T/U`; criado `BAKEN:ACPI_AML_EVALUATOR_FAILED`.
+- SMP #153 detectou divergência runner/YAML; corrigida em `8e553f79`.
+- Nenhuma dessas correções relaxou scheduler, CR3/TLB, FPU, Ring3 ou storage.
+
+## Invariantes congelados do Kernel Core
 
 1. afinidade não transfere ownership;
 2. thread dinâmica só é selecionável/reapable com owner `NONE`;
-3. ownership de frame/stack é liberado somente após entrada posterior do scheduler na CPU anterior;
-4. BSP/AP usam FPU save -> schedule -> CR3/TSS -> restore;
-5. o mesmo TID Ring3 migra BSP -> AP preservando address-space root e SIMD;
-6. reaper/teardown só ocorre após abandono físico do frame anterior;
-7. `BAKEN:HEX=E:` é terminal;
-8. `HEX=Q` e `HEX=W` permanecem fail-closed.
-
-Nenhuma mudança AML-6a/6b deve alterar esses invariantes.
+3. frame/stack só é liberado após entrada posterior do scheduler na CPU anterior;
+4. FPU save -> schedule -> CR3/TSS -> FPU restore permanece sob switch lock;
+5. migração Ring3 BSP->AP preserva TID, address-space root e SIMD;
+6. teardown só ocorre após abandono físico do frame anterior;
+7. `BAKEN:HEX=E:` continua terminal;
+8. provas wait/sleep, TLB, Ring3 e SMP não podem ser removidas para acomodar AML.
 
 ---
 
-## Estado da Fase 2 — ACPI/AML
+# Estado ACPI/AML
 
-### AML-0 — tabelas DSDT/SSDT
-**✅ COMPROVADO.** Catálogo validado e marker `BAKEN:ACPI_AML_TABLES_READY`.
+## AML-0 — tabelas
+**✅ COMPROVADO.** DSDT/SSDT bounded, checksum e `BAKEN:ACPI_AML_TABLES_READY`.
 
-### AML-1 — decoder estrutural
-**✅ COMPROVADO.** Cursor limitado, PkgLength, NameString/NameSeg e inteiros; marker `BAKEN:ACPI_AML_DECODER_READY`.
+## AML-1 — decoder
+**✅ COMPROVADO.** Cursor, PkgLength, NameString e Integer fail-closed.
 
-### AML-2 — namespace core read-only
-**✅ COMPROVADO.** Namespace estático/bounded, resolução absoluta/relativa/parent e janela controlada do loader; marker `BAKEN:ACPI_AML_NAMESPACE_READY`.
+## AML-2 — namespace
+**✅ COMPROVADO.** Namespace bounded/read-only fora da janela do loader.
 
-### AML-3 — data objects grammar-aware
-**✅ COMPROVADO e revalidado em `3f02decb`.** String/Buffer/Package/VarPackage, budgets e nenhuma varredura cega; marker `BAKEN:ACPI_AML_DATA_READY`.
+## AML-3 — Data Objects
+**✅ COMPROVADO.** String/Buffer/Package/VarPackage, sem scan cego.
 
-### AML-4 — DSDT/SSDT -> namespace real
-**✅ COMPROVADO.**
+## AML-4 — DSDT/SSDT -> namespace
+**✅ COMPROVADO em `2a9974ad500ac65da360faf0d1f99461ef78b9bc`.**
 
-Checkpoint:
+## AML-5 — discovery estático
+**✅ COMPROVADO na baseline `3f02decb`.**
 
-```text
-2a9974ad500ac65da360faf0d1f99461ef78b9bc
-fix(acpi): accept root NullName in AML ScopeOp
-```
+## AML-6a — evaluator sem hardware
+**✅ COMPROVADO em `8e553f79`.**
 
-Gates:
-- CI #1046 — run `34465896493` — ✅;
-- SMP #149 — run `34465896534` — ✅;
-- NVMe #246 — run `34465896564` — ✅.
+Suporta Arg0..6, Local0..7, Store local/arg/null, Return, aritmética/lógica, If/Else, leitura read-only do namespace, fuel/depth e MethodFlags. Continua bloqueando nested method, While, Sleep/Stall, Notify, OperationRegion/Field, global writes e Serialized/SyncLevel.
 
-O loader materializa Name/Scope/Device e armazena Method como corpo opaco; não executa AML. Marker `BAKEN:ACPI_AML_NAMESPACE_LOADED`.
+## AML-6b — discovery dinâmico
+**✅ COMPROVADO em `4e90ec22`.**
 
-### AML-5 — descoberta estática de dispositivos
-**✅ COMPROVADO na baseline integrada `3f02decb`.**
-
-Implementação inicial:
-
-```text
-a312c3e87c388b70ee7248c2f710232a154cdd70
-feat(acpi): discover static AML devices and resources
-```
-
-Implementado:
-- `_HID`, `_CID`, `_UID`, `_ADR`;
-- `_STA` apenas quando constante;
-- `_CRS` estático;
-- EISA ID;
-- ResourceTemplate bounded com EndTag/checksum;
-- métodos dinâmicos somente marcados como `requires_evaluator`;
-- zero execução de Method/OperationRegion e zero escrita de hardware;
-- marker `BAKEN:ACPI_AML_DEVICES_READY`;
-- falhas estruturais `HEX=R/S`.
-
-Falha histórica CI #1047 (`34470298359`): ponteiro cru fora de `unsafe` em `aml_discovery_pointer_add`. Corrigido em `3f02decb` sem mudar a lógica; CI #1048 + SMP #151 + NVMe #248 fecharam 3/3.
-
----
-
-## AML-6a — evaluator controlado, sem hardware
-
-**Estado: ✅ COMPROVADO na branch/PR de validação**
-
-Branch: `aml6a-validation`  
-PR: `#16`
-
-Checkpoint certificado:
-
-```text
-8e553f791a8e67fa3dd673700077b6c28b485a71
-fix(ci): align SMP AML evaluator proof contract
-```
-
-Gates do mesmo candidato:
-
-- CI principal #1051 — run `34480220577` — ✅ PASS;
-- SMP #154 — run `34480220696` — ✅ PASS, 3/3 boots independentes;
-- NVMe-only #251 — run `34480220755` — ✅ PASS.
-
-Isso certifica a engine AML-6a **e** o protocolo de diagnóstico/validação. A `main` não foi movida; `8e553f79` é a baseline verde da PR #16 para iniciar AML-6b.
-
-Escopo comprovado:
-- execution frame fixo: Arg0..Arg6 e Local0..Local7;
-- `Store` somente para Local/Arg/Null target;
-- `Return`;
-- Add/Subtract/Multiply/Shift/And/Or/Xor/Not;
-- LAnd/LOr/LNot/LEqual/LGreater/LLess;
-- If/Else delimitados por PkgLength;
-- leitura read-only de Name estático do namespace;
-- aridade validada pelos MethodFlags;
-- Method Serialized/SyncLevel bloqueado até existir lock AML;
-- fuel `4096` e profundidade máxima `8`;
-- métodos encadeados, While, Sleep/Stall, Notify, OperationRegion/Field e escrita global continuam proibidos;
-- marker de sucesso `BAKEN:ACPI_AML_EVALUATOR_READY`.
-
-### Histórico de validação AML-6a
-
-Primeira rodada da PR #16, head `7dcd1f67`:
-- CI #1049 / `34474459862` — ❌ falso positivo;
-- SMP #152 / `34474459987` — ✅ 3/3;
-- NVMe #249 / `34474459985` — ❌ falso positivo.
-
-Os vermelhos chegaram a `ACPI_AML_EVALUATOR_READY`; a causa era colisão de canais: `HEX=T` já era checkpoint do LAPIC timer e `HEX=U` diagnóstico de userspace.
-
-Correção:
-
-```text
-12b97433af677b2ea93764c95c0bcf38cfb8ce4d
-fix(acpi): disambiguate AML evaluator diagnostics
-```
-
-Foi criado o marker terminal exclusivo:
-
-```text
-BAKEN:ACPI_AML_EVALUATOR_FAILED
-```
-
-`HEX=T/U` passaram a ser somente detalhes e nunca classificam falha isoladamente.
-
-SMP #153 / `34479698271` então falhou antes do QEMU porque `run_smp_qemu.py` já exigia `ACPI_AML_EVALUATOR_READY`, mas o YAML SMP ainda não o exigia explicitamente. O gate detectou corretamente a divergência.
-
-Correção final:
-
-```text
-8e553f791a8e67fa3dd673700077b6c28b485a71
-fix(ci): align SMP AML evaluator proof contract
-```
-
-O YAML passou a executar o contrato AML-6a, abortar no marker exclusivo de falha e exigir `ACPI_AML_EVALUATOR_READY` em cada boot. A rodada #1051/#154/#251 confirmou 3/3 verde.
-
----
-
-## AML-6b — predefined methods para discovery
-
-**Estado: ⏳ EM VALIDAÇÃO**
-
-Base de desenvolvimento:
-
-```text
-8e553f791a8e67fa3dd673700077b6c28b485a71
-```
-
-A implementação candidata é o próximo commit da PR #16 e introduz uma camada separada `aml_dynamic_discovery.sotlas`, sem reescrever AML-5.
-
-### Contrato arquitetural
-
-1. AML-5 continua sendo a fonte estática e marca `*_requires_evaluator`.
-2. AML-6a continua sendo a única engine de execução.
-3. AML-6b mantém um **overlay read-only**, com buffers/arrays de capacidade fixa e sem heap.
-4. Somente `_HID`, `_CID`, `_UID`, `_STA` e `_CRS` marcados pelo AML-5 são candidatos.
-5. Somente Method zero-arg, não-Serialized e SyncLevel zero é executado.
-6. Falha de opcode/tipo/flag não suportado em um método de firmware deixa o valor **unresolved**; nenhum valor é fabricado.
-7. Falha estrutural da própria camada dinâmica é terminal para publicação da plataforma.
-8. Nenhum OperationRegion/Field, MMIO/PIO/PCI write, Sleep/Stall, Notify ou efeito de hardware é permitido.
-
-### Validação por predefined object
-
-- `_HID`: Integer EISA válido ou string HID estrita;
-- `_CID`: Integer/string ou Package/VarPackage bounded de IDs válidos;
-- `_UID`: Integer ou string ASCII imprimível;
-- `_STA`: Integer dentro de `0x1F`, rejeitando combinação inválida `0b10` nos bits 0..1;
-- `_CRS`: Buffer materializado integralmente, ResourceTemplate bounded, EndTag obrigatório e checksum validado. Nesta fase `BufferSize` deve coincidir com o ByteList real; AML-6b não fabrica o zero-fill implícito ainda.
-
-### Publicação e prova
-
-Nova ordem da barreira de plataforma:
-
-```text
-AML-5 static discovery
--> AML-6a evaluator
--> AML-6b dynamic discovery
--> PLATFORM_READY
-```
-
-Markers candidatos:
-
+Markers:
 ```text
 BAKEN:ACPI_AML_DYNAMIC_READY
 BAKEN:ACPI_AML_DYNAMIC_FAILED
 ```
 
-`ACPI_AML_DYNAMIC_READY` significa que o passe bounded terminou sobre todos os devices AML-5; não significa que todo método de firmware foi resolvido. Métodos fora do subconjunto seguro permanecem explicitamente pendentes.
+# AML-7 — OperationRegion / Field core
 
-CI principal, runner SMP e workflow SMP passam a exigir o marker READY e reconhecer o FAILED de forma fail-closed.
+**⏳ EM VALIDAÇÃO NA PR #16**
 
----
+Objetivo desta etapa final antes do merge:
+- descritores bounded para SystemMemory, SystemIO e PCIConfig;
+- overflow e limite validados antes de qualquer acesso;
+- SystemMemory somente por MMIO 32-bit `volatile` já existente e page mapping nativo;
+- SystemIO somente por `__inl/__outl`;
+- PCIConfig somente via `pci_read_config32/pci_write_config32` com BDF explícito;
+- Field limitado a até 32 bits e a um único dword;
+- read-modify-write somente após validação de geometry e region bounds;
+- init/self-test **não toca hardware**;
+- IndexField/BankField não são emulados silenciosamente: permanecem unsupported até backing dedicado.
 
-## Próximos passos
+Markers candidatos:
+```text
+BAKEN:ACPI_AML_REGIONS_READY
+BAKEN:ACPI_AML_REGIONS_FAILED
+```
 
-1. validar o candidato AML-6b na PR #16;
-2. exigir CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA;
-3. se houver vermelho, diagnosticar o ponto exato sem relaxar marker/timeout nem alterar Kernel Core;
-4. somente após AML-6b 3/3 verde considerar promoção/merge da PR;
-5. AML-7: OperationRegion/Field mediados por MMIO/PIO/PCI nativo e com bounds;
-6. AML-8: `_PRT`/`_PIC`, `_S5` e power/routing de produção.
+O marker READY prova o **core de mediação**, não execução automática de todos os OperationRegions do firmware.
 
-Depois: HID adicional/I2C-HID, storage/VFS, rede, áudio, GPU/composição e power/hot-plug.
+# AML-8 — `_PIC`, `_PRT`, `_S5`
+
+**⏳ EM VALIDAÇÃO NA PR #16**
+
+- `_PIC`: se existir como Method de 1 argumento, tenta APIC mode com `Arg0=1` usando AML-6a. Se exigir global write/OperationRegion/opcode não suportado, fica presente porém não aplicado; o boot não inventa sucesso.
+- `_PRT`: Name/Method zero-arg que produza Package bounded; cada rota exige exatamente 4 elementos `Address, Pin, Source, SourceIndex`; `Pin` 0..3; máximo 256 rotas.
+- `_S5`: Name/Method zero-arg que produza Package; os dois primeiros elementos devem ser inteiros 0..7.
+- EC, GPE, GlobalLock e transição física de sleep ficam fora deste core; são expansão posterior de power/hotplug.
+
+Markers candidatos:
+```text
+BAKEN:ACPI_AML_PLATFORM_READY
+BAKEN:ACPI_AML_PLATFORM_FAILED
+```
+
+Nova barreira:
+```text
+AML-5 static
+-> AML-6a evaluator
+-> AML-6b dynamic discovery
+-> AML-7 region core
+-> AML-8 platform objects
+-> PLATFORM_READY
+```
+
+Os commits intermediários `770176be` e `123cd564` apenas adicionaram os dois módulos na branch e **não são baseline/candidatos de merge**. Somente o head final integrado, com testes/smoke/docs e os três gates verdes, pode substituir `4e90ec22`.
+
+## Critério para encerrar AML e integrar PR #16
+
+1. CI principal verde;
+2. SMP verification verde em 3/3 boots independentes;
+3. NVMe-only verde;
+4. todos no mesmo head final;
+5. `ACPI_AML_REGIONS_READY` e `ACPI_AML_PLATFORM_READY` presentes no smoke;
+6. nenhum marker AML `*_FAILED`, `HEX=A/R` ou CPU `HEX=E`;
+7. atualizar estes dois documentos com o SHA final e os run IDs;
+8. só então integrar a PR #16 em `main`.
+
+Depois do merge, a trilha ACPI/AML core é considerada encerrada. EC/GPE/GlobalLock, sleep transition completa e firmware-specific AML passam a pertencer à trilha de power/hot-plug, não bloqueiam Platform/Drivers.
 
 `HPinho/LangSotlas` permanece somente leitura/referência salvo autorização explícita.

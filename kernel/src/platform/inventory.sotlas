@@ -1,9 +1,9 @@
 // Baken OS — inventário canônico da plataforma pós-cutover.
 // Copia fatos de ACPI/APIC/PCI; não guarda ponteiros UEFI nem inicializa drivers.
 //
-// AML-6a valida a engine read-only. AML-6b aplica essa engine somente aos
-// predefined methods zero-arg marcados pelo AML-5, ainda sem OperationRegion.
-// A plataforma só é publicada depois das duas barreiras AML estarem prontas.
+// Ordem AML certificada:
+// AML-6a evaluator -> AML-6b discovery dinâmico -> AML-7 region core
+// -> AML-8 platform objects -> publicação de PLATFORM_READY.
 module kernel::platform::inventory;
 
 import kernel::acpi::tables::*;
@@ -13,6 +13,8 @@ import kernel::acpi::hpet::*;
 import kernel::acpi::aml_tables::*;
 import kernel::acpi::aml_evaluator::*;
 import kernel::acpi::aml_dynamic_discovery::*;
+import kernel::acpi::aml_regions::*;
+import kernel::acpi::aml_platform::*;
 import kernel::drivers::pci_bus::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
@@ -81,12 +83,28 @@ pub fn platform_inventory_init() -> bool {
         }
     }
 
-    // AML-6b: resolve somente os métodos predefinidos que AML-5 deixou
-    // explicitamente pendentes. Métodos fora do subconjunto seguro permanecem
-    // unresolved; falha estrutural da camada dinâmica é terminal para publicação.
+    // AML-6b: resolve somente predefined methods seguros de discovery.
     if !aml_dynamic_discovery_is_ready() {
         if !aml_dynamic_discovery_init() {
             aml_dynamic_discovery_emit_failure_marker();
+            return false;
+        }
+    }
+
+    // AML-7: instala somente o core mediado/bounded de OperationRegion/Field.
+    // Init e self-test não executam acesso de hardware.
+    if !aml_regions_is_ready() {
+        if !aml_regions_init() {
+            aml_regions_emit_failure_marker();
+            return false;
+        }
+    }
+
+    // AML-8: resolve _PIC/_PRT/_S5 dentro do subconjunto certificado.
+    // Objetos que dependam de AML ainda não suportado permanecem unresolved.
+    if !aml_platform_is_ready() {
+        if !aml_platform_init() {
+            aml_platform_emit_failure_marker();
             return false;
         }
     }
@@ -148,9 +166,10 @@ pub fn platform_inventory_is_ready() -> bool { unsafe { return PLATFORM_INFO.val
 @system
 pub fn platform_inventory_emit_ready_marker() -> bool {
     if !platform_inventory_is_ready() { return false; }
-    // Ordem de publicação: evaluator -> resolução dinâmica -> plataforma.
     if !aml_evaluator_emit_ready_marker() { return false; }
     if !aml_dynamic_discovery_emit_ready_marker() { return false; }
+    if !aml_regions_emit_ready_marker() { return false; }
+    if !aml_platform_emit_ready_marker() { return false; }
     let marker: [u8; 21] = [
         66,65,75,69,78,58,80,76,65,84,70,79,82,77,95,82,69,65,68,89,10
     ];
