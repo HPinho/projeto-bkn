@@ -187,7 +187,7 @@ Esses gates validam somente a primeira subfatia. HID-4c continua fora da `main` 
 
 ### HID-4c.2 — HID Interrupt IN por slot/interface
 
-**⏳ IMPLEMENTADO E EM VALIDAÇÃO.**
+**⏳ IMPLEMENTADO E EM REVALIDAÇÃO.**
 
 Implementação:
 - `xhci_hid_context` troca os singletons persistentes por `XHCI_HID_CONTEXTS[slot_id]` com epoch;
@@ -213,14 +213,29 @@ d3fcaf8e feat(xhci): configure HID endpoints per slot
 f51f5cb0 test(hid): advance runtime contract to HID-4c transport
 ```
 
-### Validação HID-4c.2
+### Histórico de validação/correção HID-4c.2
 
-Candidato de código `f51f5cb0`:
-- CI #1085 / `34533310356` ⏳;
-- SMP #188 / `34533310323` ⏳;
-- NVMe-only #285 / `34533310320` ⏳.
+Os candidatos `f51f5cb0` e `bffcd2d6` mantiveram o runtime real saudável, mas o CI principal parou na suíte por dois guardrails desatualizados:
 
-O head documental posterior também deve ser revalidado antes de esta subfatia ser marcada verde. Nenhum destes commits altera a baseline da `main`.
+- `f51f5cb0`: CI #1085 / `34533310356` ❌; SMP #188 / `34533310323` ✅; NVMe-only #285 / `34533310320` ✅;
+- `bffcd2d6`: CI #1087 / `34533512920` ❌; SMP #190 / `34533512907` ✅ — 3/3, build Sotlas e QEMU completos; NVMe-only #287 / `34533512927` ✅ — build/ISO/QEMU completos.
+
+Falhas exatas do CI #1087:
+1. `test_hid3_runtime_contract.py` ainda fazia split por `fn xhci_hid_report_parse(length: u32) -> bool`, removida pela migração por slot;
+2. `test_xhci_hid_context.py` exigia a string de chamada `xhci_hid_context_ring_physical_for(slot_id)` dentro do módulo em vez de provar a definição/retorno do getter por slot.
+
+Correções:
+```text
+b32cad41 fix(test): align HID-3 event guardrail with per-slot report state
+18b6e308 fix(test): validate per-slot HID ring getter definition
+```
+
+O primeiro guardrail agora inspeciona `xhci_hid_report_parse_for_slot(slot_id, length)` e mantém a exigência semântica de que o marker real só seja publicado quando `after_events > before_events`. O segundo exige a assinatura pública do getter `_for(slot_id)` e que ele retorne `XHCI_HID_CONTEXTS[slot].ring_physical`; nenhum contrato runtime foi removido ou relaxado.
+
+Revalidação do candidato corrigido `18b6e308`:
+- CI #1089 ⏳;
+- SMP #192 ⏳;
+- NVMe-only #289 ⏳.
 
 ### Limite atual do HID-4c.2
 
