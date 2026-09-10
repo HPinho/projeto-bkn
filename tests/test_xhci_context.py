@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails da memória por slot xHCI antes de Address Device."""
+"""Guardrails de Device/Input/EP0 contexts xHCI por Slot ID."""
 
 from pathlib import Path
 import unittest
@@ -18,13 +18,13 @@ class XhciContextTests(unittest.TestCase):
         self.assertIn("let slot_context_offset = context_size as u64", text)
         self.assertIn("let ep0_context_offset = (context_size as u64) * 2", text)
 
-    def test_context_uses_one_three_page_dma_arena(self):
+    def test_context_uses_one_three_page_dma_arena_per_slot(self):
         text = CONTEXT.read_text(encoding="utf-8")
         self.assertIn("XHCI_CONTEXT_ARENA_PAGES: u64 = 3", text)
-        self.assertIn("XHCI_DEVICE_CONTEXT_PAGE: u64 = 0", text)
-        self.assertIn("XHCI_INPUT_CONTEXT_PAGE: u64 = 1", text)
-        self.assertIn("XHCI_EP0_RING_PAGE: u64 = 2", text)
-        self.assertIn("dma_alloc(XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE", text)
+        self.assertIn("XHCI_CONTEXTS", text)
+        self.assertIn("XHCI_CONTEXT_SLOT_CAPACITY", text)
+        self.assertIn("pub fn xhci_context_prepare_for_slot(slot_id: u8)", text)
+        self.assertIn("XHCI_CONTEXTS[index].arena = arena", text)
 
     def test_ep0_packet_size_depends_on_port_speed(self):
         text = CONTEXT.read_text(encoding="utf-8")
@@ -37,7 +37,7 @@ class XhciContextTests(unittest.TestCase):
 
     def test_dcbaa_slot_is_published_only_after_context_and_ring_setup(self):
         text = CONTEXT.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_context_prepare_for_enabled_slot()", 1)[1]
+        body = text.split("pub fn xhci_context_prepare_for_slot(slot_id: u8)", 1)[1]
         zero = body.index("xhci_context_zero")
         link = body.index("xhci_trb_link")
         slot_context = body.index("slot_context_offset")
@@ -48,10 +48,17 @@ class XhciContextTests(unittest.TestCase):
         self.assertLess(slot_context, dcbaa)
         self.assertLess(dcbaa, shared)
 
+    def test_context_generation_tracks_slot_epoch(self):
+        text = CONTEXT.read_text(encoding="utf-8")
+        self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
+        self.assertIn("XHCI_CONTEXTS[index].epoch = epoch", text)
+        self.assertIn("XHCI_CONTEXTS[index].epoch == epoch", text)
+        self.assertIn("XHCI_DEVICE_STATE_CONTEXT_READY", text)
+
     def test_address_device_is_not_sent_in_context_stage(self):
         text = CONTEXT.read_text(encoding="utf-8")
         code = "\n".join(line for line in text.splitlines() if not line.strip().startswith("//"))
-        self.assertNotIn("address_device", code.lower())
+        self.assertNotIn("xhci_trb_address_device", code)
         self.assertNotIn("xhci_command_submit", code)
         self.assertNotIn("doorbell", code.lower())
 
