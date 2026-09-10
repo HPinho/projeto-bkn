@@ -1,8 +1,8 @@
-// Baken OS — Address Device após Slot/Input/EP0 contexts reais.
+// Baken OS — HID-4c: Address Device por Slot ID.
 //
-// Envia Address Device com BSR=0 pelo Command Ring stateful e só aceita sucesso
-// se o Device Context atualizado pelo xHC indicar Slot State = Addressed.
-// Não executa transferências de controle nem lê descriptors USB nesta fase.
+// Cada slot usa seu Input/Device Context próprio. O wrapper first_slot mantém o
+// bring-up atual, enquanto address_slot permite endereçar múltiplos devices sem
+// sobrescrever estado global do transporte.
 
 module kernel::drivers::xhci_address;
 
@@ -10,6 +10,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::memory::direct_map::*;
 import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_trb::*;
 
 pub const XHCI_SLOT_STATE_SHIFT: u32 = 27;
@@ -17,21 +18,64 @@ pub const XHCI_SLOT_STATE_MASK: u32 = 0x1F << XHCI_SLOT_STATE_SHIFT;
 pub const XHCI_SLOT_STATE_ADDRESSED: u8 = 2;
 pub const XHCI_SLOT_CONTEXT_DWORD3_OFFSET: u64 = 12;
 pub const XHCI_SLOT_DEVICE_ADDRESS_MASK: u32 = 0xFF;
+pub const XHCI_ADDRESS_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
 
+static mut XHCI_ADDRESS_READY_SLOTS: [bool; XHCI_ADDRESS_SLOT_CAPACITY] = [false; XHCI_ADDRESS_SLOT_CAPACITY];
+static mut XHCI_ADDRESS_EPOCHS: [u32; XHCI_ADDRESS_SLOT_CAPACITY] = [0; XHCI_ADDRESS_SLOT_CAPACITY];
+static mut XHCI_ADDRESS_DEVICE_ADDRESSES: [u8; XHCI_ADDRESS_SLOT_CAPACITY] = [0; XHCI_ADDRESS_SLOT_CAPACITY];
 static mut XHCI_ADDRESS_READY: bool = false;
 static mut XHCI_ADDRESS_SLOT_ID: u8 = 0;
-static mut XHCI_ADDRESS_DEVICE_ADDRESS: u8 = 0;
 
 @system
-fn xhci_address_read_device_slot_dw3() -> u32 {
-    let physical = xhci_context_device_physical();
+fn xhci_address_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_ADDRESS_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
+
+@system
+fn xhci_address_read_device_slot_dw3(slot_id: u8) -> u32 {
+    let physical = xhci_context_device_physical_for(slot_id);
     if physical == 0 { return 0; }
     let virtual_address = direct_map_virtual_address(physical);
     if virtual_address == 0 { return 0; }
     unsafe {
-        let pointer = (virtual_address + XHCI_SLOT_CONTEXT_DWORD3_OFFSET) as *const u32;
-        return *pointer;
+        return *((virtual_address + XHCI_SLOT_CONTEXT_DWORD3_OFFSET) as *const u32);
     }
+}
+
+@system
+pub fn xhci_address_slot(slot_id: u8) -> bool {
+    if !xhci_context_is_ready_for(slot_id) || !xhci_command_is_ready() ||
+       !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY { return false; }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    let input_physical = xhci_context_input_physical_for(slot_id);
+    if epoch == 0 || input_physical == 0 || (input_physical & 0xF) != 0 { return false; }
+
+    let command = xhci_trb_address_device(input_physical, slot_id, false,
+        xhci_command_producer_cycle());
+    let command_physical = xhci_command_submit(command);
+    if command_physical == 0 || !xhci_command_wait_completion(command_physical) ||
+       xhci_command_last_slot_id() != slot_id {
+        return false;
+    }
+
+    if x86_read_cr3_raw() == 0 { return false; }
+    let slot_dw3 = xhci_address_read_device_slot_dw3(slot_id);
+    let state = ((slot_dw3 & XHCI_SLOT_STATE_MASK) >> XHCI_SLOT_STATE_SHIFT) as u8;
+    let device_address = (slot_dw3 & XHCI_SLOT_DEVICE_ADDRESS_MASK) as u8;
+    if state != XHCI_SLOT_STATE_ADDRESSED || device_address == 0 { return false; }
+
+    unsafe {
+        XHCI_ADDRESS_READY_SLOTS[index] = true;
+        XHCI_ADDRESS_EPOCHS[index] = epoch;
+        XHCI_ADDRESS_DEVICE_ADDRESSES[index] = device_address;
+    }
+    if !xhci_device_table_set_state(slot_id, epoch, XHCI_DEVICE_STATE_ADDRESSED) { return false; }
+    return true;
 }
 
 @system
@@ -39,42 +83,45 @@ pub fn xhci_address_first_slot() -> bool {
     unsafe {
         XHCI_ADDRESS_READY = false;
         XHCI_ADDRESS_SLOT_ID = 0;
-        XHCI_ADDRESS_DEVICE_ADDRESS = 0;
     }
-    if !xhci_context_is_ready() || !xhci_command_is_ready() { return false; }
-
     let slot_id = xhci_context_slot_id();
-    let input_physical = xhci_context_input_physical();
-    if slot_id == 0 || input_physical == 0 || (input_physical & 0xF) != 0 { return false; }
-
-    // BSR=false: o xHC deve executar SET_ADDRESS e atualizar o Output Context.
-    let command = xhci_trb_address_device(input_physical, slot_id, false,
-        xhci_command_producer_cycle());
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 { return false; }
-    if !xhci_command_wait_completion(command_physical) { return false; }
-    if xhci_command_last_slot_id() != slot_id { return false; }
-
-    // Publication/observation barrier antes de ler DMA escrito pelo controller.
-    if x86_read_cr3_raw() == 0 { return false; }
-    let slot_dw3 = xhci_address_read_device_slot_dw3();
-    let state = ((slot_dw3 & XHCI_SLOT_STATE_MASK) >> XHCI_SLOT_STATE_SHIFT) as u8;
-    let device_address = (slot_dw3 & XHCI_SLOT_DEVICE_ADDRESS_MASK) as u8;
-    if state != XHCI_SLOT_STATE_ADDRESSED || device_address == 0 { return false; }
-
+    if slot_id == 0 || !xhci_address_slot(slot_id) { return false; }
     unsafe {
         XHCI_ADDRESS_SLOT_ID = slot_id;
-        XHCI_ADDRESS_DEVICE_ADDRESS = device_address;
         XHCI_ADDRESS_READY = true;
     }
     return true;
 }
 
 @system
-pub fn xhci_address_is_ready() -> bool { unsafe { return XHCI_ADDRESS_READY; } }
+pub fn xhci_address_is_ready_for(slot_id: u8) -> bool {
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    unsafe {
+        return epoch != 0 && XHCI_ADDRESS_READY_SLOTS[index] &&
+               XHCI_ADDRESS_EPOCHS[index] == epoch &&
+               XHCI_ADDRESS_DEVICE_ADDRESSES[index] != 0;
+    }
+}
+
+@system
+pub fn xhci_address_is_ready() -> bool {
+    unsafe { return XHCI_ADDRESS_READY && xhci_address_is_ready_for(XHCI_ADDRESS_SLOT_ID); }
+}
 
 @system
 pub fn xhci_address_slot_id() -> u8 { unsafe { return XHCI_ADDRESS_SLOT_ID; } }
 
 @system
-pub fn xhci_address_device_address() -> u8 { unsafe { return XHCI_ADDRESS_DEVICE_ADDRESS; } }
+pub fn xhci_address_device_address_for(slot_id: u8) -> u8 {
+    if !xhci_address_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_ADDRESS_DEVICE_ADDRESSES[xhci_address_index(slot_id)]; }
+}
+
+@system
+pub fn xhci_address_device_address() -> u8 {
+    return xhci_address_device_address_for(xhci_address_slot_id());
+}
