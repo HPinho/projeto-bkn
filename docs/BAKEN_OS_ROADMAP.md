@@ -25,7 +25,7 @@ Prova no mesmo SHA:
 | SMP #151 / `34471015170` | ✅ PASS — 3/3 boots |
 | NVMe-only #248 / `34471015070` | ✅ PASS |
 
-### Regra nova de integração
+### Regra de integração
 
 Para evitar workflows vermelhos na baseline, `main` fica congelada no último checkpoint verde. Trabalho novo ocorre em branch/PR; falhas são corrigidas ali. A baseline só avança após os três gates obrigatórios passarem.
 
@@ -121,8 +121,14 @@ Merge-test SHA: `7ad3cb6dd9099e2477ee91c6b26f96ebc702fd09`.
 
 Os dois logs vermelhos chegaram a `BAKEN:ACPI_AML_EVALUATOR_READY`, `PLATFORM_READY`, scheduler, wait/wake e Ring3. A causa não foi a engine AML-6a: o smoke tratava `HEX=T` como falha do evaluator e `HEX=U` como detalhe, mas `HEX=T` já é usado pelo LAPIC timer e `HEX=U` pelo userspace loader.
 
-Correção aplicada no candidato seguinte da branch:
+#### Correção do protocolo — `12b97433`
 
+```text
+12b97433af677b2ea93764c95c0bcf38cfb8ce4d
+fix(acpi): disambiguate AML evaluator diagnostics
+```
+
+Mudanças:
 - novo marker terminal e exclusivo: `BAKEN:ACPI_AML_EVALUATOR_FAILED`;
 - `HEX=T/U` permanecem apenas como detalhe diagnóstico e nunca classificam falha isoladamente;
 - `verify_kernel_smoke.py` usa apenas o marker textual exclusivo para falha AML-6a;
@@ -130,7 +136,23 @@ Correção aplicada no candidato seguinte da branch:
 - teste de contrato garante que `HEX=T/U` isolados não gerem falso positivo;
 - Kernel Core, timer, IRQ, CR3/TLB, FPU, Ring3 e lógica do evaluator permanecem intactos.
 
-**Promoção:** somente após a nova revisão da PR #16 fechar CI + SMP 3/3 + NVMe-only verdes.
+#### Segunda rodada — SMP #153
+
+| Gate | Resultado observado |
+|---|---|
+| CI principal #1050 / `34479698316` | ⏳ estava em execução quando o gate SMP revelou a inconsistência |
+| SMP #153 / `34479698271` | ❌ falhou em `Verify SMP Contracts`, antes de build/QEMU |
+| NVMe-only #250 / `34479698333` | ⏳ estava em execução quando o gate SMP revelou a inconsistência |
+
+Causa do SMP #153: `test_local_smp_runner.py::test_every_local_marker_is_required_by_workflow` detectou que o runner Python já exigia `BAKEN:ACPI_AML_EVALUATOR_READY`, mas o YAML `.github/workflows/baken_smp.yml` ainda não continha esse marker explicitamente. Portanto o gate recusou corretamente um desalinhamento entre a prova local e a prova do Actions.
+
+Correção do candidato seguinte:
+- adicionar `python3 tests/test_acpi_aml_evaluator.py` ao `Verify SMP Contracts`;
+- adicionar parada fail-closed no YAML para `BAKEN:ACPI_AML_EVALUATOR_FAILED`;
+- adicionar `require_marker 'BAKEN:ACPI_AML_EVALUATOR_READY'` em cada boot SMP;
+- reforçar o contrato para manter runner Python, workflow e runtime sincronizados.
+
+**Promoção:** somente após uma nova revisão da PR #16 fechar CI + SMP 3/3 + NVMe-only verdes.
 
 ### AML-6b — Métodos predefinidos para discovery
 **⬜ BLOQUEADO ATÉ AML-6a VERDE.**

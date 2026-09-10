@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 EVALUATOR = ROOT / "kernel/src/acpi/aml_evaluator.sotlas"
 PLATFORM = ROOT / "kernel/src/platform/inventory.sotlas"
+SMP_WORKFLOW = ROOT / ".github/workflows/baken_smp.yml"
 
 
 class AcpiAmlEvaluatorTests(unittest.TestCase):
@@ -14,6 +15,7 @@ class AcpiAmlEvaluatorTests(unittest.TestCase):
     def setUpClass(cls):
         cls.source = EVALUATOR.read_text(encoding="utf-8")
         cls.platform = PLATFORM.read_text(encoding="utf-8")
+        cls.smp_workflow = SMP_WORKFLOW.read_text(encoding="utf-8")
 
     def test_execution_context_has_fixed_limits_and_no_heap_or_hardware(self):
         for token in (
@@ -134,6 +136,12 @@ class AcpiAmlEvaluatorTests(unittest.TestCase):
 
         self.assertIn("ACPI_AML_EVALUATOR_READY", REQUIRED)
         self.assertIn("BAKEN:ACPI_AML_EVALUATOR_READY", REQUIRED_MARKERS)
+        self.assertIn("python3 tests/test_acpi_aml_evaluator.py", self.smp_workflow)
+        self.assertIn("BAKEN:ACPI_AML_EVALUATOR_FAILED", self.smp_workflow)
+        self.assertIn(
+            "require_marker 'BAKEN:ACPI_AML_EVALUATOR_READY'",
+            self.smp_workflow,
+        )
 
         shared_diagnostics = "BAKEN:HEX=T:00000001\nBAKEN:HEX=U:00000013\n"
         self.assertFalse(any("AML evaluator failed" in error

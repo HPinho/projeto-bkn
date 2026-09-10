@@ -167,25 +167,46 @@ Nos dois vermelhos o serial **alcançou `BAKEN:ACPI_AML_EVALUATOR_READY`**, depo
 - `HEX=T` é checkpoint do LAPIC timer;
 - `HEX=U` é diagnóstico do userspace loader.
 
-A correção deste candidato de validação mantém `HEX=T/U` apenas como detalhes legados e cria um gatilho inequívoco:
+### Correção do diagnóstico — `12b97433`
+
+```text
+12b97433af677b2ea93764c95c0bcf38cfb8ce4d
+fix(acpi): disambiguate AML evaluator diagnostics
+```
+
+O candidato mantém `HEX=T/U` apenas como detalhes legados e cria o gatilho inequívoco:
 
 ```text
 BAKEN:ACPI_AML_EVALUATOR_FAILED
 ```
 
-Somente esse marker textual pode classificar falha do evaluator. CI/NVMe usam `verify_kernel_smoke.py`; o runner SMP passa a exigir `BAKEN:ACPI_AML_EVALUATOR_READY` e também reconhece o marker exclusivo de falha. Os testes de contrato cobrem explicitamente que `HEX=T/U` isolados **não** são erro AML.
+Somente esse marker textual pode classificar falha do evaluator. CI/NVMe usam `verify_kernel_smoke.py`; o runner SMP passou a exigir `BAKEN:ACPI_AML_EVALUATOR_READY` e também reconhece o marker exclusivo de falha. Os testes de contrato cobrem explicitamente que `HEX=T/U` isolados **não** são erro AML.
 
-Nenhum código de scheduler, IRQ, timer, Ring3, CR3/TLB, FPU ou da engine de avaliação foi alterado para corrigir os dois vermelhos.
+#### Falha observada — SMP #153
+
+**❌ FALHOU** no SHA `12b97433`, run `34479698271`, antes do build/QEMU, em `Verify SMP Contracts`.
+
+Causa objetiva: `tests/test_local_smp_runner.py::test_every_local_marker_is_required_by_workflow` detectou que `run_smp_qemu.py` já incluía `BAKEN:ACPI_AML_EVALUATOR_READY` em `REQUIRED_MARKERS`, mas `.github/workflows/baken_smp.yml` ainda não continha o mesmo marker de forma explícita. O gate estava correto ao recusar essa divergência entre runner local e workflow.
+
+Correção aplicada no candidato seguinte:
+
+- adicionar `python3 tests/test_acpi_aml_evaluator.py` ao bloco `Verify SMP Contracts`;
+- abortar o loop QEMU do YAML em `BAKEN:ACPI_AML_EVALUATOR_FAILED`;
+- exigir `BAKEN:ACPI_AML_EVALUATOR_READY` em cada boot SMP;
+- manter `HEX=T/U` não terminais isoladamente;
+- reforçar o teste AML-6a para garantir alinhamento entre runtime, runner Python e YAML.
+
+Nenhum código de scheduler, IRQ, timer, Ring3, CR3/TLB, FPU ou da engine de avaliação foi alterado para corrigir #1049/#249/#153.
 
 O AML-6a **não é usado ainda para resolver `_STA/_CRS/_HID/...` reais**. Essa ligação será AML-6b depois da certificação do engine isolado.
 
-Critério de promoção: a nova revisão da PR #16 precisa fechar CI + SMP 3/3 + NVMe-only verde. Até isso ocorrer, `main` permanece em `3f02decb`.
+Critério de promoção: uma nova revisão da PR #16 precisa fechar CI + SMP 3/3 + NVMe-only verde. Até isso ocorrer, `main` permanece em `3f02decb`.
 
 ---
 
 ## Próximos passos
 
-1. validar a correção do protocolo de diagnóstico na PR #16 sem mover `main`;
+1. validar a revisão que alinha YAML + runner + contratos AML-6a na PR #16 sem mover `main`;
 2. exigir os três gates verdes no mesmo candidato;
 3. quando 3/3 estiver verde, promover AML-6a à nova baseline;
 4. AML-6b: avaliação controlada de métodos predefinidos zero-arg necessários à descoberta (`_STA`, `_CRS`, `_HID`, `_CID`, `_UID`), mantendo tipos/bounds/fuel;
