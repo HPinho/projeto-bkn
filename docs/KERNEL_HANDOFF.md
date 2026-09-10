@@ -16,15 +16,17 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 ## Baseline de runtime certificada
 
 ```text
-12c308b3d0d4a6bb3b17397ca74bfe4bcc95327c
-docs: note HID-4a revalidation runs
+dbc5669aebd635b4e94c6e18e209f306cba5837f
+feat(hid): isolate input maps per device
 ```
 
-HID-4a está certificado e foi promovido para `main` por fast-forward, sem merge commit adicional.
+HID-4b está certificado e foi promovido para `main` por fast-forward, sem merge commit adicional.
 
-- CI #1072 / `34516628427` ✅;
-- SMP #175 / `34516628437` ✅ — 3/3 boots;
-- NVMe-only #272 / `34516628445` ✅.
+- CI #1074 / `34520772415` ✅;
+- SMP #177 / `34520772429` ✅ — 3/3 boots;
+- NVMe-only #274 / `34520772422` ✅.
+
+A baseline HID-4a `12c308b3` continua preservada no histórico abaixo e permanece ancestral direto da baseline atual.
 
 ## Invariantes congelados do Kernel Core
 
@@ -99,11 +101,13 @@ O runtime corrigido passou inclusive SMP #173 3/3. O head documental final `12c3
 
 ## HID-4b — mapa/decoder HID por device
 
-**⏳ EM VALIDAÇÃO na branch `hid4b-validation`, baseada em `12c308b3`.**
+**✅ CERTIFICADO em `dbc5669a` e integrado à `main`.**
+
+Branch de validação original: `hid4b-validation`, baseada em `12c308b3`.
 
 Objetivo: remover o mapa HID-2 persistente singleton do caminho runtime sem reabrir HID-1/HID-3/HID-4a.
 
-Implementação candidata:
+Implementação certificada:
 - novo `hid_input_device_map.sotlas`, fixed-capacity e sem heap;
 - até `INPUT_DEVICE_CAPACITY` snapshots HID-2 independentes, indexados por `device_id + generation`;
 - campos, Report IDs e `expected_bytes` separados por device;
@@ -119,14 +123,109 @@ Implementação candidata:
 
 ### Limite explícito do HID-4b
 
-HID-4b **não declara xHCI multi-device completo**. Slot, address/context, endpoint/ring e buffer de report do transporte ainda são singletons. A separação do mapa é pré-requisito para migrar esses recursos no HID-4c.
+HID-4b **não declarou xHCI multi-device completo**. Slot, address/context, endpoint/ring e buffer de report do transporte ainda eram singletons. A separação do mapa foi o pré-requisito para migrar esses recursos no HID-4c.
+
+### Certificação HID-4b
+
+Head certificado/promovido:
+
+```text
+dbc5669aebd635b4e94c6e18e209f306cba5837f
+feat(hid): isolate input maps per device
+```
+
+- CI #1074 / `34520772415` ✅;
+- SMP #177 / `34520772429` ✅ — 3/3 boots;
+- NVMe-only #274 / `34520772422` ✅.
+
+A branch estava 1 commit à frente e 0 atrás da `main`, portanto a promoção foi feita por fast-forward no próprio SHA testado.
+
+## HID-4c — multi-slot/multi-device xHCI
+
+**⏳ EM DESENVOLVIMENTO/VALIDAÇÃO na branch `hid4c-validation`.**
+
+Base da branch:
+
+```text
+dbc5669aebd635b4e94c6e18e209f306cba5837f
+```
+
+PR de validação: **#22 — `HID-4c: multi-slot xHCI transport state`**.
+
+Objetivo global: remover singletons de transporte xHCI ainda existentes e permitir que slot/context/address/configuration/HID endpoint/ring/report buffer sejam associados ao device/interface corretos sem quebrar a baseline HID-0..HID-4b.
+
+### HID-4c.1 — multi-slot transport core
+
+**⏳ IMPLEMENTADO E EM VALIDAÇÃO.** Candidato de runtime inicial: `bd6f1708`.
+
+Implementação presente:
+- novo `xhci_device_table.sotlas`, fixed-capacity de 256 Slot IDs e sem heap;
+- registro de `slot_id`, `port_id`, `slot_type`, `state` e `epoch`;
+- `epoch` impede que estado antigo seja confundido com um Slot ID reutilizado;
+- lifecycle de transporte: `ENABLED`, `CONTEXT_READY`, `ADDRESSED`, `HID_READY`, `FAILED`;
+- `xhci_slot_enable_port(port_id, slot_type)` executa Enable Slot para uma porta específica e registra o Slot ID retornado pelo xHC;
+- segunda associação para uma porta já ocupada é rejeitada;
+- `xhci_slot_enable_first_port()` continua disponível como wrapper do bring-up atual;
+- `xhci_slot_id/port_id/slot_type` permanecem wrappers sobre o slot ativo, preservando contratos antigos sem reintroduzir storage singleton;
+- `xhci_context` passa a armazenar arena DMA, Device Context, Input Context, EP0 ring, Context Size e EP0 Max Packet por Slot ID;
+- `xhci_context_prepare_slot(slot_id)` prepara contexto do slot selecionado e publica `DCBAA[slot]` no índice correto;
+- wrappers `xhci_context_*()` antigos resolvem o slot ativo para não quebrar EP0/descriptor existentes enquanto as próximas subfatias são migradas;
+- `xhci_address_slot(slot_id)` envia Address Device usando o Input Context daquele slot;
+- estado Addressed e USB Device Address são armazenados por Slot ID + epoch;
+- `xhci_address_first_slot()` e getters antigos permanecem como wrappers do slot ativo;
+- `kernel/src/main.sotlas` importa `xhci_device_table` no grafo canônico;
+- guardrails `test_xhci_slot.py`, `test_xhci_context.py` e `test_xhci_address.py` foram atualizados para exigir a arquitetura por-slot e impedir regressão aos antigos singletons desses estágios.
+
+### Validação HID-4c.1
+
+Gates disparados pela PR #22 sobre `bd6f1708`:
+
+- CI #1076 / `34530534046` ⏳;
+- SMP #179 / `34530534016` ⏳;
+- NVMe-only #276 / `34530534020` ⏳.
+
+Esses gates são apenas da primeira subfatia. Mesmo que fiquem verdes, HID-4c ainda não deve ser promovido enquanto os recursos HID de transporte restantes continuarem globais.
+
+### Limite atual do HID-4c.1
+
+A arquitetura multi-slot já existe para Enable Slot, Device/Input/EP0 Context e Address Device, mas o runtime normal ainda seleciona o primeiro device através dos wrappers de compatibilidade. `xhci_hid_context`, `xhci_hid_report`, Configuration Descriptor e parte do estado HID xHCI ainda precisam ser migrados para contexto por slot/interface.
+
+### HID-4c.2 — HID Interrupt IN por slot/interface
+
+**⬜ PRÓXIMA SUBFATIA.**
+
+Migrar:
+- `xhci_hid_context` para estado por Slot ID + interface/DCI;
+- Transfer Ring Interrupt IN própria por contexto HID;
+- producer cycle/enqueue por ring;
+- report DMA buffer por contexto;
+- polling/completion usando `slot_id + dci` do contexto correto;
+- remover do caminho multi-device os singletons `XHCI_HID_CONTEXT_RING`, `XHCI_HID_REPORT_ENQUEUE_INDEX`, `XHCI_HID_REPORT_PRODUCER_CYCLE` e `XHCI_HID_REPORT_BUFFER`;
+- manter wrappers temporários somente onde forem necessários para o boot single-device já certificado.
+
+### HID-4c.3 — Configuration/HID descriptor por device/interface
+
+**⬜ PLANEJADO.**
+
+Migrar o estado persistente de Configuration Descriptor, interface HID, endpoint, Report Descriptor transport state e bindings xHCI para o slot/interface correspondentes. HID-1 parser, HID-2/HID-4b maps e HID-3 event model continuam transport-agnostic e não devem ser reabertos.
+
+### HID-4c.4 — enumeração simultânea real
+
+**⬜ PLANEJADO.**
+
+- iterar portas conectadas elegíveis em vez de somente `first_connected_port`;
+- Enable Slot + context + Address Device independentes por porta/device;
+- configurar múltiplos HID no mesmo xHC;
+- provar keyboard + mouse simultâneos, cada um com Slot ID/context/endpoint/ring/map/generation próprios;
+- garantir que evento/report de um device nunca seja aceito pelo contexto de outro;
+- preservar fail-closed e bounds em todos os passos.
 
 ## Próximas fatias HID-4
 
 - HID-4c: slot/context/address/HID rings/buffers xHCI por device/interface e enumeração de múltiplos HID simultâneos;
 - HID-4d: detach físico, cancel/recovery de Interrupt IN e hot-plug/re-enumeração bounded/fail-closed.
 
-Critério de promoção HID-4b: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final. Até isso ocorrer, `main` permanece em `12c308b3`.
+Critério de promoção HID-4c: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final **depois do fechamento das subfatias multi-device**, não apenas da primeira migração de slot/context/address. Até isso ocorrer, `main` permanece na baseline HID-4b `dbc5669a`.
 
 I2C-HID continua somente após transporte I2C/ACPI seguro.
 
