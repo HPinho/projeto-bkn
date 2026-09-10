@@ -291,7 +291,10 @@ fn aml_platform_append_prt_entry(scope: usize, entry: AmlDataObject) -> bool {
     let pin = aml_decode_integer(&mut cursor);
     if !address.valid || !pin.valid || pin.value > 3 { return false; }
 
-    let mut source_is_link = false;
+    // Explicit bool annotation is required here. Without it Sotlas' mutable
+    // local lowering historically inferred an int temporary and generated
+    // int* instead of _Bool* for the out-parameter below.
+    let mut source_is_link: bool = false;
     let mut source_segment: u32 = 0;
     if !aml_platform_source(&mut cursor, &mut source_is_link, &mut source_segment) {
         return false;

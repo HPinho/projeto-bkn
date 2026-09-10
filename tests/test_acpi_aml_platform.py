@@ -41,6 +41,9 @@ class AmlPlatformTests(unittest.TestCase):
         self.assertIn("pin.value > 3", text)
         self.assertIn("AML_PLATFORM_HARD_FAILURE = true", text)
         self.assertIn("AML_PLATFORM_PRT_UNRESOLVED", text)
+        # Mutable boolean passed by pointer must remain explicitly typed. Sotlas
+        # otherwise historically lowered it to int* while C expects _Bool*.
+        self.assertIn("let mut source_is_link: bool = false;", text)
 
     def test_s5_sleep_types_are_three_bit_values(self):
         text = PLATFORM.read_text(encoding="utf-8")
