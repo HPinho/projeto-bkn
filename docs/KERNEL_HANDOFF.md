@@ -16,17 +16,15 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 ## Baseline de runtime certificada
 
 ```text
-2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
-docs: track HID-3 input event validation
+12c308b3d0d4a6bb3b17397ca74bfe4bcc95327c
+docs: note HID-4a revalidation runs
 ```
 
-O runtime HID-3 foi introduzido em `51631f23f8ffa3bd2593c405bfee90f0e5f2fe32`; `2775c12a` acrescenta somente documentação de validação e é o head efetivamente promovido após os três gates verdes.
+HID-4a está certificado e foi promovido para `main` por fast-forward, sem merge commit adicional.
 
-- CI #1066 / `34509266662` ✅;
-- SMP #169 / `34509266645` ✅ — 3/3 boots, todos `stop_reason=complete`;
-- NVMe-only #266 / `34509266646` ✅.
-
-`75886e96` é somente o commit documental posterior de certificação HID-3 e é a base da branch HID-4.
+- CI #1072 / `34516628427` ✅;
+- SMP #175 / `34516628437` ✅ — 3/3 boots;
+- NVMe-only #272 / `34516628445` ✅.
 
 ## Invariantes congelados do Kernel Core
 
@@ -67,84 +65,68 @@ O runtime HID-3 foi introduzido em `51631f23f8ffa3bd2593c405bfee90f0e5f2fe32`; `
 
 ## HID-4a — identidade, generation e lifecycle seguro
 
-**⏳ EM VALIDAÇÃO na branch `hid4-validation`.**
+**✅ CERTIFICADO em `12c308b3`.**
 
-Candidato de runtime original:
-```text
-8f34ae132454ef87afae67288b632886131acfe4
-feat(hid): add generation-safe input lifecycle
-```
-
-Escopo desta fatia:
-- novo `input_device.sotlas`, registro transport-agnostic fixed-capacity de 16 devices e sem heap;
-- identidade composta por `device_id + generation`; device_id pode ser reutilizado somente com geração nova;
-- estados `EMPTY -> ATTACHED -> ACTIVE`, além de `FAILED` e `DETACHED`;
-- attach/activate/fail/detach/snapshot/is_active protegidos por IRQ-save + spinlock;
-- metadata de transporte preserva kind, instance, address e interface sem importar xHCI;
-- `InputEvent` passa a carregar `device_id` e `device_generation`;
-- fila HID-3 deixa de ser caller-serialized: publish/peek/pop/count/purge são SMP/IRQ-safe;
-- publicação revalida a geração ativa já dentro do lock da fila para fechar corrida detach-vs-publish;
-- detach invalida primeiro a geração, depois purga eventos antigos e por último limpa o estado HID;
-- `hid_input_events.sotlas` separa estado por device x Report ID e possui bind/unbind generation-safe;
-- processamento HID continua transport-agnostic e HID-2 permanece autoridade de validação/decodificação;
-- xHCI registra a primeira interface HID real no generic registry após HID-2/HID-3 estarem prontos;
-- o report Interrupt IN usa a identidade registrada antes de publicar qualquer evento;
-- fallback Boot e prova física QEMU da tecla A permanecem intactos.
-
-Novo gate runtime:
-```text
-BAKEN:USB_HID_DEVICE_READY
-```
-
-Falha dedicada:
-```text
-BAKEN:USB_HID_DEVICE_FAILED
-```
-
-O smoke CI/NVMe exige `USB_HID_DEVICE_READY`; o SMP local/workflow também passa a exigir o marker em todos os três boots, além de HID-1/HID-2/HID-3 e das provas do Kernel Core.
+Implementação:
+- `input_device.sotlas`: registro transport-agnostic fixed-capacity de 16 devices, sem heap;
+- identidade `device_id + generation`, impedindo stale handles após detach/re-attach;
+- lifecycle ATTACHED/ACTIVE/FAILED/DETACHED;
+- registry e fila protegidos com IRQ-save + spinlock;
+- `InputEvent` carrega identidade da fonte;
+- publicação revalida a identidade dentro do lock da fila;
+- purge remove somente a geração desconectada;
+- estado HID anterior particionado por device x Report ID;
+- bind/unbind HID generation-safe;
+- xHCI associa a interface real atual ao registry antes de aceitar Interrupt IN;
+- marker `BAKEN:USB_HID_DEVICE_READY`; falha `BAKEN:USB_HID_DEVICE_FAILED`.
 
 ### Histórico de validação HID-4a
 
-Primeiro head de validação: `ebf21182b33252c7bb6270c82eb25441b1746487`.
+Primeiro candidato de validação `ebf21182b33252c7bb6270c82eb25441b1746487` falhou antes do QEMU:
 
 - CI #1069 / `34513631621` ❌;
 - SMP #172 / `34513631581` ❌;
 - NVMe-only #269 / `34513631641` ❌.
 
-Os três gates falharam pela mesma causa antes de qualquer execução QEMU. Os contratos, incluindo os novos testes HID-4a, e `compiler.py check kernel/src/main.sotlas` passaram nos gates que chegaram a essa etapa. O `compiler.py build`, porém, reparseia os módulos para emissão dos headers C e rejeitou `kernel/src/drivers/xhci_hid_descriptor.sotlas:235:9` com `expressão inválida: 'return'`. A causa era um `return false` dentro de um `if` usado como expressão para inicializar `device_class`.
+Causa única: `compiler.py build` rejeitou `return false` dentro de um `if` usado como expressão em `xhci_hid_descriptor.sotlas`. Correção mínima:
 
-Correção mínima:
 ```text
 a4762cf614a0748336040be8d15e7f352b17f25f
 fix(hid): avoid return in conditional expression
 ```
 
-A correção preserva a semântica: keyboard -> `INPUT_DEVICE_CLASS_KEYBOARD`, mouse -> `INPUT_DEVICE_CLASS_POINTER` e protocolo não suportado continua fail-closed. Não altera lifecycle, locking, ABI, Kernel Core, AML ou storage.
+O runtime corrigido passou inclusive SMP #173 3/3. O head documental final `12c308b3` foi então revalidado integralmente com CI #1072 + SMP #175 3/3 + NVMe #272 verdes no mesmo SHA e promovido por fast-forward para `main`.
 
-Head final atualmente em revalidação:
-```text
-f9a2bf61a2b15ae3518e5a53f42827ec0ced5027
-docs: record HID-4a parser gate failure
-```
+## HID-4b — mapa/decoder HID por device
 
-Gates disparados no mesmo head final:
-- CI #1071 / `34516135043` ⏳;
-- SMP #174 / `34516135064` ⏳;
-- NVMe-only #271 / `34516135048` ⏳.
+**⏳ EM VALIDAÇÃO na branch `hid4b-validation`, baseada em `12c308b3`.**
 
-HID-4a permanece **não certificado** até os três fecharem verdes no mesmo `f9a2bf61` (ou em um head corretivo posterior, caso surja outra falha).
+Objetivo: remover o mapa HID-2 persistente singleton do caminho runtime sem reabrir HID-1/HID-3/HID-4a.
 
-### Limite honesto desta fatia
+Implementação candidata:
+- novo `hid_input_device_map.sotlas`, fixed-capacity e sem heap;
+- até `INPUT_DEVICE_CAPACITY` snapshots HID-2 independentes, indexados por `device_id + generation`;
+- campos, Report IDs e `expected_bytes` separados por device;
+- parser HID-1 permanece stateless;
+- builder HID-2 legado fica somente como scratch serializado durante construção do snapshot e é invalidado imediatamente depois;
+- Interrupt IN, validação, decode e tradução deixam de consultar o singleton;
+- self-test mantém simultaneamente um mapa de teclado e outro de mouse e prova isolamento cruzado;
+- attach xHCI ocorre antes do build do mapa para fornecer identidade real;
+- bind do event model ocorre somente depois do snapshot específico estar pronto;
+- teardown segue `invalidate identity -> purge events -> clear HID event state -> remove device map`;
+- novo marker `BAKEN:USB_HID_DEVICE_MAP_READY` e falha `BAKEN:USB_HID_DEVICE_MAP_FAILED`;
+- CI, SMP e NVMe passam a exigir/validar essa camada.
 
-HID-4a **não declara xHCI multi-device completo**. `xhci_slot`, `xhci_context`, `xhci_address`, `xhci_hid_context`, `xhci_hid_report` e o mapa HID-2 ainda possuem singletons. O objetivo desta fatia é estabelecer identidade/lifecycle/concurrency corretos antes de migrar esses estados para estruturas per-device.
+### Limite explícito do HID-4b
 
-### Próximas fatias HID-4
+HID-4b **não declara xHCI multi-device completo**. Slot, address/context, endpoint/ring e buffer de report do transporte ainda são singletons. A separação do mapa é pré-requisito para migrar esses recursos no HID-4c.
 
-- HID-4b: transformar o mapa/decoder HID-2 em contexto per-device, eliminando o singleton do Report Descriptor/field map;
-- HID-4c: converter slot/context/address/HID rings xHCI para tabelas por slot/interface e enumeração de múltiplos devices;
-- HID-4d: attach/detach físico, cancel/recovery de Interrupt IN e hot-plug/re-enumeração bounded/fail-closed.
+## Próximas fatias HID-4
 
-Critério de promoção HID-4a: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final da branch. Até isso ocorrer, `main` permanece na baseline HID-3 certificada.
+- HID-4c: slot/context/address/HID rings/buffers xHCI por device/interface e enumeração de múltiplos HID simultâneos;
+- HID-4d: detach físico, cancel/recovery de Interrupt IN e hot-plug/re-enumeração bounded/fail-closed.
+
+Critério de promoção HID-4b: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final. Até isso ocorrer, `main` permanece em `12c308b3`.
 
 I2C-HID continua somente após transporte I2C/ACPI seguro.
 

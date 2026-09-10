@@ -19,8 +19,8 @@ REQUIRED_MARKERS = (
     "BAKEN:ACPI_AML_NAMESPACE_READY", "BAKEN:ACPI_AML_NAMESPACE_LOADED",
     "BAKEN:ACPI_AML_DEVICES_READY", "BAKEN:ACPI_AML_EVALUATOR_READY",
     "BAKEN:ACPI_AML_DYNAMIC_READY", "BAKEN:USB_HID_DESCRIPTOR_READY",
-    "BAKEN:USB_HID_INPUT_MAP_READY", "BAKEN:USB_HID_EVENT_MODEL_READY",
-    "BAKEN:USB_HID_DEVICE_READY",
+    "BAKEN:USB_HID_INPUT_MAP_READY", "BAKEN:USB_HID_DEVICE_MAP_READY",
+    "BAKEN:USB_HID_EVENT_MODEL_READY", "BAKEN:USB_HID_DEVICE_READY",
     "BAKEN:SMP_AP_ONLINE", "BAKEN:SMP_AP_RUNTIME_READY", "BAKEN:SMP_THREAD_ON_AP",
     "BAKEN:SMP_TIMER_ON_AP", "BAKEN:SMP_ANY_THREAD_ON_AP",
     "BAKEN:SMP_HEAP_READY", "BAKEN:SMP_TLB_SHOOTDOWN_READY",
@@ -78,6 +78,8 @@ def validate(serial: str) -> list[str]:
         errors.append("USB HID report descriptor fetch/parser failed")
     if "BAKEN:USB_HID_INPUT_MAP_FAILED" in lines:
         errors.append("USB HID input field map failed")
+    if "BAKEN:USB_HID_DEVICE_MAP_FAILED" in lines:
+        errors.append("USB HID per-device input map failed")
     if "BAKEN:USB_HID_EVENT_MODEL_FAILED" in lines:
         errors.append("USB HID event model initialization failed")
     if "BAKEN:USB_HID_DEVICE_FAILED" in lines:
@@ -126,6 +128,9 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
                     break
                 if "BAKEN:USB_HID_INPUT_MAP_FAILED" in lines:
                     stop_reason = "USB HID input map failure"
+                    break
+                if "BAKEN:USB_HID_DEVICE_MAP_FAILED" in lines:
+                    stop_reason = "USB HID per-device map failure"
                     break
                 if "BAKEN:USB_HID_EVENT_MODEL_FAILED" in lines:
                     stop_reason = "USB HID event model failure"

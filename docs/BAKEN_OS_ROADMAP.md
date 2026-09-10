@@ -13,15 +13,15 @@ Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. 
 ## Baseline de runtime certificada
 
 ```text
-2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
-docs: track HID-3 input event validation
+12c308b3d0d4a6bb3b17397ca74bfe4bcc95327c
+docs: note HID-4a revalidation runs
 ```
 
-- CI #1066 / `34509266662` ✅;
-- SMP #169 / `34509266645` ✅ — 3/3;
-- NVMe #266 / `34509266646` ✅.
+- CI #1072 / `34516628427` ✅;
+- SMP #175 / `34516628437` ✅ — 3/3;
+- NVMe #272 / `34516628445` ✅.
 
-`75886e96` é somente o commit documental posterior de certificação HID-3.
+HID-4a foi promovido para `main` por fast-forward no próprio SHA certificado.
 
 ---
 
@@ -49,9 +49,9 @@ docs: track HID-3 input event validation
 | HID-1 Report Descriptor | ✅ | fetch real + parser bounded transport-agnostic |
 | HID-2 Field map / decoder | ✅ | Report ID, Usage, bit offsets, flags e valores |
 | HID-3 Input event model | ✅ | fila e eventos normalizados keyboard/mouse |
-| HID-4a Identity/lifecycle core | ⏳ | device_id+generation, SMP-safe queue, bind/unbind |
-| HID-4b Per-device HID map | ⬜ | retirar singleton do Report Descriptor/field map |
-| HID-4c Multi-slot xHCI | ⬜ | slot/context/rings por device/interface |
+| HID-4a Identity/lifecycle core | ✅ | device_id+generation, SMP-safe queue, bind/unbind |
+| HID-4b Per-device HID map | ⏳ | snapshots de field map/decoder por device+generation |
+| HID-4c Multi-slot xHCI | ⬜ | slot/context/rings/buffers por device/interface |
 | HID-4d Hot-plug/recovery | ⬜ | detach físico, cancel/recovery e reenumeração |
 | I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
 
@@ -67,53 +67,42 @@ docs: track HID-3 input event validation
 
 Runtime `51631f23`; head promovido `2775c12a`. CI #1066 / `34509266662` ✅; SMP #169 / `34509266645` ✅ 3/3; NVMe #266 / `34509266646` ✅. Markers `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:USB_HID_EVENT_READY` permanecem obrigatórios no smoke.
 
-### HID-4a — candidato atual
+### HID-4a — certificado
 
-Branch: `hid4-validation`.
+Runtime original `8f34ae13`; correção de parser Sotlas `a4762cf6`; head final certificado/promovido:
 
-Runtime original:
 ```text
-8f34ae132454ef87afae67288b632886131acfe4
-feat(hid): add generation-safe input lifecycle
+12c308b3d0d4a6bb3b17397ca74bfe4bcc95327c
 ```
 
-Implementação:
-- registro `input_device.sotlas` com 16 slots fixed-capacity, sem heap e sem dependência de transporte;
-- identidade `device_id + generation`, impedindo stale handles após detach/re-attach;
-- lifecycle ATTACHED/ACTIVE/FAILED/DETACHED;
-- registry e fila protegidos com IRQ-save + spinlock;
-- `InputEvent` inclui identidade da fonte;
-- publicação revalida a identidade dentro do lock da fila;
-- `input_event_purge_device` remove somente a geração desconectada sem apagar eventos de outros devices;
-- estado HID anterior particionado por device x Report ID;
-- bind/unbind HID generation-safe;
-- xHCI associa a interface real atual a um registro USB e transmite essa identidade ao tradutor;
-- detach lógico segue `invalidate -> purge -> clear HID state`;
-- marker novo `BAKEN:USB_HID_DEVICE_READY`; falha `BAKEN:USB_HID_DEVICE_FAILED`;
-- smoke CI/NVMe e SMP 3/3 passam a exigir identidade real pronta;
-- HID-0..HID-3 e prova QEMU `sendkey a` permanecem.
+- CI #1072 / `34516628427` ✅;
+- SMP #175 / `34516628437` ✅ 3/3;
+- NVMe #272 / `34516628445` ✅.
 
-#### Primeira validação HID-4a — falhou antes do QEMU
+HID-4a entrega registro de 16 devices, `device_id + generation`, lifecycle explícito, fila/eventos SMP-safe, purge por geração, estado HID por device x Report ID, bind/unbind generation-safe e marker `BAKEN:USB_HID_DEVICE_READY`.
 
-Head: `ebf21182b33252c7bb6270c82eb25441b1746487`.
+Histórico: CI #1069 / SMP #172 / NVMe #269 falharam antes do QEMU pela sintaxe `return` dentro de `if`-expressão em `xhci_hid_descriptor.sotlas`; `a4762cf6` corrigiu somente essa forma de controle de fluxo. A correção passou SMP #173 3/3 e depois o head final passou os três gates oficiais.
 
-- CI #1069 / `34513631621` ❌;
-- SMP #172 / `34513631581` ❌;
-- NVMe #269 / `34513631641` ❌.
+### HID-4b — candidato atual
 
-Causa única nos três gates: `compiler.py build` reparsa `xhci_hid_descriptor.sotlas` para emissão dos headers C e falhou em `:235:9` com `expressão inválida: 'return'`. O `return false` estava dentro de um `if` usado como expressão ao inicializar `device_class`. Os contratos e `compiler.py check` passaram onde executados; não houve boot QEMU nem regressão runtime observada porque o PE não chegou a ser gerado.
+Branch: `hid4b-validation`, criada diretamente da baseline certificada `12c308b3`.
 
-Correção:
-```text
-a4762cf614a0748336040be8d15e7f352b17f25f
-fix(hid): avoid return in conditional expression
-```
+Escopo candidato:
+- `hid_input_device_map.sotlas` fixed-capacity, sem heap e transport-agnostic;
+- snapshot HID-2 independente por `device_id + generation`;
+- fields, Report IDs e expected bytes separados por device;
+- parser HID-1 continua stateless;
+- mapa HID-2 legado é apenas scratch serializado de construção, invalidado após copiar o snapshot;
+- runtime de Interrupt IN usa exclusivamente APIs per-device;
+- tradutor HID usa mapa e estado correspondentes à mesma generation;
+- self-test mantém teclado e mouse simultaneamente e prova que um report não valida contra o mapa do outro;
+- teardown remove mapa somente depois de invalidar identidade, purgar fila e limpar estado de eventos;
+- marker novo `BAKEN:USB_HID_DEVICE_MAP_READY`; falha `BAKEN:USB_HID_DEVICE_MAP_FAILED`;
+- smoke/SMP/NVMe passam a bloquear ausência ou falha do mapa específico.
 
-A correção troca somente o `if`-expressão por controle de fluxo convencional e mantém o comportamento fail-closed. HID-4a continua **⏳ EM VALIDAÇÃO**; nenhum status foi promovido por causa dessa correção.
+**Limite:** xHCI ainda é single-slot/single-endpoint nesta fatia. HID-4b não declara múltiplos dispositivos USB simultâneos no transporte; ele remove o bloqueio semântico do mapa para que HID-4c possa fazê-lo corretamente.
 
-**Limite atual:** o xHCI ainda é singleton em slot/context/address/HID context/report, e o mapa HID-2 ainda é global. Portanto HID-4a não será descrito como suporte multi-device completo mesmo se seus gates passarem.
-
-**Critério:** CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch. Só depois promover HID-4a e iniciar HID-4b.
+**Critério:** CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch. Só então promover HID-4b e iniciar HID-4c.
 
 ## Trilha C — Storage de produção
 

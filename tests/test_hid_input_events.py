@@ -11,7 +11,7 @@ class HidInputEventsTests(unittest.TestCase):
         text = HID_EVENTS.read_text(encoding="utf-8")
         self.assertIn("module kernel::drivers::hid_input_events", text)
         self.assertIn("import kernel::drivers::input_device::*;", text)
-        self.assertIn("import kernel::drivers::hid_input_report::*;", text)
+        self.assertIn("import kernel::drivers::hid_input_device_map::*;", text)
         self.assertIn("import kernel::drivers::input_event::*;", text)
         for forbidden in ("xhci_", "dma_", "pci_", "acpi_"):
             self.assertNotIn(forbidden, text)
@@ -28,16 +28,14 @@ class HidInputEventsTests(unittest.TestCase):
         self.assertIn("INPUT_EVENT_KIND_KEY_UP", text)
         self.assertIn("decoded.usage != 0", text)
 
-    def test_bind_unbind_are_generation_safe_and_clear_device_state(self):
+    def test_bind_requires_generation_specific_map_and_clears_state(self):
         text = HID_EVENTS.read_text(encoding="utf-8")
-        for token in (
-            "pub fn hid_input_events_bind_device",
-            "pub fn hid_input_events_unbind_device",
-            "hid_input_events_clear_device_locked(device_slot)",
-            "HID_EVENT_DEVICE_GENERATIONS[device_slot] == device_generation",
-            "input_device_is_active(device_id, device_generation)",
-        ):
-            self.assertIn(token, text)
+        body = text.split("pub fn hid_input_events_bind_device", 1)[1]
+        body = body.split("pub fn hid_input_events_unbind_device", 1)[0]
+        self.assertIn("input_device_is_active(device_id, device_generation)", body)
+        self.assertIn("hid_input_device_map_is_ready(device_id, device_generation)", body)
+        self.assertIn("hid_input_events_clear_device_locked(device_slot)", body)
+        self.assertIn("HID_EVENT_DEVICE_GENERATIONS[device_slot] = device_generation", body)
 
     def test_state_mutation_is_irq_safe_and_smp_serialized(self):
         text = HID_EVENTS.read_text(encoding="utf-8")
@@ -49,6 +47,7 @@ class HidInputEventsTests(unittest.TestCase):
         process = text.split("pub fn hid_input_events_process_report_for_device", 1)[1]
         self.assertIn("let state_flags = hid_input_events_lock_irq()", process)
         self.assertIn("HID_EVENT_DEVICE_GENERATIONS[device_slot] != device_generation", process)
+        self.assertIn("hid_input_device_map_is_ready(device_id, device_generation)", process)
 
     def test_mouse_buttons_and_signed_relative_axes_are_normalized(self):
         text = HID_EVENTS.read_text(encoding="utf-8")
@@ -61,13 +60,16 @@ class HidInputEventsTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
-    def test_report_is_hid2_validated_before_generation_locked_translation(self):
+    def test_report_is_validated_against_its_device_map_before_state_lock(self):
         text = HID_EVENTS.read_text(encoding="utf-8")
         body = text.split("pub fn hid_input_events_process_report_for_device", 1)[1]
-        self.assertIn("hid_input_report_validate(report, length)", body)
-        self.assertIn("hid_input_events_wire_report_id(report, length)", body)
-        self.assertIn("hid_input_report_decode_field(report, length, index)", body)
-        validate = body.index("hid_input_report_validate(report, length)")
+        validate_token = "hid_input_device_map_validate(device_id, device_generation, report, length)"
+        self.assertIn(validate_token, body)
+        self.assertIn("hid_input_events_wire_report_id(\n        device_id, device_generation, report, length)", body)
+        self.assertIn("hid_input_device_map_decode_field(", body)
+        self.assertIn("hid_input_device_map_field_count(device_id, device_generation)", body)
+        self.assertNotIn("hid_input_report_validate(", body)
+        validate = body.index(validate_token)
         lock = body.index("let state_flags = hid_input_events_lock_irq()")
         self.assertLess(validate, lock)
 
@@ -77,13 +79,14 @@ class HidInputEventsTests(unittest.TestCase):
         body = body.split("fn hid_input_events_set_keyboard_usage", 1)[0]
         self.assertIn("input_event_publish_for_device(device_id, device_generation", body)
 
-    def test_initialization_does_not_rebuild_descriptor_map_or_reset_per_attach(self):
+    def test_initialization_requires_map_core_but_does_not_build_or_reset_maps(self):
         text = HID_EVENTS.read_text(encoding="utf-8")
         body = text.split("pub fn hid_input_events_initialize()", 1)[1]
         body = body.split("pub fn hid_input_events_is_ready", 1)[0]
-        self.assertIn("hid_input_report_map_is_ready()", body)
+        self.assertIn("hid_input_device_map_core_is_ready()", body)
         self.assertIn("input_event_queue_self_test()", body)
         self.assertNotIn("hid_input_report_map_build", body)
+        self.assertNotIn("hid_input_device_map_build", body)
         bind = text.split("pub fn hid_input_events_bind_device", 1)[1]
         bind = bind.split("pub fn hid_input_events_unbind_device", 1)[0]
         self.assertNotIn("input_event_initialize", bind)

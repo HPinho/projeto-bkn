@@ -1,8 +1,8 @@
-// Baken OS — polling HID Interrupt IN com identidade HID-4a.
+// Baken OS — polling HID Interrupt IN com mapa HID-4b por device.
 //
 // O xHCI continua transportando um primeiro endpoint singleton nesta fatia, mas
-// cada report é atribuído à geração registrada pela camada de descriptor. HID-2
-// valida, HID-4 traduz/publica com identidade e só então o fallback Boot é lido.
+// cada report e validado/decodificado contra o snapshot HID-2 da generation
+// registrada. HID-4c migrara rings/slot/context para estruturas per-device.
 
 module kernel::drivers::xhci_hid_report;
 
@@ -11,7 +11,7 @@ import kernel::arch::x86_64::serial::*;
 import kernel::memory::dma::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::active_page_tables::*;
-import kernel::drivers::hid_input_report::*;
+import kernel::drivers::hid_input_device_map::*;
 import kernel::drivers::hid_input_events::*;
 import kernel::drivers::input_event::*;
 import kernel::drivers::xhci_controller::*;
@@ -165,15 +165,19 @@ fn xhci_hid_report_emit_event_failure_marker() -> bool {
 @system
 fn xhci_hid_report_parse(length: u32) -> bool {
     let base = unsafe { XHCI_HID_REPORT_BUFFER.virtual_address };
-    if base == (null as *mut u8) || length == 0 || !hid_input_report_map_is_ready() ||
+    let device_id = xhci_hid_descriptor_input_device_id();
+    let device_generation = xhci_hid_descriptor_input_device_generation();
+    if base == (null as *mut u8) || length == 0 ||
+       !hid_input_device_map_is_ready(device_id, device_generation) ||
        !hid_input_events_is_ready() || !input_event_queue_is_ready() ||
        !xhci_hid_descriptor_input_device_is_active() {
         return false;
     }
 
-    if !hid_input_report_validate(base as *const u8, length as usize) { return false; }
-    let device_id = xhci_hid_descriptor_input_device_id();
-    let device_generation = xhci_hid_descriptor_input_device_generation();
+    if !hid_input_device_map_validate(
+        device_id, device_generation, base as *const u8, length as usize) {
+        return false;
+    }
 
     let before_events = hid_input_events_events_published();
     if !hid_input_events_process_report_for_device(
@@ -189,7 +193,7 @@ fn xhci_hid_report_parse(length: u32) -> bool {
         }
     }
 
-    if hid_input_report_has_report_ids() { return true; }
+    if hid_input_device_map_has_report_ids(device_id, device_generation) { return true; }
 
     let protocol = xhci_hid_protocol();
     unsafe {
@@ -226,7 +230,7 @@ pub fn xhci_hid_report_prepare() -> bool {
         XHCI_HID_REPORT_LAST_LENGTH = 0;
     }
     if !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() ||
-       !hid_input_report_map_is_ready() || !hid_input_events_is_ready() ||
+       !xhci_hid_descriptor_input_map_is_ready() || !hid_input_events_is_ready() ||
        !input_event_queue_is_ready() || !xhci_hid_descriptor_input_device_is_active() {
         return false;
     }
@@ -248,7 +252,8 @@ pub fn xhci_hid_report_prepare() -> bool {
 
 @system
 pub fn xhci_hid_report_poll_once() -> bool {
-    if !xhci_hid_report_is_ready() || !xhci_hid_descriptor_input_device_is_active() {
+    if !xhci_hid_report_is_ready() || !xhci_hid_descriptor_input_device_is_active() ||
+       !xhci_hid_descriptor_input_map_is_ready() {
         return false;
     }
     let slot_id = xhci_slot_id();

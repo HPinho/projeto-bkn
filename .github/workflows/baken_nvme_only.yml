@@ -49,6 +49,7 @@ jobs:
           python3 tests/test_storage_discovery.py
           python3 tests/test_acpi_aml_loader.py
           python3 tests/test_acpi_aml_discovery.py
+          python3 tests/test_hid_input_device_map.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel

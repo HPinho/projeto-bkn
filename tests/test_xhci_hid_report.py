@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do produtor HID Interrupt IN com identidade HID-4a."""
+"""Guardrails do produtor HID Interrupt IN com mapa HID-4b por device."""
 
 from pathlib import Path
 import unittest
@@ -11,15 +11,16 @@ MAIN = ROOT / "kernel/src/main.sotlas"
 
 
 class XhciHidReportTests(unittest.TestCase):
-    def test_report_path_requires_configured_endpoint_map_events_and_active_identity(self):
+    def test_report_path_requires_configured_endpoint_device_map_events_and_identity(self):
         text = HID.read_text(encoding="utf-8")
         for token in (
             "xhci_hid_context_is_ready()", "xhci_set_configuration_is_ready()",
-            "hid_input_report_map_is_ready()", "hid_input_events_is_ready()",
+            "xhci_hid_descriptor_input_map_is_ready()", "hid_input_events_is_ready()",
             "input_event_queue_is_ready()", "xhci_hid_descriptor_input_device_is_active()",
             "xhci_hid_context_dci() <= 1",
         ):
             self.assertIn(token, text)
+        self.assertNotIn("hid_input_report_map_is_ready()", text)
 
     def test_normal_trb_publication_precedes_doorbell_wait(self):
         text = HID.read_text(encoding="utf-8")
@@ -45,19 +46,21 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("xhci_transfer_wait_completion(slot_id, dci, physical)", text)
         self.assertIn("xhci_transfer_last_residual_length()", text)
 
-    def test_real_report_is_validated_then_attributed_before_boot_fallback(self):
+    def test_real_report_is_attributed_then_validated_against_its_device_map(self):
         text = HID.read_text(encoding="utf-8")
         body = text.split("fn xhci_hid_report_parse(length: u32) -> bool", 1)[1]
         body = body.split("pub fn xhci_hid_report_prepare", 1)[0]
-        validate = body.index("hid_input_report_validate(base as *const u8, length as usize)")
         identity = body.index("let device_id = xhci_hid_descriptor_input_device_id()")
+        validate = body.index("hid_input_device_map_validate(")
         translate = body.index("hid_input_events_process_report_for_device(")
         keyboard = body.index("protocol == USB_HID_PROTOCOL_KEYBOARD")
-        self.assertLess(validate, identity)
-        self.assertLess(identity, translate)
+        self.assertLess(identity, validate)
+        self.assertLess(validate, translate)
         self.assertLess(translate, keyboard)
         self.assertIn("device_id, device_generation, base as *const u8", body)
-        self.assertIn("if hid_input_report_has_report_ids() { return true; }", body)
+        self.assertIn("hid_input_device_map_has_report_ids(device_id, device_generation)", body)
+        self.assertNotIn("hid_input_report_validate(", body)
+        self.assertNotIn("hid_input_report_has_report_ids()", body)
 
     def test_runtime_event_marker_still_requires_a_new_published_event(self):
         text = HID.read_text(encoding="utf-8")
