@@ -20,18 +20,11 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 fix(acpi): preserve bool type in PRT lowering
 ```
 
-Gates no mesmo SHA:
 - CI #1056 / `34493002949` ✅;
 - SMP #159 / `34493003041` ✅ — 3/3 boots;
 - NVMe-only #256 / `34493002936` ✅.
 
-A PR #16 foi integrada por fast-forward; o `merge_commit_sha` é o próprio `7803447a`, portanto nenhum commit de runtime diferente do candidato testado foi criado. Commits posteriores que alterem apenas documentação não substituem esta baseline de runtime.
-
-## Baselines ACPI/AML relevantes
-
-- AML-6a `8e553f791a8e67fa3dd673700077b6c28b485a71`: CI #1051 + SMP #154 3/3 + NVMe #251 ✅.
-- AML-6b `4e90ec22097c71950dcfa9f84b734568d87ae022`: CI #1052 + SMP #155 3/3 + NVMe #252 ✅.
-- AML-7/8 final `7803447a4c2179d088948b3c4288b6e3655bc1d5`: CI #1056 + SMP #159 3/3 + NVMe #256 ✅.
+PR #16 foi integrada por fast-forward no próprio SHA validado. `ead13903` é apenas a consolidação documental posterior e não substitui a baseline de runtime.
 
 ## Invariantes congelados do Kernel Core
 
@@ -42,97 +35,57 @@ A PR #16 foi integrada por fast-forward; o `merge_commit_sha` é o próprio `780
 5. migração Ring3 BSP->AP preserva TID, address-space root e SIMD;
 6. teardown ocorre apenas após abandono físico do frame anterior;
 7. `BAKEN:HEX=E:` continua terminal;
-8. wait/sleep, TLB, Ring3 e SMP não podem ser relaxados para acomodar novas camadas.
+8. wait/sleep, TLB, Ring3 e SMP não podem ser relaxados para acomodar drivers.
 
 ---
 
-# Estado ACPI/AML
+# ACPI/AML
 
-| Etapa | Estado | Checkpoint principal |
-|---|---|---|
-| AML-0 DSDT/SSDT | ✅ | `ACPI_AML_TABLES_READY` |
-| AML-1 decoder | ✅ | `ACPI_AML_DECODER_READY` |
-| AML-2 namespace | ✅ | `ACPI_AML_NAMESPACE_READY` |
-| AML-3 data objects | ✅ | `ACPI_AML_DATA_READY` |
-| AML-4 DSDT/SSDT -> namespace | ✅ | `2a9974ad` |
-| AML-5 discovery estático | ✅ | `3f02decb` |
-| AML-6a evaluator bounded | ✅ | `8e553f79` |
-| AML-6b dynamic discovery | ✅ | `4e90ec22` |
-| AML-7 OperationRegion/Field core | ✅ | `7803447a` |
-| AML-8 `_PIC`/`_PRT`/`_S5` | ✅ | `7803447a` |
+**✅ CORE CONCLUÍDO E CERTIFICADO em `7803447a`.**
 
-**Trilha ACPI/AML core: ✅ CONCLUÍDA E CERTIFICADA.**
+AML-0..AML-8 estão fechados. AML-7 entrega OperationRegion/Field bounded para SystemMemory/SystemIO/PCIConfig; AML-8 entrega `_PIC`, `_PRT` e `_S5` no subconjunto fail-closed. EC/GPE/GlobalLock e transições físicas de energia ficam para power/hot-plug.
 
-## AML-7 — OperationRegion / Field core
+Histórico final: CI #1055 / `34491870501` detectou lowering `int* -> _Bool*`; a tipagem explícita de `source_is_link` produziu o candidato `7803447a`, aprovado por CI #1056 + SMP #159 3/3 + NVMe #256.
 
-Implementado e comprovado:
-- descritores bounded para SystemMemory, SystemIO e PCIConfig;
-- overflow e bounds validados antes do acesso;
-- SystemMemory por MMIO 32-bit `volatile` + page mapping nativo;
-- SystemIO por `__inl/__outl`;
-- PCIConfig por `pci_read_config32/pci_write_config32` com BDF explícito;
-- Field limitado a até 32 bits e um único dword;
-- init/self-test sem acesso de hardware;
-- IndexField/BankField não são emulados silenciosamente.
+---
 
-Markers:
-```text
-BAKEN:ACPI_AML_REGIONS_READY
-BAKEN:ACPI_AML_REGIONS_FAILED
-```
+# HID / input de produção
 
-READY certifica o core de mediação; não significa execução irrestrita de AML/OperationRegion arbitrário do firmware.
+## HID-0 — Boot HID xHCI
 
-## AML-8 — objetos de plataforma
+**✅ BASELINE EXISTENTE.**
 
-Implementado e comprovado:
-- `_PIC`: APIC mode com `Arg0=1` somente se a engine bounded conseguir executar com segurança;
-- `_PRT`: Package bounded; entradas `Address, Pin, Source, SourceIndex`, Pin 0..3, máximo 256;
-- `_S5`: dois primeiros SleepTypes inteiros 0..7;
-- unsupported permanece unresolved; nenhum retorno é fabricado;
-- EC/GPE/GlobalLock e transição física de sleep ficam para power/hot-plug posterior.
+O xHCI atual já enumera o primeiro HID Boot keyboard/mouse, configura Interrupt IN e prova report real no QEMU. O parser de report atual ainda usa o formato fixo Boot: keyboard 8 bytes e mouse >=3 bytes.
+
+## HID-1 — Report Descriptor genérico
+
+**⏳ EM VALIDAÇÃO na branch `hid-input-validation`.**
+
+Escopo do candidato:
+- novo `kernel/src/drivers/hid_report_descriptor.sotlas`, independente de transporte;
+- parser bounded de HID short items com limite de 4096 bytes, 512 itens e collection depth 16;
+- valida item size/type/tag e falha fechado em truncamento, reserved/long item e Push/Pop ainda não implementado;
+- extrai Usage Page/Application para keyboard/mouse, ReportSize/ReportCount, Report ID e geometria input/output/feature;
+- self-test com descriptor Boot Keyboard realista de 63 bytes, 64 input bits e 8 output bits;
+- novo `kernel/src/drivers/xhci_hid_descriptor.sotlas` busca o Report Descriptor real via EP0 usando `GET_DESCRIPTOR`, `bmRequestType=0x81`, `wValue=0x2200`, `wIndex=interface` e o `wDescriptorLength` descoberto no HID descriptor;
+- o descriptor real é validado antes de `XHCI_SET_CONFIGURATION_READY`;
+- Boot protocol serve apenas como checagem de consistência da Application Usage, não como fonte do layout;
+- sem Report ID, o input report calculado deve caber no max packet do Interrupt IN endpoint;
+- nenhum mock substitui a leitura real no QEMU.
 
 Markers:
 ```text
-BAKEN:ACPI_AML_PLATFORM_READY
-BAKEN:ACPI_AML_PLATFORM_FAILED
+BAKEN:USB_HID_DESCRIPTOR_READY
+BAKEN:USB_HID_DESCRIPTOR_FAILED
 ```
 
-Barreira certificada:
-```text
-AML-5 static
--> AML-6a evaluator
--> AML-6b dynamic discovery
--> AML-7 region core
--> AML-8 platform objects
--> PLATFORM_READY
-```
+O marker READY foi adicionado ao smoke geral e ao gate SMP; FAILED é terminal para essa prova. A `main` permanece em `ead13903`/runtime `7803447a` até CI + SMP 3/3 + NVMe-only fecharem no mesmo SHA desta branch.
 
-## Histórico da correção final AML-7/8
+## Próximos passos após HID-1
 
-Candidato inicial:
-```text
-1e3335948e8cf412e8866e06a0224627b325fff8
-feat(acpi): complete bounded AML platform core
-```
-
-CI #1055 / `34491870501` ❌ falhou antes do QEMU em `test_build_modular_compiles_kernel_objects`: `let mut source_is_link = false` foi lowered para `int`, enquanto `aml_platform_source(..., *mut bool, ...)` exigia `_Bool*`.
-
-Correção final:
-```text
-let mut source_is_link: bool = false;
-```
-
-Foi adicionado teste de regressão para essa fronteira de lowering. O candidato `7803447a` passou os três gates e encerrou a falha.
-
-## Próxima frente
-
-Com ACPI/AML core fechado, a próxima trilha é **HID adicional / input de produção**:
-- parser de HID report descriptor;
-- abstração de dispositivos de input além do boot protocol;
-- touchpad/touchscreen e I2C-HID quando houver transporte seguro;
-- hot-plug e lifecycle sem quebrar xHCI/HID já certificado.
-
-EC/GPE/GlobalLock e extensões firmware-specific permanecem na futura trilha de power/hot-plug.
+- HID-2: field map por Report ID/Usage e decoder genérico de Input reports;
+- HID-3: fila/event model unificada para keyboard, mouse, touchpad e touchscreen;
+- HID-4: lifecycle/hot-plug xHCI;
+- I2C-HID somente após transporte I2C/ACPI seguro.
 
 `HPinho/LangSotlas` permanece somente leitura/referência salvo autorização explícita.

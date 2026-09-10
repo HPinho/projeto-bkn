@@ -1,8 +1,9 @@
 // Baken OS — ativa a configuração USB selecionada após Configure Endpoint.
 //
 // Envia SET_CONFIGURATION como control transfer sem Data Stage: Setup OUT
-// seguido por Status IN + IOC no EP0. O sucesso só é aceito após Transfer Event
-// correspondente ao Status TRB. Não publica transfers HID nesta fase.
+// seguido por Status IN + IOC no EP0. Após o dispositivo confirmar a
+// configuração, lê e valida o HID Report Descriptor real antes de publicar
+// este estágio como pronto. Não publica transfers Interrupt IN nesta fase.
 
 module kernel::drivers::xhci_set_configuration;
 
@@ -12,6 +13,7 @@ import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_trb::*;
 import kernel::drivers::xhci_transfer::*;
+import kernel::drivers::xhci_hid_descriptor::*;
 
 pub const USB_REQUEST_SET_CONFIGURATION: u8 = 9;
 pub const USB_REQUEST_TYPE_HOST_TO_DEVICE_STANDARD_DEVICE: u8 = 0x00;
@@ -55,6 +57,13 @@ pub fn xhci_set_first_configuration() -> bool {
     if status_physical == 0 { return false; }
     if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
     if xhci_transfer_last_residual_length() != 0 { return false; }
+
+    // O request SET_CONFIGURATION já foi confirmado pelo device. Antes de
+    // publicar READY, prova o caminho standard-interface GET_DESCRIPTOR(Report)
+    // e o parser bounded sobre os bytes retornados pelo hardware/QEMU.
+    if !xhci_hid_descriptor_initialize() || !xhci_hid_descriptor_is_ready() {
+        return false;
+    }
 
     unsafe {
         XHCI_SET_CONFIGURATION_VALUE = configuration_value;

@@ -1,0 +1,274 @@
+// Baken OS — parser bounded de USB/I2C HID Report Descriptor.
+//
+// Este módulo é deliberadamente independente do transporte. Ele valida a
+// sequência de short items HID e extrai somente a geometria necessária ao
+// primeiro input genérico: aplicações keyboard/mouse, tamanho agregado dos
+// reports e presença de Report ID. Descriptor/firmware é input não confiável:
+// qualquer item truncado, reserved, long item ou estado fora dos limites falha
+// fechado. Push/Pop global fica para uma extensão posterior, também fail-closed.
+
+module kernel::drivers::hid_report_descriptor;
+
+pub const HID_REPORT_DESCRIPTOR_MAX_BYTES: usize = 4096;
+pub const HID_REPORT_DESCRIPTOR_MAX_ITEMS: u32 = 512;
+pub const HID_REPORT_MAX_COLLECTION_DEPTH: u16 = 16;
+pub const HID_REPORT_MAX_REPORT_SIZE_BITS: u32 = 64;
+pub const HID_REPORT_MAX_REPORT_COUNT: u32 = 256;
+pub const HID_REPORT_MAX_AGGREGATE_BITS: u32 = 32768;
+
+pub const HID_ITEM_LONG_PREFIX: u8 = 0xFE;
+pub const HID_ITEM_TYPE_MAIN: u8 = 0;
+pub const HID_ITEM_TYPE_GLOBAL: u8 = 1;
+pub const HID_ITEM_TYPE_LOCAL: u8 = 2;
+pub const HID_ITEM_TYPE_RESERVED: u8 = 3;
+
+pub const HID_MAIN_INPUT: u8 = 8;
+pub const HID_MAIN_OUTPUT: u8 = 9;
+pub const HID_MAIN_COLLECTION: u8 = 10;
+pub const HID_MAIN_FEATURE: u8 = 11;
+pub const HID_MAIN_END_COLLECTION: u8 = 12;
+pub const HID_COLLECTION_APPLICATION: u32 = 1;
+
+pub const HID_GLOBAL_USAGE_PAGE: u8 = 0;
+pub const HID_GLOBAL_REPORT_SIZE: u8 = 7;
+pub const HID_GLOBAL_REPORT_ID: u8 = 8;
+pub const HID_GLOBAL_REPORT_COUNT: u8 = 9;
+pub const HID_GLOBAL_PUSH: u8 = 10;
+pub const HID_GLOBAL_POP: u8 = 11;
+
+pub const HID_LOCAL_USAGE: u8 = 0;
+pub const HID_USAGE_PAGE_GENERIC_DESKTOP: u32 = 0x01;
+pub const HID_USAGE_KEYBOARD: u32 = 0x06;
+pub const HID_USAGE_MOUSE: u32 = 0x02;
+
+pub struct HidReportDescriptorInfo {
+    pub valid: bool;
+    pub descriptor_length: u16;
+    pub item_count: u16;
+    pub collection_count: u16;
+    pub input_bits: u32;
+    pub output_bits: u32;
+    pub feature_bits: u32;
+    pub has_report_ids: bool;
+    pub has_keyboard_application: bool;
+    pub has_mouse_application: bool;
+}
+
+@system
+pub fn hid_report_descriptor_invalid() -> HidReportDescriptorInfo {
+    return HidReportDescriptorInfo {
+        valid: false,
+        descriptor_length: 0,
+        item_count: 0,
+        collection_count: 0,
+        input_bits: 0,
+        output_bits: 0,
+        feature_bits: 0,
+        has_report_ids: false,
+        has_keyboard_application: false,
+        has_mouse_application: false
+    };
+}
+
+@system
+fn hid_report_read8(base: *const u8, offset: usize) -> u8 {
+    if base == (null as *const u8) { return 0; }
+    unsafe { return *(((base as usize) + offset) as *const u8); }
+}
+
+@system
+fn hid_report_item_size(prefix: u8) -> usize {
+    let code = prefix & 0x03;
+    if code == 0 { return 0; }
+    if code == 1 { return 1; }
+    if code == 2 { return 2; }
+    return 4;
+}
+
+@system
+fn hid_report_read_value(base: *const u8, offset: usize, size: usize) -> u32 {
+    if base == (null as *const u8) || size > 4 { return 0; }
+    let mut value: u32 = 0;
+    let mut index: usize = 0;
+    while index < size {
+        value |= (hid_report_read8(base, offset + index) as u32) << ((index as u32) * 8);
+        index += 1;
+    }
+    return value;
+}
+
+@system
+fn hid_report_add_bits(current: u32, size: u32, count: u32) -> u32 {
+    if size == 0 || count == 0 ||
+       size > HID_REPORT_MAX_REPORT_SIZE_BITS ||
+       count > HID_REPORT_MAX_REPORT_COUNT ||
+       count > (HID_REPORT_MAX_AGGREGATE_BITS / size) {
+        return HID_REPORT_MAX_AGGREGATE_BITS + 1;
+    }
+    let bits = size * count;
+    if current > HID_REPORT_MAX_AGGREGATE_BITS - bits {
+        return HID_REPORT_MAX_AGGREGATE_BITS + 1;
+    }
+    return current + bits;
+}
+
+@system
+pub fn hid_report_descriptor_parse(base: *const u8,
+                                   length: usize) -> HidReportDescriptorInfo {
+    let mut result = hid_report_descriptor_invalid();
+    if base == (null as *const u8) || length == 0 ||
+       length > HID_REPORT_DESCRIPTOR_MAX_BYTES {
+        return result;
+    }
+
+    let mut offset: usize = 0;
+    let mut items: u32 = 0;
+    let mut collections: u16 = 0;
+    let mut collection_depth: u16 = 0;
+    let mut usage_page: u32 = 0;
+    let mut local_usage_page: u32 = 0;
+    let mut local_usage: u32 = 0;
+    let mut local_usage_valid: bool = false;
+    let mut report_size: u32 = 0;
+    let mut report_count: u32 = 0;
+    let mut input_bits: u32 = 0;
+    let mut output_bits: u32 = 0;
+    let mut feature_bits: u32 = 0;
+    let mut has_report_ids: bool = false;
+    let mut keyboard_application: bool = false;
+    let mut mouse_application: bool = false;
+
+    while offset < length {
+        if items >= HID_REPORT_DESCRIPTOR_MAX_ITEMS { return result; }
+        let prefix = hid_report_read8(base, offset);
+        offset += 1;
+        if prefix == HID_ITEM_LONG_PREFIX { return result; }
+
+        let size = hid_report_item_size(prefix);
+        if size > length - offset { return result; }
+        let value = hid_report_read_value(base, offset, size);
+        offset += size;
+
+        let item_type = (prefix >> 2) & 0x03;
+        let tag = (prefix >> 4) & 0x0F;
+
+        if item_type == HID_ITEM_TYPE_GLOBAL {
+            if tag == HID_GLOBAL_USAGE_PAGE {
+                if value > 0xFFFF { return result; }
+                usage_page = value;
+            } else if tag == HID_GLOBAL_REPORT_SIZE {
+                if value == 0 || value > HID_REPORT_MAX_REPORT_SIZE_BITS { return result; }
+                report_size = value;
+            } else if tag == HID_GLOBAL_REPORT_ID {
+                if value == 0 || value > 0xFF { return result; }
+                has_report_ids = true;
+            } else if tag == HID_GLOBAL_REPORT_COUNT {
+                if value == 0 || value > HID_REPORT_MAX_REPORT_COUNT { return result; }
+                report_count = value;
+            } else if tag == HID_GLOBAL_PUSH || tag == HID_GLOBAL_POP {
+                // Sem stack global nesta primeira etapa: jamais fingir suporte.
+                return result;
+            } else if tag > 6 {
+                return result;
+            }
+        } else if item_type == HID_ITEM_TYPE_LOCAL {
+            if tag == HID_LOCAL_USAGE {
+                local_usage_valid = true;
+                if size == 4 && value > 0xFFFF {
+                    local_usage_page = (value >> 16) & 0xFFFF;
+                    local_usage = value & 0xFFFF;
+                } else {
+                    local_usage_page = usage_page;
+                    local_usage = value;
+                }
+            }
+            // UsageMinimum/Maximum, Designator/String e Delimiter não alteram
+            // a geometria de bits calculada aqui e são apenas bounds-checked.
+        } else if item_type == HID_ITEM_TYPE_MAIN {
+            if tag == HID_MAIN_COLLECTION {
+                if size == 0 || collection_depth >= HID_REPORT_MAX_COLLECTION_DEPTH {
+                    return result;
+                }
+                if value == HID_COLLECTION_APPLICATION && local_usage_valid &&
+                   local_usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP {
+                    if local_usage == HID_USAGE_KEYBOARD { keyboard_application = true; }
+                    if local_usage == HID_USAGE_MOUSE { mouse_application = true; }
+                }
+                collection_depth += 1;
+                collections += 1;
+            } else if tag == HID_MAIN_END_COLLECTION {
+                if size != 0 || collection_depth == 0 { return result; }
+                collection_depth -= 1;
+            } else if tag == HID_MAIN_INPUT {
+                input_bits = hid_report_add_bits(input_bits, report_size, report_count);
+                if input_bits > HID_REPORT_MAX_AGGREGATE_BITS { return result; }
+            } else if tag == HID_MAIN_OUTPUT {
+                output_bits = hid_report_add_bits(output_bits, report_size, report_count);
+                if output_bits > HID_REPORT_MAX_AGGREGATE_BITS { return result; }
+            } else if tag == HID_MAIN_FEATURE {
+                feature_bits = hid_report_add_bits(feature_bits, report_size, report_count);
+                if feature_bits > HID_REPORT_MAX_AGGREGATE_BITS { return result; }
+            } else {
+                return result;
+            }
+            local_usage_valid = false;
+            local_usage_page = 0;
+            local_usage = 0;
+        } else {
+            return result;
+        }
+        items += 1;
+    }
+
+    if items == 0 || collection_depth != 0 || collections == 0 || input_bits == 0 {
+        return result;
+    }
+
+    result.valid = true;
+    result.descriptor_length = length as u16;
+    result.item_count = items as u16;
+    result.collection_count = collections;
+    result.input_bits = input_bits;
+    result.output_bits = output_bits;
+    result.feature_bits = feature_bits;
+    result.has_report_ids = has_report_ids;
+    result.has_keyboard_application = keyboard_application;
+    result.has_mouse_application = mouse_application;
+    return result;
+}
+
+@system
+pub fn hid_report_descriptor_input_bytes(info: HidReportDescriptorInfo) -> u16 {
+    if !info.valid || info.input_bits == 0 { return 0; }
+    let mut bytes = (info.input_bits + 7) / 8;
+    if info.has_report_ids { bytes += 1; }
+    if bytes > 0xFFFF { return 0; }
+    return bytes as u16;
+}
+
+@system
+pub fn hid_report_descriptor_self_test() -> bool {
+    // Boot keyboard Report Descriptor clássico: 64 input bits e 8 output bits.
+    let keyboard: [u8; 63] = [
+        0x05,0x01,0x09,0x06,0xA1,0x01,
+        0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,0x25,0x01,
+        0x75,0x01,0x95,0x08,0x81,0x02,
+        0x95,0x01,0x75,0x08,0x81,0x01,
+        0x95,0x05,0x75,0x01,0x05,0x08,0x19,0x01,0x29,0x05,0x91,0x02,
+        0x95,0x01,0x75,0x03,0x91,0x01,
+        0x95,0x06,0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,
+        0x19,0x00,0x29,0x65,0x81,0x00,0xC0
+    ];
+    let parsed = hid_report_descriptor_parse(&keyboard[0], 63);
+    if !parsed.valid || !parsed.has_keyboard_application ||
+       parsed.has_mouse_application || parsed.input_bits != 64 ||
+       parsed.output_bits != 8 || hid_report_descriptor_input_bytes(parsed) != 8 {
+        return false;
+    }
+
+    let truncated: [u8; 2] = [0x75, 0x08];
+    if hid_report_descriptor_parse(&truncated[0], 1).valid { return false; }
+    let long_item: [u8; 3] = [HID_ITEM_LONG_PREFIX, 0, 0];
+    if hid_report_descriptor_parse(&long_item[0], 3).valid { return false; }
+    return true;
+}

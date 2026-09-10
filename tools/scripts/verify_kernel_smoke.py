@@ -1,4 +1,4 @@
-"""Fail closed on incomplete kernel execution or any reported CPU/AML failure."""
+"""Fail closed on incomplete kernel execution or any reported CPU/AML/HID failure."""
 import argparse
 from pathlib import Path
 
@@ -7,6 +7,7 @@ REQUIRED = (
     "ACPI_AML_DATA_READY", "ACPI_AML_NAMESPACE_READY", "ACPI_AML_NAMESPACE_LOADED",
     "ACPI_AML_DEVICES_READY", "ACPI_AML_EVALUATOR_READY", "ACPI_AML_DYNAMIC_READY",
     "ACPI_AML_REGIONS_READY", "ACPI_AML_PLATFORM_READY",
+    "USB_HID_DESCRIPTOR_READY",
     "HEAP_READY", "PLATFORM_READY", "DEVICE_CATALOG_READY", "STORAGE_DRIVER_BOUND",
     "PROCESS_ISOLATION_READY", "PROCESS_REGISTRY_READY", "BARE_METAL_READY",
     "SMP_BASE_READY",
@@ -40,6 +41,8 @@ def validate(serial: str) -> list[str]:
         errors.append("AML OperationRegion/Field core failed (BAKEN:ACPI_AML_REGIONS_FAILED)")
     if "BAKEN:ACPI_AML_PLATFORM_FAILED" in lines:
         errors.append("AML platform object pass failed (BAKEN:ACPI_AML_PLATFORM_FAILED)")
+    if "BAKEN:USB_HID_DESCRIPTOR_FAILED" in lines:
+        errors.append("USB HID report descriptor fetch/parser failed")
     # HEX=T is also the LAPIC timer checkpoint and HEX=U is userspace diagnostics.
     # They are intentionally non-terminal unless the evaluator publishes its
     # dedicated textual failure marker above.
@@ -65,7 +68,7 @@ def main() -> int:
         print("\n".join(line for line in serial.splitlines()
                         if "BAKEN:" in line)[-4096:])
         return 1
-    print("Kernel smoke passed: all milestones present, no CPU/AML failure.")
+    print("Kernel smoke passed: all milestones present, no CPU/AML/HID failure.")
     return 0
 
 

@@ -10,7 +10,7 @@ Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. 
 **Fase 1 — Kernel Core: ✅ CONCLUÍDA E CERTIFICADA**  
 **Fase 2 — Platform/Drivers: ▶️ EM DESENVOLVIMENTO**
 
-## Baseline de runtime certificada integrada em `main`
+## Baseline de runtime certificada
 
 ```text
 7803447a4c2179d088948b3c4288b6e3655bc1d5
@@ -21,7 +21,7 @@ fix(acpi): preserve bool type in PRT lowering
 - SMP #159 / `34493003041` ✅ — 3/3;
 - NVMe #256 / `34493002936` ✅.
 
-A PR #16 foi integrada por fast-forward no próprio SHA validado. Commits posteriores somente de documentação não alteram esta baseline de runtime.
+`ead13903` é o commit documental integrado depois dessa prova.
 
 ---
 
@@ -33,66 +33,52 @@ A PR #16 foi integrada por fast-forward no próprio SHA validado. Commits poster
 
 **✅ CONCLUÍDA E CERTIFICADA.** Scheduler preemptivo/SMP, wait/wake/sleep, heap, processos/address spaces, Ring3/syscalls/user-copy, fault isolation, FPU/SIMD, TLB shootdown, migração BSP->AP e teardown seguro.
 
-Checkpoint histórico: `72422a79dfcec4c9c43bd3a83ef8a9ad90c7c2c8`.
-
 ---
 
 # Fase 2 — Platform e Drivers
 
 ## Trilha A — ACPI/AML
 
-| Etapa | Estado | Checkpoint |
-|---|---|---|
-| AML-0 Catálogo DSDT/SSDT | ✅ | TABLES_READY |
-| AML-1 Decoder estrutural | ✅ | DECODER_READY |
-| AML-2 Namespace core | ✅ | NAMESPACE_READY |
-| AML-3 Data objects | ✅ | DATA_READY |
-| AML-4 Namespace real | ✅ | `2a9974ad` |
-| AML-5 Discovery estático | ✅ | `3f02decb` |
-| AML-6a Evaluator bounded | ✅ | `8e553f79` |
-| AML-6b Discovery dinâmico | ✅ | `4e90ec22` |
-| AML-7 OperationRegion/Field core | ✅ | `7803447a` |
-| AML-8 `_PIC`/`_PRT`/`_S5` | ✅ | `7803447a` |
+**✅ CORE CONCLUÍDO E CERTIFICADO em `7803447a`.**
 
-**Trilha A — ACPI/AML CORE: ✅ CONCLUÍDA E CERTIFICADA.**
-
-### Certificação final AML-7/8
-
-```text
-7803447a4c2179d088948b3c4288b6e3655bc1d5
-fix(acpi): preserve bool type in PRT lowering
-```
-
-- CI #1056 / `34493002949` ✅;
-- SMP #159 / `34493003041` ✅ — 3/3;
-- NVMe #256 / `34493002936` ✅.
-
-AML-7 entrega SystemMemory/SystemIO/PCIConfig mediados, bounds/overflow antes de hardware, Field <=32 bits dentro de um dword e init sem side effect. IndexField/BankField não são emulados sem backing dedicado.
-
-AML-8 entrega `_PIC`, `_PRT` e `_S5` em subconjunto bounded/fail-closed. Unsupported permanece unresolved. EC/GPE/GlobalLock e transições físicas de energia ficam para power/hot-plug.
-
-Markers finais:
-```text
-BAKEN:ACPI_AML_REGIONS_READY
-BAKEN:ACPI_AML_PLATFORM_READY
-```
-
-Histórico: CI #1055 / `34491870501` ❌ detectou lowering `int* -> _Bool*` no candidato `1e333594`. A anotação explícita `let mut source_is_link: bool = false;` e teste de regressão produziram o candidato final verde `7803447a`.
+AML-0..AML-8 fechados. Últimos gates: CI #1056 + SMP #159 3/3 + NVMe #256. EC/GPE/GlobalLock e transições físicas de energia foram movidos para power/hot-plug avançado.
 
 ## Trilha B — HID adicional / input de produção
 
-**▶️ PRÓXIMA ETAPA.**
+| Etapa | Estado | Objetivo |
+|---|---|---|
+| HID-0 Boot HID xHCI | ✅ | keyboard/mouse Boot + Interrupt IN real |
+| HID-1 Report Descriptor | ⏳ | fetch real + parser bounded transport-agnostic |
+| HID-2 Field map / decoder | ⬜ | Report ID, Usage, bit offsets e valores |
+| HID-3 Input event model | ⬜ | eventos unificados keyboard/mouse/touch |
+| HID-4 Hot-plug/lifecycle | ⬜ | attach/detach/recovery sem estado global frágil |
+| I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
 
-Objetivos:
-- parser bounded de HID report descriptors;
-- input genérico além do boot protocol;
-- keyboard/mouse report protocol real sem quebrar o caminho atual;
-- touchpad/touchscreen sobre HID quando transporte apropriado estiver disponível;
-- I2C-HID somente após transporte I2C/ACPI seguro;
-- hot-plug, attach/detach e lifecycle previsível;
-- markers e provas QEMU sem mocks substituindo hardware real.
+### HID-1 — candidato atual
 
-Critério de promoção: novo candidato em branch/PR, CI + SMP 3/3 + NVMe-only no mesmo SHA e nenhuma regressão no xHCI/HID atual.
+Branch: `hid-input-validation`.
+
+Implementação:
+- parser `hid_report_descriptor.sotlas` sem dependência de xHCI/DMA;
+- máximo 4096 bytes, 512 itens, collection depth 16, ReportSize <=64, ReportCount <=256 e geometria total <=32768 bits;
+- parsing real de short item size/type/tag;
+- Application Usage keyboard/mouse, Report ID e geometria input/output/feature;
+- unsupported/truncated/reserved/long/Push/Pop = fail-closed;
+- `xhci_hid_descriptor.sotlas` usa EP0 `GET_DESCRIPTOR(Report)` com request `0x81`, value `0x2200`, índice de interface e comprimento vindo do HID descriptor;
+- valida descriptor real antes de publicar SET_CONFIGURATION pronto;
+- report Boot fixo continua apenas como fallback de consumo, não como descriptor sintético.
+
+Prova runtime exigida:
+```text
+BAKEN:USB_HID_DESCRIPTOR_READY
+```
+
+Falha dedicada:
+```text
+BAKEN:USB_HID_DESCRIPTOR_FAILED
+```
+
+Critério de promoção: CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA da branch, mantendo os gates do Kernel Core e o HID Boot anterior intactos.
 
 ## Trilha C — Storage de produção
 
