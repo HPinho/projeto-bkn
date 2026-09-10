@@ -41,9 +41,7 @@ feat(hid): parse real report descriptors
 
 # ACPI/AML
 
-**✅ CORE CONCLUÍDO E CERTIFICADO.**
-
-AML-0..AML-8 permanecem fechados. O checkpoint AML final `7803447a` passou CI #1056 + SMP #159 3/3 + NVMe #256 e voltou a ser exercitado pelos gates do HID-1.
+**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 permanecem fechados. O checkpoint AML final `7803447a` passou CI #1056 + SMP #159 3/3 + NVMe #256 e voltou a ser exercitado pelos gates do HID-1.
 
 ---
 
@@ -65,39 +63,41 @@ AML-0..AML-8 permanecem fechados. O checkpoint AML final `7803447a` passou CI #1
 
 ## HID-2 — Field map / decoder genérico
 
-**⏳ EM VALIDAÇÃO na branch `hid2-validation`.**
+**⏳ EM VALIDAÇÃO na PR #18 / branch `hid2-validation`.**
 
-Escopo do candidato:
-- novo `kernel/src/drivers/hid_input_report.sotlas`, independente de xHCI/DMA/ACPI;
-- até 512 campos, 256 Report IDs e 256 usages locais por Main item, sem heap;
-- mapa por Report ID, bit offset, bit width, Usage Page/Usage, flags Constant/Data, Array/Variable, Absolute/Relative e Null State;
-- Usage list segue ordem do descriptor; quando há menos usages que controles Variable, o último Usage é repetido;
-- Usage Minimum/Maximum cria range bounded; arrays não contíguos sem range explícito continuam com valor bruto e usage unresolved, nunca fabricado;
-- Logical Minimum/Maximum preservados; valores são sign-extended quando o mínimo lógico é negativo;
-- Report ID é byte de prefixo do wire report e não altera o bit offset do payload;
-- comprimento real do Interrupt IN deve coincidir exatamente com a geometria do Report ID;
-- `Buffered Bytes`, Delimiter, Global Push/Pop e construções fora do subconjunto permanecem fail-closed;
-- self-test cobre teclado Boot, mouse com X/Y relativos signed, Report ID e truncamento;
-- `xhci_hid_descriptor` constrói o mapa a partir dos mesmos bytes reais já lidos no HID-1;
-- `xhci_hid_report` valida cada report real pelo mapa HID-2 antes do fallback Boot legado;
-- caminho existente da tecla `A` continua obrigatório no QEMU.
-
-Markers:
+Candidato inicial:
 ```text
-BAKEN:USB_HID_INPUT_MAP_READY
-BAKEN:USB_HID_INPUT_MAP_FAILED
+7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b
+feat(hid): decode mapped input reports
 ```
 
-O smoke CI/NVMe exige `USB_HID_INPUT_MAP_READY`; `USB_HID_INPUT_MAP_FAILED` é terminal. O SMP continua provando o caminho porque `USB_HID_DESCRIPTOR_READY` só é publicado depois do mapa HID-2 estar pronto; não há relaxamento do gate SMP.
+Escopo:
+- `hid_input_report.sotlas` independente de xHCI/DMA/ACPI;
+- até 512 campos, 256 Report IDs e 256 usages locais por Main item, sem heap;
+- mapa por Report ID, bit offset/width, Usage Page/Usage e flags Main;
+- Usage list e Usage Minimum/Maximum bounded;
+- Logical Minimum/Maximum + sign extension;
+- Report ID é prefixo do wire report, separado dos offsets do payload;
+- comprimento real do Interrupt IN deve coincidir exatamente com a geometria do Report ID;
+- arrays não contíguos sem range demonstrável permanecem usage-unresolved;
+- Buffered Bytes/Delimiter/Push/Pop continuam fail-closed;
+- self-test cobre teclado Boot, mouse signed-relative, Report ID e truncamento;
+- mapa é construído sobre os bytes reais do Report Descriptor HID-1;
+- Interrupt IN real é validado pelo mapa antes do fallback Boot;
+- `BAKEN:USB_HID_INPUT_MAP_READY` obrigatório no smoke CI/NVMe;
+- `BAKEN:USB_HID_INPUT_MAP_FAILED` terminal.
+
+### Validação HID-2 — histórico
+
+- SMP #165 / run `34501501476` ❌ em `Verify SMP Contracts`, antes de build e QEMU.
+- causa: erro no próprio guardrail `test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready`; `text.index("xhci_hid_input_map_emit_ready_marker()")` encontrou a definição da função, que aparece antes de `xhci_hid_descriptor_probe_internal`, e comparou offsets de escopos diferentes.
+- o runtime não falhou e não chegou a ser compilado nesse gate.
+- correção: o teste agora recorta apenas o corpo de `xhci_hid_descriptor_probe_internal` antes de verificar a ordem `map_build -> map_ready -> descriptor_store`.
+- nenhuma linha do runtime HID-2, Kernel Core, storage ou AML foi alterada por essa correção.
 
 ## Critério de promoção HID-2
 
-1. CI principal verde;
-2. SMP 3/3 verde;
-3. NVMe-only verde;
-4. todos no mesmo SHA da `hid2-validation`;
-5. manter `USB_HID_DESCRIPTOR_READY`, prova real da tecla `A` e todos os invariantes do Kernel Core;
-6. registrar SHA/run IDs aqui e no roadmap antes do fast-forward de `main`.
+CI principal + SMP 3/3 + NVMe-only devem ficar verdes no mesmo SHA corrigido da PR #18. Depois, registrar SHA/run IDs aqui e no roadmap e fast-forward `main` somente para o runtime comprovado.
 
 Depois do HID-2:
 - HID-3: event model/fila unificada baseada nos campos decodificados;

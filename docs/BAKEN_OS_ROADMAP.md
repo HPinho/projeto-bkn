@@ -21,8 +21,6 @@ feat(hid): parse real report descriptors
 - SMP #162 / `34497000136` ✅ — 3/3;
 - NVMe #259 / `34497000185` ✅.
 
-`a16e515b` é o commit documental posterior.
-
 ---
 
 # Fase 0 — Fundação Bare-Metal
@@ -54,32 +52,18 @@ feat(hid): parse real report descriptors
 
 ### HID-1 — certificado
 
-```text
-1b3f94ccca5e399550d0951fc2c9f133a768440c
-feat(hid): parse real report descriptors
-```
+`1b3f94cc`: CI #1059 / `34497000191` ✅; SMP #162 / `34497000136` ✅ 3/3; NVMe #259 / `34497000185` ✅.
 
-Gates: CI #1059 / `34497000191` ✅; SMP #162 / `34497000136` ✅ 3/3; NVMe #259 / `34497000185` ✅.
+### HID-2 — candidato PR #18
 
-### HID-2 — candidato atual
+Candidato inicial `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b` implementa field map transport-agnostic, Report IDs, Usage lists/ranges, bit offsets/widths, flags Main, logical range/sign extension e validação exata de Interrupt IN real. Marker: `BAKEN:USB_HID_INPUT_MAP_READY`; falha: `BAKEN:USB_HID_INPUT_MAP_FAILED`.
 
-Branch: `hid2-validation`. **⏳ EM VALIDAÇÃO.**
+Validação:
+- SMP #165 / `34501501476` ❌ em `Verify SMP Contracts`, antes de build/QEMU.
+- causa: teste de ordem usou `text.index` no arquivo inteiro e encontrou a definição de `xhci_hid_input_map_emit_ready_marker` antes da chamada dentro de `probe_internal`.
+- correção: restringir a busca ao corpo de `xhci_hid_descriptor_probe_internal`; runtime HID-2 permanece inalterado.
 
-- `hid_input_report.sotlas` transport-agnostic, fixed-capacity e sem heap;
-- field map por Report ID, Usage Page/Usage, bit offset/width e Main flags;
-- Usage list e Usage Minimum/Maximum bounded;
-- Logical Minimum/Maximum + sign extension;
-- byte de Report ID separado do payload;
-- comprimento real precisa coincidir com a geometria do Report ID;
-- Arrays mantêm range de usages quando demonstrável; combinação não contígua não gera Usage sintético;
-- Buffered Bytes/Delimiter/Push/Pop continuam fail-closed;
-- self-test de keyboard, mouse signed-relative e Report ID;
-- mapa é construído sobre o descriptor real do HID-1;
-- report Interrupt IN real é validado pelo mapa antes do fallback Boot;
-- marker `BAKEN:USB_HID_INPUT_MAP_READY` obrigatório no smoke CI/NVMe;
-- `BAKEN:USB_HID_INPUT_MAP_FAILED` terminal.
-
-Critério: CI + SMP 3/3 + NVMe verdes no mesmo SHA; só então fast-forward de `main`.
+**Critério:** CI + SMP 3/3 + NVMe verdes no mesmo SHA corrigido; só então fast-forward de `main` e promoção para ✅.
 
 ## Trilha C — Storage de produção
 

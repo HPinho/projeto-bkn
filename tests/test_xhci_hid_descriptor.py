@@ -39,9 +39,11 @@ class XhciHidDescriptorTests(unittest.TestCase):
         text = XHCI.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::hid_input_report::*;", text)
         self.assertIn("hid_input_report_self_test()", text)
-        build = text.index("hid_input_report_map_build(buffer.virtual_address as *const u8, length as usize)")
-        map_ready = text.index("xhci_hid_input_map_emit_ready_marker()")
-        descriptor_store = text.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
+        body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
+        body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
+        build = body.index("hid_input_report_map_build(buffer.virtual_address as *const u8, length as usize)")
+        map_ready = body.index("xhci_hid_input_map_emit_ready_marker()")
+        descriptor_store = body.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
         self.assertLess(build, map_ready)
         self.assertLess(map_ready, descriptor_store)
         self.assertIn("let marker: [u8; 30]", text)
