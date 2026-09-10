@@ -1,0 +1,350 @@
+// Baken OS — AML-7: core mediado de OperationRegion / Field.
+//
+// Esta camada não executa AML arbitrário. Ela fornece descritores bounded para
+// SystemMemory, SystemIO e PCIConfig e acesso inteiro de 32 bits com validação
+// de overflow/alinhamento/limites antes de tocar hardware. Field é reduzido a
+// uma janela de bits dentro de um único dword. IndexField/BankField permanecem
+// explicitamente não suportados até existir backing seguro específico.
+//
+// Nenhum acesso de hardware ocorre durante init/self-test. O marker READY prova
+// a infraestrutura de mediação, não que todo OperationRegion do firmware tenha
+// sido executado.
+
+module kernel::acpi::aml_regions;
+
+import kernel::acpi::aml_loader::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::drivers::pci_bus::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_REGION_SYSTEM_MEMORY: u8 = 0;
+pub const AML_REGION_SYSTEM_IO: u8 = 1;
+pub const AML_REGION_PCI_CONFIG: u8 = 2;
+
+pub const AML_FIELD_KIND_REGION: u8 = 1;
+pub const AML_FIELD_KIND_INDEX: u8 = 2;
+pub const AML_FIELD_KIND_BANK: u8 = 3;
+
+pub const AML_REGION_MAX_LENGTH: u64 = 0x0000000100000000;
+pub const AML_FIELD_MAX_BITS: u32 = 32;
+
+pub struct AmlOperationRegion {
+    pub space: u8;
+    pub base: u64;
+    pub length: u64;
+    pub pci_bus: u8;
+    pub pci_slot: u8;
+    pub pci_func: u8;
+    pub valid: bool;
+}
+
+pub struct AmlFieldDescriptor {
+    pub kind: u8;
+    pub bit_offset: u64;
+    pub bit_length: u32;
+    pub access_width: u8;
+    pub valid: bool;
+}
+
+static mut AML_REGIONS_READY: bool = false;
+
+@system
+fn aml_region_invalid() -> AmlOperationRegion {
+    return AmlOperationRegion {
+        space: 0, base: 0, length: 0,
+        pci_bus: 0, pci_slot: 0, pci_func: 0, valid: false
+    };
+}
+
+@system
+pub fn aml_region_make(space: u8, base: u64, length: u64) -> AmlOperationRegion {
+    if length == 0 || length > AML_REGION_MAX_LENGTH ||
+       base > 0xFFFFFFFFFFFFFFFF - (length - 1) {
+        return aml_region_invalid();
+    }
+    if space != AML_REGION_SYSTEM_MEMORY && space != AML_REGION_SYSTEM_IO {
+        return aml_region_invalid();
+    }
+    if space == AML_REGION_SYSTEM_IO &&
+       (base > 0xFFFF || length > 0x10000 || base + length > 0x10000) {
+        return aml_region_invalid();
+    }
+    return AmlOperationRegion {
+        space: space, base: base, length: length,
+        pci_bus: 0, pci_slot: 0, pci_func: 0, valid: true
+    };
+}
+
+@system
+pub fn aml_region_make_pci(bus: u8, slot: u8, func: u8,
+                           base: u64, length: u64) -> AmlOperationRegion {
+    if slot >= 32 || func >= 8 || length == 0 || length > 0x100 ||
+       base > 0xFF || base + length > 0x100 {
+        return aml_region_invalid();
+    }
+    return AmlOperationRegion {
+        space: AML_REGION_PCI_CONFIG, base: base, length: length,
+        pci_bus: bus, pci_slot: slot, pci_func: func, valid: true
+    };
+}
+
+@system
+pub fn aml_region_bounds_valid(region: *const AmlOperationRegion,
+                               byte_offset: u64, width: u64) -> bool {
+    if region == (null as *const AmlOperationRegion) || width == 0 {
+        return false;
+    }
+    unsafe {
+        if !(*region).valid || byte_offset > (*region).length ||
+           width > (*region).length - byte_offset {
+            return false;
+        }
+        if (*region).base > 0xFFFFFFFFFFFFFFFF - byte_offset {
+            return false;
+        }
+        let address = (*region).base + byte_offset;
+        if address > 0xFFFFFFFFFFFFFFFF - (width - 1) { return false; }
+        if (*region).space == AML_REGION_SYSTEM_IO &&
+           (address > 0xFFFF || width > 0x10000 ||
+            address + width > 0x10000) {
+            return false;
+        }
+        if (*region).space == AML_REGION_PCI_CONFIG &&
+           (address > 0xFF || width > 0x100 ||
+            address + width > 0x100) {
+            return false;
+        }
+    }
+    return true;
+}
+
+@system
+fn aml_region_mmio_map_dword(address: u64) -> bool {
+    if address == 0 || (address & 3) != 0 { return false; }
+    let page = address & 0xFFFFFFFFFFFFF000;
+    if page == 0 { return false; }
+    return active_page_tables_map_mmio_identity_4k(page);
+}
+
+@system
+pub fn aml_region_read32(region: *const AmlOperationRegion,
+                         byte_offset: u64,
+                         out_value: *mut u32) -> bool {
+    if !aml_regions_is_ready() || out_value == (null as *mut u32) ||
+       !aml_region_bounds_valid(region, byte_offset, 4) {
+        return false;
+    }
+    unsafe {
+        let address = (*region).base + byte_offset;
+        if (address & 3) != 0 { return false; }
+        let mut value: u32 = 0;
+        if (*region).space == AML_REGION_SYSTEM_MEMORY {
+            if !aml_region_mmio_map_dword(address) { return false; }
+            value = x86_mmio_read32(address);
+        } else if (*region).space == AML_REGION_SYSTEM_IO {
+            value = __inl(address as u16);
+        } else if (*region).space == AML_REGION_PCI_CONFIG {
+            value = pci_read_config32(
+                (*region).pci_bus, (*region).pci_slot, (*region).pci_func,
+                address as u8
+            );
+        } else {
+            return false;
+        }
+        *out_value = value;
+    }
+    return true;
+}
+
+@system
+pub fn aml_region_write32(region: *const AmlOperationRegion,
+                          byte_offset: u64, value: u32) -> bool {
+    if !aml_regions_is_ready() ||
+       !aml_region_bounds_valid(region, byte_offset, 4) {
+        return false;
+    }
+    unsafe {
+        let address = (*region).base + byte_offset;
+        if (address & 3) != 0 { return false; }
+        if (*region).space == AML_REGION_SYSTEM_MEMORY {
+            if !aml_region_mmio_map_dword(address) { return false; }
+            x86_mmio_write32(address, value);
+        } else if (*region).space == AML_REGION_SYSTEM_IO {
+            __outl(address as u16, value);
+        } else if (*region).space == AML_REGION_PCI_CONFIG {
+            pci_write_config32(
+                (*region).pci_bus, (*region).pci_slot, (*region).pci_func,
+                address as u8, value
+            );
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn aml_field_make(bit_offset: u64, bit_length: u32,
+                      access_width: u8) -> AmlFieldDescriptor {
+    let mut result = AmlFieldDescriptor {
+        kind: AML_FIELD_KIND_REGION,
+        bit_offset: bit_offset,
+        bit_length: bit_length,
+        access_width: access_width,
+        valid: false
+    };
+    if bit_length == 0 || bit_length > AML_FIELD_MAX_BITS { return result; }
+    if access_width != 0 && access_width != 4 { return result; }
+    if bit_offset > 0xFFFFFFFFFFFFFFFF - bit_length as u64 { return result; }
+    let dword_bit_base = (bit_offset / 32) * 32;
+    let shift = bit_offset - dword_bit_base;
+    if shift + bit_length as u64 > 32 { return result; }
+    result.valid = true;
+    return result;
+}
+
+@system
+pub fn aml_field_geometry_valid(region: *const AmlOperationRegion,
+                                field: *const AmlFieldDescriptor) -> bool {
+    if region == (null as *const AmlOperationRegion) ||
+       field == (null as *const AmlFieldDescriptor) {
+        return false;
+    }
+    unsafe {
+        if !(*region).valid || !(*field).valid ||
+           (*field).kind != AML_FIELD_KIND_REGION ||
+           (*field).bit_length == 0 ||
+           (*field).bit_length > AML_FIELD_MAX_BITS {
+            return false;
+        }
+        let dword_bit_base = ((*field).bit_offset / 32) * 32;
+        let byte_offset = dword_bit_base / 8;
+        return aml_region_bounds_valid(region, byte_offset, 4);
+    }
+}
+
+@system
+pub fn aml_field_read_integer(region: *const AmlOperationRegion,
+                              field: *const AmlFieldDescriptor,
+                              out_value: *mut u64) -> bool {
+    if out_value == (null as *mut u64) ||
+       !aml_field_geometry_valid(region, field) {
+        return false;
+    }
+    unsafe {
+        let dword_bit_base = ((*field).bit_offset / 32) * 32;
+        let byte_offset = dword_bit_base / 8;
+        let shift = (*field).bit_offset - dword_bit_base;
+        let mut raw: u32 = 0;
+        if !aml_region_read32(region, byte_offset, &mut raw) { return false; }
+        let mask: u64 = if (*field).bit_length == 32 {
+            0xFFFFFFFF
+        } else {
+            ((1 as u64) << (*field).bit_length) - 1
+        };
+        *out_value = ((raw as u64) >> shift) & mask;
+    }
+    return true;
+}
+
+@system
+pub fn aml_field_write_integer(region: *const AmlOperationRegion,
+                               field: *const AmlFieldDescriptor,
+                               value: u64) -> bool {
+    if !aml_field_geometry_valid(region, field) { return false; }
+    unsafe {
+        let dword_bit_base = ((*field).bit_offset / 32) * 32;
+        let byte_offset = dword_bit_base / 8;
+        let shift = (*field).bit_offset - dword_bit_base;
+        let mask: u64 = if (*field).bit_length == 32 {
+            0xFFFFFFFF
+        } else {
+            ((1 as u64) << (*field).bit_length) - 1
+        };
+        if (value & ~mask) != 0 { return false; }
+        let mut raw: u32 = 0;
+        if !aml_region_read32(region, byte_offset, &mut raw) { return false; }
+        let clear_mask = ~((mask as u32) << shift);
+        let updated = (raw & clear_mask) | (((value & mask) as u32) << shift);
+        return aml_region_write32(region, byte_offset, updated);
+    }
+}
+
+@system
+pub fn aml_regions_is_ready() -> bool {
+    unsafe { return AML_REGIONS_READY; }
+}
+
+@system
+pub fn aml_regions_self_test() -> bool {
+    let io = aml_region_make(AML_REGION_SYSTEM_IO, 0x400, 0x20);
+    if !io.valid || !aml_region_bounds_valid(&io, 0, 4) ||
+       !aml_region_bounds_valid(&io, 0x1C, 4) ||
+       aml_region_bounds_valid(&io, 0x1D, 4) {
+        return false;
+    }
+
+    let pci = aml_region_make_pci(0, 31, 7, 0x40, 0x40);
+    if !pci.valid || !aml_region_bounds_valid(&pci, 0x3C, 4) ||
+       aml_region_bounds_valid(&pci, 0x3D, 4) {
+        return false;
+    }
+
+    let field = aml_field_make(8, 8, 4);
+    if !field.valid || !aml_field_geometry_valid(&io, &field) { return false; }
+    let crossing = aml_field_make(31, 2, 4);
+    if crossing.valid { return false; }
+    let too_wide = aml_field_make(0, 33, 4);
+    if too_wide.valid { return false; }
+
+    let overflow = aml_region_make(
+        AML_REGION_SYSTEM_MEMORY, 0xFFFFFFFFFFFFFFF0, 0x20
+    );
+    if overflow.valid { return false; }
+
+    return true;
+}
+
+@system
+pub fn aml_regions_init() -> bool {
+    unsafe { AML_REGIONS_READY = false; }
+    if !aml_loader_is_ready() || !active_page_tables_is_ready() {
+        return false;
+    }
+    if !aml_regions_self_test() { return false; }
+    unsafe {
+        __dma_fence();
+        AML_REGIONS_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_regions_emit_ready_marker() -> bool {
+    if !aml_regions_is_ready() { return false; }
+    let marker: [u8; 29] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,82,
+        69,71,73,79,78,83,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 29 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn aml_regions_emit_failure_marker() -> bool {
+    let marker: [u8; 30] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,82,
+        69,71,73,79,78,83,95,70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 30 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
