@@ -1,0 +1,544 @@
+// Baken OS — AML-8: objetos de plataforma ACPI bounded.
+//
+// Fecha a trilha AML necessária ao kernel sem tentar reproduzir um ACPICA
+// universal. O passe procura _PIC, _PRT e _S5 no namespace já validado.
+// _PIC é tentado somente como Method(Arg0=1) pela engine AML-6a; se exigir
+// efeitos/opcodes ainda proibidos fica unresolved. _PRT aceita Packages de
+// quatro elementos com Address/Pin/Source/SourceIndex. _S5 aceita Package com
+// dois primeiros inteiros de SleepType. Nenhum valor é fabricado.
+//
+// EC/GPE/GlobalLock, sleep transition efetiva e métodos arbitrários permanecem
+// fora deste core e podem ser adicionados depois sem bloquear o merge da base.
+
+module kernel::acpi::aml_platform;
+
+import kernel::acpi::aml_decoder::*;
+import kernel::acpi::aml_data::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_loader::*;
+import kernel::acpi::aml_evaluator::*;
+import kernel::acpi::aml_regions::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_PLATFORM_NAME_PIC: u32 = 0x4349505F;
+pub const AML_PLATFORM_NAME_PRT: u32 = 0x5452505F;
+pub const AML_PLATFORM_NAME_S5: u32 = 0x5F35535F;
+
+pub const AML_PLATFORM_MAX_PRT_ENTRIES: usize = 256;
+
+pub struct AmlPrtEntry {
+    pub scope_index: usize;
+    pub address: u64;
+    pub pin: u8;
+    pub source_is_link: bool;
+    pub source_segment: u32;
+    pub source_index: u32;
+    pub valid: bool;
+}
+
+struct AmlPackageView {
+    data: *const u8;
+    length: usize;
+    count: usize;
+    valid: bool;
+}
+
+static mut AML_PLATFORM_PRT: [AmlPrtEntry; AML_PLATFORM_MAX_PRT_ENTRIES] = [
+    AmlPrtEntry {
+        scope_index: AML_NAMESPACE_INVALID_INDEX,
+        address: 0, pin: 0, source_is_link: false,
+        source_segment: 0, source_index: 0, valid: false
+    };
+    AML_PLATFORM_MAX_PRT_ENTRIES
+];
+
+static mut AML_PLATFORM_PRT_COUNT: usize = 0;
+static mut AML_PLATFORM_PRT_OBJECTS: usize = 0;
+static mut AML_PLATFORM_PRT_UNRESOLVED: usize = 0;
+static mut AML_PLATFORM_PIC_PRESENT: bool = false;
+static mut AML_PLATFORM_PIC_APPLIED: bool = false;
+static mut AML_PLATFORM_S5_PRESENT: bool = false;
+static mut AML_PLATFORM_S5_TYP_A: u8 = 0;
+static mut AML_PLATFORM_S5_TYP_B: u8 = 0;
+static mut AML_PLATFORM_READY: bool = false;
+static mut AML_PLATFORM_HARD_FAILURE: bool = false;
+
+@system
+fn aml_platform_reset() -> void {
+    unsafe {
+        AML_PLATFORM_PRT_COUNT = 0;
+        AML_PLATFORM_PRT_OBJECTS = 0;
+        AML_PLATFORM_PRT_UNRESOLVED = 0;
+        AML_PLATFORM_PIC_PRESENT = false;
+        AML_PLATFORM_PIC_APPLIED = false;
+        AML_PLATFORM_S5_PRESENT = false;
+        AML_PLATFORM_S5_TYP_A = 0;
+        AML_PLATFORM_S5_TYP_B = 0;
+        AML_PLATFORM_READY = false;
+        AML_PLATFORM_HARD_FAILURE = false;
+        let mut index: usize = 0;
+        while index < AML_PLATFORM_MAX_PRT_ENTRIES {
+            AML_PLATFORM_PRT[index].scope_index = AML_NAMESPACE_INVALID_INDEX;
+            AML_PLATFORM_PRT[index].address = 0;
+            AML_PLATFORM_PRT[index].pin = 0;
+            AML_PLATFORM_PRT[index].source_is_link = false;
+            AML_PLATFORM_PRT[index].source_segment = 0;
+            AML_PLATFORM_PRT[index].source_index = 0;
+            AML_PLATFORM_PRT[index].valid = false;
+            index += 1;
+        }
+    }
+}
+
+@system
+fn aml_platform_package_view(value: AmlEvalValue) -> AmlPackageView {
+    let mut invalid = AmlPackageView {
+        data: null as *const u8, length: 0, count: 0, valid: false
+    };
+    if !value.valid ||
+       (value.kind != AML_EVAL_VALUE_PACKAGE &&
+        value.kind != AML_EVAL_VALUE_VAR_PACKAGE) ||
+       value.data == (null as *const u8) || value.data_length == 0 {
+        return invalid;
+    }
+
+    let mut cursor = aml_cursor_new(value.data, value.data_length);
+    if !cursor.valid { return invalid; }
+    let mut count: usize = 0;
+    if value.kind == AML_EVAL_VALUE_PACKAGE {
+        if aml_cursor_remaining(&cursor) == 0 { return invalid; }
+        count = aml_cursor_read_u8(&mut cursor) as usize;
+    } else {
+        let integer = aml_decode_term_arg_constant(&mut cursor);
+        if !integer.valid || integer.value > AML_DATA_MAX_PACKAGE_ELEMENTS as u64 {
+            return invalid;
+        }
+        count = integer.value as usize;
+    }
+    if value.element_count != 0 && value.element_count != count {
+        return invalid;
+    }
+    let remaining = aml_cursor_remaining(&cursor);
+    let offset = cursor.offset as u64;
+    let base = value.data as u64;
+    if offset > 0xFFFFFFFFFFFFFFFF - base { return invalid; }
+    invalid.data = unsafe { (base + offset) as *const u8 };
+    invalid.length = remaining;
+    invalid.count = count;
+    invalid.valid = true;
+    return invalid;
+}
+
+@system
+fn aml_platform_value_from_data(data: AmlDataObject) -> AmlEvalValue {
+    if !data.valid {
+        return AmlEvalValue {
+            kind: AML_EVAL_VALUE_NONE, integer_value: 0,
+            data: null as *const u8, data_length: 0,
+            element_count: 0, valid: false
+        };
+    }
+    if data.kind == AML_DATA_KIND_PACKAGE || data.kind == AML_DATA_KIND_VAR_PACKAGE {
+        return AmlEvalValue {
+            kind: if data.kind == AML_DATA_KIND_PACKAGE {
+                AML_EVAL_VALUE_PACKAGE
+            } else {
+                AML_EVAL_VALUE_VAR_PACKAGE
+            },
+            integer_value: 0, data: data.data, data_length: data.data_length,
+            element_count: data.element_count, valid: true
+        };
+    }
+    return AmlEvalValue {
+        kind: AML_EVAL_VALUE_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0,
+        element_count: 0, valid: false
+    };
+}
+
+@system
+fn aml_platform_static_package(node: *const AmlNamespaceNode,
+                               out_value: *mut AmlEvalValue) -> bool {
+    if node == (null as *const AmlNamespaceNode) ||
+       out_value == (null as *mut AmlEvalValue) {
+        return false;
+    }
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_NAME ||
+           ((*node).value_kind != AML_NAMESPACE_VALUE_PACKAGE &&
+            (*node).value_kind != AML_NAMESPACE_VALUE_VAR_PACKAGE) ||
+           (*node).aml_body == (null as *const u8) || (*node).aml_body_length == 0 {
+            return false;
+        }
+        let mut value = AmlEvalValue {
+            kind: if (*node).value_kind == AML_NAMESPACE_VALUE_PACKAGE {
+                AML_EVAL_VALUE_PACKAGE
+            } else {
+                AML_EVAL_VALUE_VAR_PACKAGE
+            },
+            integer_value: 0,
+            data: (*node).aml_body,
+            data_length: (*node).aml_body_length,
+            element_count: 0,
+            valid: true
+        };
+        let view = aml_platform_package_view(value);
+        if !view.valid { return false; }
+        value.element_count = view.count;
+        *out_value = value;
+    }
+    return true;
+}
+
+@system
+fn aml_platform_method_package(index: usize,
+                               out_value: *mut AmlEvalValue) -> bool {
+    if out_value == (null as *mut AmlEvalValue) { return false; }
+    let node = aml_namespace_node(index);
+    if node == (null as *const AmlNamespaceNode) { return false; }
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_METHOD ||
+           ((*node).flags & 0x07) != 0 || ((*node).flags & 0xF8) != 0 {
+            return false;
+        }
+    }
+    let mut value = aml_eval_integer(0);
+    if !aml_evaluator_execute_method(
+        index, null as *const AmlEvalValue, 0, &mut value
+    ) || !value.valid ||
+       (value.kind != AML_EVAL_VALUE_PACKAGE &&
+        value.kind != AML_EVAL_VALUE_VAR_PACKAGE) {
+        return false;
+    }
+    unsafe { *out_value = value; }
+    return true;
+}
+
+@system
+fn aml_platform_parse_s5(value: AmlEvalValue,
+                         out_a: *mut u8, out_b: *mut u8) -> bool {
+    if out_a == (null as *mut u8) || out_b == (null as *mut u8) {
+        return false;
+    }
+    let view = aml_platform_package_view(value);
+    if !view.valid || view.count < 2 { return false; }
+    let mut cursor = aml_cursor_new(view.data, view.length);
+    if !cursor.valid { return false; }
+    let first = aml_decode_integer(&mut cursor);
+    let second = aml_decode_integer(&mut cursor);
+    if !first.valid || !second.valid || first.value > 7 || second.value > 7 {
+        return false;
+    }
+    let mut index: usize = 2;
+    while index < view.count {
+        if !aml_skip_package_element(&mut cursor) { return false; }
+        index += 1;
+    }
+    if aml_cursor_remaining(&cursor) != 0 { return false; }
+    unsafe {
+        *out_a = first.value as u8;
+        *out_b = second.value as u8;
+    }
+    return true;
+}
+
+@system
+fn aml_platform_source(cursor: *mut AmlCursor,
+                       out_is_link: *mut bool,
+                       out_segment: *mut u32) -> bool {
+    if cursor == (null as *mut AmlCursor) ||
+       out_is_link == (null as *mut bool) ||
+       out_segment == (null as *mut u32) ||
+       aml_cursor_remaining(cursor as *const AmlCursor) == 0 {
+        return false;
+    }
+    let opcode = aml_cursor_peek_u8(cursor as *const AmlCursor);
+    if opcode == AML_ZERO_OP || opcode == AML_ONE_OP ||
+       opcode == AML_ONES_OP || opcode == AML_BYTE_PREFIX ||
+       opcode == AML_WORD_PREFIX || opcode == AML_DWORD_PREFIX ||
+       opcode == AML_QWORD_PREFIX {
+        let integer = aml_decode_integer(cursor);
+        if !integer.valid || integer.value != 0 { return false; }
+        unsafe {
+            *out_is_link = false;
+            *out_segment = 0;
+        }
+        return true;
+    }
+    let name = aml_decode_name_string(cursor);
+    if !name.valid || name.segment_count == 0 { return false; }
+    unsafe {
+        *out_is_link = true;
+        *out_segment = name.segments[name.segment_count - 1];
+    }
+    return true;
+}
+
+@system
+fn aml_platform_append_prt_entry(scope: usize, entry: AmlDataObject) -> bool {
+    if !entry.valid ||
+       (entry.kind != AML_DATA_KIND_PACKAGE &&
+        entry.kind != AML_DATA_KIND_VAR_PACKAGE) {
+        return false;
+    }
+    let value = aml_platform_value_from_data(entry);
+    let view = aml_platform_package_view(value);
+    if !view.valid || view.count != 4 { return false; }
+    let mut cursor = aml_cursor_new(view.data, view.length);
+    if !cursor.valid { return false; }
+
+    let address = aml_decode_integer(&mut cursor);
+    let pin = aml_decode_integer(&mut cursor);
+    if !address.valid || !pin.valid || pin.value > 3 { return false; }
+
+    let mut source_is_link = false;
+    let mut source_segment: u32 = 0;
+    if !aml_platform_source(&mut cursor, &mut source_is_link, &mut source_segment) {
+        return false;
+    }
+    let source_index = aml_decode_integer(&mut cursor);
+    if !source_index.valid || source_index.value > 0xFFFFFFFF ||
+       aml_cursor_remaining(&cursor) != 0 {
+        return false;
+    }
+
+    unsafe {
+        if AML_PLATFORM_PRT_COUNT >= AML_PLATFORM_MAX_PRT_ENTRIES {
+            AML_PLATFORM_HARD_FAILURE = true;
+            return false;
+        }
+        let slot = AML_PLATFORM_PRT_COUNT;
+        AML_PLATFORM_PRT[slot].scope_index = scope;
+        AML_PLATFORM_PRT[slot].address = address.value;
+        AML_PLATFORM_PRT[slot].pin = pin.value as u8;
+        AML_PLATFORM_PRT[slot].source_is_link = source_is_link;
+        AML_PLATFORM_PRT[slot].source_segment = source_segment;
+        AML_PLATFORM_PRT[slot].source_index = source_index.value as u32;
+        AML_PLATFORM_PRT[slot].valid = true;
+        AML_PLATFORM_PRT_COUNT += 1;
+    }
+    return true;
+}
+
+@system
+fn aml_platform_parse_prt(value: AmlEvalValue, scope: usize) -> bool {
+    let view = aml_platform_package_view(value);
+    if !view.valid || view.count > AML_PLATFORM_MAX_PRT_ENTRIES { return false; }
+    let mut cursor = aml_cursor_new(view.data, view.length);
+    if !cursor.valid { return false; }
+    let start = unsafe { AML_PLATFORM_PRT_COUNT };
+    let mut index: usize = 0;
+    while index < view.count {
+        let entry = aml_decode_data_object(&mut cursor);
+        if !aml_platform_append_prt_entry(scope, entry) {
+            unsafe {
+                let mut rollback = start;
+                while rollback < AML_PLATFORM_PRT_COUNT {
+                    AML_PLATFORM_PRT[rollback].valid = false;
+                    rollback += 1;
+                }
+                AML_PLATFORM_PRT_COUNT = start;
+            }
+            return false;
+        }
+        index += 1;
+    }
+    return aml_cursor_remaining(&cursor) == 0;
+}
+
+@system
+fn aml_platform_try_pic(index: usize) -> bool {
+    let node = aml_namespace_node(index);
+    if node == (null as *const AmlNamespaceNode) { return false; }
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_METHOD ||
+           ((*node).flags & 0x07) != 1 || ((*node).flags & 0xF8) != 0 {
+            return false;
+        }
+    }
+    let argument = aml_eval_integer(1);
+    let mut result = aml_eval_integer(0);
+    return aml_evaluator_execute_method(index, &argument, 1, &mut result);
+}
+
+@system
+pub fn aml_platform_is_ready() -> bool {
+    unsafe { return AML_PLATFORM_READY; }
+}
+
+@system
+pub fn aml_platform_prt_count() -> usize {
+    unsafe { if !AML_PLATFORM_READY { return 0; } return AML_PLATFORM_PRT_COUNT; }
+}
+
+@system
+pub fn aml_platform_prt_entry(index: usize) -> *const AmlPrtEntry {
+    unsafe {
+        if !AML_PLATFORM_READY || index >= AML_PLATFORM_PRT_COUNT ||
+           !AML_PLATFORM_PRT[index].valid {
+            return null as *const AmlPrtEntry;
+        }
+        return &AML_PLATFORM_PRT[index];
+    }
+}
+
+@system
+pub fn aml_platform_pic_present() -> bool {
+    unsafe { return AML_PLATFORM_READY && AML_PLATFORM_PIC_PRESENT; }
+}
+
+@system
+pub fn aml_platform_pic_applied() -> bool {
+    unsafe { return AML_PLATFORM_READY && AML_PLATFORM_PIC_APPLIED; }
+}
+
+@system
+pub fn aml_platform_s5_present() -> bool {
+    unsafe { return AML_PLATFORM_READY && AML_PLATFORM_S5_PRESENT; }
+}
+
+@system
+pub fn aml_platform_s5_type_a() -> u8 {
+    unsafe { if !AML_PLATFORM_READY || !AML_PLATFORM_S5_PRESENT { return 0; } return AML_PLATFORM_S5_TYP_A; }
+}
+
+@system
+pub fn aml_platform_s5_type_b() -> u8 {
+    unsafe { if !AML_PLATFORM_READY || !AML_PLATFORM_S5_PRESENT { return 0; } return AML_PLATFORM_S5_TYP_B; }
+}
+
+@system
+pub fn aml_platform_self_test() -> bool {
+    // Package(4) body: { Byte(5), Byte(5), Zero, Zero }.
+    let s5_body: [u8; 7] = [
+        4, AML_BYTE_PREFIX, 5, AML_BYTE_PREFIX, 5, AML_ZERO_OP, AML_ZERO_OP
+    ];
+    let s5 = AmlEvalValue {
+        kind: AML_EVAL_VALUE_PACKAGE, integer_value: 0,
+        data: &s5_body[0], data_length: 7, element_count: 4, valid: true
+    };
+    let mut a: u8 = 0;
+    let mut b: u8 = 0;
+    if !aml_platform_parse_s5(s5, &mut a, &mut b) || a != 5 || b != 5 {
+        return false;
+    }
+
+    // Outer Package body com uma rota:
+    // Package(4) { Byte(0x1F), Zero, Zero, Zero }.
+    let prt_body: [u8; 9] = [
+        1, AML_PACKAGE_OP, 0x07, 4,
+        AML_BYTE_PREFIX, 0x1F, AML_ZERO_OP, AML_ZERO_OP, AML_ZERO_OP
+    ];
+    let prt = AmlEvalValue {
+        kind: AML_EVAL_VALUE_PACKAGE, integer_value: 0,
+        data: &prt_body[0], data_length: 9, element_count: 1, valid: true
+    };
+    aml_platform_reset();
+    if !aml_platform_parse_prt(prt, 0) { return false; }
+    unsafe {
+        if AML_PLATFORM_PRT_COUNT != 1 || !AML_PLATFORM_PRT[0].valid ||
+           AML_PLATFORM_PRT[0].address != 0x1F ||
+           AML_PLATFORM_PRT[0].pin != 0 ||
+           AML_PLATFORM_PRT[0].source_is_link {
+            return false;
+        }
+    }
+    aml_platform_reset();
+    return true;
+}
+
+@system
+pub fn aml_platform_init() -> bool {
+    aml_platform_reset();
+    if !aml_loader_is_ready() || !aml_namespace_is_ready() ||
+       !aml_evaluator_is_ready() || !aml_regions_is_ready() ||
+       aml_namespace_count() <= 1 {
+        return false;
+    }
+    if !aml_platform_self_test() { return false; }
+    aml_platform_reset();
+
+    let count = aml_namespace_count();
+    let mut index: usize = 1;
+    while index < count {
+        let node = aml_namespace_node(index);
+        if node == (null as *const AmlNamespaceNode) {
+            return false;
+        }
+        unsafe {
+            if (*node).valid && (*node).segment == AML_PLATFORM_NAME_PIC {
+                AML_PLATFORM_PIC_PRESENT = true;
+                if (*node).kind == AML_NAMESPACE_KIND_METHOD &&
+                   aml_platform_try_pic(index) {
+                    AML_PLATFORM_PIC_APPLIED = true;
+                }
+            } else if (*node).valid && (*node).segment == AML_PLATFORM_NAME_S5 &&
+                      !AML_PLATFORM_S5_PRESENT {
+                let mut value = aml_eval_integer(0);
+                let mut available = false;
+                if (*node).kind == AML_NAMESPACE_KIND_NAME {
+                    available = aml_platform_static_package(node, &mut value);
+                } else if (*node).kind == AML_NAMESPACE_KIND_METHOD {
+                    available = aml_platform_method_package(index, &mut value);
+                }
+                let mut a: u8 = 0;
+                let mut b: u8 = 0;
+                if available && aml_platform_parse_s5(value, &mut a, &mut b) {
+                    AML_PLATFORM_S5_PRESENT = true;
+                    AML_PLATFORM_S5_TYP_A = a;
+                    AML_PLATFORM_S5_TYP_B = b;
+                }
+            } else if (*node).valid && (*node).segment == AML_PLATFORM_NAME_PRT {
+                let mut value = aml_eval_integer(0);
+                let mut available = false;
+                if (*node).kind == AML_NAMESPACE_KIND_NAME {
+                    available = aml_platform_static_package(node, &mut value);
+                } else if (*node).kind == AML_NAMESPACE_KIND_METHOD {
+                    available = aml_platform_method_package(index, &mut value);
+                }
+                if available && aml_platform_parse_prt(value, (*node).parent) {
+                    AML_PLATFORM_PRT_OBJECTS += 1;
+                } else {
+                    AML_PLATFORM_PRT_UNRESOLVED += 1;
+                }
+            }
+        }
+        unsafe { if AML_PLATFORM_HARD_FAILURE { return false; } }
+        index += 1;
+    }
+
+    unsafe {
+        __dma_fence();
+        AML_PLATFORM_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_platform_emit_ready_marker() -> bool {
+    if !aml_platform_is_ready() { return false; }
+    let marker: [u8; 30] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,80,
+        76,65,84,70,79,82,77,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 30 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn aml_platform_emit_failure_marker() -> bool {
+    let marker: [u8; 31] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,80,
+        76,65,84,70,79,82,77,95,70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 31 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
