@@ -62,6 +62,7 @@ jobs:
           python3 tests/test_acpi_aml_data.py
           python3 tests/test_acpi_aml_namespace.py
           python3 tests/test_acpi_aml_loader.py
+          python3 tests/test_acpi_aml_discovery.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -114,6 +115,10 @@ jobs:
               stop_reason=aml-loader-failure
               break
             fi
+            if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:HEX=R:' build/qemu-smp-serial.log; then
+              stop_reason=aml-discovery-failure
+              break
+            fi
             if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
               stop_reason=cpu-exception
               break
@@ -137,9 +142,9 @@ jobs:
           echo "SMP proof ${proof}: stop_reason=${stop_reason}"
           if test "$stop_reason" != complete; then
             checkpoint=$(grep -E '^BAKEN:HEX=Q:' build/qemu-smp-serial.log | tail -n 1 || true)
-            aml_error=$(grep -E '^BAKEN:HEX=[AB]:' build/qemu-smp-serial.log | tail -n 2 || true)
+            aml_error=$(grep -E '^BAKEN:HEX=[ABRS]:' build/qemu-smp-serial.log | tail -n 2 || true)
             echo "::error::SMP stopped: ${stop_reason}; Ring3/TLB checkpoint=${checkpoint:-none}. Q stages: 1=publication, 2=remap, 3=resume, 4=reaper, 5=idle, 6=syscalls, 7/8/9=unmap, A=cleanup; bit31=failure."
-            if test -n "$aml_error"; then echo "::error::AML loader diagnostics: ${aml_error}"; fi
+            if test -n "$aml_error"; then echo "::error::AML diagnostics: ${aml_error}"; fi
           fi
           python3 tools/scripts/run_smp_qemu.py --validate-log build/qemu-smp-serial.log
           if grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
@@ -176,6 +181,7 @@ jobs:
           require_marker 'BAKEN:ACPI_AML_DATA_READY'
           require_marker 'BAKEN:ACPI_AML_NAMESPACE_READY'
           require_marker 'BAKEN:ACPI_AML_NAMESPACE_LOADED'
+          require_marker 'BAKEN:ACPI_AML_DEVICES_READY'
           require_marker 'BAKEN:SMP_AP_ONLINE'
           require_marker 'BAKEN:SMP_AP_RUNTIME_READY'
           require_marker 'BAKEN:SMP_THREAD_ON_AP'

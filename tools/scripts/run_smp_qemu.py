@@ -17,6 +17,7 @@ REQUIRED_MARKERS = (
     "BAKEN:SMP_BASE_READY", "BAKEN:ACPI_AML_TABLES_READY",
     "BAKEN:ACPI_AML_DECODER_READY", "BAKEN:ACPI_AML_DATA_READY",
     "BAKEN:ACPI_AML_NAMESPACE_READY", "BAKEN:ACPI_AML_NAMESPACE_LOADED",
+    "BAKEN:ACPI_AML_DEVICES_READY",
     "BAKEN:SMP_AP_ONLINE", "BAKEN:SMP_AP_RUNTIME_READY", "BAKEN:SMP_THREAD_ON_AP",
     "BAKEN:SMP_TIMER_ON_AP", "BAKEN:SMP_ANY_THREAD_ON_AP",
     "BAKEN:SMP_HEAP_READY", "BAKEN:SMP_TLB_SHOOTDOWN_READY",
@@ -57,6 +58,11 @@ def validate(serial: str) -> list[str]:
         errors.append("CPU exception reported (BAKEN:HEX=E:)")
     aml_failures = re.findall(r"^BAKEN:HEX=A:[0-9A-Fa-f]{8}$", serial, re.M)
     errors.extend(f"AML loader failed: {marker} (offset is BAKEN:HEX=B:)" for marker in aml_failures)
+    discovery_failures = re.findall(r"^BAKEN:HEX=R:[0-9A-Fa-f]{8}$", serial, re.M)
+    errors.extend(
+        f"AML device discovery failed: {marker} (detail is BAKEN:HEX=S:)"
+        for marker in discovery_failures
+    )
     lines = marker_lines(serial)
     failures = re.findall(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M)
     errors.extend(f"Ring3/TLB probe failed: {marker}" for marker in failures)
@@ -86,6 +92,9 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
                 serial = serial_path.read_text(errors="replace") if serial_path.exists() else ""
                 if re.search(r"^BAKEN:HEX=A:[0-9A-Fa-f]{8}$", serial, re.M):
                     stop_reason = "AML loader failure"
+                    break
+                if re.search(r"^BAKEN:HEX=R:[0-9A-Fa-f]{8}$", serial, re.M):
+                    stop_reason = "AML device discovery failure"
                     break
                 if "BAKEN:HEX=E:" in serial or re.search(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M):
                     stop_reason = "kernel failure"

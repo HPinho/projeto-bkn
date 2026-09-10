@@ -5,6 +5,7 @@ from pathlib import Path
 REQUIRED = (
     "PROCESS_SCHEDULER_READY", "ACPI_AML_TABLES_READY", "ACPI_AML_DECODER_READY",
     "ACPI_AML_DATA_READY", "ACPI_AML_NAMESPACE_READY", "ACPI_AML_NAMESPACE_LOADED",
+    "ACPI_AML_DEVICES_READY",
     "HEAP_READY", "PLATFORM_READY", "DEVICE_CATALOG_READY", "STORAGE_DRIVER_BOUND", "PROCESS_ISOLATION_READY", "PROCESS_REGISTRY_READY", "BARE_METAL_READY",
     "SMP_BASE_READY",
     "SCHEDULER_SWITCH", "SCHEDULER_ROUND_TRIP", "RUN_QUEUE_CREATED",
@@ -24,6 +25,8 @@ def validate(serial: str) -> list[str]:
         errors.append("CPU exception reported (BAKEN:HEX=E:)")
     if "BAKEN:HEX=A:" in serial:
         errors.append("AML namespace loader failed (BAKEN:HEX=A:, offset in BAKEN:HEX=B:)")
+    if "BAKEN:HEX=R:" in serial:
+        errors.append("AML device discovery failed (BAKEN:HEX=R:, detail in BAKEN:HEX=S:)")
     errors.extend(f"Missing BAKEN:{marker}" for marker in REQUIRED
                   if f"BAKEN:{marker}" not in lines)
     return errors

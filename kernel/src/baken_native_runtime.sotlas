@@ -23,6 +23,7 @@ import kernel::acpi::aml_tables::*;
 import kernel::acpi::aml_decoder::*;
 import kernel::acpi::aml_namespace::*;
 import kernel::acpi::aml_loader::*;
+import kernel::acpi::aml_discovery::*;
 import kernel::process::address_space::*;
 import kernel::process::registry::*;
 import kernel::process::userspace_loader::*;
@@ -184,8 +185,8 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
 
-    // Fase 2/AML: catálogo -> decoder/data -> namespace core -> loader real.
-    // O loader ainda não executa métodos ou acessa OperationRegion.
+    // Fase 2/AML: catálogo -> decoder/data -> namespace -> loader -> discovery.
+    // AML-5 apenas consulta objetos estáticos; Method/OperationRegion não são executados.
     if !aml_tables_init() || !aml_tables_emit_ready_marker() { loop {} }
     if !aml_decoder_self_test() || !aml_decoder_emit_ready_marker() { loop {} }
     if !aml_namespace_foundation_init() || !aml_namespace_emit_ready_marker() { loop {} }
@@ -194,6 +195,11 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
         loop {}
     }
     if !aml_loader_emit_ready_marker() { loop {} }
+    if !aml_discovery_init() {
+        aml_discovery_emit_failure_markers();
+        loop {}
+    }
+    if !aml_discovery_emit_ready_marker() { loop {} }
 
     // Consolida ACPI/APIC/PCI antes de liberar APs ou inicializar serviços.
     if !platform_inventory_init() || !platform_inventory_emit_ready_marker() { loop {} }
