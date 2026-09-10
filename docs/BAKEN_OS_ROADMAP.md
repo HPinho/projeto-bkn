@@ -13,13 +13,15 @@ Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`. 
 ## Baseline de runtime certificada
 
 ```text
-1b3f94ccca5e399550d0951fc2c9f133a768440c
-feat(hid): parse real report descriptors
+a2e04a7858443a837488ff39fc2c26df4261fa58
+test(hid): scope HID-2 runtime order assertion
 ```
 
-- CI #1059 / `34497000191` ✅;
-- SMP #162 / `34497000136` ✅ — 3/3;
-- NVMe #259 / `34497000185` ✅.
+O runtime HID-2 está em `7e3008ae`; `a2e04a78` corrige apenas o guardrail de teste e é o SHA final promovido.
+
+- CI #1063 / `34501892035` ✅;
+- SMP #166 / `34501892066` ✅ — 3/3 boots;
+- NVMe #263 / `34501892022` ✅.
 
 ---
 
@@ -45,7 +47,7 @@ feat(hid): parse real report descriptors
 |---|---|---|
 | HID-0 Boot HID xHCI | ✅ | keyboard/mouse Boot + Interrupt IN real |
 | HID-1 Report Descriptor | ✅ | fetch real + parser bounded transport-agnostic |
-| HID-2 Field map / decoder | ⏳ | Report ID, Usage, bit offsets, flags e valores |
+| HID-2 Field map / decoder | ✅ | Report ID, Usage, bit offsets, flags e valores |
 | HID-3 Input event model | ⬜ | eventos unificados keyboard/mouse/touch |
 | HID-4 Hot-plug/lifecycle | ⬜ | attach/detach/recovery e múltiplos devices |
 | I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
@@ -54,16 +56,31 @@ feat(hid): parse real report descriptors
 
 `1b3f94cc`: CI #1059 / `34497000191` ✅; SMP #162 / `34497000136` ✅ 3/3; NVMe #259 / `34497000185` ✅.
 
-### HID-2 — candidato PR #18
+### HID-2 — certificado
 
-Candidato inicial `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b` implementa field map transport-agnostic, Report IDs, Usage lists/ranges, bit offsets/widths, flags Main, logical range/sign extension e validação exata de Interrupt IN real. Marker: `BAKEN:USB_HID_INPUT_MAP_READY`; falha: `BAKEN:USB_HID_INPUT_MAP_FAILED`.
+Runtime implementado em `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b`:
+- field map transport-agnostic e fixed-capacity;
+- Report IDs;
+- Usage lists e Usage Minimum/Maximum;
+- bit offsets/widths e flags Main;
+- Logical Minimum/Maximum e sign extension;
+- validação exata do comprimento de cada Interrupt IN;
+- arrays sem range demonstrável permanecem usage-unresolved;
+- descriptor real HID-1 alimenta o mapa;
+- report real passa pelo decoder antes do fallback Boot;
+- marker `BAKEN:USB_HID_INPUT_MAP_READY` e falha `BAKEN:USB_HID_INPUT_MAP_FAILED`.
 
-Validação:
-- SMP #165 / `34501501476` ❌ em `Verify SMP Contracts`, antes de build/QEMU.
-- causa: teste de ordem usou `text.index` no arquivo inteiro e encontrou a definição de `xhci_hid_input_map_emit_ready_marker` antes da chamada dentro de `probe_internal`.
-- correção: restringir a busca ao corpo de `xhci_hid_descriptor_probe_internal`; runtime HID-2 permanece inalterado.
+Histórico:
+- SMP #165 / `34501501476` ❌ antes do build/QEMU por bug no próprio teste de ordem (`text.index` no arquivo inteiro);
+- correção `a2e04a7858443a837488ff39fc2c26df4261fa58` restringiu a asserção a `xhci_hid_descriptor_probe_internal`, sem alterar runtime;
+- CI #1063 / `34501892035` ✅;
+- SMP #166 / `34501892066` ✅ — 3/3, com `USB_HID_INPUT_MAP_READY` e prova completa até `SMP_FPU_MIGRATION_READY`;
+- NVMe #263 / `34501892022` ✅;
+- `main` promovida por fast-forward para `a2e04a78`.
 
-**Critério:** CI + SMP 3/3 + NVMe verdes no mesmo SHA corrigido; só então fast-forward de `main` e promoção para ✅.
+### HID-3 — próximo
+
+**⬜ PLANEJADO.** Modelo e fila unificada de eventos consumindo os campos HID-2 já decodificados, inicialmente keyboard/mouse, com arquitetura extensível a touch. O event core deve ser transport-agnostic; xHCI atua como produtor. Lifecycle/hot-plug e múltiplos devices permanecem HID-4.
 
 ## Trilha C — Storage de produção
 

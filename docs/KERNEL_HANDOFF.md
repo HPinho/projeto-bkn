@@ -16,15 +16,17 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 ## Baseline de runtime certificada
 
 ```text
-1b3f94ccca5e399550d0951fc2c9f133a768440c
-feat(hid): parse real report descriptors
+a2e04a7858443a837488ff39fc2c26df4261fa58
+test(hid): scope HID-2 runtime order assertion
 ```
 
-- CI #1059 / `34497000191` ✅;
-- SMP #162 / `34497000136` ✅ — 3/3 boots;
-- NVMe-only #259 / `34497000185` ✅.
+O runtime HID-2 foi introduzido em `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b`; `a2e04a78` altera apenas o guardrail de teste/documentação e é o SHA final certificado/promovido.
 
-`a16e515b` é somente o commit documental de certificação posterior. A branch `hid2-validation` parte exatamente desse estado.
+- CI #1063 / `34501892035` ✅;
+- SMP #166 / `34501892066` ✅ — 3/3 boots independentes completos;
+- NVMe-only #263 / `34501892022` ✅.
+
+Em todos os boots SMP, `BAKEN:USB_HID_INPUT_MAP_READY` foi observado antes de `BAKEN:USB_HID_DESCRIPTOR_READY`, e a prova prosseguiu até `BAKEN:SMP_FPU_MIGRATION_READY` sem relaxar os invariantes do Kernel Core.
 
 ## Invariantes congelados do Kernel Core
 
@@ -41,7 +43,7 @@ feat(hid): parse real report descriptors
 
 # ACPI/AML
 
-**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 permanecem fechados. O checkpoint AML final `7803447a` passou CI #1056 + SMP #159 3/3 + NVMe #256 e voltou a ser exercitado pelos gates do HID-1.
+**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 permanecem fechados. O checkpoint AML final `7803447a` passou CI #1056 + SMP #159 3/3 + NVMe #256 e continua sendo reexercitado pelos gates atuais.
 
 ---
 
@@ -61,17 +63,13 @@ feat(hid): parse real report descriptors
 - `BAKEN:USB_HID_DESCRIPTOR_READY` obrigatório;
 - `BAKEN:USB_HID_DESCRIPTOR_FAILED` terminal.
 
+Prova HID-1: CI #1059 / `34497000191` ✅; SMP #162 / `34497000136` ✅ 3/3; NVMe #259 / `34497000185` ✅.
+
 ## HID-2 — Field map / decoder genérico
 
-**⏳ EM VALIDAÇÃO na PR #18 / branch `hid2-validation`.**
+**✅ COMPROVADO em `a2e04a78`.**
 
-Candidato inicial:
-```text
-7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b
-feat(hid): decode mapped input reports
-```
-
-Escopo:
+Implementação de runtime em `7e3008ae`:
 - `hid_input_report.sotlas` independente de xHCI/DMA/ACPI;
 - até 512 campos, 256 Report IDs e 256 usages locais por Main item, sem heap;
 - mapa por Report ID, bit offset/width, Usage Page/Usage e flags Main;
@@ -84,23 +82,23 @@ Escopo:
 - self-test cobre teclado Boot, mouse signed-relative, Report ID e truncamento;
 - mapa é construído sobre os bytes reais do Report Descriptor HID-1;
 - Interrupt IN real é validado pelo mapa antes do fallback Boot;
-- `BAKEN:USB_HID_INPUT_MAP_READY` obrigatório no smoke CI/NVMe;
+- `BAKEN:USB_HID_INPUT_MAP_READY` obrigatório no smoke;
 - `BAKEN:USB_HID_INPUT_MAP_FAILED` terminal.
 
-### Validação HID-2 — histórico
+### Histórico de validação HID-2
 
-- SMP #165 / run `34501501476` ❌ em `Verify SMP Contracts`, antes de build e QEMU.
-- causa: erro no próprio guardrail `test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready`; `text.index("xhci_hid_input_map_emit_ready_marker()")` encontrou a definição da função, que aparece antes de `xhci_hid_descriptor_probe_internal`, e comparou offsets de escopos diferentes.
-- o runtime não falhou e não chegou a ser compilado nesse gate.
-- correção: o teste agora recorta apenas o corpo de `xhci_hid_descriptor_probe_internal` antes de verificar a ordem `map_build -> map_ready -> descriptor_store`.
-- nenhuma linha do runtime HID-2, Kernel Core, storage ou AML foi alterada por essa correção.
+- candidato inicial `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b`;
+- SMP #165 / `34501501476` ❌ em `Verify SMP Contracts`, antes de build/QEMU;
+- causa: o guardrail `test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready` comparava offsets de escopos diferentes porque `text.index("xhci_hid_input_map_emit_ready_marker()")` encontrava a definição da função antes da chamada em `probe_internal`;
+- correção `a2e04a7858443a837488ff39fc2c26df4261fa58`: busca limitada ao corpo de `xhci_hid_descriptor_probe_internal`; nenhuma linha do runtime HID-2, Kernel Core, storage ou AML foi alterada;
+- certificação final no mesmo SHA `a2e04a78`: CI #1063 ✅, SMP #166 ✅ 3/3, NVMe #263 ✅;
+- `main` promovida por fast-forward diretamente para `a2e04a78`.
 
-## Critério de promoção HID-2
+## Próximo estágio — HID-3
 
-CI principal + SMP 3/3 + NVMe-only devem ficar verdes no mesmo SHA corrigido da PR #18. Depois, registrar SHA/run IDs aqui e no roadmap e fast-forward `main` somente para o runtime comprovado.
+**⬜ PLANEJADO.** Criar um modelo/fila unificada de input consumindo os campos já decodificados, sem acoplar a fila ao xHCI e sem remover a prova Boot existente. O objetivo é publicar eventos normalizados de keyboard/mouse e preparar extensão futura para touch, deixando lifecycle/hot-plug e múltiplos devices para HID-4.
 
-Depois do HID-2:
-- HID-3: event model/fila unificada baseada nos campos decodificados;
+Depois:
 - HID-4: lifecycle/hot-plug e múltiplos devices;
 - I2C-HID somente após transporte I2C/ACPI seguro.
 
