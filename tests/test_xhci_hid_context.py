@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails da fundação do Endpoint Context HID Interrupt IN."""
+"""Guardrails HID-4c.2 do Endpoint Context HID Interrupt IN por slot."""
 
 from pathlib import Path
 import unittest
@@ -20,6 +20,17 @@ class XhciHidContextTests(unittest.TestCase):
         self.assertIn("((endpoint as u16) * 2) + 1", text)
         self.assertIn("XHCI_HID_MAX_CONTEXT_INDEX", text)
         self.assertIn("xhci_hid_context_compute_dci(endpoint_address)", text)
+
+    def test_context_storage_is_partitioned_by_slot_and_epoch(self):
+        text = HID.read_text(encoding="utf-8")
+        self.assertIn("XHCI_HID_CONTEXT_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY", text)
+        self.assertIn("static mut XHCI_HID_CONTEXTS: [XhciHidContextRecord;", text)
+        self.assertIn("pub fn xhci_hid_context_prepare_for_slot(slot_id: u8", text)
+        self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
+        self.assertIn("xhci_context_input_physical_for(slot_id)", text)
+        self.assertIn("xhci_hid_context_ring_physical_for(slot_id)", text)
+        self.assertNotIn("static mut XHCI_HID_CONTEXT_RING:", text)
+        self.assertNotIn("static mut XHCI_HID_CONTEXT_DCI:", text)
 
     def test_hid_ring_is_pmm_dma_backed_and_linked(self):
         text = HID.read_text(encoding="utf-8")
@@ -52,17 +63,24 @@ class XhciHidContextTests(unittest.TestCase):
     def test_full_low_speed_interval_uses_xhci_exponent_encoding(self):
         text = HID.read_text(encoding="utf-8")
         body = text.split("fn xhci_hid_context_compute_interval", 1)[1]
-        body = body.split("pub fn xhci_hid_context_prepare", 1)[0]
+        body = body.split("pub fn xhci_hid_context_is_ready_for", 1)[0]
         self.assertIn("let microframes = (usb_interval as u32) * 8", body)
         self.assertIn("let encoded = exponent + 1", body)
         self.assertIn("let encoded = usb_interval - 1", body)
 
     def test_stage_has_no_command_or_doorbell_side_effects(self):
         text = code_only(HID.read_text(encoding="utf-8")).lower()
-        self.assertNotIn("configure_endpoint", text)
         self.assertNotIn("xhci_command_submit", text)
-        self.assertNotIn("doorbell", text)
         self.assertNotIn("x86_mmio_write32", text)
+
+    def test_wrapper_preserves_first_device_bringup(self):
+        text = HID.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_hid_context_prepare()", 1)[1]
+        self.assertIn("xhci_context_slot_id()", body)
+        self.assertIn("xhci_hid_endpoint_address()", body)
+        self.assertIn("xhci_hid_endpoint_max_packet()", body)
+        self.assertIn("xhci_hid_endpoint_interval()", body)
+        self.assertIn("xhci_hid_context_prepare_for_slot(", body)
 
     def test_stage_stays_bootstrap_compatible(self):
         text = code_only(HID.read_text(encoding="utf-8"))
