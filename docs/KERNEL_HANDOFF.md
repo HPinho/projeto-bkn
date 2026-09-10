@@ -20,13 +20,13 @@ Este arquivo é o registro operacional de continuidade. Código presente não eq
 docs: track HID-3 input event validation
 ```
 
-O runtime HID-3 foi introduzido em `51631f23f8ffa3bd2593c405bfee90f0e5f2fe32`; `2775c12a` acrescenta somente documentação de validação e é o head efetivamente promovido para `main` após os três gates verdes.
+O runtime HID-3 foi introduzido em `51631f23f8ffa3bd2593c405bfee90f0e5f2fe32`; `2775c12a` acrescenta somente documentação de validação e é o head efetivamente promovido após os três gates verdes.
 
 - CI #1066 / `34509266662` ✅;
 - SMP #169 / `34509266645` ✅ — 3/3 boots, todos `stop_reason=complete`;
 - NVMe-only #266 / `34509266646` ✅.
 
-O smoke CI/NVMe no mesmo head exige `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:USB_HID_EVENT_READY`, além dos markers HID-1/HID-2 e `BAKEN:BARE_METAL_READY`. O SMP 3/3 preservou `BAKEN:SMP_PROCESS_MIGRATED` e `BAKEN:SMP_FPU_MIGRATION_READY`.
+`75886e96` é somente o commit documental posterior de certificação HID-3 e é a base da branch HID-4.
 
 ## Invariantes congelados do Kernel Core
 
@@ -61,61 +61,59 @@ O smoke CI/NVMe no mesmo head exige `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:U
 
 **✅ COMPROVADO em `a2e04a78`.** Field map por Report ID, Usage, offsets/flags, sign extension e validação exata de Interrupt IN. Marker `BAKEN:USB_HID_INPUT_MAP_READY`.
 
-Histórico HID-2: SMP #165 `34501501476` falhou somente no guardrail textual antes de build/QEMU; `a2e04a78` corrigiu o escopo da asserção sem mudar runtime. CI #1063 + SMP #166 3/3 + NVMe #263 ficaram verdes e `main` foi promovida por fast-forward.
-
 ## HID-3 — modelo/fila unificada de input
 
-**✅ COMPROVADO em `2775c12a`.**
+**✅ COMPROVADO em `2775c12a`.** Runtime base `51631f23`; CI #1066 + SMP #169 3/3 + NVMe #266 verdes. O smoke exige `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:USB_HID_EVENT_READY`; CI/NVMe continuam provando evento real via `sendkey a`.
 
-Runtime:
+## HID-4a — identidade, generation e lifecycle seguro
+
+**⏳ EM VALIDAÇÃO na branch `hid4-validation`.**
+
+Candidato de runtime:
 ```text
-51631f23f8ffa3bd2593c405bfee90f0e5f2fe32
-feat(hid): add unified input event model
+8f34ae132454ef87afae67288b632886131acfe4
+feat(hid): add generation-safe input lifecycle
 ```
 
-Head certificado/promovido:
+Escopo desta fatia:
+- novo `input_device.sotlas`, registro transport-agnostic fixed-capacity de 16 devices e sem heap;
+- identidade composta por `device_id + generation`; device_id pode ser reutilizado somente com geração nova;
+- estados `EMPTY -> ATTACHED -> ACTIVE`, além de `FAILED` e `DETACHED`;
+- attach/activate/fail/detach/snapshot/is_active protegidos por IRQ-save + spinlock;
+- metadata de transporte preserva kind, instance, address e interface sem importar xHCI;
+- `InputEvent` passa a carregar `device_id` e `device_generation`;
+- fila HID-3 deixa de ser caller-serialized: publish/peek/pop/count/purge são SMP/IRQ-safe;
+- publicação revalida a geração ativa já dentro do lock da fila para fechar corrida detach-vs-publish;
+- detach invalida primeiro a geração, depois purga eventos antigos e por último limpa o estado HID;
+- `hid_input_events.sotlas` separa estado por device x Report ID e possui bind/unbind generation-safe;
+- processamento HID continua transport-agnostic e HID-2 permanece autoridade de validação/decodificação;
+- xHCI registra a primeira interface HID real no generic registry após HID-2/HID-3 estarem prontos;
+- o report Interrupt IN usa a identidade registrada antes de publicar qualquer evento;
+- fallback Boot e prova física QEMU da tecla A permanecem intactos.
+
+Novo gate runtime:
 ```text
-2775c12a1c36dbcf9f88cee25de0c8ad98242d3c
-docs: track HID-3 input event validation
+BAKEN:USB_HID_DEVICE_READY
 ```
 
-Escopo comprovado:
-- `input_event.sotlas`: ABI comum de eventos e fila FIFO fixed-capacity de 512 entradas, sem heap;
-- core de eventos sem import de HID, xHCI, DMA ou ACPI;
-- classes generic/keyboard/pointer/touch e tipos key down/up, button down/up, relative/absolute;
-- sequência monotônica, `peek`, `pop`, contador e diagnóstico de overflow;
-- `hid_input_events.sotlas`: tradutor transport-agnostic HID-2 -> `InputEvent`;
-- estado de teclas e botões separado por Report ID;
-- teclado: Usage Page 0x07, transições reais e Usage 0 tratado como No Event;
-- campos Variable só são considerados pressionados com valor diferente de zero;
-- mouse: Button Page 0x09 + X/Y/Wheel relativos da Generic Desktop Page;
-- HID-2 continua obrigatoriamente validando/decodificando o Interrupt IN antes da tradução;
-- xHCI inicializa HID-3 somente depois do mapa HID-2 real;
-- Interrupt IN real passa pelo tradutor HID-3 antes do fallback Boot legado;
-- fallback Boot e a prova física QEMU da tecla A permanecem intactos.
-
-Provas:
+Falha dedicada:
 ```text
-BAKEN:USB_HID_EVENT_MODEL_READY
-BAKEN:USB_HID_EVENT_READY
+BAKEN:USB_HID_DEVICE_FAILED
 ```
 
-`USB_HID_EVENT_MODEL_READY` prova que o core/fila foi inicializado sobre o mapa real. `USB_HID_EVENT_READY` só é emitido quando um Interrupt IN real aumenta o número de eventos publicados. Como CI #1066 e NVMe #266 passaram o smoke que exige ambos os markers, a injeção `sendkey a` produziu a prova real de evento normalizado. SMP #169 confirmou ainda 3/3 boots do Kernel Core no mesmo candidato integrado.
+O smoke CI/NVMe exige `USB_HID_DEVICE_READY`; o SMP local/workflow também passa a exigir o marker em todos os três boots, além de HID-1/HID-2/HID-3 e das provas do Kernel Core.
 
-Certificação:
-- CI #1066 / `34509266662` ✅;
-- SMP #169 / `34509266645` ✅ — 3/3;
-- NVMe-only #266 / `34509266646` ✅.
+### Limite honesto desta fatia
 
-## Próximo: HID-4 — lifecycle / múltiplos devices
+HID-4a **não declara xHCI multi-device completo**. `xhci_slot`, `xhci_context`, `xhci_address`, `xhci_hid_context`, `xhci_hid_report` e o mapa HID-2 ainda possuem singletons. O objetivo desta fatia é estabelecer identidade/lifecycle/concurrency corretos antes de migrar esses estados para estruturas per-device.
 
-**⬜ PLANEJADO.** A próxima etapa deve tratar concorrência e ciclo de vida do input sem reabrir HID-0..HID-3:
-- identidade estável por dispositivo/interface, não somente um primeiro HID global;
-- attach/detach e invalidação segura de estado/fila;
-- múltiplos HID simultâneos sem colisão de Report ID entre dispositivos;
-- cancelamento/recovery de Interrupt IN e endpoint lifecycle;
-- hot-plug com bounds e diagnóstico fail-closed;
-- preservar o event model genérico como fronteira entre transportes e consumers.
+### Próximas fatias HID-4
+
+- HID-4b: transformar o mapa/decoder HID-2 em contexto per-device, eliminando o singleton do Report Descriptor/field map;
+- HID-4c: converter slot/context/address/HID rings xHCI para tabelas por slot/interface e enumeração de múltiplos devices;
+- HID-4d: attach/detach físico, cancel/recovery de Interrupt IN e hot-plug/re-enumeração bounded/fail-closed.
+
+Critério de promoção HID-4a: CI principal + SMP 3/3 + NVMe-only verdes no mesmo head final da branch. Até isso ocorrer, `main` permanece na baseline HID-3 certificada.
 
 I2C-HID continua somente após transporte I2C/ACPI seguro.
 
