@@ -1,5 +1,9 @@
 // Baken OS — inventário canônico da plataforma pós-cutover.
 // Copia fatos de ACPI/APIC/PCI; não guarda ponteiros UEFI nem inicializa drivers.
+//
+// AML-6a é validado aqui, depois de AML-5 e antes da publicação PLATFORM_READY.
+// Nesta etapa o evaluator executa somente seus self-tests sintéticos; descoberta
+// dinâmica de _STA/_CRS/etc. continua bloqueada até AML-6b.
 module kernel::platform::inventory;
 
 import kernel::acpi::tables::*;
@@ -7,6 +11,7 @@ import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
 import kernel::acpi::hpet::*;
 import kernel::acpi::aml_tables::*;
+import kernel::acpi::aml_evaluator::*;
 import kernel::drivers::pci_bus::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
@@ -48,6 +53,16 @@ static mut PLATFORM_INFO: PlatformInventory = PlatformInventory {
 @system
 pub fn platform_inventory_init() -> bool {
     unsafe { if PLATFORM_INFO.valid { return true; } }
+
+    // AML-6a fica propositalmente fora do caminho de descoberta AML-5. Ele é
+    // provado como engine isolado sobre o namespace real já carregado.
+    if !aml_evaluator_is_ready() {
+        if !aml_evaluator_self_test() {
+            aml_evaluator_emit_failure_markers();
+            return false;
+        }
+    }
+
     if !acpi_is_ready() || !acpi_uses_post_cutover_direct_map() ||
        !aml_tables_is_ready() || aml_dsdt() == (null as *const u8) ||
        !madt_is_ready() || !lapic_is_ready() || !ioapic_is_ready() { return false; }
@@ -105,6 +120,9 @@ pub fn platform_inventory_is_ready() -> bool { unsafe { return PLATFORM_INFO.val
 @system
 pub fn platform_inventory_emit_ready_marker() -> bool {
     if !platform_inventory_is_ready() { return false; }
+    // A emissão é encadeada: PLATFORM_READY jamais aparece se a prova AML-6a
+    // não tiver publicado seu marker primeiro.
+    if !aml_evaluator_emit_ready_marker() { return false; }
     let marker: [u8; 21] = [
         66,65,75,69,78,58,80,76,65,84,70,79,82,77,95,82,69,65,68,89,10
     ];
