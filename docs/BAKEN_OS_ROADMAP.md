@@ -17,11 +17,11 @@ a2e04a7858443a837488ff39fc2c26df4261fa58
 test(hid): scope HID-2 runtime order assertion
 ```
 
-O runtime HID-2 está em `7e3008ae`; `a2e04a78` corrige apenas o guardrail de teste e é o SHA final promovido.
-
 - CI #1063 / `34501892035` ✅;
-- SMP #166 / `34501892066` ✅ — 3/3 boots;
+- SMP #166 / `34501892066` ✅ — 3/3;
 - NVMe #263 / `34501892022` ✅.
+
+`89640db8` é somente o commit documental posterior.
 
 ---
 
@@ -48,8 +48,8 @@ O runtime HID-2 está em `7e3008ae`; `a2e04a78` corrige apenas o guardrail de te
 | HID-0 Boot HID xHCI | ✅ | keyboard/mouse Boot + Interrupt IN real |
 | HID-1 Report Descriptor | ✅ | fetch real + parser bounded transport-agnostic |
 | HID-2 Field map / decoder | ✅ | Report ID, Usage, bit offsets, flags e valores |
-| HID-3 Input event model | ⬜ | eventos unificados keyboard/mouse/touch |
-| HID-4 Hot-plug/lifecycle | ⬜ | attach/detach/recovery e múltiplos devices |
+| HID-3 Input event model | ⏳ | fila e eventos normalizados keyboard/mouse |
+| HID-4 Hot-plug/lifecycle | ⬜ | concorrência, attach/detach/recovery e múltiplos devices |
 | I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
 
 ### HID-1 — certificado
@@ -58,29 +58,39 @@ O runtime HID-2 está em `7e3008ae`; `a2e04a78` corrige apenas o guardrail de te
 
 ### HID-2 — certificado
 
-Runtime implementado em `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b`:
-- field map transport-agnostic e fixed-capacity;
-- Report IDs;
-- Usage lists e Usage Minimum/Maximum;
-- bit offsets/widths e flags Main;
-- Logical Minimum/Maximum e sign extension;
-- validação exata do comprimento de cada Interrupt IN;
-- arrays sem range demonstrável permanecem usage-unresolved;
-- descriptor real HID-1 alimenta o mapa;
-- report real passa pelo decoder antes do fallback Boot;
-- marker `BAKEN:USB_HID_INPUT_MAP_READY` e falha `BAKEN:USB_HID_INPUT_MAP_FAILED`.
+`a2e04a78`: CI #1063 / `34501892035` ✅; SMP #166 / `34501892066` ✅ 3/3; NVMe #263 / `34501892022` ✅. Runtime base em `7e3008ae`; correção final foi somente do guardrail textual.
 
-Histórico:
-- SMP #165 / `34501501476` ❌ antes do build/QEMU por bug no próprio teste de ordem (`text.index` no arquivo inteiro);
-- correção `a2e04a7858443a837488ff39fc2c26df4261fa58` restringiu a asserção a `xhci_hid_descriptor_probe_internal`, sem alterar runtime;
-- CI #1063 / `34501892035` ✅;
-- SMP #166 / `34501892066` ✅ — 3/3, com `USB_HID_INPUT_MAP_READY` e prova completa até `SMP_FPU_MIGRATION_READY`;
-- NVMe #263 / `34501892022` ✅;
-- `main` promovida por fast-forward para `a2e04a78`.
+### HID-3 — candidato atual
 
-### HID-3 — próximo
+Branch: `hid3-validation`.
 
-**⬜ PLANEJADO.** Modelo e fila unificada de eventos consumindo os campos HID-2 já decodificados, inicialmente keyboard/mouse, com arquitetura extensível a touch. O event core deve ser transport-agnostic; xHCI atua como produtor. Lifecycle/hot-plug e múltiplos devices permanecem HID-4.
+Runtime:
+```text
+51631f23f8ffa3bd2593c405bfee90f0e5f2fe32
+feat(hid): add unified input event model
+```
+
+Implementação:
+- `input_event.sotlas`: fila FIFO 512, fixed-capacity, sem heap e independente de protocolo/transporte;
+- ABI de eventos com classes keyboard/pointer/touch e key/button/relative/absolute;
+- `hid_input_events.sotlas`: HID-2 -> eventos normalizados, sem dependência xHCI;
+- estado anterior por Report ID;
+- teclado por Usage Page 0x07 com press/release edge detection;
+- Variable exige valor != 0; Usage 0 não gera tecla;
+- mouse: botões + X/Y/Wheel relativos assinados;
+- xHCI continua apenas como produtor de reports;
+- HID-2 continua autoridade de validação/decodificação antes do tradutor;
+- fallback Boot e a prova QEMU da tecla A permanecem.
+
+Markers:
+```text
+BAKEN:USB_HID_EVENT_MODEL_READY
+BAKEN:USB_HID_EVENT_READY
+```
+
+O segundo marker exige que um Interrupt IN real publique evento; CI/NVMe continuam usando `sendkey a`. Falhas `USB_HID_EVENT_MODEL_FAILED` e `USB_HID_EVENT_FAILED` são terminais no smoke.
+
+**Critério:** CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch. `main` permanece no HID-2 até isso ocorrer.
 
 ## Trilha C — Storage de produção
 

@@ -20,13 +20,13 @@ a2e04a7858443a837488ff39fc2c26df4261fa58
 test(hid): scope HID-2 runtime order assertion
 ```
 
-O runtime HID-2 foi introduzido em `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b`; `a2e04a78` altera apenas o guardrail de teste/documentação e é o SHA final certificado/promovido.
+O runtime HID-2 foi introduzido em `7e3008ae`; `a2e04a78` alterou apenas o guardrail final e é o SHA certificado/promovido.
 
 - CI #1063 / `34501892035` ✅;
-- SMP #166 / `34501892066` ✅ — 3/3 boots independentes completos;
+- SMP #166 / `34501892066` ✅ — 3/3 boots;
 - NVMe-only #263 / `34501892022` ✅.
 
-Em todos os boots SMP, `BAKEN:USB_HID_INPUT_MAP_READY` foi observado antes de `BAKEN:USB_HID_DESCRIPTOR_READY`, e a prova prosseguiu até `BAKEN:SMP_FPU_MIGRATION_READY` sem relaxar os invariantes do Kernel Core.
+`89640db8` é o commit documental posterior de certificação HID-2.
 
 ## Invariantes congelados do Kernel Core
 
@@ -43,7 +43,7 @@ Em todos os boots SMP, `BAKEN:USB_HID_INPUT_MAP_READY` foi observado antes de `B
 
 # ACPI/AML
 
-**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 permanecem fechados. O checkpoint AML final `7803447a` passou CI #1056 + SMP #159 3/3 + NVMe #256 e continua sendo reexercitado pelos gates atuais.
+**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 permanecem fechados. Checkpoint final `7803447a`; os gates HID continuam reexercitando essa base.
 
 ---
 
@@ -55,51 +55,58 @@ Em todos os boots SMP, `BAKEN:USB_HID_INPUT_MAP_READY` foi observado antes de `B
 
 ## HID-1 — Report Descriptor genérico
 
-**✅ COMPROVADO em `1b3f94cc`.**
-
-- parser bounded e transport-agnostic de HID Report Descriptor;
-- EP0 busca o Report Descriptor real com `GET_DESCRIPTOR(Report)`;
-- Boot protocol não inventa layout;
-- `BAKEN:USB_HID_DESCRIPTOR_READY` obrigatório;
-- `BAKEN:USB_HID_DESCRIPTOR_FAILED` terminal.
-
-Prova HID-1: CI #1059 / `34497000191` ✅; SMP #162 / `34497000136` ✅ 3/3; NVMe #259 / `34497000185` ✅.
+**✅ COMPROVADO em `1b3f94cc`.** Report Descriptor real via EP0, parser bounded/transport-agnostic e marker `BAKEN:USB_HID_DESCRIPTOR_READY`.
 
 ## HID-2 — Field map / decoder genérico
 
-**✅ COMPROVADO em `a2e04a78`.**
+**✅ COMPROVADO em `a2e04a78`.** Field map por Report ID, Usage, offsets/flags, sign extension e validação exata de Interrupt IN. Marker `BAKEN:USB_HID_INPUT_MAP_READY`.
 
-Implementação de runtime em `7e3008ae`:
-- `hid_input_report.sotlas` independente de xHCI/DMA/ACPI;
-- até 512 campos, 256 Report IDs e 256 usages locais por Main item, sem heap;
-- mapa por Report ID, bit offset/width, Usage Page/Usage e flags Main;
-- Usage list e Usage Minimum/Maximum bounded;
-- Logical Minimum/Maximum + sign extension;
-- Report ID é prefixo do wire report, separado dos offsets do payload;
-- comprimento real do Interrupt IN deve coincidir exatamente com a geometria do Report ID;
-- arrays não contíguos sem range demonstrável permanecem usage-unresolved;
-- Buffered Bytes/Delimiter/Push/Pop continuam fail-closed;
-- self-test cobre teclado Boot, mouse signed-relative, Report ID e truncamento;
-- mapa é construído sobre os bytes reais do Report Descriptor HID-1;
-- Interrupt IN real é validado pelo mapa antes do fallback Boot;
-- `BAKEN:USB_HID_INPUT_MAP_READY` obrigatório no smoke;
-- `BAKEN:USB_HID_INPUT_MAP_FAILED` terminal.
+Histórico HID-2: SMP #165 `34501501476` falhou somente no guardrail textual antes de build/QEMU; `a2e04a78` corrigiu o escopo da asserção sem mudar runtime. CI #1063 + SMP #166 3/3 + NVMe #263 ficaram verdes e `main` foi promovida por fast-forward.
 
-### Histórico de validação HID-2
+## HID-3 — modelo/fila unificada de input
 
-- candidato inicial `7e3008ae43af73b89ea8cd3fbb03c8f3a45c920b`;
-- SMP #165 / `34501501476` ❌ em `Verify SMP Contracts`, antes de build/QEMU;
-- causa: o guardrail `test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready` comparava offsets de escopos diferentes porque `text.index("xhci_hid_input_map_emit_ready_marker()")` encontrava a definição da função antes da chamada em `probe_internal`;
-- correção `a2e04a7858443a837488ff39fc2c26df4261fa58`: busca limitada ao corpo de `xhci_hid_descriptor_probe_internal`; nenhuma linha do runtime HID-2, Kernel Core, storage ou AML foi alterada;
-- certificação final no mesmo SHA `a2e04a78`: CI #1063 ✅, SMP #166 ✅ 3/3, NVMe #263 ✅;
-- `main` promovida por fast-forward diretamente para `a2e04a78`.
+**⏳ EM VALIDAÇÃO na branch `hid3-validation`.**
 
-## Próximo estágio — HID-3
+Candidato de runtime:
+```text
+51631f23f8ffa3bd2593c405bfee90f0e5f2fe32
+feat(hid): add unified input event model
+```
 
-**⬜ PLANEJADO.** Criar um modelo/fila unificada de input consumindo os campos já decodificados, sem acoplar a fila ao xHCI e sem remover a prova Boot existente. O objetivo é publicar eventos normalizados de keyboard/mouse e preparar extensão futura para touch, deixando lifecycle/hot-plug e múltiplos devices para HID-4.
+Escopo:
+- novo `input_event.sotlas`: ABI comum de eventos e fila FIFO fixed-capacity de 512 entradas, sem heap;
+- core de eventos não importa HID, xHCI, DMA ou ACPI;
+- classes generic/keyboard/pointer/touch e tipos key down/up, button down/up, relative/absolute;
+- sequência monotônica, `peek`, `pop`, contador e diagnóstico de overflow;
+- novo `hid_input_events.sotlas`: tradutor transport-agnostic HID-2 -> `InputEvent`;
+- estado de teclas e botões separado por Report ID, evitando releases fabricados entre reports compostos;
+- teclado: Usage Page 0x07, transições reais e Usage 0 tratado como No Event;
+- campos Variable só são considerados pressionados com valor diferente de zero;
+- mouse: Button Page 0x09 + X/Y/Wheel relativos da Generic Desktop Page;
+- reports continuam obrigatoriamente validados/decodificados pelo HID-2 antes da tradução;
+- xHCI inicializa HID-3 somente depois do mapa HID-2 real;
+- Interrupt IN real passa por HID-3 antes do fallback Boot legado;
+- o fallback Boot e a prova física QEMU da tecla A permanecem intactos.
 
-Depois:
-- HID-4: lifecycle/hot-plug e múltiplos devices;
+Provas novas:
+```text
+BAKEN:USB_HID_EVENT_MODEL_READY
+BAKEN:USB_HID_EVENT_READY
+```
+
+`USB_HID_EVENT_MODEL_READY` prova que o core/fila foi inicializado sobre o mapa real. `USB_HID_EVENT_READY` só é emitido quando um Interrupt IN real aumenta o número de eventos publicados; report neutro não satisfaz esse gate. CI/NVMe continuam injetando `sendkey a`, então o smoke exige ambos os markers além do `STEP=W` existente.
+
+Falhas dedicadas:
+```text
+BAKEN:USB_HID_EVENT_MODEL_FAILED
+BAKEN:USB_HID_EVENT_FAILED
+```
+
+Critério de promoção HID-3: CI principal + SMP 3/3 + NVMe-only verdes no mesmo SHA final da branch, sem relaxar os gates HID-0/1/2 nem qualquer invariante do Kernel Core.
+
+## Depois do HID-3
+
+- HID-4: concorrência/lifecycle, attach/detach/recovery e múltiplos devices;
 - I2C-HID somente após transporte I2C/ACPI seguro.
 
 `HPinho/LangSotlas` permanece somente leitura/referência salvo autorização explícita.
