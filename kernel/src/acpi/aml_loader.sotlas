@@ -169,8 +169,10 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
             if !body.valid {
                 return aml_loader_fail(table_index, AML_LOADER_ERROR_PACKAGE, opcode, term_offset);
             }
+            // NamePath pode ser NullName. Scope(\) é a codificação normal para
+            // reabrir a raiz e deve resolver para o nó 0, não ser rejeitado.
             let name = aml_decode_name_string(&mut body);
-            if !name.valid || name.segment_count == 0 {
+            if !name.valid {
                 return aml_loader_fail(table_index, AML_LOADER_ERROR_NAME, opcode, term_offset);
             }
             let child_scope = aml_namespace_loader_open_scope(

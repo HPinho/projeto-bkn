@@ -59,6 +59,30 @@ class AcpiAmlLoaderTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
 
+    def test_scope_accepts_root_null_name_but_named_objects_stay_strict(self):
+        scope = self.source.split("} else if opcode == AML_SCOPE_OP {", 1)[1].split(
+            "} else if opcode == AML_METHOD_OP {", 1
+        )[0]
+        self.assertIn("let name = aml_decode_name_string(&mut body)", scope)
+        self.assertIn("if !name.valid {", scope)
+        self.assertNotIn("name.segment_count == 0", scope)
+        self.assertIn("aml_namespace_loader_open_scope", scope)
+
+        name_op = self.source.split("if opcode == AML_NAME_OP {", 1)[1].split(
+            "} else if opcode == AML_SCOPE_OP {", 1
+        )[0]
+        method = self.source.split("} else if opcode == AML_METHOD_OP {", 1)[1].split(
+            "} else if opcode == AML_ALIAS_OP {", 1
+        )[0]
+        self.assertIn("name.segment_count == 0", name_op)
+        self.assertIn("name.segment_count == 0", method)
+
+        open_scope = self.namespace.split("pub fn aml_namespace_loader_open_scope", 1)[1].split(
+            "pub fn aml_namespace_loader_finish", 1
+        )[0]
+        self.assertIn("aml_namespace_lookup_internal(requested_scope, name)", open_scope)
+        self.assertNotIn("segment_count == 0", open_scope)
+
     def test_method_bodies_and_control_flow_are_not_executed(self):
         body = self.source.split("fn aml_loader_parse_term_list", 1)[1].split(
             "fn aml_loader_load_definition_block", 1
