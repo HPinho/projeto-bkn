@@ -1,0 +1,627 @@
+// Baken OS — AML-6a: evaluator controlado, read-only e sem efeitos de hardware.
+//
+// Executa apenas o subconjunto mínimo necessário para métodos ACPI simples:
+// constantes/data objects, Arg0..Arg6, Local0..Local7, Store/Return,
+// aritmética/lógica inteira e If/Else. Não executa OperationRegion/Field,
+// Sleep/Stall/While, Notify, sincronização, chamadas encadeadas de Method nem
+// escrita em objetos globais do namespace.
+//
+// Todo trabalho é limitado por fuel e profundidade. Firmware AML permanece input
+// não confiável; opcode, tipo, target ou controle de fluxo fora do subconjunto
+// suportado falham fechados.
+
+module kernel::acpi::aml_evaluator;
+
+import kernel::acpi::aml_decoder::*;
+import kernel::acpi::aml_data::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_loader::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_EVAL_MAX_ARGS: usize = 7;
+pub const AML_EVAL_MAX_LOCALS: usize = 8;
+pub const AML_EVAL_MAX_DEPTH: usize = 8;
+pub const AML_EVAL_DEFAULT_FUEL: usize = 4096;
+
+pub const AML_EVAL_VALUE_NONE: u8 = 0;
+pub const AML_EVAL_VALUE_INTEGER: u8 = 1;
+pub const AML_EVAL_VALUE_STRING: u8 = 2;
+pub const AML_EVAL_VALUE_BUFFER: u8 = 3;
+pub const AML_EVAL_VALUE_PACKAGE: u8 = 4;
+pub const AML_EVAL_VALUE_VAR_PACKAGE: u8 = 5;
+
+pub const AML_LOCAL0_OP: u8 = 0x60;
+pub const AML_LOCAL7_OP: u8 = 0x67;
+pub const AML_ARG0_OP: u8 = 0x68;
+pub const AML_ARG6_OP: u8 = 0x6E;
+pub const AML_STORE_OP: u8 = 0x70;
+pub const AML_ADD_OP: u8 = 0x72;
+pub const AML_SUBTRACT_OP: u8 = 0x74;
+pub const AML_MULTIPLY_OP: u8 = 0x77;
+pub const AML_SHIFT_LEFT_OP: u8 = 0x79;
+pub const AML_SHIFT_RIGHT_OP: u8 = 0x7A;
+pub const AML_AND_OP: u8 = 0x7B;
+pub const AML_OR_OP: u8 = 0x7D;
+pub const AML_XOR_OP: u8 = 0x7F;
+pub const AML_NOT_OP: u8 = 0x80;
+pub const AML_LAND_OP: u8 = 0x90;
+pub const AML_LOR_OP: u8 = 0x91;
+pub const AML_LNOT_OP: u8 = 0x92;
+pub const AML_LEQUAL_OP: u8 = 0x93;
+pub const AML_LGREATER_OP: u8 = 0x94;
+pub const AML_LLESS_OP: u8 = 0x95;
+pub const AML_IF_EVAL_OP: u8 = 0xA0;
+pub const AML_ELSE_EVAL_OP: u8 = 0xA1;
+pub const AML_NOOP_EVAL_OP: u8 = 0xA3;
+pub const AML_RETURN_OP: u8 = 0xA4;
+
+const AML_EVAL_ERROR_NOT_READY: u8 = 1;
+const AML_EVAL_ERROR_BOUNDS: u8 = 2;
+const AML_EVAL_ERROR_FUEL: u8 = 3;
+const AML_EVAL_ERROR_DEPTH: u8 = 4;
+const AML_EVAL_ERROR_TYPE: u8 = 5;
+const AML_EVAL_ERROR_TARGET: u8 = 6;
+const AML_EVAL_ERROR_OPCODE: u8 = 7;
+const AML_EVAL_ERROR_NAMESPACE: u8 = 8;
+const AML_EVAL_ERROR_METHOD: u8 = 9;
+const AML_EVAL_ERROR_ARITY: u8 = 10;
+const AML_EVAL_ERROR_FLAGS: u8 = 11;
+const AML_EVAL_ERROR_CONTROL: u8 = 12;
+
+pub struct AmlEvalValue {
+    pub kind: u8;
+    pub integer_value: u64;
+    pub data: *const u8;
+    pub data_length: usize;
+    pub element_count: usize;
+    pub valid: bool;
+}
+
+struct AmlEvalFrame {
+    args: [AmlEvalValue; AML_EVAL_MAX_ARGS];
+    locals: [AmlEvalValue; AML_EVAL_MAX_LOCALS];
+    returned: bool;
+    return_value: AmlEvalValue;
+}
+
+static mut AML_EVALUATOR_READY: bool = false;
+static mut AML_EVALUATOR_LAST_ERROR: u32 = 0;
+static mut AML_EVALUATOR_LAST_OFFSET: usize = 0;
+
+@system
+fn aml_eval_none() -> AmlEvalValue {
+    return AmlEvalValue {
+        kind: AML_EVAL_VALUE_NONE,
+        integer_value: 0,
+        data: null as *const u8,
+        data_length: 0,
+        element_count: 0,
+        valid: true
+    };
+}
+
+@system
+pub fn aml_eval_integer(value: u64) -> AmlEvalValue {
+    return AmlEvalValue {
+        kind: AML_EVAL_VALUE_INTEGER,
+        integer_value: value,
+        data: null as *const u8,
+        data_length: 0,
+        element_count: 0,
+        valid: true
+    };
+}
+
+@system
+fn aml_eval_invalid() -> AmlEvalValue {
+    let mut value = aml_eval_none();
+    value.valid = false;
+    return value;
+}
+
+@system
+fn aml_eval_record_failure(reason: u8, offset: usize) -> void {
+    unsafe {
+        AML_EVALUATOR_LAST_ERROR = (reason as u32) << 24;
+        AML_EVALUATOR_LAST_OFFSET = offset;
+    }
+}
+
+@system
+fn aml_eval_fail_value(reason: u8, offset: usize) -> AmlEvalValue {
+    aml_eval_record_failure(reason, offset);
+    return aml_eval_invalid();
+}
+
+@system
+fn aml_eval_fail_bool(reason: u8, offset: usize) -> bool {
+    aml_eval_record_failure(reason, offset);
+    return false;
+}
+
+@system
+fn aml_eval_frame_new() -> AmlEvalFrame {
+    let empty = aml_eval_none();
+    return AmlEvalFrame {
+        args: [empty; AML_EVAL_MAX_ARGS],
+        locals: [empty; AML_EVAL_MAX_LOCALS],
+        returned: false,
+        return_value: empty
+    };
+}
+
+@system
+fn aml_eval_consume_fuel(fuel: *mut usize, offset: usize) -> bool {
+    if fuel == (null as *mut usize) {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_FUEL, offset);
+    }
+    unsafe {
+        if (*fuel) == 0 {
+            return aml_eval_fail_bool(AML_EVAL_ERROR_FUEL, offset);
+        }
+        (*fuel) -= 1;
+    }
+    return true;
+}
+
+@system
+fn aml_eval_is_integer_data_opcode(opcode: u8) -> bool {
+    return opcode == AML_ZERO_OP || opcode == AML_ONE_OP ||
+        opcode == AML_ONES_OP || opcode == AML_BYTE_PREFIX ||
+        opcode == AML_WORD_PREFIX || opcode == AML_DWORD_PREFIX ||
+        opcode == AML_QWORD_PREFIX;
+}
+
+@system
+fn aml_eval_is_data_opcode(opcode: u8) -> bool {
+    return aml_eval_is_integer_data_opcode(opcode) ||
+        opcode == AML_STRING_PREFIX || opcode == AML_BUFFER_OP ||
+        opcode == AML_PACKAGE_OP || opcode == AML_VAR_PACKAGE_OP;
+}
+
+@system
+fn aml_eval_is_name_start(opcode: u8) -> bool {
+    return opcode == AML_ROOT_CHAR || opcode == AML_PARENT_PREFIX_CHAR ||
+        opcode == AML_DUAL_NAME_PREFIX || opcode == AML_MULTI_NAME_PREFIX ||
+        opcode == '_' as u8 || (opcode >= 'A' as u8 && opcode <= 'Z' as u8);
+}
+
+@system
+fn aml_eval_from_data(data: AmlDataObject) -> AmlEvalValue {
+    if !data.valid { return aml_eval_invalid(); }
+    if data.kind == AML_DATA_KIND_INTEGER { return aml_eval_integer(data.integer_value); }
+    if data.kind == AML_DATA_KIND_STRING {
+        return AmlEvalValue { kind: AML_EVAL_VALUE_STRING, integer_value: 0,
+            data: data.data, data_length: data.data_length, element_count: 0, valid: true };
+    }
+    if data.kind == AML_DATA_KIND_BUFFER {
+        return AmlEvalValue { kind: AML_EVAL_VALUE_BUFFER, integer_value: data.integer_value,
+            data: data.data, data_length: data.data_length, element_count: 0, valid: true };
+    }
+    if data.kind == AML_DATA_KIND_PACKAGE || data.kind == AML_DATA_KIND_VAR_PACKAGE {
+        return AmlEvalValue {
+            kind: if data.kind == AML_DATA_KIND_PACKAGE { AML_EVAL_VALUE_PACKAGE }
+                  else { AML_EVAL_VALUE_VAR_PACKAGE },
+            integer_value: 0, data: data.data, data_length: data.data_length,
+            element_count: data.element_count, valid: true
+        };
+    }
+    return aml_eval_invalid();
+}
+
+@system
+fn aml_eval_from_namespace(index: usize, offset: usize) -> AmlEvalValue {
+    let node = aml_namespace_node(index);
+    if node == (null as *const AmlNamespaceNode) {
+        return aml_eval_fail_value(AML_EVAL_ERROR_NAMESPACE, offset);
+    }
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_NAME {
+            return aml_eval_fail_value(
+                if (*node).kind == AML_NAMESPACE_KIND_METHOD { AML_EVAL_ERROR_METHOD }
+                else { AML_EVAL_ERROR_NAMESPACE }, offset
+            );
+        }
+        if (*node).value_kind == AML_NAMESPACE_VALUE_INTEGER {
+            return aml_eval_integer((*node).integer_value);
+        }
+        if (*node).value_kind == AML_NAMESPACE_VALUE_STRING {
+            return AmlEvalValue { kind: AML_EVAL_VALUE_STRING, integer_value: 0,
+                data: (*node).aml_body, data_length: (*node).aml_body_length,
+                element_count: 0, valid: true };
+        }
+        if (*node).value_kind == AML_NAMESPACE_VALUE_BUFFER {
+            return AmlEvalValue { kind: AML_EVAL_VALUE_BUFFER, integer_value: 0,
+                data: (*node).aml_body, data_length: (*node).aml_body_length,
+                element_count: 0, valid: true };
+        }
+        if (*node).value_kind == AML_NAMESPACE_VALUE_PACKAGE ||
+           (*node).value_kind == AML_NAMESPACE_VALUE_VAR_PACKAGE {
+            return AmlEvalValue {
+                kind: if (*node).value_kind == AML_NAMESPACE_VALUE_PACKAGE {
+                    AML_EVAL_VALUE_PACKAGE
+                } else { AML_EVAL_VALUE_VAR_PACKAGE },
+                integer_value: 0, data: (*node).aml_body,
+                data_length: (*node).aml_body_length, element_count: 0, valid: true
+            };
+        }
+    }
+    return aml_eval_fail_value(AML_EVAL_ERROR_TYPE, offset);
+}
+
+@system
+fn aml_eval_read_slot(frame: *const AmlEvalFrame, opcode: u8,
+                      offset: usize) -> AmlEvalValue {
+    if frame == (null as *const AmlEvalFrame) {
+        return aml_eval_fail_value(AML_EVAL_ERROR_BOUNDS, offset);
+    }
+    unsafe {
+        if opcode >= AML_LOCAL0_OP && opcode <= AML_LOCAL7_OP {
+            return (*frame).locals[(opcode - AML_LOCAL0_OP) as usize];
+        }
+        if opcode >= AML_ARG0_OP && opcode <= AML_ARG6_OP {
+            return (*frame).args[(opcode - AML_ARG0_OP) as usize];
+        }
+    }
+    return aml_eval_fail_value(AML_EVAL_ERROR_OPCODE, offset);
+}
+
+@system
+fn aml_eval_write_target(cursor: *mut AmlCursor, frame: *mut AmlEvalFrame,
+                         value: AmlEvalValue, offset: usize) -> bool {
+    if cursor == (null as *mut AmlCursor) || frame == (null as *mut AmlEvalFrame) ||
+       aml_cursor_remaining(cursor as *const AmlCursor) == 0 {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_TARGET, offset);
+    }
+    let opcode = aml_cursor_read_u8(cursor);
+    if opcode == AML_NULL_NAME { return true; }
+    unsafe {
+        if opcode >= AML_LOCAL0_OP && opcode <= AML_LOCAL7_OP {
+            (*frame).locals[(opcode - AML_LOCAL0_OP) as usize] = value;
+            return true;
+        }
+        if opcode >= AML_ARG0_OP && opcode <= AML_ARG6_OP {
+            (*frame).args[(opcode - AML_ARG0_OP) as usize] = value;
+            return true;
+        }
+    }
+    // Escrita em NameString/global namespace fica proibida no AML-6a.
+    return aml_eval_fail_bool(AML_EVAL_ERROR_TARGET, offset);
+}
+
+@system
+fn aml_eval_integer_required(value: AmlEvalValue, offset: usize) -> bool {
+    if !value.valid || value.kind != AML_EVAL_VALUE_INTEGER {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_TYPE, offset);
+    }
+    return true;
+}
+
+@system
+fn aml_eval_term_arg(cursor: *mut AmlCursor, scope: usize,
+                     frame: *mut AmlEvalFrame, depth: usize,
+                     fuel: *mut usize) -> AmlEvalValue {
+    if cursor == (null as *mut AmlCursor) || frame == (null as *mut AmlEvalFrame) ||
+       aml_cursor_remaining(cursor as *const AmlCursor) == 0 {
+        return aml_eval_fail_value(AML_EVAL_ERROR_BOUNDS, 0);
+    }
+    let offset = unsafe { (*cursor).offset };
+    if depth >= AML_EVAL_MAX_DEPTH {
+        return aml_eval_fail_value(AML_EVAL_ERROR_DEPTH, offset);
+    }
+    if !aml_eval_consume_fuel(fuel, offset) { return aml_eval_invalid(); }
+    let opcode = aml_cursor_peek_u8(cursor as *const AmlCursor);
+
+    if aml_eval_is_data_opcode(opcode) {
+        let data = aml_decode_data_object(cursor);
+        if !data.valid { return aml_eval_fail_value(AML_EVAL_ERROR_BOUNDS, offset); }
+        let value = aml_eval_from_data(data);
+        if !value.valid { return aml_eval_fail_value(AML_EVAL_ERROR_TYPE, offset); }
+        return value;
+    }
+
+    if opcode >= AML_LOCAL0_OP && opcode <= AML_ARG6_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_eval_read_slot(frame as *const AmlEvalFrame, opcode, offset);
+    }
+
+    if aml_eval_is_name_start(opcode) {
+        let name = aml_decode_name_string(cursor);
+        if !name.valid || name.segment_count == 0 {
+            return aml_eval_fail_value(AML_EVAL_ERROR_NAMESPACE, offset);
+        }
+        let index = aml_namespace_lookup(scope, &name);
+        if index == AML_NAMESPACE_INVALID_INDEX {
+            return aml_eval_fail_value(AML_EVAL_ERROR_NAMESPACE, offset);
+        }
+        return aml_eval_from_namespace(index, offset);
+    }
+
+    if opcode == AML_ADD_OP || opcode == AML_SUBTRACT_OP ||
+       opcode == AML_MULTIPLY_OP || opcode == AML_SHIFT_LEFT_OP ||
+       opcode == AML_SHIFT_RIGHT_OP || opcode == AML_AND_OP ||
+       opcode == AML_OR_OP || opcode == AML_XOR_OP {
+        aml_cursor_read_u8(cursor);
+        let left = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !aml_eval_integer_required(left, offset) { return aml_eval_invalid(); }
+        let right = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !aml_eval_integer_required(right, offset) { return aml_eval_invalid(); }
+        let mut result_value: u64 = 0;
+        if opcode == AML_ADD_OP { result_value = left.integer_value + right.integer_value; }
+        else if opcode == AML_SUBTRACT_OP { result_value = left.integer_value - right.integer_value; }
+        else if opcode == AML_MULTIPLY_OP { result_value = left.integer_value * right.integer_value; }
+        else if opcode == AML_SHIFT_LEFT_OP {
+            if right.integer_value >= 64 { return aml_eval_fail_value(AML_EVAL_ERROR_BOUNDS, offset); }
+            result_value = left.integer_value << (right.integer_value as usize);
+        } else if opcode == AML_SHIFT_RIGHT_OP {
+            if right.integer_value >= 64 { return aml_eval_fail_value(AML_EVAL_ERROR_BOUNDS, offset); }
+            result_value = left.integer_value >> (right.integer_value as usize);
+        } else if opcode == AML_AND_OP { result_value = left.integer_value & right.integer_value; }
+        else if opcode == AML_OR_OP { result_value = left.integer_value | right.integer_value; }
+        else { result_value = left.integer_value ^ right.integer_value; }
+        let result = aml_eval_integer(result_value);
+        if !aml_eval_write_target(cursor, frame, result, offset) { return aml_eval_invalid(); }
+        return result;
+    }
+
+    if opcode == AML_NOT_OP {
+        aml_cursor_read_u8(cursor);
+        let operand = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !aml_eval_integer_required(operand, offset) { return aml_eval_invalid(); }
+        let result = aml_eval_integer(~operand.integer_value);
+        if !aml_eval_write_target(cursor, frame, result, offset) { return aml_eval_invalid(); }
+        return result;
+    }
+
+    if opcode == AML_LAND_OP || opcode == AML_LOR_OP ||
+       opcode == AML_LEQUAL_OP || opcode == AML_LGREATER_OP || opcode == AML_LLESS_OP {
+        aml_cursor_read_u8(cursor);
+        let left = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !aml_eval_integer_required(left, offset) { return aml_eval_invalid(); }
+        let right = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !aml_eval_integer_required(right, offset) { return aml_eval_invalid(); }
+        let result_value: u64 = if opcode == AML_LAND_OP {
+            if left.integer_value != 0 && right.integer_value != 0 { 1 } else { 0 }
+        } else if opcode == AML_LOR_OP {
+            if left.integer_value != 0 || right.integer_value != 0 { 1 } else { 0 }
+        } else if opcode == AML_LEQUAL_OP {
+            if left.integer_value == right.integer_value { 1 } else { 0 }
+        } else if opcode == AML_LGREATER_OP {
+            if left.integer_value > right.integer_value { 1 } else { 0 }
+        } else {
+            if left.integer_value < right.integer_value { 1 } else { 0 }
+        };
+        return aml_eval_integer(result_value);
+    }
+
+    if opcode == AML_LNOT_OP {
+        aml_cursor_read_u8(cursor);
+        let operand = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !aml_eval_integer_required(operand, offset) { return aml_eval_invalid(); }
+        return aml_eval_integer(if operand.integer_value == 0 { 1 } else { 0 });
+    }
+    return aml_eval_fail_value(AML_EVAL_ERROR_OPCODE, offset);
+}
+
+@system
+fn aml_eval_term_list(cursor: *mut AmlCursor, scope: usize,
+                      frame: *mut AmlEvalFrame, depth: usize,
+                      fuel: *mut usize) -> bool {
+    if cursor == (null as *mut AmlCursor) || frame == (null as *mut AmlEvalFrame) {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_BOUNDS, 0);
+    }
+    if depth >= AML_EVAL_MAX_DEPTH { return aml_eval_fail_bool(AML_EVAL_ERROR_DEPTH, 0); }
+
+    while aml_cursor_remaining(cursor as *const AmlCursor) > 0 {
+        unsafe { if (*frame).returned { return true; } }
+        let offset = unsafe { (*cursor).offset };
+        if !aml_eval_consume_fuel(fuel, offset) { return false; }
+        let opcode = aml_cursor_peek_u8(cursor as *const AmlCursor);
+
+        if opcode == AML_STORE_OP {
+            aml_cursor_read_u8(cursor);
+            let value = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+            if !value.valid || !aml_eval_write_target(cursor, frame, value, offset) { return false; }
+        } else if opcode == AML_RETURN_OP {
+            aml_cursor_read_u8(cursor);
+            let value = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+            if !value.valid { return false; }
+            unsafe { (*frame).return_value = value; (*frame).returned = true; }
+            return true;
+        } else if opcode == AML_IF_EVAL_OP {
+            aml_cursor_read_u8(cursor);
+            let package = aml_decode_pkg_length(cursor);
+            if !package.valid { return aml_eval_fail_bool(AML_EVAL_ERROR_CONTROL, offset); }
+            let mut body = aml_cursor_take(cursor, package.body_bytes);
+            if !body.valid || aml_cursor_remaining(&body) == 0 {
+                return aml_eval_fail_bool(AML_EVAL_ERROR_CONTROL, offset);
+            }
+            let predicate = aml_eval_term_arg(&mut body, scope, frame, depth + 1, fuel);
+            if !aml_eval_integer_required(predicate, offset) { return false; }
+            let take_if = predicate.integer_value != 0;
+            if take_if {
+                if !aml_eval_term_list(&mut body, scope, frame, depth + 1, fuel) { return false; }
+                unsafe { if (*frame).returned { return true; } }
+            }
+            if aml_cursor_remaining(cursor as *const AmlCursor) > 0 &&
+               aml_cursor_peek_u8(cursor as *const AmlCursor) == AML_ELSE_EVAL_OP {
+                let else_offset = unsafe { (*cursor).offset };
+                if !aml_eval_consume_fuel(fuel, else_offset) { return false; }
+                aml_cursor_read_u8(cursor);
+                let else_package = aml_decode_pkg_length(cursor);
+                if !else_package.valid { return aml_eval_fail_bool(AML_EVAL_ERROR_CONTROL, else_offset); }
+                let mut else_body = aml_cursor_take(cursor, else_package.body_bytes);
+                if !else_body.valid { return aml_eval_fail_bool(AML_EVAL_ERROR_CONTROL, else_offset); }
+                if !take_if {
+                    if !aml_eval_term_list(&mut else_body, scope, frame, depth + 1, fuel) { return false; }
+                    unsafe { if (*frame).returned { return true; } }
+                }
+            }
+        } else if opcode == AML_ELSE_EVAL_OP {
+            return aml_eval_fail_bool(AML_EVAL_ERROR_CONTROL, offset);
+        } else if opcode == AML_NOOP_EVAL_OP {
+            aml_cursor_read_u8(cursor);
+        } else if opcode == AML_ADD_OP || opcode == AML_SUBTRACT_OP ||
+                  opcode == AML_MULTIPLY_OP || opcode == AML_SHIFT_LEFT_OP ||
+                  opcode == AML_SHIFT_RIGHT_OP || opcode == AML_AND_OP ||
+                  opcode == AML_OR_OP || opcode == AML_XOR_OP || opcode == AML_NOT_OP ||
+                  opcode == AML_LAND_OP || opcode == AML_LOR_OP || opcode == AML_LNOT_OP ||
+                  opcode == AML_LEQUAL_OP || opcode == AML_LGREATER_OP || opcode == AML_LLESS_OP {
+            let discarded = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+            if !discarded.valid { return false; }
+        } else {
+            return aml_eval_fail_bool(AML_EVAL_ERROR_OPCODE, offset);
+        }
+    }
+    return true;
+}
+
+@system
+fn aml_eval_execute_body(body: *const u8, body_length: usize, scope: usize,
+                         frame: *mut AmlEvalFrame, fuel: *mut usize) -> bool {
+    if body == (null as *const u8) || body_length == 0 || frame == (null as *mut AmlEvalFrame) {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_BOUNDS, 0);
+    }
+    let mut cursor = aml_cursor_new(body, body_length);
+    if !cursor.valid { return aml_eval_fail_bool(AML_EVAL_ERROR_BOUNDS, 0); }
+    if !aml_eval_term_list(&mut cursor, scope, frame, 0, fuel) { return false; }
+    unsafe { if (*frame).returned { return true; } }
+    return aml_cursor_remaining(&cursor) == 0;
+}
+
+@system
+pub fn aml_evaluator_execute_method(method_index: usize,
+                                    arguments: *const AmlEvalValue,
+                                    argument_count: usize,
+                                    result: *mut AmlEvalValue) -> bool {
+    unsafe {
+        if !AML_EVALUATOR_READY || result == (null as *mut AmlEvalValue) {
+            return aml_eval_fail_bool(AML_EVAL_ERROR_NOT_READY, 0);
+        }
+    }
+    if argument_count > AML_EVAL_MAX_ARGS ||
+       (argument_count != 0 && arguments == (null as *const AmlEvalValue)) {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_ARITY, 0);
+    }
+    let node = aml_namespace_node(method_index);
+    if node == (null as *const AmlNamespaceNode) {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_METHOD, 0);
+    }
+    let mut frame = aml_eval_frame_new();
+    let mut method_body: *const u8 = null as *const u8;
+    let mut method_length: usize = 0;
+    let mut method_scope: usize = 0;
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_METHOD {
+            return aml_eval_fail_bool(AML_EVAL_ERROR_METHOD, 0);
+        }
+        let flags = (*node).flags;
+        let declared_args = (flags & 0x07) as usize;
+        if declared_args != argument_count { return aml_eval_fail_bool(AML_EVAL_ERROR_ARITY, 0); }
+        // Serialized/SyncLevel ficam bloqueados até existir lock AML dedicado.
+        if (flags & 0xF8) != 0 { return aml_eval_fail_bool(AML_EVAL_ERROR_FLAGS, 0); }
+        method_body = (*node).aml_body;
+        method_length = (*node).aml_body_length;
+        method_scope = (*node).parent;
+        let mut index: usize = 0;
+        while index < argument_count {
+            if !arguments[index].valid { return aml_eval_fail_bool(AML_EVAL_ERROR_TYPE, index); }
+            frame.args[index] = arguments[index];
+            index += 1;
+        }
+    }
+    let mut fuel: usize = AML_EVAL_DEFAULT_FUEL;
+    if !aml_eval_execute_body(method_body, method_length, method_scope, &mut frame, &mut fuel) {
+        return false;
+    }
+    unsafe { *result = frame.return_value; }
+    return true;
+}
+
+@system
+pub fn aml_evaluator_is_ready() -> bool { unsafe { return AML_EVALUATOR_READY; } }
+
+@system
+pub fn aml_evaluator_self_test() -> bool {
+    if !aml_namespace_is_ready() || !aml_loader_is_ready() || aml_namespace_count() <= 1 {
+        return aml_eval_fail_bool(AML_EVAL_ERROR_NOT_READY, 0);
+    }
+    unsafe {
+        AML_EVALUATOR_READY = false;
+        AML_EVALUATOR_LAST_ERROR = 0;
+        AML_EVALUATOR_LAST_OFFSET = 0;
+    }
+
+    // Store(0x2A, Local0); Return(Add(Local0, One, Local1)) => 0x2B.
+    let arithmetic: [u8; 9] = [
+        AML_STORE_OP,AML_BYTE_PREFIX,0x2A,AML_LOCAL0_OP,
+        AML_RETURN_OP,AML_ADD_OP,AML_LOCAL0_OP,AML_ONE_OP,0x61
+    ];
+    let mut frame = aml_eval_frame_new();
+    let mut fuel: usize = AML_EVAL_DEFAULT_FUEL;
+    if !aml_eval_execute_body(&arithmetic[0], 9, 0, &mut frame, &mut fuel) { return false; }
+    if !frame.returned || !frame.return_value.valid ||
+       frame.return_value.kind != AML_EVAL_VALUE_INTEGER ||
+       frame.return_value.integer_value != 0x2B || frame.locals[1].integer_value != 0x2B {
+        return false;
+    }
+
+    // If (LEqual(Arg0, One)) Return(AA) Else Return(55).
+    let branch: [u8; 13] = [
+        AML_IF_EVAL_OP,0x07,AML_LEQUAL_OP,AML_ARG0_OP,AML_ONE_OP,
+        AML_RETURN_OP,AML_BYTE_PREFIX,0xAA,
+        AML_ELSE_EVAL_OP,0x04,AML_RETURN_OP,AML_BYTE_PREFIX,0x55
+    ];
+    frame = aml_eval_frame_new();
+    frame.args[0] = aml_eval_integer(1);
+    fuel = AML_EVAL_DEFAULT_FUEL;
+    if !aml_eval_execute_body(&branch[0], 13, 0, &mut frame, &mut fuel) ||
+       !frame.returned || frame.return_value.integer_value != 0xAA { return false; }
+
+    frame = aml_eval_frame_new();
+    frame.args[0] = aml_eval_integer(0);
+    fuel = AML_EVAL_DEFAULT_FUEL;
+    if !aml_eval_execute_body(&branch[0], 13, 0, &mut frame, &mut fuel) ||
+       !frame.returned || frame.return_value.integer_value != 0x55 { return false; }
+
+    // Fuel mínimo deve falhar fechado antes de executar a sequência completa.
+    frame = aml_eval_frame_new();
+    fuel = 1;
+    if aml_eval_execute_body(&arithmetic[0], 9, 0, &mut frame, &mut fuel) { return false; }
+
+    unsafe {
+        AML_EVALUATOR_LAST_ERROR = 0;
+        AML_EVALUATOR_LAST_OFFSET = 0;
+        __dma_fence();
+        AML_EVALUATOR_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_evaluator_emit_failure_markers() -> bool {
+    unsafe {
+        if AML_EVALUATOR_LAST_ERROR == 0 { return false; }
+        let first = x86_serial_write_hex32_marker('T' as u8, AML_EVALUATOR_LAST_ERROR);
+        let second = x86_serial_write_hex32_marker(
+            'U' as u8, (AML_EVALUATOR_LAST_OFFSET & 0xFFFFFFFF) as u32
+        );
+        return first && second;
+    }
+}
+
+@system
+pub fn aml_evaluator_emit_ready_marker() -> bool {
+    if !aml_evaluator_is_ready() { return false; }
+    // BAKEN:ACPI_AML_EVALUATOR_READY
+    let marker: [u8; 31] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,69,86,65,76,85,65,84,79,
+        82,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 31 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
