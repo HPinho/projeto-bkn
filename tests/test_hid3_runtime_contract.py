@@ -24,10 +24,15 @@ class Hid3RuntimeContractTests(unittest.TestCase):
 
     def test_real_event_marker_is_not_emitted_for_neutral_report_only(self):
         text = XHCI_REPORT.read_text(encoding="utf-8")
-        body = text.split("fn xhci_hid_report_parse(length: u32) -> bool", 1)[1]
-        body = body.split("pub fn xhci_hid_report_prepare", 1)[0]
+        body = text.split("fn xhci_hid_report_parse_for_slot(slot_id: u8, length: u32) -> bool", 1)[1]
+        body = body.split("pub fn xhci_hid_report_is_ready_for", 1)[0]
+        self.assertIn("let before_events = hid_input_events_events_published()", body)
+        self.assertIn("let after_events = hid_input_events_events_published()", body)
         self.assertIn("after_events > before_events", body)
-        self.assertIn("XHCI_HID_REPORT_EVENT_MARKER_EMITTED", body)
+        self.assertIn("XHCI_HID_REPORT_STATES[state_index].event_marker_emitted", body)
+        marker_test = body.index("after_events > before_events")
+        ready_marker = body.index("xhci_hid_report_emit_event_ready_marker()")
+        self.assertLess(marker_test, ready_marker)
 
 
 if __name__ == "__main__":
