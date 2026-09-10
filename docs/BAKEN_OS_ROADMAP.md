@@ -121,9 +121,10 @@ Branch: `hid4c-validation`, criada diretamente da baseline HID-4b certificada `d
 
 Objetivo completo do HID-4c: retirar os singletons restantes do transporte xHCI e permitir slot/context/address/HID rings/buffers por device/interface, culminando em enumeração de múltiplos HID simultâneos.
 
-#### HID-4c.1 — multi-slot transport core — implementado, em validação
+#### HID-4c.1 — multi-slot transport core — validado na branch
 
-Implementado até o candidato de runtime `bd6f1708`:
+Implementado inicialmente até `bd6f1708`; head documental/revalidado da subfatia: `22ede5d7`.
+
 - novo `xhci_device_table.sotlas` fixed-capacity de 256 Slot IDs, sem heap;
 - associação explícita `slot_id <-> port_id` e `slot_type`;
 - `epoch` por Slot ID para impedir reutilização stale;
@@ -139,14 +140,41 @@ Implementado até o candidato de runtime `bd6f1708`:
 - grafo canônico importa `xhci_device_table`;
 - guardrails de slot/context/address atualizados para exigir as novas APIs e impedir retorno aos singletons antigos.
 
-Gates do candidato `bd6f1708` disparados pela PR #22:
-- CI #1076 / `34530534046` ⏳;
-- SMP #179 / `34530534016` ⏳;
-- NVMe #276 / `34530534020` ⏳.
+Validação final da subfatia no head `22ede5d7`:
+- CI #1078 / `34530989194` ✅;
+- SMP #181 / `34530989212` ✅ — 3/3;
+- NVMe #278 / `34530989192` ✅.
 
-#### HID-4c.2 — próximo
+**Importante:** HID-4c.1 validado não altera a baseline da `main`; HID-4c continua como um único marco em desenvolvimento até 4c.2/4c.3/4c.4 fecharem.
 
-**⬜ PLANEJADO.** Migrar `xhci_hid_context` e `xhci_hid_report` para contexto/ring/buffer Interrupt IN por Slot ID + interface/DCI, eliminando `XHCI_HID_CONTEXT_RING`, enqueue/cycle e report buffer globais do caminho multi-device.
+#### HID-4c.2 — HID Interrupt IN por slot/interface — implementado, em validação
+
+Implementação atual:
+- `xhci_hid_context` possui tabela `XHCI_HID_CONTEXTS` por Slot ID + epoch;
+- DCI, endpoint address, max packet, interval e Transfer Ring Interrupt IN ficam separados por slot;
+- nova `xhci_hid_context_prepare_for_slot(slot_id, endpoint_address, max_packet, usb_interval)` usa o Input Context correspondente;
+- `xhci_configure_endpoint` armazena READY/epoch/DCI por slot e oferece `xhci_configure_hid_endpoint_for_slot(slot_id)`;
+- confirmação de Endpoint State=Running é lida do Device Context do mesmo Slot ID;
+- `xhci_hid_report` possui `XHCI_HID_REPORT_STATES` por slot+epoch;
+- producer cycle, enqueue index, DMA report buffer, last length e fallback Boot keyboard/mouse deixam de ser globais;
+- ring base e Link TRB são resolvidos com `xhci_hid_context_ring_physical_for(slot_id)`;
+- polling usa explicitamente `slot_id + dci` e `xhci_transfer_wait_completion(slot_id, dci, physical)`;
+- antes de aceitar report, a identidade HID ativa é conferida contra `InputDeviceRecord.transport_address == slot_id`;
+- wrappers `xhci_hid_context_prepare`, `xhci_configure_first_hid_endpoint`, `xhci_hid_report_prepare` e `xhci_hid_report_poll_once` preservam o boot single-device certificado chamando internamente as APIs por slot;
+- guardrails de HID context, Configure Endpoint, report e contrato HID-4 foram atualizados para bloquear retorno aos antigos singletons de ring/buffer/cycle.
+
+Commits centrais desta subfatia:
+- `e2486b2b` — `feat(xhci): isolate HID endpoint contexts per slot`;
+- `d3fcaf8e` — `feat(xhci): configure HID endpoints per slot`;
+- `0dd3ea5a` — `feat(xhci): isolate HID report rings per slot`;
+- `f51f5cb0` — guardrail agregado do contrato HID-4c.
+
+Gates disparados sobre o candidato de código `f51f5cb0`:
+- CI #1085 / `34533310356` ⏳;
+- SMP #188 / `34533310323` ⏳;
+- NVMe #285 / `34533310320` ⏳.
+
+**Limite atual:** Configuration Descriptor, HID descriptor e binding transport-specific da interface ainda possuem estado persistente singleton. A estrutura de ring/report já é por slot, mas múltiplos HID simultâneos só serão declarados após HID-4c.3 e HID-4c.4.
 
 #### HID-4c.3 — depois
 
