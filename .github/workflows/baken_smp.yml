@@ -64,6 +64,7 @@ jobs:
           python3 tests/test_acpi_aml_loader.py
           python3 tests/test_acpi_aml_discovery.py
           python3 tests/test_acpi_aml_evaluator.py
+          python3 tests/test_acpi_aml_dynamic_discovery.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -124,6 +125,10 @@ jobs:
               stop_reason=aml-evaluator-failure
               break
             fi
+            if test -f build/qemu-smp-serial.log && grep -Fxq 'BAKEN:ACPI_AML_DYNAMIC_FAILED' build/qemu-smp-serial.log; then
+              stop_reason=aml-dynamic-failure
+              break
+            fi
             if test -f build/qemu-smp-serial.log && grep -Fq 'BAKEN:HEX=E:' build/qemu-smp-serial.log; then
               stop_reason=cpu-exception
               break
@@ -147,7 +152,7 @@ jobs:
           echo "SMP proof ${proof}: stop_reason=${stop_reason}"
           if test "$stop_reason" != complete; then
             checkpoint=$(grep -E '^BAKEN:HEX=Q:' build/qemu-smp-serial.log | tail -n 1 || true)
-            aml_error=$(grep -E '^BAKEN:(ACPI_AML_EVALUATOR_FAILED|HEX=[ABRS]:)' build/qemu-smp-serial.log | tail -n 4 || true)
+            aml_error=$(grep -E '^BAKEN:(ACPI_AML_(EVALUATOR|DYNAMIC)_FAILED|HEX=[ABRS]:)' build/qemu-smp-serial.log | tail -n 6 || true)
             echo "::error::SMP stopped: ${stop_reason}; Ring3/TLB checkpoint=${checkpoint:-none}. Q stages: 1=publication, 2=remap, 3=resume, 4=reaper, 5=idle, 6=syscalls, 7/8/9=unmap, A=cleanup; bit31=failure."
             if test -n "$aml_error"; then echo "::error::AML diagnostics: ${aml_error}"; fi
           fi
@@ -188,6 +193,7 @@ jobs:
           require_marker 'BAKEN:ACPI_AML_NAMESPACE_LOADED'
           require_marker 'BAKEN:ACPI_AML_DEVICES_READY'
           require_marker 'BAKEN:ACPI_AML_EVALUATOR_READY'
+          require_marker 'BAKEN:ACPI_AML_DYNAMIC_READY'
           require_marker 'BAKEN:SMP_AP_ONLINE'
           require_marker 'BAKEN:SMP_AP_RUNTIME_READY'
           require_marker 'BAKEN:SMP_THREAD_ON_AP'

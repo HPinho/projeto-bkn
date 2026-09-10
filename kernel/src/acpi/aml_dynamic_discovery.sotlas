@@ -1,0 +1,669 @@
+// Baken OS — AML-6b: resolução dinâmica read-only para predefined objects de discovery.
+//
+// Esta camada NÃO substitui AML-5. Ela sobrepõe somente resultados de métodos
+// zero-arg que AML-5 marcou como requires_evaluator. Firmware não suportado
+// permanece não resolvido; nenhum valor é fabricado e nenhuma operação de
+// hardware é executada aqui.
+
+module kernel::acpi::aml_dynamic_discovery;
+
+import kernel::acpi::aml_decoder::*;
+import kernel::acpi::aml_data::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_evaluator::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const AML_DYNAMIC_MAX_DEVICES: usize = 512;
+pub const AML_DYNAMIC_MAX_COMPAT_IDS: usize = 1024;
+pub const AML_DYNAMIC_MAX_COMPAT_IDS_PER_DEVICE: usize = 32;
+pub const AML_DYNAMIC_MAX_ID_BYTES: usize = 64;
+pub const AML_DYNAMIC_MAX_RESOURCE_DESCRIPTORS: usize = 4096;
+
+pub const AML_DYNAMIC_ID_NONE: u8 = 0;
+pub const AML_DYNAMIC_ID_INTEGER: u8 = 1;
+pub const AML_DYNAMIC_ID_STRING: u8 = 2;
+
+pub const AML_DYNAMIC_NAME_HID: u32 = 0x4449485F;
+pub const AML_DYNAMIC_NAME_CID: u32 = 0x4449435F;
+pub const AML_DYNAMIC_NAME_UID: u32 = 0x4449555F;
+pub const AML_DYNAMIC_NAME_STA: u32 = 0x4154535F;
+pub const AML_DYNAMIC_NAME_CRS: u32 = 0x5352435F;
+
+pub const AML_DYNAMIC_STA_VALID_MASK: u32 = 0x0000001F;
+pub const AML_DYNAMIC_RESOURCE_END_TAG_NAME: u8 = 0x0F;
+pub const AML_DYNAMIC_RESOURCE_END_TAG_LENGTH: usize = 1;
+
+const AML_DYNAMIC_ERROR_PREREQUISITE: u8 = 1;
+const AML_DYNAMIC_ERROR_CAPACITY: u8 = 2;
+const AML_DYNAMIC_ERROR_SOURCE: u8 = 3;
+
+pub struct AmlDynamicId {
+    pub kind: u8;
+    pub integer_value: u64;
+    pub data: *const u8;
+    pub data_length: usize;
+    pub valid: bool;
+}
+
+pub struct AmlDynamicDevice {
+    pub namespace_index: usize;
+
+    pub hid_resolved: bool;
+    pub hid_kind: u8;
+    pub hid_integer: u64;
+    pub hid_data: *const u8;
+    pub hid_length: usize;
+
+    pub cid_resolved: bool;
+    pub cid_start: usize;
+    pub cid_count: usize;
+
+    pub uid_resolved: bool;
+    pub uid_kind: u8;
+    pub uid_integer: u64;
+    pub uid_data: *const u8;
+    pub uid_length: usize;
+
+    pub status_resolved: bool;
+    pub status: u32;
+
+    pub crs_resolved: bool;
+    pub crs_data: *const u8;
+    pub crs_length: usize;
+
+    pub attempted_methods: u8;
+    pub resolved_methods: u8;
+    pub valid: bool;
+}
+
+static mut AML_DYNAMIC_DEVICES: [AmlDynamicDevice; AML_DYNAMIC_MAX_DEVICES] = [
+    AmlDynamicDevice {
+        namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        hid_resolved: false, hid_kind: AML_DYNAMIC_ID_NONE, hid_integer: 0,
+        hid_data: null as *const u8, hid_length: 0,
+        cid_resolved: false, cid_start: 0, cid_count: 0,
+        uid_resolved: false, uid_kind: AML_DYNAMIC_ID_NONE, uid_integer: 0,
+        uid_data: null as *const u8, uid_length: 0,
+        status_resolved: false, status: 0,
+        crs_resolved: false, crs_data: null as *const u8, crs_length: 0,
+        attempted_methods: 0, resolved_methods: 0, valid: false
+    };
+    AML_DYNAMIC_MAX_DEVICES
+];
+
+static mut AML_DYNAMIC_COMPAT_IDS: [AmlDynamicId; AML_DYNAMIC_MAX_COMPAT_IDS] = [
+    AmlDynamicId {
+        kind: AML_DYNAMIC_ID_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0, valid: false
+    };
+    AML_DYNAMIC_MAX_COMPAT_IDS
+];
+
+static mut AML_DYNAMIC_DEVICE_COUNT: usize = 0;
+static mut AML_DYNAMIC_COMPAT_ID_COUNT: usize = 0;
+static mut AML_DYNAMIC_ATTEMPTED_METHODS: usize = 0;
+static mut AML_DYNAMIC_RESOLVED_METHODS: usize = 0;
+static mut AML_DYNAMIC_READY: bool = false;
+static mut AML_DYNAMIC_LAST_ERROR: u32 = 0;
+
+@system
+fn aml_dynamic_fail(reason: u8, index: usize) -> bool {
+    unsafe {
+        AML_DYNAMIC_LAST_ERROR = ((reason as u32) << 24) |
+            ((index & 0x00FFFFFF) as u32);
+    }
+    return false;
+}
+
+@system
+fn aml_dynamic_reset() -> void {
+    unsafe {
+        AML_DYNAMIC_DEVICE_COUNT = 0;
+        AML_DYNAMIC_COMPAT_ID_COUNT = 0;
+        AML_DYNAMIC_ATTEMPTED_METHODS = 0;
+        AML_DYNAMIC_RESOLVED_METHODS = 0;
+        AML_DYNAMIC_READY = false;
+        AML_DYNAMIC_LAST_ERROR = 0;
+
+        let mut index: usize = 0;
+        while index < AML_DYNAMIC_MAX_DEVICES {
+            AML_DYNAMIC_DEVICES[index].namespace_index = AML_NAMESPACE_INVALID_INDEX;
+            AML_DYNAMIC_DEVICES[index].hid_resolved = false;
+            AML_DYNAMIC_DEVICES[index].hid_kind = AML_DYNAMIC_ID_NONE;
+            AML_DYNAMIC_DEVICES[index].hid_integer = 0;
+            AML_DYNAMIC_DEVICES[index].hid_data = null as *const u8;
+            AML_DYNAMIC_DEVICES[index].hid_length = 0;
+            AML_DYNAMIC_DEVICES[index].cid_resolved = false;
+            AML_DYNAMIC_DEVICES[index].cid_start = 0;
+            AML_DYNAMIC_DEVICES[index].cid_count = 0;
+            AML_DYNAMIC_DEVICES[index].uid_resolved = false;
+            AML_DYNAMIC_DEVICES[index].uid_kind = AML_DYNAMIC_ID_NONE;
+            AML_DYNAMIC_DEVICES[index].uid_integer = 0;
+            AML_DYNAMIC_DEVICES[index].uid_data = null as *const u8;
+            AML_DYNAMIC_DEVICES[index].uid_length = 0;
+            AML_DYNAMIC_DEVICES[index].status_resolved = false;
+            AML_DYNAMIC_DEVICES[index].status = 0;
+            AML_DYNAMIC_DEVICES[index].crs_resolved = false;
+            AML_DYNAMIC_DEVICES[index].crs_data = null as *const u8;
+            AML_DYNAMIC_DEVICES[index].crs_length = 0;
+            AML_DYNAMIC_DEVICES[index].attempted_methods = 0;
+            AML_DYNAMIC_DEVICES[index].resolved_methods = 0;
+            AML_DYNAMIC_DEVICES[index].valid = false;
+            index += 1;
+        }
+
+        index = 0;
+        while index < AML_DYNAMIC_MAX_COMPAT_IDS {
+            AML_DYNAMIC_COMPAT_IDS[index].kind = AML_DYNAMIC_ID_NONE;
+            AML_DYNAMIC_COMPAT_IDS[index].integer_value = 0;
+            AML_DYNAMIC_COMPAT_IDS[index].data = null as *const u8;
+            AML_DYNAMIC_COMPAT_IDS[index].data_length = 0;
+            AML_DYNAMIC_COMPAT_IDS[index].valid = false;
+            index += 1;
+        }
+    }
+}
+
+@system
+fn aml_dynamic_string_printable(data: *const u8, length: usize) -> bool {
+    if data == (null as *const u8) || length == 0 ||
+       length > AML_DYNAMIC_MAX_ID_BYTES { return false; }
+    let mut index: usize = 0;
+    while index < length {
+        let value = unsafe { data[index] };
+        if value < 0x20 || value > 0x7E { return false; }
+        index += 1;
+    }
+    return unsafe { data[0] != '*' as u8 };
+}
+
+@system
+fn aml_dynamic_ascii_upper(value: u8) -> bool {
+    return value >= 'A' as u8 && value <= 'Z' as u8;
+}
+
+@system
+fn aml_dynamic_ascii_digit(value: u8) -> bool {
+    return value >= '0' as u8 && value <= '9' as u8;
+}
+
+@system
+fn aml_dynamic_ascii_hex(value: u8) -> bool {
+    return aml_dynamic_ascii_digit(value) ||
+        (value >= 'A' as u8 && value <= 'F' as u8);
+}
+
+@system
+fn aml_dynamic_hid_string_valid(data: *const u8, length: usize) -> bool {
+    if data == (null as *const u8) { return false; }
+    if length == 7 {
+        let mut index: usize = 0;
+        while index < 3 {
+            if !aml_dynamic_ascii_upper(unsafe { data[index] }) { return false; }
+            index += 1;
+        }
+        while index < 7 {
+            if !aml_dynamic_ascii_hex(unsafe { data[index] }) { return false; }
+            index += 1;
+        }
+        return true;
+    }
+    if length == 8 {
+        let mut index: usize = 0;
+        while index < 4 {
+            let value = unsafe { data[index] };
+            if !aml_dynamic_ascii_upper(value) && !aml_dynamic_ascii_digit(value) {
+                return false;
+            }
+            index += 1;
+        }
+        while index < 8 {
+            if !aml_dynamic_ascii_hex(unsafe { data[index] }) { return false; }
+            index += 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+@system
+fn aml_dynamic_eisa_id_valid(value: u64) -> bool {
+    let mut output: [u8; 8] = [0; 8];
+    return aml_discovery_eisa_id_to_string(value, &mut output[0], 8);
+}
+
+@system
+fn aml_dynamic_id_from_value(value: AmlEvalValue,
+                             strict_hid: bool) -> AmlDynamicId {
+    let mut result = AmlDynamicId {
+        kind: AML_DYNAMIC_ID_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0, valid: false
+    };
+    if !value.valid { return result; }
+    if value.kind == AML_EVAL_VALUE_INTEGER {
+        if !aml_dynamic_eisa_id_valid(value.integer_value) { return result; }
+        result.kind = AML_DYNAMIC_ID_INTEGER;
+        result.integer_value = value.integer_value;
+        result.valid = true;
+        return result;
+    }
+    if value.kind == AML_EVAL_VALUE_STRING {
+        let valid_string = if strict_hid {
+            aml_dynamic_hid_string_valid(value.data, value.data_length)
+        } else {
+            aml_dynamic_string_printable(value.data, value.data_length)
+        };
+        if !valid_string { return result; }
+        result.kind = AML_DYNAMIC_ID_STRING;
+        result.data = value.data;
+        result.data_length = value.data_length;
+        result.valid = true;
+    }
+    return result;
+}
+
+@system
+fn aml_dynamic_append_compat_id(id: *const AmlDynamicId) -> bool {
+    if id == (null as *const AmlDynamicId) { return false; }
+    unsafe {
+        if !(*id).valid || AML_DYNAMIC_COMPAT_ID_COUNT >= AML_DYNAMIC_MAX_COMPAT_IDS {
+            return false;
+        }
+        let index = AML_DYNAMIC_COMPAT_ID_COUNT;
+        AML_DYNAMIC_COMPAT_IDS[index].kind = (*id).kind;
+        AML_DYNAMIC_COMPAT_IDS[index].integer_value = (*id).integer_value;
+        AML_DYNAMIC_COMPAT_IDS[index].data = (*id).data;
+        AML_DYNAMIC_COMPAT_IDS[index].data_length = (*id).data_length;
+        AML_DYNAMIC_COMPAT_IDS[index].valid = true;
+        AML_DYNAMIC_COMPAT_ID_COUNT += 1;
+    }
+    return true;
+}
+
+@system
+fn aml_dynamic_value_from_data(data: AmlDataObject) -> AmlDynamicId {
+    let mut result = AmlDynamicId {
+        kind: AML_DYNAMIC_ID_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0, valid: false
+    };
+    if !data.valid { return result; }
+    if data.kind == AML_DATA_KIND_INTEGER {
+        if !aml_dynamic_eisa_id_valid(data.integer_value) { return result; }
+        result.kind = AML_DYNAMIC_ID_INTEGER;
+        result.integer_value = data.integer_value;
+        result.valid = true;
+    } else if data.kind == AML_DATA_KIND_STRING {
+        if !aml_dynamic_string_printable(data.data, data.data_length) { return result; }
+        result.kind = AML_DYNAMIC_ID_STRING;
+        result.data = data.data;
+        result.data_length = data.data_length;
+        result.valid = true;
+    }
+    return result;
+}
+
+@system
+fn aml_dynamic_parse_cid_value(value: AmlEvalValue,
+                               device_slot: usize) -> bool {
+    let first = unsafe { AML_DYNAMIC_COMPAT_ID_COUNT };
+    if value.kind == AML_EVAL_VALUE_INTEGER || value.kind == AML_EVAL_VALUE_STRING {
+        let id = aml_dynamic_id_from_value(value, false);
+        if !id.valid || !aml_dynamic_append_compat_id(&id) { return false; }
+        unsafe {
+            AML_DYNAMIC_DEVICES[device_slot].cid_start = first;
+            AML_DYNAMIC_DEVICES[device_slot].cid_count = 1;
+        }
+        return true;
+    }
+    if (value.kind != AML_EVAL_VALUE_PACKAGE &&
+        value.kind != AML_EVAL_VALUE_VAR_PACKAGE) ||
+       value.data == (null as *const u8) || value.data_length == 0 {
+        return false;
+    }
+
+    let mut cursor = aml_cursor_new(value.data, value.data_length);
+    if !cursor.valid { return false; }
+    let mut count: usize = 0;
+    if value.kind == AML_EVAL_VALUE_PACKAGE {
+        if aml_cursor_remaining(&cursor) == 0 { return false; }
+        count = aml_cursor_read_u8(&mut cursor) as usize;
+    } else {
+        let count_object = aml_decode_term_arg_constant(&mut cursor);
+        if !count_object.valid ||
+           count_object.value > AML_DYNAMIC_MAX_COMPAT_IDS_PER_DEVICE as u64 {
+            return false;
+        }
+        count = count_object.value as usize;
+    }
+    if count == 0 || count > AML_DYNAMIC_MAX_COMPAT_IDS_PER_DEVICE ||
+       count != value.element_count ||
+       first + count > AML_DYNAMIC_MAX_COMPAT_IDS {
+        return false;
+    }
+
+    let mut element: usize = 0;
+    while element < count {
+        let data = aml_decode_data_object(&mut cursor);
+        let id = aml_dynamic_value_from_data(data);
+        if !id.valid || !aml_dynamic_append_compat_id(&id) {
+            unsafe { AML_DYNAMIC_COMPAT_ID_COUNT = first; }
+            return false;
+        }
+        element += 1;
+    }
+    if aml_cursor_remaining(&cursor) != 0 {
+        unsafe { AML_DYNAMIC_COMPAT_ID_COUNT = first; }
+        return false;
+    }
+    unsafe {
+        AML_DYNAMIC_DEVICES[device_slot].cid_start = first;
+        AML_DYNAMIC_DEVICES[device_slot].cid_count = count;
+    }
+    return true;
+}
+
+@system
+fn aml_dynamic_resource_template_valid(data: *const u8, length: usize) -> bool {
+    if data == (null as *const u8) || length < 2 { return false; }
+    let mut offset: usize = 0;
+    let mut descriptors: usize = 0;
+    let mut ended = false;
+
+    while offset < length && !ended {
+        if descriptors >= AML_DYNAMIC_MAX_RESOURCE_DESCRIPTORS { return false; }
+        let tag = unsafe { data[offset] };
+        let mut header_length: usize = 0;
+        let mut payload_length: usize = 0;
+        let mut item_name: u8 = 0;
+
+        if (tag & 0x80) == 0 {
+            header_length = 1;
+            payload_length = (tag & 0x07) as usize;
+            item_name = (tag >> 3) & 0x0F;
+        } else {
+            if length - offset < 3 { return false; }
+            header_length = 3;
+            item_name = tag & 0x7F;
+            payload_length = (unsafe { data[offset + 1] } as usize) |
+                ((unsafe { data[offset + 2] } as usize) << 8);
+        }
+
+        if header_length > length - offset ||
+           payload_length > length - offset - header_length {
+            return false;
+        }
+        offset += header_length + payload_length;
+        descriptors += 1;
+
+        if (tag & 0x80) == 0 && item_name == AML_DYNAMIC_RESOURCE_END_TAG_NAME {
+            if payload_length != AML_DYNAMIC_RESOURCE_END_TAG_LENGTH ||
+               offset != length { return false; }
+            let checksum = unsafe { data[offset - 1] };
+            if checksum != 0 {
+                let mut sum: u32 = 0;
+                let mut index: usize = 0;
+                while index < length {
+                    sum += unsafe { data[index] } as u32;
+                    index += 1;
+                }
+                if (sum & 0xFF) != 0 { return false; }
+            }
+            ended = true;
+        }
+    }
+    return ended && offset == length;
+}
+
+@system
+fn aml_dynamic_execute_zero_arg(namespace_index: usize, segment: u32,
+                                result: *mut AmlEvalValue) -> bool {
+    if result == (null as *mut AmlEvalValue) { return false; }
+    let method_index = aml_namespace_find_child(namespace_index, segment);
+    if method_index == AML_NAMESPACE_INVALID_INDEX { return false; }
+    let node = aml_namespace_node(method_index);
+    if node == (null as *const AmlNamespaceNode) { return false; }
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_METHOD ||
+           (*node).aml_body == (null as *const u8) || (*node).aml_body_length == 0 {
+            return false;
+        }
+        // AML-6b só executa métodos zero-arg, não-Serialized e SyncLevel zero.
+        if ((*node).flags & 0x07) != 0 || ((*node).flags & 0xF8) != 0 {
+            return false;
+        }
+    }
+    return aml_evaluator_execute_method(
+        method_index, null as *const AmlEvalValue, 0, result
+    );
+}
+
+@system
+fn aml_dynamic_new_result() -> AmlEvalValue {
+    return AmlEvalValue {
+        kind: AML_EVAL_VALUE_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0,
+        element_count: 0, valid: false
+    };
+}
+
+@system
+fn aml_dynamic_record_attempt(device_slot: usize, resolved: bool) -> void {
+    unsafe {
+        AML_DYNAMIC_DEVICES[device_slot].attempted_methods += 1;
+        AML_DYNAMIC_ATTEMPTED_METHODS += 1;
+        if resolved {
+            AML_DYNAMIC_DEVICES[device_slot].resolved_methods += 1;
+            AML_DYNAMIC_RESOLVED_METHODS += 1;
+        }
+    }
+}
+
+@system
+fn aml_dynamic_resolve_device(device_slot: usize,
+                              source: *const AmlDiscoveredDevice) -> bool {
+    if source == (null as *const AmlDiscoveredDevice) { return false; }
+    let mut namespace_index: usize = AML_NAMESPACE_INVALID_INDEX;
+    unsafe {
+        if !(*source).valid { return false; }
+        namespace_index = (*source).namespace_index;
+        AML_DYNAMIC_DEVICES[device_slot].namespace_index = namespace_index;
+        AML_DYNAMIC_DEVICES[device_slot].cid_start = AML_DYNAMIC_COMPAT_ID_COUNT;
+    }
+
+    unsafe {
+        if (*source).hid_requires_evaluator {
+            let mut result = aml_dynamic_new_result();
+            let mut resolved = false;
+            if aml_dynamic_execute_zero_arg(namespace_index, AML_DYNAMIC_NAME_HID, &mut result) {
+                let id = aml_dynamic_id_from_value(result, true);
+                if id.valid {
+                    AML_DYNAMIC_DEVICES[device_slot].hid_resolved = true;
+                    AML_DYNAMIC_DEVICES[device_slot].hid_kind = id.kind;
+                    AML_DYNAMIC_DEVICES[device_slot].hid_integer = id.integer_value;
+                    AML_DYNAMIC_DEVICES[device_slot].hid_data = id.data;
+                    AML_DYNAMIC_DEVICES[device_slot].hid_length = id.data_length;
+                    resolved = true;
+                }
+            }
+            aml_dynamic_record_attempt(device_slot, resolved);
+        }
+
+        if (*source).cid_requires_evaluator {
+            let mut result = aml_dynamic_new_result();
+            let mut resolved = false;
+            if aml_dynamic_execute_zero_arg(namespace_index, AML_DYNAMIC_NAME_CID, &mut result) &&
+               aml_dynamic_parse_cid_value(result, device_slot) {
+                AML_DYNAMIC_DEVICES[device_slot].cid_resolved = true;
+                resolved = true;
+            }
+            aml_dynamic_record_attempt(device_slot, resolved);
+        }
+
+        if (*source).uid_requires_evaluator {
+            let mut result = aml_dynamic_new_result();
+            let mut resolved = false;
+            if aml_dynamic_execute_zero_arg(namespace_index, AML_DYNAMIC_NAME_UID, &mut result) {
+                if result.kind == AML_EVAL_VALUE_INTEGER {
+                    AML_DYNAMIC_DEVICES[device_slot].uid_resolved = true;
+                    AML_DYNAMIC_DEVICES[device_slot].uid_kind = AML_DYNAMIC_ID_INTEGER;
+                    AML_DYNAMIC_DEVICES[device_slot].uid_integer = result.integer_value;
+                    resolved = true;
+                } else if result.kind == AML_EVAL_VALUE_STRING &&
+                          aml_dynamic_string_printable(result.data, result.data_length) {
+                    AML_DYNAMIC_DEVICES[device_slot].uid_resolved = true;
+                    AML_DYNAMIC_DEVICES[device_slot].uid_kind = AML_DYNAMIC_ID_STRING;
+                    AML_DYNAMIC_DEVICES[device_slot].uid_data = result.data;
+                    AML_DYNAMIC_DEVICES[device_slot].uid_length = result.data_length;
+                    resolved = true;
+                }
+            }
+            aml_dynamic_record_attempt(device_slot, resolved);
+        }
+
+        if (*source).status_requires_evaluator {
+            let mut result = aml_dynamic_new_result();
+            let mut resolved = false;
+            if aml_dynamic_execute_zero_arg(namespace_index, AML_DYNAMIC_NAME_STA, &mut result) &&
+               result.valid && result.kind == AML_EVAL_VALUE_INTEGER &&
+               result.integer_value <= AML_DYNAMIC_STA_VALID_MASK as u64 &&
+               (result.integer_value & 0x03) != 0x02 {
+                AML_DYNAMIC_DEVICES[device_slot].status_resolved = true;
+                AML_DYNAMIC_DEVICES[device_slot].status = result.integer_value as u32;
+                resolved = true;
+            }
+            aml_dynamic_record_attempt(device_slot, resolved);
+        }
+
+        if (*source).crs_requires_evaluator {
+            let mut result = aml_dynamic_new_result();
+            let mut resolved = false;
+            if aml_dynamic_execute_zero_arg(namespace_index, AML_DYNAMIC_NAME_CRS, &mut result) &&
+               result.valid && result.kind == AML_EVAL_VALUE_BUFFER &&
+               result.data != (null as *const u8) && result.data_length != 0 &&
+               result.integer_value == result.data_length as u64 &&
+               aml_dynamic_resource_template_valid(result.data, result.data_length) {
+                AML_DYNAMIC_DEVICES[device_slot].crs_resolved = true;
+                AML_DYNAMIC_DEVICES[device_slot].crs_data = result.data;
+                AML_DYNAMIC_DEVICES[device_slot].crs_length = result.data_length;
+                resolved = true;
+            }
+            aml_dynamic_record_attempt(device_slot, resolved);
+        }
+
+        AML_DYNAMIC_DEVICES[device_slot].valid = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_dynamic_discovery_init() -> bool {
+    aml_dynamic_reset();
+    if !aml_discovery_is_ready() || !aml_evaluator_is_ready() {
+        return aml_dynamic_fail(AML_DYNAMIC_ERROR_PREREQUISITE, 0);
+    }
+
+    let count = aml_discovery_device_count();
+    if count == 0 || count > AML_DYNAMIC_MAX_DEVICES {
+        return aml_dynamic_fail(AML_DYNAMIC_ERROR_CAPACITY, count);
+    }
+
+    let mut index: usize = 0;
+    while index < count {
+        let source = aml_discovery_device(index);
+        if source == (null as *const AmlDiscoveredDevice) ||
+           !aml_dynamic_resolve_device(index, source) {
+            return aml_dynamic_fail(AML_DYNAMIC_ERROR_SOURCE, index);
+        }
+        index += 1;
+    }
+
+    unsafe {
+        AML_DYNAMIC_DEVICE_COUNT = count;
+        __dma_fence();
+        AML_DYNAMIC_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_dynamic_discovery_is_ready() -> bool {
+    unsafe { return AML_DYNAMIC_READY; }
+}
+
+@system
+pub fn aml_dynamic_discovery_device_count() -> usize {
+    unsafe { if !AML_DYNAMIC_READY { return 0; } return AML_DYNAMIC_DEVICE_COUNT; }
+}
+
+@system
+pub fn aml_dynamic_discovery_device(index: usize) -> *const AmlDynamicDevice {
+    unsafe {
+        if !AML_DYNAMIC_READY || index >= AML_DYNAMIC_DEVICE_COUNT ||
+           !AML_DYNAMIC_DEVICES[index].valid {
+            return null as *const AmlDynamicDevice;
+        }
+        return &AML_DYNAMIC_DEVICES[index];
+    }
+}
+
+@system
+pub fn aml_dynamic_compat_id_count() -> usize {
+    unsafe { if !AML_DYNAMIC_READY { return 0; } return AML_DYNAMIC_COMPAT_ID_COUNT; }
+}
+
+@system
+pub fn aml_dynamic_compat_id(index: usize) -> *const AmlDynamicId {
+    unsafe {
+        if !AML_DYNAMIC_READY || index >= AML_DYNAMIC_COMPAT_ID_COUNT ||
+           !AML_DYNAMIC_COMPAT_IDS[index].valid {
+            return null as *const AmlDynamicId;
+        }
+        return &AML_DYNAMIC_COMPAT_IDS[index];
+    }
+}
+
+@system
+pub fn aml_dynamic_attempted_method_count() -> usize {
+    unsafe { if !AML_DYNAMIC_READY { return 0; } return AML_DYNAMIC_ATTEMPTED_METHODS; }
+}
+
+@system
+pub fn aml_dynamic_resolved_method_count() -> usize {
+    unsafe { if !AML_DYNAMIC_READY { return 0; } return AML_DYNAMIC_RESOLVED_METHODS; }
+}
+
+@system
+pub fn aml_dynamic_discovery_emit_failure_marker() -> bool {
+    unsafe { if AML_DYNAMIC_LAST_ERROR == 0 { return false; } }
+    // BAKEN:ACPI_AML_DYNAMIC_FAILED
+    let marker: [u8; 30] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,68,89,78,65,77,73,67,95,
+        70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 30 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn aml_dynamic_discovery_emit_ready_marker() -> bool {
+    if !aml_dynamic_discovery_is_ready() ||
+       aml_dynamic_discovery_device_count() != aml_discovery_device_count() {
+        return false;
+    }
+    // BAKEN:ACPI_AML_DYNAMIC_READY
+    let marker: [u8; 29] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,68,89,78,65,77,73,67,95,
+        82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 29 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}

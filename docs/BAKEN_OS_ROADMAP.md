@@ -2,7 +2,7 @@
 
 Atualizado em 2026-09-10 (America/Fortaleza).
 
-Este roadmap separa `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU` e `⬜ PLANEJADO`. Uma feature só vira baseline quando CI principal + SMP 3/3 + NVMe-only fecham verdes para o mesmo candidato.
+Este roadmap separa `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU` e `⬜ PLANEJADO`. Uma feature só vira baseline integrada quando CI principal + SMP 3/3 + NVMe-only fecham verdes para o mesmo candidato.
 
 ## Estado geral
 
@@ -10,7 +10,7 @@ Este roadmap separa `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU` e `⬜ 
 **Fase 1 — Kernel Core: ✅ CONCLUÍDA E CERTIFICADA**  
 **Fase 2 — Platform/Drivers: ▶️ EM DESENVOLVIMENTO**
 
-## Baseline operacional verde
+## Baseline integrada em `main`
 
 ```text
 3f02decb2cacc94975113e1886ae3ed74cf8a698
@@ -27,7 +27,21 @@ Prova no mesmo SHA:
 
 ### Regra de integração
 
-Para evitar workflows vermelhos na baseline, `main` fica congelada no último checkpoint verde. Trabalho novo ocorre em branch/PR; falhas são corrigidas ali. A baseline só avança após os três gates obrigatórios passarem.
+Para evitar workflows vermelhos na baseline, `main` fica congelada no último checkpoint verde integrado. Trabalho novo ocorre em branch/PR; falhas são corrigidas ali. A baseline só avança após os três gates obrigatórios passarem.
+
+A PR #16 já possui uma baseline verde própria para AML-6a:
+
+```text
+8e553f791a8e67fa3dd673700077b6c28b485a71
+fix(ci): align SMP AML evaluator proof contract
+```
+
+Prova:
+- CI #1051 / `34480220577` ✅;
+- SMP #154 / `34480220696` ✅ — 3/3 boots;
+- NVMe-only #251 / `34480220755` ✅.
+
+Esse checkpoint é a base de AML-6b, sem mover `main`.
 
 ---
 
@@ -70,102 +84,105 @@ Gates:
 Materializa Name/Scope/Device e armazena Method opaco. Marker `BAKEN:ACPI_AML_NAMESPACE_LOADED`.
 
 ### AML-5 — Descoberta estática de dispositivos
-**✅ COMPROVADO na baseline `3f02decb`.**
+**✅ COMPROVADO na baseline integrada `3f02decb`.**
 
-Inclui `_HID`, `_CID`, `_UID`, `_ADR`, `_STA` constante, `_CRS` estático, EISA ID e ResourceTemplate bounded. Métodos permanecem diferidos. Marker `BAKEN:ACPI_AML_DEVICES_READY`.
+Inclui `_HID`, `_CID`, `_UID`, `_ADR`, `_STA` constante, `_CRS` estático, EISA ID e ResourceTemplate bounded. Métodos permanecem diferidos e marcados `requires_evaluator`. Marker `BAKEN:ACPI_AML_DEVICES_READY`.
 
 Histórico de regressão:
-- `a312c3e8` / CI #1047 (`34470298359`) ❌: criação de ponteiro cru fora de `unsafe` durante `build_modular`;
+- `a312c3e8` / CI #1047 (`34470298359`) ❌: criação de ponteiro cru fora de `unsafe`;
 - `3f02decb` ✅: fronteira `unsafe` corrigida sem mudar a lógica; CI #1048 + SMP #151 + NVMe #248 passaram.
 
 ### AML-6a — Evaluator isolado e sem efeitos de hardware
-**⏳ EM VALIDAÇÃO** na branch `aml6a-validation`.
+**✅ COMPROVADO na PR #16 / branch `aml6a-validation`.**
 
-SHA técnico original:
-
-```text
-17267c3d51456935aefbd5347a4041f4eb69a91b
-```
-
-Head que produziu a primeira rodada da PR #16:
+Checkpoint:
 
 ```text
-7dcd1f6706db6b17c0174fe28839099dda18fb78
+8e553f791a8e67fa3dd673700077b6c28b485a71
+fix(ci): align SMP AML evaluator proof contract
 ```
-
-Implementado:
-- 7 Args e 8 Locals por frame;
-- `Store` restrito a Local/Arg/Null target;
-- `Return`;
-- aritmética e lógica inteira básica;
-- If/Else com PkgLength;
-- leitura read-only de Name estático;
-- aridade por MethodFlags;
-- serialized/SyncLevel rejeitado até existir lock;
-- fuel 4096 + depth 8;
-- sem nested Method, While, Sleep/Stall, Notify, OperationRegion/Field ou write global;
-- self-test bare-metal antes de `PLATFORM_READY`;
-- marker de sucesso `BAKEN:ACPI_AML_EVALUATOR_READY`.
-
-O evaluator ainda não participa da descoberta real. Isso evita misturar engine + semântica de firmware em um único gate.
-
-#### PR #16 — primeira rodada
-
-Merge-test SHA: `7ad3cb6dd9099e2477ee91c6b26f96ebc702fd09`.
 
 | Gate | Resultado |
 |---|---|
-| CI principal #1049 / `34474459862` | ❌ falso positivo no validador QEMU |
-| SMP #152 / `34474459987` | ✅ PASS — 3/3 boots |
-| NVMe-only #249 / `34474459985` | ❌ falso positivo no validador QEMU |
+| CI principal #1051 / `34480220577` | ✅ PASS |
+| SMP #154 / `34480220696` | ✅ PASS — 3/3 boots |
+| NVMe-only #251 / `34480220755` | ✅ PASS |
 
-Os dois logs vermelhos chegaram a `BAKEN:ACPI_AML_EVALUATOR_READY`, `PLATFORM_READY`, scheduler, wait/wake e Ring3. A causa não foi a engine AML-6a: o smoke tratava `HEX=T` como falha do evaluator e `HEX=U` como detalhe, mas `HEX=T` já é usado pelo LAPIC timer e `HEX=U` pelo userspace loader.
+Escopo comprovado:
+- 7 Args e 8 Locals por frame;
+- `Store` restrito a Local/Arg/Null target;
+- `Return`;
+- aritmética/lógica inteira básica;
+- If/Else com PkgLength;
+- leitura read-only de Name estático;
+- aridade por MethodFlags;
+- Serialized/SyncLevel rejeitado até existir lock;
+- fuel 4096 + depth 8;
+- sem nested Method, While, Sleep/Stall, Notify, OperationRegion/Field ou write global;
+- marker `BAKEN:ACPI_AML_EVALUATOR_READY`.
 
-#### Correção do protocolo — `12b97433`
+#### Histórico de falhas AML-6a
 
-```text
-12b97433af677b2ea93764c95c0bcf38cfb8ce4d
-fix(acpi): disambiguate AML evaluator diagnostics
-```
+Primeira rodada da PR:
+- CI #1049 / `34474459862` ❌ falso positivo;
+- SMP #152 / `34474459987` ✅ 3/3;
+- NVMe #249 / `34474459985` ❌ falso positivo.
 
-Mudanças:
-- novo marker terminal e exclusivo: `BAKEN:ACPI_AML_EVALUATOR_FAILED`;
-- `HEX=T/U` permanecem apenas como detalhe diagnóstico e nunca classificam falha isoladamente;
-- `verify_kernel_smoke.py` usa apenas o marker textual exclusivo para falha AML-6a;
-- `run_smp_qemu.py` exige `BAKEN:ACPI_AML_EVALUATOR_READY` e reconhece o marker exclusivo de falha;
-- teste de contrato garante que `HEX=T/U` isolados não gerem falso positivo;
-- Kernel Core, timer, IRQ, CR3/TLB, FPU, Ring3 e lógica do evaluator permanecem intactos.
+Causa: `HEX=T` já pertencia ao timer e `HEX=U` ao userspace. O validador os confundiu com erro AML.
 
-#### Segunda rodada — SMP #153
+`12b97433` criou `BAKEN:ACPI_AML_EVALUATOR_FAILED` como marker terminal exclusivo; `HEX=T/U` ficaram somente como detalhes.
 
-| Gate | Resultado observado |
-|---|---|
-| CI principal #1050 / `34479698316` | ⏳ estava em execução quando o gate SMP revelou a inconsistência |
-| SMP #153 / `34479698271` | ❌ falhou em `Verify SMP Contracts`, antes de build/QEMU |
-| NVMe-only #250 / `34479698333` | ⏳ estava em execução quando o gate SMP revelou a inconsistência |
+SMP #153 / `34479698271` depois falhou em `Verify SMP Contracts`: runner Python exigia `ACPI_AML_EVALUATOR_READY`, mas YAML não. O gate recusou corretamente a divergência.
 
-Causa do SMP #153: `test_local_smp_runner.py::test_every_local_marker_is_required_by_workflow` detectou que o runner Python já exigia `BAKEN:ACPI_AML_EVALUATOR_READY`, mas o YAML `.github/workflows/baken_smp.yml` ainda não continha esse marker explicitamente. Portanto o gate recusou corretamente um desalinhamento entre a prova local e a prova do Actions.
-
-Correção do candidato seguinte:
-- adicionar `python3 tests/test_acpi_aml_evaluator.py` ao `Verify SMP Contracts`;
-- adicionar parada fail-closed no YAML para `BAKEN:ACPI_AML_EVALUATOR_FAILED`;
-- adicionar `require_marker 'BAKEN:ACPI_AML_EVALUATOR_READY'` em cada boot SMP;
-- reforçar o contrato para manter runner Python, workflow e runtime sincronizados.
-
-**Promoção:** somente após uma nova revisão da PR #16 fechar CI + SMP 3/3 + NVMe-only verdes.
+`8e553f79` alinhou YAML, runner e teste. A rodada #1051/#154/#251 fechou 3/3 verde e certificou AML-6a.
 
 ### AML-6b — Métodos predefinidos para discovery
-**⬜ BLOQUEADO ATÉ AML-6a VERDE.**
+**⏳ EM VALIDAÇÃO** na mesma PR #16, partindo de `8e553f79`.
 
-Planejado:
-- chamar métodos zero-arg estritamente necessários (`_STA`, `_CRS`, `_HID`, `_CID`, `_UID`) quando o AML-5 registrar `requires_evaluator`;
-- validar tipo do retorno por predefined object;
-- preservar fuel/depth;
-- nenhuma OperationRegion até AML-7;
-- adicionar nested Method calls somente quando firmware real exigir e com profundidade/aridade controladas.
+Implementação candidata:
+- novo overlay `aml_dynamic_discovery.sotlas`, separado do AML-5;
+- processa somente devices já descobertos pelo AML-5;
+- tenta apenas `_HID`, `_CID`, `_UID`, `_STA` e `_CRS` com `requires_evaluator`;
+- somente métodos zero-arg, não-Serialized e SyncLevel zero;
+- usa exclusivamente a engine AML-6a certificada;
+- mantém arrays/capacidades fixas; zero heap;
+- nenhum OperationRegion/Field ou write MMIO/PIO/PCI;
+- método não suportado permanece **unresolved**, sem valor sintético;
+- falha estrutural da camada impede `PLATFORM_READY`.
+
+Validação de retorno:
+- `_HID`: EISA Integer ou HID string estrita;
+- `_CID`: Integer/string ou Package/VarPackage bounded;
+- `_UID`: Integer ou string imprimível;
+- `_STA`: Integer <= `0x1F`, com bits de presença/habilitação válidos;
+- `_CRS`: Buffer completo com ResourceTemplate bounded, EndTag e checksum; sem zero-fill implícito fabricado.
+
+Nova ordem de publicação:
+
+```text
+AML-5 static discovery
+-> AML-6a evaluator
+-> AML-6b dynamic discovery
+-> PLATFORM_READY
+```
+
+Markers candidatos:
+
+```text
+BAKEN:ACPI_AML_DYNAMIC_READY
+BAKEN:ACPI_AML_DYNAMIC_FAILED
+```
+
+`DYNAMIC_READY` certifica que o passe bounded completou; não afirma que todo método de firmware foi resolvido. Firmware que dependa de opcodes ainda fora do subconjunto continua pendente até etapas posteriores.
+
+Gates exigidos para promoção de AML-6b:
+- CI principal;
+- SMP 3/3;
+- NVMe-only;
+todos no mesmo SHA.
 
 ### AML-7 — OperationRegion / Field
-**⬜ PLANEJADO.** SystemMemory, SystemIO e PCIConfig mediados por camadas nativas, com bounds rígidos; Field/IndexField apenas quando necessário.
+**⬜ PLANEJADO.** SystemMemory, SystemIO e PCIConfig mediados por camadas nativas, com bounds rígidos; Field/IndexField apenas quando necessário. Nenhuma região pode escapar de endereço/tamanho validado.
 
 ### AML-8 — ACPI power/routing
 **⬜ PLANEJADO.** `_PRT`/`_PIC`, `_S5`, sleep/wake posterior e EC somente após infraestrutura segura.
@@ -207,7 +224,7 @@ SMP verification — 3/3 boots independentes
 NVMe-only verification
 ```
 
-Markers AML acumulados na baseline `3f02decb`:
+Markers AML comprovados até AML-6a na PR #16:
 
 ```text
 BAKEN:ACPI_AML_TABLES_READY
@@ -216,16 +233,23 @@ BAKEN:ACPI_AML_DATA_READY
 BAKEN:ACPI_AML_NAMESPACE_READY
 BAKEN:ACPI_AML_NAMESPACE_LOADED
 BAKEN:ACPI_AML_DEVICES_READY
+BAKEN:ACPI_AML_EVALUATOR_READY
 ```
 
-Markers candidatos AML-6a:
+Falha exclusiva AML-6a:
 
 ```text
-BAKEN:ACPI_AML_EVALUATOR_READY
 BAKEN:ACPI_AML_EVALUATOR_FAILED
 ```
 
-O segundo é terminal somente quando explicitamente emitido. `HEX=T/U` não são exclusivos de AML e não podem, isoladamente, reprovar um gate.
+`HEX=T/U` não são exclusivos de AML e não podem, isoladamente, reprovar um gate.
+
+Markers candidatos AML-6b:
+
+```text
+BAKEN:ACPI_AML_DYNAMIC_READY
+BAKEN:ACPI_AML_DYNAMIC_FAILED
+```
 
 ## Regras de prioridade
 
@@ -236,4 +260,5 @@ O segundo é terminal somente quando explicitamente emitido. `HEX=T/U` não são
 5. nunca fazer scan cego de AML desconhecido;
 6. firmware AML é input não confiável;
 7. hardware opcional deve degradar com diagnóstico, não corromper o kernel;
-8. qualquer falha e sua correção são registradas aqui e em `KERNEL_HANDOFF.md`.
+8. método dinâmico não suportado fica unresolved; nunca inventar retorno;
+9. qualquer falha e sua correção são registradas aqui e em `KERNEL_HANDOFF.md`.

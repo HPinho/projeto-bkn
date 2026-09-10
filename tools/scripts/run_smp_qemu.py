@@ -18,6 +18,7 @@ REQUIRED_MARKERS = (
     "BAKEN:ACPI_AML_DECODER_READY", "BAKEN:ACPI_AML_DATA_READY",
     "BAKEN:ACPI_AML_NAMESPACE_READY", "BAKEN:ACPI_AML_NAMESPACE_LOADED",
     "BAKEN:ACPI_AML_DEVICES_READY", "BAKEN:ACPI_AML_EVALUATOR_READY",
+    "BAKEN:ACPI_AML_DYNAMIC_READY",
     "BAKEN:SMP_AP_ONLINE", "BAKEN:SMP_AP_RUNTIME_READY", "BAKEN:SMP_THREAD_ON_AP",
     "BAKEN:SMP_TIMER_ON_AP", "BAKEN:SMP_ANY_THREAD_ON_AP",
     "BAKEN:SMP_HEAP_READY", "BAKEN:SMP_TLB_SHOOTDOWN_READY",
@@ -69,6 +70,8 @@ def validate(serial: str) -> list[str]:
             "AML evaluator failed (BAKEN:ACPI_AML_EVALUATOR_FAILED; "
             "detail may follow in BAKEN:HEX=T/U)"
         )
+    if "BAKEN:ACPI_AML_DYNAMIC_FAILED" in lines:
+        errors.append("AML dynamic discovery failed (BAKEN:ACPI_AML_DYNAMIC_FAILED)")
     failures = re.findall(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M)
     errors.extend(f"Ring3/TLB probe failed: {marker}" for marker in failures)
     errors.extend(f"missing {marker}" for marker in REQUIRED_MARKERS if marker not in lines)
@@ -104,6 +107,9 @@ def run_once(args: argparse.Namespace, proof: int, diagnostics: Path) -> None:
                     break
                 if "BAKEN:ACPI_AML_EVALUATOR_FAILED" in lines:
                     stop_reason = "AML evaluator failure"
+                    break
+                if "BAKEN:ACPI_AML_DYNAMIC_FAILED" in lines:
+                    stop_reason = "AML dynamic discovery failure"
                     break
                 if "BAKEN:HEX=E:" in serial or re.search(r"^BAKEN:HEX=Q:8[0-9A-Fa-f]{7}$", serial, re.M):
                     stop_reason = "kernel failure"
