@@ -6,6 +6,9 @@ DEVICE = ROOT / "kernel/src/drivers/input_device.sotlas"
 DEVICE_MAP = ROOT / "kernel/src/drivers/hid_input_device_map.sotlas"
 EVENT = ROOT / "kernel/src/drivers/input_event.sotlas"
 HID_EVENTS = ROOT / "kernel/src/drivers/hid_input_events.sotlas"
+XHCI_DEVICE_TABLE = ROOT / "kernel/src/drivers/xhci_device_table.sotlas"
+XHCI_HID_CONTEXT = ROOT / "kernel/src/drivers/xhci_hid_context.sotlas"
+XHCI_CONFIGURE = ROOT / "kernel/src/drivers/xhci_configure_endpoint.sotlas"
 XHCI_DESCRIPTOR = ROOT / "kernel/src/drivers/xhci_hid_descriptor.sotlas"
 XHCI_REPORT = ROOT / "kernel/src/drivers/xhci_hid_report.sotlas"
 SMOKE = ROOT / "tools/scripts/verify_kernel_smoke.py"
@@ -24,7 +27,7 @@ class Hid4RuntimeContractTests(unittest.TestCase):
                       DEVICE_MAP.read_text(encoding="utf-8"))
         self.assertIn("INPUT_EVENT_QUEUE_CAPACITY: usize = 512", EVENT.read_text(encoding="utf-8"))
 
-    def test_xhci_current_transport_is_identity_and_map_bound(self):
+    def test_xhci_transport_is_identity_and_map_bound(self):
         descriptor = XHCI_DESCRIPTOR.read_text(encoding="utf-8")
         report = XHCI_REPORT.read_text(encoding="utf-8")
         self.assertIn("input_device_attach(", descriptor)
@@ -33,6 +36,8 @@ class Hid4RuntimeContractTests(unittest.TestCase):
         self.assertIn("xhci_hid_descriptor_input_device_is_active()", report)
         self.assertIn("xhci_hid_descriptor_input_map_is_ready()", report)
         self.assertIn("hid_input_events_process_report_for_device(", report)
+        self.assertIn("input_device_snapshot(device_id, generation)", report)
+        self.assertIn("record.transport_address == slot_id as u32", report)
 
     def test_detach_order_blocks_publish_then_purges_state_and_map(self):
         text = XHCI_DESCRIPTOR.read_text(encoding="utf-8")
@@ -46,11 +51,24 @@ class Hid4RuntimeContractTests(unittest.TestCase):
         self.assertLess(purge, event_unbind)
         self.assertLess(event_unbind, map_unbind)
 
-    def test_hid4b_does_not_claim_multidevice_xhci_before_transport_singletons_migrate(self):
+    def test_hid4c_transport_state_is_partitioned_while_descriptor_is_next_boundary(self):
+        table = XHCI_DEVICE_TABLE.read_text(encoding="utf-8")
+        context = XHCI_HID_CONTEXT.read_text(encoding="utf-8")
+        configure = XHCI_CONFIGURE.read_text(encoding="utf-8")
         descriptor = XHCI_DESCRIPTOR.read_text(encoding="utf-8")
         report = XHCI_REPORT.read_text(encoding="utf-8")
-        self.assertIn("single-slot", descriptor)
-        self.assertIn("primeiro endpoint singleton", report)
+
+        self.assertIn("XHCI_DEVICE_SLOTS", table)
+        self.assertIn("XHCI_HID_CONTEXTS", context)
+        self.assertIn("XHCI_CONFIGURE_ENDPOINT_READY_SLOTS", configure)
+        self.assertIn("XHCI_HID_REPORT_STATES", report)
+        self.assertIn("xhci_hid_context_ring_physical_for(slot_id)", report)
+        self.assertNotIn("static mut XHCI_HID_CONTEXT_RING:", context)
+        self.assertNotIn("static mut XHCI_HID_REPORT_BUFFER:", report)
+
+        # HID-4c.3 ainda precisa particionar descriptor/configuration por interface.
+        self.assertIn("static mut XHCI_HID_INPUT_DEVICE_ID", descriptor)
+        self.assertIn("static mut XHCI_HID_DESCRIPTOR_BUFFER", descriptor)
         self.assertNotIn("MULTI_DEVICE_READY", descriptor)
         self.assertNotIn("MULTI_DEVICE_READY", report)
 
