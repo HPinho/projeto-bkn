@@ -1,13 +1,33 @@
 """Keep the fast local SMP runner aligned with the GitHub gate."""
 from pathlib import Path
+import os
+import subprocess
+import sys
+import tempfile
 import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
 from tools.scripts.run_smp_qemu import FINAL_MARKER, REQUIRED_MARKERS, validate
 
-ROOT = Path(__file__).resolve().parents[1]
-
 
 class LocalSmpRunnerTests(unittest.TestCase):
+    def test_direct_execution_without_pythonpath(self):
+        # Exercise the CI entry point in a fresh interpreter. Discovery in the
+        # repository root can hide a missing import path in a standalone test.
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+        with tempfile.TemporaryDirectory() as directory:
+            result = subprocess.run(
+                [sys.executable, str(Path(__file__).resolve()),
+                 "LocalSmpRunnerTests.test_validator_fails_closed"],
+                cwd=directory, env=environment, capture_output=True, text=True,
+                timeout=30,
+            )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("Ran 1 test", result.stderr)
+
     def test_runner_uses_same_machine_shape_as_workflow(self):
         source = (ROOT / "tools/scripts/run_smp_qemu.py").read_text(encoding="utf-8")
         for token in ('"q35"', '"-smp", "2"', '"512M"', '"qemu-xhci,id=xhci"'):
