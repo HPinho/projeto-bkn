@@ -1,0 +1,196 @@
+// Baken OS — HID-3: modelo e fila bounded de eventos de input.
+//
+// Este módulo não conhece HID, xHCI, DMA ou ACPI. Ele define a fronteira comum
+// entre produtores de input e consumidores futuros (WM/userspace). A fila é
+// fixed-capacity, sem heap, não bloqueante e caller-serialized nesta etapa.
+// Concorrência/hot-plug multi-device será fechada no HID-4 sem alterar o ABI
+// lógico dos eventos aqui definidos.
+
+module kernel::drivers::input_event;
+
+pub const INPUT_EVENT_QUEUE_CAPACITY: usize = 512;
+
+pub const INPUT_DEVICE_CLASS_GENERIC: u8 = 0;
+pub const INPUT_DEVICE_CLASS_KEYBOARD: u8 = 1;
+pub const INPUT_DEVICE_CLASS_POINTER: u8 = 2;
+pub const INPUT_DEVICE_CLASS_TOUCH: u8 = 3;
+
+pub const INPUT_EVENT_KIND_KEY_DOWN: u8 = 1;
+pub const INPUT_EVENT_KIND_KEY_UP: u8 = 2;
+pub const INPUT_EVENT_KIND_BUTTON_DOWN: u8 = 3;
+pub const INPUT_EVENT_KIND_BUTTON_UP: u8 = 4;
+pub const INPUT_EVENT_KIND_RELATIVE: u8 = 5;
+pub const INPUT_EVENT_KIND_ABSOLUTE: u8 = 6;
+
+pub const INPUT_EVENT_FLAG_NONE: u32 = 0;
+pub const INPUT_EVENT_FLAG_RELATIVE: u32 = 1;
+
+pub struct InputEvent {
+    pub valid: bool;
+    pub sequence: u64;
+    pub device_class: u8;
+    pub kind: u8;
+    pub report_id: u8;
+    pub usage_page: u32;
+    pub usage: u32;
+    pub value: i64;
+    pub flags: u32;
+}
+
+static mut INPUT_EVENT_QUEUE: [InputEvent; INPUT_EVENT_QUEUE_CAPACITY] = [
+    InputEvent {
+        valid: false, sequence: 0, device_class: INPUT_DEVICE_CLASS_GENERIC,
+        kind: 0, report_id: 0, usage_page: 0, usage: 0, value: 0,
+        flags: INPUT_EVENT_FLAG_NONE
+    };
+    INPUT_EVENT_QUEUE_CAPACITY
+];
+static mut INPUT_EVENT_HEAD: usize = 0;
+static mut INPUT_EVENT_TAIL: usize = 0;
+static mut INPUT_EVENT_COUNT: usize = 0;
+static mut INPUT_EVENT_NEXT_SEQUENCE: u64 = 1;
+static mut INPUT_EVENT_DROPPED: u64 = 0;
+static mut INPUT_EVENT_READY: bool = false;
+
+@system
+pub fn input_event_invalid() -> InputEvent {
+    return InputEvent {
+        valid: false, sequence: 0, device_class: INPUT_DEVICE_CLASS_GENERIC,
+        kind: 0, report_id: 0, usage_page: 0, usage: 0, value: 0,
+        flags: INPUT_EVENT_FLAG_NONE
+    };
+}
+
+@system
+fn input_event_kind_valid(kind: u8) -> bool {
+    return kind >= INPUT_EVENT_KIND_KEY_DOWN && kind <= INPUT_EVENT_KIND_ABSOLUTE;
+}
+
+@system
+fn input_event_device_class_valid(device_class: u8) -> bool {
+    return device_class <= INPUT_DEVICE_CLASS_TOUCH;
+}
+
+@system
+pub fn input_event_initialize() -> bool {
+    unsafe {
+        INPUT_EVENT_HEAD = 0;
+        INPUT_EVENT_TAIL = 0;
+        INPUT_EVENT_COUNT = 0;
+        INPUT_EVENT_NEXT_SEQUENCE = 1;
+        INPUT_EVENT_DROPPED = 0;
+        INPUT_EVENT_READY = false;
+        let mut index: usize = 0;
+        while index < INPUT_EVENT_QUEUE_CAPACITY {
+            INPUT_EVENT_QUEUE[index] = input_event_invalid();
+            index += 1;
+        }
+        INPUT_EVENT_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn input_event_queue_is_ready() -> bool { unsafe { return INPUT_EVENT_READY; } }
+
+@system
+pub fn input_event_queue_count() -> usize {
+    unsafe { if !INPUT_EVENT_READY { return 0; } return INPUT_EVENT_COUNT; }
+}
+
+@system
+pub fn input_event_queue_dropped() -> u64 {
+    unsafe { if !INPUT_EVENT_READY { return 0; } return INPUT_EVENT_DROPPED; }
+}
+
+@system
+pub fn input_event_publish(device_class: u8,
+                           kind: u8,
+                           report_id: u8,
+                           usage_page: u32,
+                           usage: u32,
+                           value: i64,
+                           flags: u32) -> bool {
+    if !input_event_queue_is_ready() ||
+       !input_event_device_class_valid(device_class) ||
+       !input_event_kind_valid(kind) {
+        return false;
+    }
+    unsafe {
+        if INPUT_EVENT_COUNT >= INPUT_EVENT_QUEUE_CAPACITY {
+            INPUT_EVENT_DROPPED += 1;
+            return false;
+        }
+        let mut event = input_event_invalid();
+        event.valid = true;
+        event.sequence = INPUT_EVENT_NEXT_SEQUENCE;
+        event.device_class = device_class;
+        event.kind = kind;
+        event.report_id = report_id;
+        event.usage_page = usage_page;
+        event.usage = usage;
+        event.value = value;
+        event.flags = flags;
+        INPUT_EVENT_QUEUE[INPUT_EVENT_TAIL] = event;
+        INPUT_EVENT_TAIL += 1;
+        if INPUT_EVENT_TAIL >= INPUT_EVENT_QUEUE_CAPACITY { INPUT_EVENT_TAIL = 0; }
+        INPUT_EVENT_COUNT += 1;
+        INPUT_EVENT_NEXT_SEQUENCE += 1;
+        if INPUT_EVENT_NEXT_SEQUENCE == 0 { INPUT_EVENT_NEXT_SEQUENCE = 1; }
+    }
+    return true;
+}
+
+@system
+pub fn input_event_peek() -> InputEvent {
+    unsafe {
+        if !INPUT_EVENT_READY || INPUT_EVENT_COUNT == 0 { return input_event_invalid(); }
+        return INPUT_EVENT_QUEUE[INPUT_EVENT_HEAD];
+    }
+}
+
+@system
+pub fn input_event_pop() -> InputEvent {
+    unsafe {
+        if !INPUT_EVENT_READY || INPUT_EVENT_COUNT == 0 { return input_event_invalid(); }
+        let event = INPUT_EVENT_QUEUE[INPUT_EVENT_HEAD];
+        INPUT_EVENT_QUEUE[INPUT_EVENT_HEAD] = input_event_invalid();
+        INPUT_EVENT_HEAD += 1;
+        if INPUT_EVENT_HEAD >= INPUT_EVENT_QUEUE_CAPACITY { INPUT_EVENT_HEAD = 0; }
+        INPUT_EVENT_COUNT -= 1;
+        return event;
+    }
+}
+
+@system
+pub fn input_event_queue_self_test() -> bool {
+    if !input_event_initialize() { return false; }
+    if !input_event_publish(INPUT_DEVICE_CLASS_KEYBOARD,
+                            INPUT_EVENT_KIND_KEY_DOWN,
+                            0, 0x07, 0x04, 1, INPUT_EVENT_FLAG_NONE) {
+        return false;
+    }
+    if !input_event_publish(INPUT_DEVICE_CLASS_POINTER,
+                            INPUT_EVENT_KIND_RELATIVE,
+                            5, 0x01, 0x30, -2, INPUT_EVENT_FLAG_RELATIVE) {
+        return false;
+    }
+    if input_event_queue_count() != 2 || input_event_queue_dropped() != 0 { return false; }
+    let first = input_event_pop();
+    let second = input_event_pop();
+    if !first.valid || first.sequence != 1 ||
+       first.device_class != INPUT_DEVICE_CLASS_KEYBOARD ||
+       first.kind != INPUT_EVENT_KIND_KEY_DOWN || first.usage_page != 0x07 ||
+       first.usage != 0x04 || first.value != 1 {
+        return false;
+    }
+    if !second.valid || second.sequence != 2 ||
+       second.device_class != INPUT_DEVICE_CLASS_POINTER ||
+       second.kind != INPUT_EVENT_KIND_RELATIVE || second.report_id != 5 ||
+       second.usage != 0x30 || second.value != -2 ||
+       (second.flags & INPUT_EVENT_FLAG_RELATIVE) == 0 {
+        return false;
+    }
+    if input_event_queue_count() != 0 || input_event_pop().valid { return false; }
+    return input_event_initialize();
+}

@@ -7,7 +7,8 @@ REQUIRED = (
     "ACPI_AML_DATA_READY", "ACPI_AML_NAMESPACE_READY", "ACPI_AML_NAMESPACE_LOADED",
     "ACPI_AML_DEVICES_READY", "ACPI_AML_EVALUATOR_READY", "ACPI_AML_DYNAMIC_READY",
     "ACPI_AML_REGIONS_READY", "ACPI_AML_PLATFORM_READY",
-    "USB_HID_INPUT_MAP_READY", "USB_HID_DESCRIPTOR_READY",
+    "USB_HID_DESCRIPTOR_READY", "USB_HID_INPUT_MAP_READY",
+    "USB_HID_EVENT_MODEL_READY", "USB_HID_EVENT_READY",
     "HEAP_READY", "PLATFORM_READY", "DEVICE_CATALOG_READY", "STORAGE_DRIVER_BOUND",
     "PROCESS_ISOLATION_READY", "PROCESS_REGISTRY_READY", "BARE_METAL_READY",
     "SMP_BASE_READY",
@@ -41,10 +42,14 @@ def validate(serial: str) -> list[str]:
         errors.append("AML OperationRegion/Field core failed (BAKEN:ACPI_AML_REGIONS_FAILED)")
     if "BAKEN:ACPI_AML_PLATFORM_FAILED" in lines:
         errors.append("AML platform object pass failed (BAKEN:ACPI_AML_PLATFORM_FAILED)")
-    if "BAKEN:USB_HID_INPUT_MAP_FAILED" in lines:
-        errors.append("USB HID input field map/decoder initialization failed")
     if "BAKEN:USB_HID_DESCRIPTOR_FAILED" in lines:
         errors.append("USB HID report descriptor fetch/parser failed")
+    if "BAKEN:USB_HID_INPUT_MAP_FAILED" in lines:
+        errors.append("USB HID input field map failed")
+    if "BAKEN:USB_HID_EVENT_MODEL_FAILED" in lines:
+        errors.append("USB HID input event model initialization failed")
+    if "BAKEN:USB_HID_EVENT_FAILED" in lines:
+        errors.append("USB HID real report event translation failed")
     # HEX=T is also the LAPIC timer checkpoint and HEX=U is userspace diagnostics.
     # They are intentionally non-terminal unless the evaluator publishes its
     # dedicated textual failure marker above.

@@ -37,8 +37,6 @@ class XhciHidDescriptorTests(unittest.TestCase):
 
     def test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready(self):
         text = XHCI.read_text(encoding="utf-8")
-        self.assertIn("import kernel::drivers::hid_input_report::*;", text)
-        self.assertIn("hid_input_report_self_test()", text)
         body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
         body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
         build = body.index("hid_input_report_map_build(buffer.virtual_address as *const u8, length as usize)")
@@ -46,8 +44,23 @@ class XhciHidDescriptorTests(unittest.TestCase):
         descriptor_store = body.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
         self.assertLess(build, map_ready)
         self.assertLess(map_ready, descriptor_store)
-        self.assertIn("let marker: [u8; 30]", text)
-        self.assertIn("let marker: [u8; 31]", text)
+
+    def test_hid3_event_model_starts_after_real_map_before_descriptor_ready(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::hid_input_events::*;", text)
+        body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
+        body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
+        map_ready = body.index("xhci_hid_input_map_emit_ready_marker()")
+        event_init = body.index("hid_input_events_initialize()")
+        event_ready = body.index("xhci_hid_event_model_emit_ready_marker()")
+        descriptor_store = body.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
+        self.assertLess(map_ready, event_init)
+        self.assertLess(event_init, event_ready)
+        self.assertLess(event_ready, descriptor_store)
+        self.assertIn("fn xhci_hid_event_model_emit_ready_marker()", text)
+        self.assertIn("let marker: [u8; 32]", text)
+        self.assertIn("fn xhci_hid_event_model_emit_failure_marker()", text)
+        self.assertIn("let marker: [u8; 33]", text)
 
     def test_set_configuration_proves_descriptor_before_ready(self):
         text = SETCFG.read_text(encoding="utf-8")
@@ -58,11 +71,16 @@ class XhciHidDescriptorTests(unittest.TestCase):
 
     def test_graph_registers_generic_and_transport_modules(self):
         text = MAIN.read_text(encoding="utf-8")
-        self.assertIn("import kernel::drivers::hid_report_descriptor::*;", text)
-        self.assertIn("import kernel::drivers::hid_input_report::*;", text)
-        self.assertIn("import kernel::drivers::xhci_hid_descriptor::*;", text)
+        for token in (
+            "import kernel::drivers::hid_report_descriptor::*;",
+            "import kernel::drivers::hid_input_report::*;",
+            "import kernel::drivers::input_event::*;",
+            "import kernel::drivers::hid_input_events::*;",
+            "import kernel::drivers::xhci_hid_descriptor::*;",
+        ):
+            self.assertIn(token, text)
 
-    def test_runtime_proof_is_required_by_smoke_and_hid1_smp_contracts_remain(self):
+    def test_runtime_proof_keeps_hid1_hid2_contracts(self):
         smoke = SMOKE.read_text(encoding="utf-8")
         smp = SMP.read_text(encoding="utf-8")
         yml = SMP_YML.read_text(encoding="utf-8")

@@ -1,0 +1,273 @@
+// Baken OS — HID-3: tradução transport-agnostic HID-2 -> InputEvent.
+//
+// Consome somente o field map/decoder HID-2 e a fila genérica de input. Não
+// conhece xHCI, DMA, PCI ou ACPI. Teclado publica transições por Usage; mouse
+// publica transições de botão e eixos relativos. O estado anterior é separado
+// por Report ID para que reports de dispositivos compostos não fabriquem key-up.
+
+module kernel::drivers::hid_input_events;
+
+import kernel::drivers::hid_input_report::*;
+import kernel::drivers::input_event::*;
+
+pub const HID_EVENT_KEYBOARD_USAGE_PAGE: u32 = 0x07;
+pub const HID_EVENT_BUTTON_USAGE_PAGE: u32 = 0x09;
+pub const HID_EVENT_GENERIC_DESKTOP_PAGE: u32 = 0x01;
+pub const HID_EVENT_USAGE_X: u32 = 0x30;
+pub const HID_EVENT_USAGE_Y: u32 = 0x31;
+pub const HID_EVENT_USAGE_WHEEL: u32 = 0x38;
+
+pub const HID_EVENT_KEYBOARD_USAGE_LIMIT: usize = 256;
+pub const HID_EVENT_KEYBOARD_WORDS: usize = 8;
+pub const HID_EVENT_REPORT_SLOTS: usize = 256;
+pub const HID_EVENT_PREVIOUS_KEY_WORDS: usize = HID_EVENT_REPORT_SLOTS * HID_EVENT_KEYBOARD_WORDS;
+pub const HID_EVENT_MAX_BUTTONS: u32 = 32;
+
+static mut HID_EVENT_PREVIOUS_KEYS: [u32; HID_EVENT_PREVIOUS_KEY_WORDS] = [0; HID_EVENT_PREVIOUS_KEY_WORDS];
+static mut HID_EVENT_PREVIOUS_BUTTONS: [u32; HID_EVENT_REPORT_SLOTS] = [0; HID_EVENT_REPORT_SLOTS];
+static mut HID_EVENT_READY: bool = false;
+static mut HID_EVENT_REPORTS_PROCESSED: u64 = 0;
+static mut HID_EVENT_EVENTS_PUBLISHED: u64 = 0;
+
+@system
+fn hid_input_events_reset_state() -> void {
+    unsafe {
+        HID_EVENT_READY = false;
+        HID_EVENT_REPORTS_PROCESSED = 0;
+        HID_EVENT_EVENTS_PUBLISHED = 0;
+        let mut index: usize = 0;
+        while index < HID_EVENT_PREVIOUS_KEY_WORDS {
+            HID_EVENT_PREVIOUS_KEYS[index] = 0;
+            index += 1;
+        }
+        index = 0;
+        while index < HID_EVENT_REPORT_SLOTS {
+            HID_EVENT_PREVIOUS_BUTTONS[index] = 0;
+            index += 1;
+        }
+    }
+}
+
+@system
+fn hid_input_events_wire_report_id(report: *const u8, length: usize) -> u16 {
+    if report == (null as *const u8) || length == 0 || !hid_input_report_map_is_ready() {
+        return 0xFFFF;
+    }
+    if hid_input_report_has_report_ids() {
+        let report_id = unsafe { *report };
+        if report_id == 0 || hid_input_report_expected_bytes(report_id) != length as u16 {
+            return 0xFFFF;
+        }
+        return report_id as u16;
+    }
+    if hid_input_report_expected_bytes(0) != length as u16 { return 0xFFFF; }
+    return 0;
+}
+
+@system
+fn hid_input_events_publish(device_class: u8,
+                            kind: u8,
+                            report_id: u8,
+                            usage_page: u32,
+                            usage: u32,
+                            value: i64,
+                            flags: u32) -> bool {
+    if !input_event_publish(device_class, kind, report_id,
+                            usage_page, usage, value, flags) {
+        return false;
+    }
+    unsafe { HID_EVENT_EVENTS_PUBLISHED += 1; }
+    return true;
+}
+
+@system
+fn hid_input_events_set_keyboard_usage(bits: *mut u32, usage: u32) -> bool {
+    if bits == (null as *mut u32) || usage >= HID_EVENT_KEYBOARD_USAGE_LIMIT as u32 {
+        return false;
+    }
+    let word = (usage / 32) as usize;
+    let bit = usage % 32;
+    unsafe {
+        let slot = ((bits as usize) + (word * 4)) as *mut u32;
+        *slot = *slot | ((1 as u32) << bit);
+    }
+    return true;
+}
+
+@system
+fn hid_input_events_keyboard_usage_set(bits: *const u32, usage: u32) -> bool {
+    if bits == (null as *const u32) || usage >= HID_EVENT_KEYBOARD_USAGE_LIMIT as u32 {
+        return false;
+    }
+    let word = (usage / 32) as usize;
+    let bit = usage % 32;
+    unsafe {
+        let value = *(((bits as usize) + (word * 4)) as *const u32);
+        return (value & ((1 as u32) << bit)) != 0;
+    }
+}
+
+@system
+fn hid_input_events_publish_keyboard_transitions(report_id: u8,
+                                                 current: *const u32) -> bool {
+    if current == (null as *const u32) { return false; }
+    let rid = report_id as usize;
+    if rid >= HID_EVENT_REPORT_SLOTS { return false; }
+    let mut usage: u32 = 1;
+    while usage < HID_EVENT_KEYBOARD_USAGE_LIMIT as u32 {
+        let current_set = hid_input_events_keyboard_usage_set(current, usage);
+        let word = (usage / 32) as usize;
+        let bit = usage % 32;
+        let previous_index = (rid * HID_EVENT_KEYBOARD_WORDS) + word;
+        let mut previous_set = false;
+        unsafe {
+            previous_set = (HID_EVENT_PREVIOUS_KEYS[previous_index] & ((1 as u32) << bit)) != 0;
+        }
+        if current_set != previous_set {
+            let kind = if current_set { INPUT_EVENT_KIND_KEY_DOWN } else { INPUT_EVENT_KIND_KEY_UP };
+            let value: i64 = if current_set { 1 } else { 0 };
+            if !hid_input_events_publish(INPUT_DEVICE_CLASS_KEYBOARD, kind, report_id,
+                                         HID_EVENT_KEYBOARD_USAGE_PAGE, usage,
+                                         value, INPUT_EVENT_FLAG_NONE) {
+                return false;
+            }
+            unsafe {
+                if current_set {
+                    HID_EVENT_PREVIOUS_KEYS[previous_index] =
+                        HID_EVENT_PREVIOUS_KEYS[previous_index] | ((1 as u32) << bit);
+                } else {
+                    HID_EVENT_PREVIOUS_KEYS[previous_index] =
+                        HID_EVENT_PREVIOUS_KEYS[previous_index] & ~((1 as u32) << bit);
+                }
+            }
+        }
+        usage += 1;
+    }
+    return true;
+}
+
+@system
+fn hid_input_events_publish_button_transitions(report_id: u8, current: u32) -> bool {
+    let rid = report_id as usize;
+    if rid >= HID_EVENT_REPORT_SLOTS { return false; }
+    let previous = unsafe { HID_EVENT_PREVIOUS_BUTTONS[rid] };
+    let mut button: u32 = 1;
+    while button <= HID_EVENT_MAX_BUTTONS {
+        let mask = (1 as u32) << (button - 1);
+        let now_set = (current & mask) != 0;
+        let before_set = (previous & mask) != 0;
+        if now_set != before_set {
+            let kind = if now_set { INPUT_EVENT_KIND_BUTTON_DOWN } else { INPUT_EVENT_KIND_BUTTON_UP };
+            let value: i64 = if now_set { 1 } else { 0 };
+            if !hid_input_events_publish(INPUT_DEVICE_CLASS_POINTER, kind, report_id,
+                                         HID_EVENT_BUTTON_USAGE_PAGE, button,
+                                         value, INPUT_EVENT_FLAG_NONE) {
+                return false;
+            }
+        }
+        button += 1;
+    }
+    unsafe { HID_EVENT_PREVIOUS_BUTTONS[rid] = current; }
+    return true;
+}
+
+@system
+pub fn hid_input_events_initialize() -> bool {
+    hid_input_events_reset_state();
+    if !hid_input_report_map_is_ready() { return false; }
+    if !input_event_queue_self_test() || !input_event_initialize() ||
+       !input_event_queue_is_ready() {
+        return false;
+    }
+    unsafe { HID_EVENT_READY = true; }
+    return true;
+}
+
+@system
+pub fn hid_input_events_is_ready() -> bool {
+    unsafe { return HID_EVENT_READY && input_event_queue_is_ready(); }
+}
+
+@system
+pub fn hid_input_events_reports_processed() -> u64 {
+    unsafe { if !HID_EVENT_READY { return 0; } return HID_EVENT_REPORTS_PROCESSED; }
+}
+
+@system
+pub fn hid_input_events_events_published() -> u64 {
+    unsafe { if !HID_EVENT_READY { return 0; } return HID_EVENT_EVENTS_PUBLISHED; }
+}
+
+@system
+pub fn hid_input_events_process_report(report: *const u8, length: usize) -> bool {
+    if !hid_input_events_is_ready() || report == (null as *const u8) || length == 0 ||
+       !hid_input_report_validate(report, length) {
+        return false;
+    }
+    let wire_id = hid_input_events_wire_report_id(report, length);
+    if wire_id == 0xFFFF { return false; }
+    let report_id = wire_id as u8;
+
+    let mut keyboard_current: [u32; HID_EVENT_KEYBOARD_WORDS] = [0; HID_EVENT_KEYBOARD_WORDS];
+    let mut keyboard_seen = false;
+    let mut button_current: u32 = 0;
+    let mut button_seen = false;
+
+    let count = hid_input_report_field_count();
+    let mut index: usize = 0;
+    while index < count {
+        let field_ptr = hid_input_report_field(index);
+        if field_ptr == (null as *const HidInputField) { return false; }
+        let field = unsafe { *field_ptr };
+        if field.report_id == report_id {
+            let decoded = hid_input_report_decode_field(report, length, index);
+            if !decoded.valid { return false; }
+            if !field.is_constant {
+                if (field.usage_valid && field.usage_page == HID_EVENT_KEYBOARD_USAGE_PAGE) ||
+                   (field.array_usage_valid && field.array_usage_page == HID_EVENT_KEYBOARD_USAGE_PAGE) {
+                    keyboard_seen = true;
+                    if !decoded.null_value && decoded.usage_valid &&
+                       decoded.usage_page == HID_EVENT_KEYBOARD_USAGE_PAGE && decoded.usage != 0 {
+                        let pressed = if field.is_variable { decoded.numeric_value != 0 } else { true };
+                        if pressed && !hid_input_events_set_keyboard_usage(&keyboard_current[0], decoded.usage) {
+                            return false;
+                        }
+                    }
+                }
+
+                if field.usage_valid && field.usage_page == HID_EVENT_BUTTON_USAGE_PAGE {
+                    button_seen = true;
+                    if field.usage == 0 || field.usage > HID_EVENT_MAX_BUTTONS { return false; }
+                    if !decoded.null_value && decoded.numeric_value != 0 {
+                        button_current |= (1 as u32) << (field.usage - 1);
+                    }
+                }
+
+                if field.usage_valid && field.usage_page == HID_EVENT_GENERIC_DESKTOP_PAGE &&
+                   (field.usage == HID_EVENT_USAGE_X || field.usage == HID_EVENT_USAGE_Y ||
+                    field.usage == HID_EVENT_USAGE_WHEEL) && field.is_relative &&
+                   !decoded.null_value && decoded.numeric_value != 0 {
+                    if !hid_input_events_publish(INPUT_DEVICE_CLASS_POINTER,
+                                                 INPUT_EVENT_KIND_RELATIVE,
+                                                 report_id,
+                                                 HID_EVENT_GENERIC_DESKTOP_PAGE,
+                                                 field.usage,
+                                                 decoded.numeric_value,
+                                                 INPUT_EVENT_FLAG_RELATIVE) {
+                        return false;
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+
+    if keyboard_seen && !hid_input_events_publish_keyboard_transitions(report_id, &keyboard_current[0]) {
+        return false;
+    }
+    if button_seen && !hid_input_events_publish_button_transitions(report_id, button_current) {
+        return false;
+    }
+    unsafe { HID_EVENT_REPORTS_PROCESSED += 1; }
+    return true;
+}

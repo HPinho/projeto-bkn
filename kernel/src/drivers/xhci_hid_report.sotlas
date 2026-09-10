@@ -2,16 +2,19 @@
 //
 // Usa a Transfer Ring dedicada preparada pelo Endpoint Context HID, publica um
 // Normal TRB por report, toca o Doorbell do Slot/DCI e espera o Transfer Event.
-// HID-2 valida primeiro o report bruto contra o field map real; o parser Boot
-// legado permanece somente para os getters keyboard/mouse já usados no bringup.
+// HID-2 valida o report bruto; HID-3 traduz os campos para a fila genérica antes
+// do parser Boot legado, que permanece apenas para os getters do bringup.
 
 module kernel::drivers::xhci_hid_report;
 
 import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
 import kernel::memory::dma::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::active_page_tables::*;
 import kernel::drivers::hid_input_report::*;
+import kernel::drivers::hid_input_events::*;
+import kernel::drivers::input_event::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_configuration::*;
@@ -29,6 +32,7 @@ pub const XHCI_HID_BOOT_MOUSE_MIN_LENGTH: u32 = 3;
 static mut XHCI_HID_REPORT_READY: bool = false;
 static mut XHCI_HID_REPORT_ENQUEUE_INDEX: u32 = XHCI_HID_REPORT_FIRST_INDEX;
 static mut XHCI_HID_REPORT_PRODUCER_CYCLE: bool = true;
+static mut XHCI_HID_REPORT_EVENT_MARKER_EMITTED: bool = false;
 static mut XHCI_HID_REPORT_BUFFER: DmaBuffer = DmaBuffer {
     virtual_address: null as *mut u8,
     physical_address: 0,
@@ -131,18 +135,58 @@ fn xhci_hid_report_ring_doorbell(slot_id: u8, dci: u8) -> bool {
 }
 
 @system
+fn xhci_hid_report_emit_event_ready_marker() -> bool {
+    let marker: [u8; 26] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,69,86,
+        69,78,84,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 26 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_report_emit_event_failure_marker() -> bool {
+    let marker: [u8; 27] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,69,86,
+        69,78,84,95,70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 27 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
 fn xhci_hid_report_parse(length: u32) -> bool {
     let base = unsafe { XHCI_HID_REPORT_BUFFER.virtual_address };
-    if base == (null as *mut u8) || length == 0 || !hid_input_report_map_is_ready() {
+    if base == (null as *mut u8) || length == 0 || !hid_input_report_map_is_ready() ||
+       !hid_input_events_is_ready() || !input_event_queue_is_ready() {
         return false;
     }
 
-    // Autoridade primária do HID-2: o report real precisa ter Report ID/tamanho
-    // e todos os campos compatíveis com o descriptor real previamente lido.
     if !hid_input_report_validate(base as *const u8, length as usize) { return false; }
 
-    // O mapa genérico já validou reports com ID. O parser Boot fixo não deve
-    // deslocar campos nesses casos; HID-3 passará a consumir os valores genéricos.
+    let before_events = hid_input_events_events_published();
+    if !hid_input_events_process_report(base as *const u8, length as usize) {
+        xhci_hid_report_emit_event_failure_marker();
+        return false;
+    }
+    let after_events = hid_input_events_events_published();
+    unsafe {
+        if !XHCI_HID_REPORT_EVENT_MARKER_EMITTED && after_events > before_events {
+            if !xhci_hid_report_emit_event_ready_marker() { return false; }
+            XHCI_HID_REPORT_EVENT_MARKER_EMITTED = true;
+        }
+    }
+
+    // Reports com ID já foram totalmente validados/traduzidos pelo caminho
+    // genérico. O parser Boot fixo não deve deslocar campos nesses casos.
     if hid_input_report_has_report_ids() { return true; }
 
     let protocol = xhci_hid_protocol();
@@ -175,11 +219,13 @@ pub fn xhci_hid_report_prepare() -> bool {
         XHCI_HID_REPORT_READY = false;
         XHCI_HID_REPORT_ENQUEUE_INDEX = XHCI_HID_REPORT_FIRST_INDEX;
         XHCI_HID_REPORT_PRODUCER_CYCLE = true;
+        XHCI_HID_REPORT_EVENT_MARKER_EMITTED = false;
         XHCI_HID_REPORT_BUFFER = dma_invalid_buffer();
         XHCI_HID_REPORT_LAST_LENGTH = 0;
     }
     if !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() ||
-       !hid_input_report_map_is_ready() {
+       !hid_input_report_map_is_ready() || !hid_input_events_is_ready() ||
+       !input_event_queue_is_ready() {
         return false;
     }
     if xhci_hid_context_dci() <= 1 || xhci_slot_id() == 0 { return false; }
@@ -241,6 +287,8 @@ pub fn xhci_hid_report_poll_once() -> bool {
 pub fn xhci_hid_report_is_ready() -> bool { unsafe { return XHCI_HID_REPORT_READY; } }
 @system
 pub fn xhci_hid_report_last_length() -> u32 { unsafe { return XHCI_HID_REPORT_LAST_LENGTH; } }
+@system
+pub fn xhci_hid_report_event_observed() -> bool { unsafe { return XHCI_HID_REPORT_EVENT_MARKER_EMITTED; } }
 @system
 pub fn xhci_hid_keyboard_modifiers() -> u8 { unsafe { return XHCI_HID_KEYBOARD_MODIFIERS; } }
 @system
