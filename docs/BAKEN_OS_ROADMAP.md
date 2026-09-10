@@ -90,7 +90,7 @@ Branch de validação: `hid4b-validation`, criada diretamente da baseline certif
 Escopo candidato preservado e agora certificado:
 - `hid_input_device_map.sotlas` fixed-capacity, sem heap e transport-agnostic;
 - snapshot HID-2 independente por `device_id + generation`;
-- fields, Report IDs e expected bytes separados por device;
+- fields, Report IDs e `expected_bytes` separados por device;
 - parser HID-1 continua stateless;
 - mapa HID-2 legado é apenas scratch serializado de construção, invalidado após copiar o snapshot;
 - runtime de Interrupt IN usa exclusivamente APIs per-device;
@@ -181,10 +181,7 @@ Correções sem relaxar contrato:
 - `b32cad41` — guardrail HID-3 atualizado para a função por slot e para provar que `USB_HID_EVENT_READY` só é emitido quando `after_events > before_events`;
 - `18b6e308` — guardrail do HID context passa a exigir a definição do getter por slot e o retorno de `XHCI_HID_CONTEXTS[slot].ring_physical`.
 
-Novo candidato de correção `18b6e308`:
-- CI #1089 ⏳;
-- SMP #192 ⏳;
-- NVMe #289 ⏳.
+Revalidação iniciada no candidato corrigido `18b6e308`: CI #1089, SMP #192 e NVMe #289. Como roadmap/handoff foram atualizados após as correções, o head documental final da subfatia também deve passar os três gates antes de HID-4c.2 receber ✅.
 
 **Limite atual:** Configuration Descriptor, HID descriptor e binding transport-specific da interface ainda possuem estado persistente singleton. A estrutura de ring/report já é por slot, mas múltiplos HID simultâneos só serão declarados após HID-4c.3 e HID-4c.4.
 
