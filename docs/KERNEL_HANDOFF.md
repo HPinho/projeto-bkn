@@ -69,7 +69,7 @@ O runtime HID-3 foi introduzido em `51631f23f8ffa3bd2593c405bfee90f0e5f2fe32`; `
 
 **⏳ EM VALIDAÇÃO na branch `hid4-validation`.**
 
-Candidato de runtime:
+Candidato de runtime original:
 ```text
 8f34ae132454ef87afae67288b632886131acfe4
 feat(hid): add generation-safe input lifecycle
@@ -102,6 +102,24 @@ BAKEN:USB_HID_DEVICE_FAILED
 ```
 
 O smoke CI/NVMe exige `USB_HID_DEVICE_READY`; o SMP local/workflow também passa a exigir o marker em todos os três boots, além de HID-1/HID-2/HID-3 e das provas do Kernel Core.
+
+### Histórico de validação HID-4a
+
+Primeiro head de validação: `ebf21182b33252c7bb6270c82eb25441b1746487`.
+
+- CI #1069 / `34513631621` ❌;
+- SMP #172 / `34513631581` ❌;
+- NVMe-only #269 / `34513631641` ❌.
+
+Os três gates falharam pela mesma causa antes de qualquer execução QEMU. Os contratos, incluindo os novos testes HID-4a, e `compiler.py check kernel/src/main.sotlas` passaram nos gates que chegaram a essa etapa. O `compiler.py build`, porém, reparseia os módulos para emissão dos headers C e rejeitou `kernel/src/drivers/xhci_hid_descriptor.sotlas:235:9` com `expressão inválida: 'return'`. A causa era um `return false` dentro de um `if` usado como expressão para inicializar `device_class`.
+
+Correção mínima:
+```text
+a4762cf614a0748336040be8d15e7f352b17f25f
+fix(hid): avoid return in conditional expression
+```
+
+A correção preserva a semântica: keyboard -> `INPUT_DEVICE_CLASS_KEYBOARD`, mouse -> `INPUT_DEVICE_CLASS_POINTER` e protocolo não suportado continua fail-closed. Não altera lifecycle, locking, ABI, Kernel Core, AML ou storage. HID-4a permanece **não certificado** até CI principal + SMP 3/3 + NVMe-only fecharem verdes no mesmo head final.
 
 ### Limite honesto desta fatia
 

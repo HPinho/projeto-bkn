@@ -71,7 +71,7 @@ Runtime `51631f23`; head promovido `2775c12a`. CI #1066 / `34509266662` ✅; SMP
 
 Branch: `hid4-validation`.
 
-Runtime:
+Runtime original:
 ```text
 8f34ae132454ef87afae67288b632886131acfe4
 feat(hid): add generation-safe input lifecycle
@@ -92,6 +92,24 @@ Implementação:
 - marker novo `BAKEN:USB_HID_DEVICE_READY`; falha `BAKEN:USB_HID_DEVICE_FAILED`;
 - smoke CI/NVMe e SMP 3/3 passam a exigir identidade real pronta;
 - HID-0..HID-3 e prova QEMU `sendkey a` permanecem.
+
+#### Primeira validação HID-4a — falhou antes do QEMU
+
+Head: `ebf21182b33252c7bb6270c82eb25441b1746487`.
+
+- CI #1069 / `34513631621` ❌;
+- SMP #172 / `34513631581` ❌;
+- NVMe #269 / `34513631641` ❌.
+
+Causa única nos três gates: `compiler.py build` reparsa `xhci_hid_descriptor.sotlas` para emissão dos headers C e falhou em `:235:9` com `expressão inválida: 'return'`. O `return false` estava dentro de um `if` usado como expressão ao inicializar `device_class`. Os contratos e `compiler.py check` passaram onde executados; não houve boot QEMU nem regressão runtime observada porque o PE não chegou a ser gerado.
+
+Correção:
+```text
+a4762cf614a0748336040be8d15e7f352b17f25f
+fix(hid): avoid return in conditional expression
+```
+
+A correção troca somente o `if`-expressão por controle de fluxo convencional e mantém o comportamento fail-closed. HID-4a continua **⏳ EM VALIDAÇÃO**; nenhum status foi promovido por causa dessa correção.
 
 **Limite atual:** o xHCI ainda é singleton em slot/context/address/HID context/report, e o mapa HID-2 ainda é global. Portanto HID-4a não será descrito como suporte multi-device completo mesmo se seus gates passarem.
 
