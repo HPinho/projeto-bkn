@@ -55,6 +55,7 @@ import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_protocol::*;
 import kernel::drivers::xhci_port_reset::*;
 import kernel::drivers::xhci_port_stage::*;
+import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_context::*;
 import kernel::drivers::xhci_address::*;
