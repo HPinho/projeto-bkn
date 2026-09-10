@@ -116,29 +116,55 @@ class AcpiAmlEvaluatorTests(unittest.TestCase):
         ):
             self.assertIn(token, self_test)
 
-    def test_platform_and_smoke_require_runtime_evaluator_proof(self):
+    def test_platform_and_all_runtime_validators_require_unambiguous_evaluator_proof(self):
         self.assertIn("import kernel::acpi::aml_evaluator::*;", self.platform)
         init = self.platform.split("pub fn platform_inventory_init", 1)[1].split(
             "pub fn platform_inventory", 1
         )[0]
         self.assertIn("aml_evaluator_self_test()", init)
+        self.assertIn("platform_emit_aml_evaluator_failure_marker()", init)
         self.assertIn("aml_evaluator_emit_failure_markers()", init)
         marker = self.platform.split("pub fn platform_inventory_emit_ready_marker", 1)[1]
         self.assertIn("aml_evaluator_emit_ready_marker()", marker)
         self.assertLess(marker.index("aml_evaluator_emit_ready_marker()"),
                         marker.index("let marker: [u8; 21]"))
-        from tools.scripts.verify_kernel_smoke import REQUIRED, validate
-        self.assertIn("ACPI_AML_EVALUATOR_READY", REQUIRED)
-        sample = "BAKEN:HEX=T:03000000\nBAKEN:HEX=U:00000004\n"
-        self.assertTrue(any("AML evaluator" in error for error in validate(sample)))
 
-    def test_marker_and_diagnostic_pair_are_explicit(self):
+        from tools.scripts.verify_kernel_smoke import REQUIRED, validate
+        from tools.scripts.run_smp_qemu import REQUIRED_MARKERS, validate as validate_smp
+
+        self.assertIn("ACPI_AML_EVALUATOR_READY", REQUIRED)
+        self.assertIn("BAKEN:ACPI_AML_EVALUATOR_READY", REQUIRED_MARKERS)
+
+        shared_diagnostics = "BAKEN:HEX=T:00000001\nBAKEN:HEX=U:00000013\n"
+        self.assertFalse(any("AML evaluator failed" in error
+                             for error in validate(shared_diagnostics)))
+        self.assertFalse(any("AML evaluator failed" in error
+                             for error in validate_smp(shared_diagnostics)))
+
+        explicit_failure = (
+            "BAKEN:ACPI_AML_EVALUATOR_FAILED\n"
+            "BAKEN:HEX=T:03000000\n"
+            "BAKEN:HEX=U:00000004\n"
+        )
+        self.assertTrue(any("AML evaluator failed" in error
+                            for error in validate(explicit_failure)))
+        self.assertTrue(any("AML evaluator failed" in error
+                            for error in validate_smp(explicit_failure)))
+
+    def test_marker_and_diagnostic_channels_are_explicit_and_collision_safe(self):
         self.assertIn("BAKEN:ACPI_AML_EVALUATOR_READY", self.source)
         marker = self.source.split("pub fn aml_evaluator_emit_ready_marker", 1)[1]
         self.assertIn("let marker: [u8; 31]", marker)
         self.assertIn("x86_serial_write_byte(marker[index])", marker)
         self.assertIn("'T' as u8", self.source)
         self.assertIn("'U' as u8", self.source)
+
+        self.assertIn("BAKEN:ACPI_AML_EVALUATOR_FAILED", self.platform)
+        failure_marker = self.platform.split(
+            "fn platform_emit_aml_evaluator_failure_marker", 1
+        )[1].split("pub fn platform_inventory_init", 1)[0]
+        self.assertIn("let marker: [u8; 32]", failure_marker)
+        self.assertIn("x86_serial_write_byte(marker[index])", failure_marker)
 
 
 if __name__ == "__main__":

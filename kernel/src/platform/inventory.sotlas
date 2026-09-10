@@ -51,6 +51,21 @@ static mut PLATFORM_INFO: PlatformInventory = PlatformInventory {
 };
 
 @system
+fn platform_emit_aml_evaluator_failure_marker() -> bool {
+    // BAKEN:ACPI_AML_EVALUATOR_FAILED
+    let marker: [u8; 32] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,69,
+        86,65,76,85,65,84,79,82,95,70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 32 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
 pub fn platform_inventory_init() -> bool {
     unsafe { if PLATFORM_INFO.valid { return true; } }
 
@@ -58,6 +73,9 @@ pub fn platform_inventory_init() -> bool {
     // provado como engine isolado sobre o namespace real já carregado.
     if !aml_evaluator_is_ready() {
         if !aml_evaluator_self_test() {
+            // HEX=T/U são canais compartilhados no kernel (timer/userspace);
+            // somente este marker textual torna a falha do evaluator inequívoca.
+            platform_emit_aml_evaluator_failure_marker();
             aml_evaluator_emit_failure_markers();
             return false;
         }

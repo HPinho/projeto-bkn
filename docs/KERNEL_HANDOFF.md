@@ -124,10 +124,16 @@ A conversão foi colocada dentro de `unsafe`, sem alterar a lógica de discovery
 
 Branch: `aml6a-validation`
 
-SHA técnico do candidato:
+SHA técnico original do evaluator:
 
 ```text
 17267c3d51456935aefbd5347a4041f4eb69a91b
+```
+
+Head da branch que produziu a primeira rodada da PR #16:
+
+```text
+7dcd1f6706db6b17c0174fe28839099dda18fb78
 ```
 
 Escopo implementado:
@@ -143,21 +149,45 @@ Escopo implementado:
 - fuel `4096` e profundidade máxima `8`;
 - métodos encadeados, While, Sleep/Stall, Notify, OperationRegion/Field e escrita global continuam proibidos;
 - self-tests bare-metal sintéticos para aritmética, branch verdadeira/falsa e exaustão de fuel;
-- marker `BAKEN:ACPI_AML_EVALUATOR_READY`;
-- diagnóstico `HEX=T/U`;
+- marker de sucesso `BAKEN:ACPI_AML_EVALUATOR_READY`;
 - `PLATFORM_READY` só pode ser emitido depois do marker do evaluator.
+
+### Primeira rodada da PR #16 — falso positivo do protocolo de diagnóstico
+
+O merge-test SHA da PR foi `7ad3cb6dd9099e2477ee91c6b26f96ebc702fd09`.
+
+Resultados:
+
+- CI principal #1049 — run `34474459862` — ❌ vermelho no QEMU smoke;
+- SMP #152 — run `34474459987` — ✅ PASS completo, 3/3 boots;
+- NVMe-only #249 — run `34474459985` — ❌ vermelho no QEMU smoke.
+
+Nos dois vermelhos o serial **alcançou `BAKEN:ACPI_AML_EVALUATOR_READY`**, depois `PLATFORM_READY`, scheduler, wait/wake e Ring3. Portanto o evaluator não falhou. O validador gerou falso positivo porque tratava qualquer `BAKEN:HEX=T:*` como erro AML e usava `HEX=U` como detalhe, mas esses canais já eram usados antes de AML-6a:
+
+- `HEX=T` é checkpoint do LAPIC timer;
+- `HEX=U` é diagnóstico do userspace loader.
+
+A correção deste candidato de validação mantém `HEX=T/U` apenas como detalhes legados e cria um gatilho inequívoco:
+
+```text
+BAKEN:ACPI_AML_EVALUATOR_FAILED
+```
+
+Somente esse marker textual pode classificar falha do evaluator. CI/NVMe usam `verify_kernel_smoke.py`; o runner SMP passa a exigir `BAKEN:ACPI_AML_EVALUATOR_READY` e também reconhece o marker exclusivo de falha. Os testes de contrato cobrem explicitamente que `HEX=T/U` isolados **não** são erro AML.
+
+Nenhum código de scheduler, IRQ, timer, Ring3, CR3/TLB, FPU ou da engine de avaliação foi alterado para corrigir os dois vermelhos.
 
 O AML-6a **não é usado ainda para resolver `_STA/_CRS/_HID/...` reais**. Essa ligação será AML-6b depois da certificação do engine isolado.
 
-Critério de promoção: PR candidato precisa fechar CI + SMP 3/3 + NVMe-only verde. Até isso ocorrer, `main` permanece em `3f02decb`.
+Critério de promoção: a nova revisão da PR #16 precisa fechar CI + SMP 3/3 + NVMe-only verde. Até isso ocorrer, `main` permanece em `3f02decb`.
 
 ---
 
 ## Próximos passos
 
-1. validar AML-6a na branch/PR sem mover `main`;
-2. se qualquer gate falhar, registrar causa e corrigir somente na branch;
-3. quando 3/3 estiver verde, promover candidato à nova baseline;
+1. validar a correção do protocolo de diagnóstico na PR #16 sem mover `main`;
+2. exigir os três gates verdes no mesmo candidato;
+3. quando 3/3 estiver verde, promover AML-6a à nova baseline;
 4. AML-6b: avaliação controlada de métodos predefinidos zero-arg necessários à descoberta (`_STA`, `_CRS`, `_HID`, `_CID`, `_UID`), mantendo tipos/bounds/fuel;
 5. AML-7: OperationRegion/Field mediados por MMIO/PIO/PCI nativo e com bounds;
 6. AML-8: `_PRT`/`_PIC`, `_S5` e power/routing de produção.

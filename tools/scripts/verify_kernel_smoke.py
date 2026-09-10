@@ -27,8 +27,14 @@ def validate(serial: str) -> list[str]:
         errors.append("AML namespace loader failed (BAKEN:HEX=A:, offset in BAKEN:HEX=B:)")
     if "BAKEN:HEX=R:" in serial:
         errors.append("AML device discovery failed (BAKEN:HEX=R:, detail in BAKEN:HEX=S:)")
-    if "BAKEN:HEX=T:" in serial:
-        errors.append("AML evaluator failed (BAKEN:HEX=T:, offset in BAKEN:HEX=U:)")
+    if "BAKEN:ACPI_AML_EVALUATOR_FAILED" in lines:
+        errors.append(
+            "AML evaluator failed (BAKEN:ACPI_AML_EVALUATOR_FAILED; "
+            "detail may follow in BAKEN:HEX=T/U)"
+        )
+    # HEX=T is also the LAPIC timer checkpoint and HEX=U is userspace diagnostics.
+    # They are intentionally non-terminal unless the evaluator publishes its
+    # dedicated textual failure marker above.
     errors.extend(f"Missing BAKEN:{marker}" for marker in REQUIRED
                   if f"BAKEN:{marker}" not in lines)
     return errors

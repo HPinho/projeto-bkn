@@ -81,10 +81,16 @@ Histórico de regressão:
 ### AML-6a — Evaluator isolado e sem efeitos de hardware
 **⏳ EM VALIDAÇÃO** na branch `aml6a-validation`.
 
-SHA técnico:
+SHA técnico original:
 
 ```text
 17267c3d51456935aefbd5347a4041f4eb69a91b
+```
+
+Head que produziu a primeira rodada da PR #16:
+
+```text
+7dcd1f6706db6b17c0174fe28839099dda18fb78
 ```
 
 Implementado:
@@ -99,12 +105,32 @@ Implementado:
 - fuel 4096 + depth 8;
 - sem nested Method, While, Sleep/Stall, Notify, OperationRegion/Field ou write global;
 - self-test bare-metal antes de `PLATFORM_READY`;
-- marker `BAKEN:ACPI_AML_EVALUATOR_READY`;
-- falha `HEX=T/U`.
+- marker de sucesso `BAKEN:ACPI_AML_EVALUATOR_READY`.
 
 O evaluator ainda não participa da descoberta real. Isso evita misturar engine + semântica de firmware em um único gate.
 
-**Promoção:** somente após CI + SMP 3/3 + NVMe-only verdes no PR candidato.
+#### PR #16 — primeira rodada
+
+Merge-test SHA: `7ad3cb6dd9099e2477ee91c6b26f96ebc702fd09`.
+
+| Gate | Resultado |
+|---|---|
+| CI principal #1049 / `34474459862` | ❌ falso positivo no validador QEMU |
+| SMP #152 / `34474459987` | ✅ PASS — 3/3 boots |
+| NVMe-only #249 / `34474459985` | ❌ falso positivo no validador QEMU |
+
+Os dois logs vermelhos chegaram a `BAKEN:ACPI_AML_EVALUATOR_READY`, `PLATFORM_READY`, scheduler, wait/wake e Ring3. A causa não foi a engine AML-6a: o smoke tratava `HEX=T` como falha do evaluator e `HEX=U` como detalhe, mas `HEX=T` já é usado pelo LAPIC timer e `HEX=U` pelo userspace loader.
+
+Correção aplicada no candidato seguinte da branch:
+
+- novo marker terminal e exclusivo: `BAKEN:ACPI_AML_EVALUATOR_FAILED`;
+- `HEX=T/U` permanecem apenas como detalhe diagnóstico e nunca classificam falha isoladamente;
+- `verify_kernel_smoke.py` usa apenas o marker textual exclusivo para falha AML-6a;
+- `run_smp_qemu.py` exige `BAKEN:ACPI_AML_EVALUATOR_READY` e reconhece o marker exclusivo de falha;
+- teste de contrato garante que `HEX=T/U` isolados não gerem falso positivo;
+- Kernel Core, timer, IRQ, CR3/TLB, FPU, Ring3 e lógica do evaluator permanecem intactos.
+
+**Promoção:** somente após a nova revisão da PR #16 fechar CI + SMP 3/3 + NVMe-only verdes.
 
 ### AML-6b — Métodos predefinidos para discovery
 **⬜ BLOQUEADO ATÉ AML-6a VERDE.**
@@ -170,11 +196,14 @@ BAKEN:ACPI_AML_NAMESPACE_LOADED
 BAKEN:ACPI_AML_DEVICES_READY
 ```
 
-Marker candidato AML-6a:
+Markers candidatos AML-6a:
 
 ```text
 BAKEN:ACPI_AML_EVALUATOR_READY
+BAKEN:ACPI_AML_EVALUATOR_FAILED
 ```
+
+O segundo é terminal somente quando explicitamente emitido. `HEX=T/U` não são exclusivos de AML e não podem, isoladamente, reprovar um gate.
 
 ## Regras de prioridade
 
