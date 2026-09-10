@@ -147,7 +147,7 @@ Validação final da subfatia no head `22ede5d7`:
 
 **Importante:** HID-4c.1 validado não altera a baseline da `main`; HID-4c continua como um único marco em desenvolvimento até 4c.2/4c.3/4c.4 fecharem.
 
-#### HID-4c.2 — HID Interrupt IN por slot/interface — implementado, em validação
+#### HID-4c.2 — HID Interrupt IN por slot/interface — implementado, em revalidação
 
 Implementação atual:
 - `xhci_hid_context` possui tabela `XHCI_HID_CONTEXTS` por Slot ID + epoch;
@@ -169,10 +169,22 @@ Commits centrais desta subfatia:
 - `0dd3ea5a` — `feat(xhci): isolate HID report rings per slot`;
 - `f51f5cb0` — guardrail agregado do contrato HID-4c.
 
-Gates disparados sobre o candidato de código `f51f5cb0`:
-- CI #1085 / `34533310356` ⏳;
-- SMP #188 / `34533310323` ⏳;
-- NVMe #285 / `34533310320` ⏳.
+Validação anterior mostrou runtime saudável, mas dois guardrails textuais obsoletos no CI principal:
+- `f51f5cb0`: CI #1085 / `34533310356` ❌ na suíte; SMP #188 / `34533310323` ✅; NVMe #285 / `34533310320` ✅;
+- `bffcd2d6`: CI #1087 / `34533512920` ❌ na suíte; SMP #190 / `34533512907` ✅ — 3/3 e build Sotlas/QEMU completos; NVMe #287 / `34533512927` ✅ com build/ISO/QEMU completos.
+
+Causas do CI #1087:
+1. `test_hid3_runtime_contract.py` ainda procurava a função removida `xhci_hid_report_parse(length)` em vez de `xhci_hid_report_parse_for_slot(slot_id, length)`;
+2. `test_xhci_hid_context.py` exigia a string de chamada `xhci_hid_context_ring_physical_for(slot_id)` dentro do próprio módulo, embora a arquitetura correta exponha esse símbolo como getter por slot.
+
+Correções sem relaxar contrato:
+- `b32cad41` — guardrail HID-3 atualizado para a função por slot e para provar que `USB_HID_EVENT_READY` só é emitido quando `after_events > before_events`;
+- `18b6e308` — guardrail do HID context passa a exigir a definição do getter por slot e o retorno de `XHCI_HID_CONTEXTS[slot].ring_physical`.
+
+Novo candidato de correção `18b6e308`:
+- CI #1089 ⏳;
+- SMP #192 ⏳;
+- NVMe #289 ⏳.
 
 **Limite atual:** Configuration Descriptor, HID descriptor e binding transport-specific da interface ainda possuem estado persistente singleton. A estrutura de ring/report já é por slot, mas múltiplos HID simultâneos só serão declarados após HID-4c.3 e HID-4c.4.
 
