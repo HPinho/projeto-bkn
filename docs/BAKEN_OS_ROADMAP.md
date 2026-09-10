@@ -90,7 +90,7 @@ Branch de validação: `hid4b-validation`, criada diretamente da baseline certif
 Escopo candidato preservado e agora certificado:
 - `hid_input_device_map.sotlas` fixed-capacity, sem heap e transport-agnostic;
 - snapshot HID-2 independente por `device_id + generation`;
-- fields, Report IDs e `expected_bytes` separados por device;
+- fields, Report IDs e expected bytes separados por device;
 - parser HID-1 continua stateless;
 - mapa HID-2 legado é apenas scratch serializado de construção, invalidado após copiar o snapshot;
 - runtime de Interrupt IN usa exclusivamente APIs per-device;
