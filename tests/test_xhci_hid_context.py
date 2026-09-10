@@ -28,7 +28,8 @@ class XhciHidContextTests(unittest.TestCase):
         self.assertIn("pub fn xhci_hid_context_prepare_for_slot(slot_id: u8", text)
         self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
         self.assertIn("xhci_context_input_physical_for(slot_id)", text)
-        self.assertIn("xhci_hid_context_ring_physical_for(slot_id)", text)
+        self.assertIn("pub fn xhci_hid_context_ring_physical_for(slot_id: u8) -> u64", text)
+        self.assertIn("return XHCI_HID_CONTEXTS[xhci_hid_context_index(slot_id)].ring_physical", text)
         self.assertNotIn("static mut XHCI_HID_CONTEXT_RING:", text)
         self.assertNotIn("static mut XHCI_HID_CONTEXT_DCI:", text)
 
