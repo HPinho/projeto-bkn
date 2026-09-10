@@ -1,9 +1,9 @@
-// Baken OS — caminho polling de reports HID Boot via Interrupt IN.
+// Baken OS — caminho polling de reports HID via Interrupt IN.
 //
 // Usa a Transfer Ring dedicada preparada pelo Endpoint Context HID, publica um
-// Normal TRB por report, toca o Doorbell do Slot/DCI, espera o Transfer Event
-// pelo consumidor global e interpreta o formato Boot Keyboard ou Boot Mouse.
-// Esta fase ainda não é chamada pelo boot pós-cutover.
+// Normal TRB por report, toca o Doorbell do Slot/DCI e espera o Transfer Event.
+// HID-2 valida primeiro o report bruto contra o field map real; o parser Boot
+// legado permanece somente para os getters keyboard/mouse já usados no bringup.
 
 module kernel::drivers::xhci_hid_report;
 
@@ -11,6 +11,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::memory::dma::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::active_page_tables::*;
+import kernel::drivers::hid_input_report::*;
 import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_configuration::*;
@@ -132,7 +133,18 @@ fn xhci_hid_report_ring_doorbell(slot_id: u8, dci: u8) -> bool {
 @system
 fn xhci_hid_report_parse(length: u32) -> bool {
     let base = unsafe { XHCI_HID_REPORT_BUFFER.virtual_address };
-    if base == (null as *mut u8) || length == 0 { return false; }
+    if base == (null as *mut u8) || length == 0 || !hid_input_report_map_is_ready() {
+        return false;
+    }
+
+    // Autoridade primária do HID-2: o report real precisa ter Report ID/tamanho
+    // e todos os campos compatíveis com o descriptor real previamente lido.
+    if !hid_input_report_validate(base as *const u8, length as usize) { return false; }
+
+    // O mapa genérico já validou reports com ID. O parser Boot fixo não deve
+    // deslocar campos nesses casos; HID-3 passará a consumir os valores genéricos.
+    if hid_input_report_has_report_ids() { return true; }
+
     let protocol = xhci_hid_protocol();
     unsafe {
         if protocol == USB_HID_PROTOCOL_KEYBOARD {
@@ -166,7 +178,10 @@ pub fn xhci_hid_report_prepare() -> bool {
         XHCI_HID_REPORT_BUFFER = dma_invalid_buffer();
         XHCI_HID_REPORT_LAST_LENGTH = 0;
     }
-    if !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() { return false; }
+    if !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() ||
+       !hid_input_report_map_is_ready() {
+        return false;
+    }
     if xhci_hid_context_dci() <= 1 || xhci_slot_id() == 0 { return false; }
 
     let max_packet = xhci_hid_endpoint_max_packet() as u64;

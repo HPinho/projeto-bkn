@@ -21,6 +21,8 @@ feat(hid): parse real report descriptors
 - SMP #162 / `34497000136` ✅ — 3/3;
 - NVMe #259 / `34497000185` ✅.
 
+`a16e515b` é o commit documental posterior.
+
 ---
 
 # Fase 0 — Fundação Bare-Metal
@@ -37,9 +39,7 @@ feat(hid): parse real report descriptors
 
 ## Trilha A — ACPI/AML
 
-**✅ CORE CONCLUÍDO E CERTIFICADO.**
-
-AML-0..AML-8 fechados. O checkpoint `7803447a` passou CI #1056 + SMP #159 3/3 + NVMe #256 e permanece coberto pelos gates posteriores.
+**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 fechados; checkpoint AML final `7803447a`.
 
 ## Trilha B — HID adicional / input de produção
 
@@ -47,9 +47,9 @@ AML-0..AML-8 fechados. O checkpoint `7803447a` passou CI #1056 + SMP #159 3/3 + 
 |---|---|---|
 | HID-0 Boot HID xHCI | ✅ | keyboard/mouse Boot + Interrupt IN real |
 | HID-1 Report Descriptor | ✅ | fetch real + parser bounded transport-agnostic |
-| HID-2 Field map / decoder | ⬜ | Report ID, Usage, bit offsets e valores |
+| HID-2 Field map / decoder | ⏳ | Report ID, Usage, bit offsets, flags e valores |
 | HID-3 Input event model | ⬜ | eventos unificados keyboard/mouse/touch |
-| HID-4 Hot-plug/lifecycle | ⬜ | attach/detach/recovery sem estado global frágil |
+| HID-4 Hot-plug/lifecycle | ⬜ | attach/detach/recovery e múltiplos devices |
 | I2C-HID | ⬜ | depois de transporte I2C/ACPI seguro |
 
 ### HID-1 — certificado
@@ -59,27 +59,27 @@ AML-0..AML-8 fechados. O checkpoint `7803447a` passou CI #1056 + SMP #159 3/3 + 
 feat(hid): parse real report descriptors
 ```
 
-Implementação:
-- parser `hid_report_descriptor.sotlas` sem dependência de xHCI/DMA;
-- máximo 4096 bytes, 512 itens, collection depth 16, ReportSize <=64, ReportCount <=256 e geometria total <=32768 bits;
-- parsing real de short item size/type/tag;
-- Application Usage keyboard/mouse, Report ID e geometria input/output/feature;
-- unsupported/truncated/reserved/long/Push/Pop = fail-closed;
-- `xhci_hid_descriptor.sotlas` usa EP0 `GET_DESCRIPTOR(Report)` com request `0x81`, value `0x2200`, índice de interface e comprimento vindo do HID descriptor;
-- descriptor real validado antes de SET_CONFIGURATION pronto;
-- report Boot fixo continua apenas como fallback de consumo, não como descriptor sintético;
-- marker `BAKEN:USB_HID_DESCRIPTOR_READY` obrigatório; `BAKEN:USB_HID_DESCRIPTOR_FAILED` terminal.
+Gates: CI #1059 / `34497000191` ✅; SMP #162 / `34497000136` ✅ 3/3; NVMe #259 / `34497000185` ✅.
 
-Gates no mesmo SHA:
-- CI #1059 / `34497000191` ✅;
-- SMP #162 / `34497000136` ✅ — 3/3;
-- NVMe #259 / `34497000185` ✅.
+### HID-2 — candidato atual
 
-### HID-2 — próximo incremento
+Branch: `hid2-validation`. **⏳ EM VALIDAÇÃO.**
 
-**⬜ PLANEJADO.**
+- `hid_input_report.sotlas` transport-agnostic, fixed-capacity e sem heap;
+- field map por Report ID, Usage Page/Usage, bit offset/width e Main flags;
+- Usage list e Usage Minimum/Maximum bounded;
+- Logical Minimum/Maximum + sign extension;
+- byte de Report ID separado do payload;
+- comprimento real precisa coincidir com a geometria do Report ID;
+- Arrays mantêm range de usages quando demonstrável; combinação não contígua não gera Usage sintético;
+- Buffered Bytes/Delimiter/Push/Pop continuam fail-closed;
+- self-test de keyboard, mouse signed-relative e Report ID;
+- mapa é construído sobre o descriptor real do HID-1;
+- report Interrupt IN real é validado pelo mapa antes do fallback Boot;
+- marker `BAKEN:USB_HID_INPUT_MAP_READY` obrigatório no smoke CI/NVMe;
+- `BAKEN:USB_HID_INPUT_MAP_FAILED` terminal.
 
-Construir field map bounded por Report ID, Usage Page/Usage, bit offset, bit width, flags e signedness; em seguida decodificar Input reports reais sem ultrapassar o comprimento efetivo recebido no endpoint. O caminho Boot atual deve continuar válido como fallback/prova de regressão.
+Critério: CI + SMP 3/3 + NVMe verdes no mesmo SHA; só então fast-forward de `main`.
 
 ## Trilha C — Storage de produção
 

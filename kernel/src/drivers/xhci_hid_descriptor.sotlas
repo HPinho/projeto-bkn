@@ -3,14 +3,15 @@
 // SET_CONFIGURATION continua sendo feito pelo estágio anterior. Depois que o
 // dispositivo aceitou a configuração, este módulo envia GET_DESCRIPTOR(Report)
 // ao recipient Interface, lê exatamente o wDescriptorLength descoberto no HID
-// descriptor e entrega os bytes ao parser genérico hid_report_descriptor.
-// Nenhum layout keyboard/mouse é inventado a partir do boot protocol.
+// descriptor e entrega os bytes ao parser genérico. HID-2 também constrói aqui
+// o field map transport-agnostic sobre os mesmos bytes reais.
 
 module kernel::drivers::xhci_hid_descriptor;
 
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::dma::*;
 import kernel::drivers::hid_report_descriptor::*;
+import kernel::drivers::hid_input_report::*;
 import kernel::drivers::xhci_context::*;
 import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_ep0::*;
@@ -115,6 +116,34 @@ fn xhci_hid_descriptor_fetch(buffer: *mut DmaBuffer,
 }
 
 @system
+fn xhci_hid_input_map_emit_ready_marker() -> bool {
+    let marker: [u8; 30] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,73,78,
+        80,85,84,95,77,65,80,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 30 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn xhci_hid_input_map_emit_failure_marker() -> bool {
+    let marker: [u8; 31] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,73,78,
+        80,85,84,95,77,65,80,95,70,65,73,76,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 31 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
 fn xhci_hid_descriptor_probe_internal() -> bool {
     if !hid_report_descriptor_self_test() || !xhci_configuration_is_ready() ||
        !xhci_ep0_is_ready() || !xhci_address_is_ready() {
@@ -138,12 +167,21 @@ fn xhci_hid_descriptor_probe_internal() -> bool {
     if protocol == USB_HID_PROTOCOL_MOUSE && !info.has_mouse_application { return false; }
     if protocol != USB_HID_PROTOCOL_KEYBOARD && protocol != USB_HID_PROTOCOL_MOUSE { return false; }
 
-    // Sem Report ID, o tamanho agregado calculado é o tamanho exato do input
-    // report e deve caber no Interrupt IN endpoint já configurado.
     if !info.has_report_ids {
         let input_bytes = hid_report_descriptor_input_bytes(info);
         if input_bytes == 0 || input_bytes > xhci_hid_endpoint_max_packet() { return false; }
     }
+
+    // HID-2: o mapa nasce exclusivamente dos bytes realmente retornados pelo
+    // device. O self-test roda antes e deixa o mapa limpo; em seguida o build
+    // real precisa fechar todos os bounds e a geometria por Report ID.
+    if !hid_input_report_self_test() ||
+       !hid_input_report_map_build(buffer.virtual_address as *const u8, length as usize) ||
+       !hid_input_report_map_is_ready() {
+        xhci_hid_input_map_emit_failure_marker();
+        return false;
+    }
+    if !xhci_hid_input_map_emit_ready_marker() { return false; }
 
     unsafe {
         XHCI_HID_DESCRIPTOR_BUFFER = buffer;

@@ -35,6 +35,18 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertIn("if !info.has_report_ids", text)
         self.assertIn("input_bytes > xhci_hid_endpoint_max_packet()", text)
 
+    def test_hid2_map_uses_real_descriptor_bytes_before_descriptor_ready(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::hid_input_report::*;", text)
+        self.assertIn("hid_input_report_self_test()", text)
+        build = text.index("hid_input_report_map_build(buffer.virtual_address as *const u8, length as usize)")
+        map_ready = text.index("xhci_hid_input_map_emit_ready_marker()")
+        descriptor_store = text.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
+        self.assertLess(build, map_ready)
+        self.assertLess(map_ready, descriptor_store)
+        self.assertIn("let marker: [u8; 30]", text)
+        self.assertIn("let marker: [u8; 31]", text)
+
     def test_set_configuration_proves_descriptor_before_ready(self):
         text = SETCFG.read_text(encoding="utf-8")
         descriptor = text.index("xhci_hid_descriptor_initialize()")
@@ -45,14 +57,17 @@ class XhciHidDescriptorTests(unittest.TestCase):
     def test_graph_registers_generic_and_transport_modules(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::hid_report_descriptor::*;", text)
+        self.assertIn("import kernel::drivers::hid_input_report::*;", text)
         self.assertIn("import kernel::drivers::xhci_hid_descriptor::*;", text)
 
-    def test_runtime_proof_is_required_by_all_smoke_contracts(self):
+    def test_runtime_proof_is_required_by_smoke_and_hid1_smp_contracts_remain(self):
         smoke = SMOKE.read_text(encoding="utf-8")
         smp = SMP.read_text(encoding="utf-8")
         yml = SMP_YML.read_text(encoding="utf-8")
         self.assertIn('"USB_HID_DESCRIPTOR_READY"', smoke)
+        self.assertIn('"USB_HID_INPUT_MAP_READY"', smoke)
         self.assertIn("BAKEN:USB_HID_DESCRIPTOR_FAILED", smoke)
+        self.assertIn("BAKEN:USB_HID_INPUT_MAP_FAILED", smoke)
         self.assertIn('"BAKEN:USB_HID_DESCRIPTOR_READY"', smp)
         self.assertIn("BAKEN:USB_HID_DESCRIPTOR_FAILED", smp)
         self.assertIn("require_marker 'BAKEN:USB_HID_DESCRIPTOR_READY'", yml)

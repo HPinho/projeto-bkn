@@ -1,0 +1,812 @@
+// Baken OS — HID-2: field map e decoder bounded de Input reports.
+//
+// Reinterpreta o Report Descriptor já validado pelo HID-1 e materializa um
+// mapa estático de campos de Input. O mapa é transport-agnostic: não importa
+// xHCI, DMA nem ACPI. Report ID é tratado como prefixo do wire report e não
+// entra nos bit offsets do payload. Local Usage items são consumidos somente
+// pelo próximo Main item, como exige HID 1.11.
+//
+// Esta etapa ainda não produz eventos de teclado/mouse. HID-3 consumirá os
+// valores decodificados. O mapa é construído no boot, antes do uso concorrente,
+// e permanece read-only depois de HID_INPUT_MAP_READY.
+
+module kernel::drivers::hid_input_report;
+
+import kernel::drivers::hid_report_descriptor::*;
+
+pub const HID_INPUT_MAX_FIELDS: usize = 512;
+pub const HID_INPUT_REPORT_ID_SLOTS: usize = 256;
+pub const HID_INPUT_MAX_LOCAL_USAGES: usize = 256;
+
+pub const HID_GLOBAL_LOGICAL_MINIMUM: u8 = 1;
+pub const HID_GLOBAL_LOGICAL_MAXIMUM: u8 = 2;
+pub const HID_LOCAL_USAGE_MINIMUM: u8 = 1;
+pub const HID_LOCAL_USAGE_MAXIMUM: u8 = 2;
+pub const HID_LOCAL_DELIMITER: u8 = 10;
+
+pub const HID_INPUT_FLAG_CONSTANT: u32 = 0x01;
+pub const HID_INPUT_FLAG_VARIABLE: u32 = 0x02;
+pub const HID_INPUT_FLAG_RELATIVE: u32 = 0x04;
+pub const HID_INPUT_FLAG_NULL_STATE: u32 = 0x40;
+pub const HID_INPUT_FLAG_BUFFERED_BYTES: u32 = 0x100;
+
+pub const HID_INPUT_INVALID_FIELD: usize = 0xFFFFFFFF;
+
+pub struct HidInputField {
+    pub valid: bool;
+    pub report_id: u8;
+    pub bit_offset: u32;
+    pub bit_size: u32;
+    pub flags: u32;
+    pub is_constant: bool;
+    pub is_variable: bool;
+    pub is_relative: bool;
+    pub null_state: bool;
+    pub usage_valid: bool;
+    pub usage_page: u32;
+    pub usage: u32;
+    pub array_usage_valid: bool;
+    pub array_usage_page: u32;
+    pub array_usage_min: u32;
+    pub array_usage_max: u32;
+    pub logical_range_valid: bool;
+    pub logical_min: i64;
+    pub logical_max: i64;
+}
+
+pub struct HidInputValue {
+    pub valid: bool;
+    pub field_index: usize;
+    pub report_id: u8;
+    pub raw_value: u64;
+    pub numeric_value: i64;
+    pub numeric_signed: bool;
+    pub null_value: bool;
+    pub usage_valid: bool;
+    pub usage_page: u32;
+    pub usage: u32;
+    pub is_constant: bool;
+    pub is_variable: bool;
+    pub is_relative: bool;
+}
+
+static mut HID_INPUT_FIELDS: [HidInputField; HID_INPUT_MAX_FIELDS] = [
+    HidInputField {
+        valid: false, report_id: 0, bit_offset: 0, bit_size: 0, flags: 0,
+        is_constant: false, is_variable: false, is_relative: false,
+        null_state: false, usage_valid: false, usage_page: 0, usage: 0,
+        array_usage_valid: false, array_usage_page: 0,
+        array_usage_min: 0, array_usage_max: 0,
+        logical_range_valid: false, logical_min: 0, logical_max: 0
+    };
+    HID_INPUT_MAX_FIELDS
+];
+static mut HID_INPUT_REPORT_BITS: [u32; HID_INPUT_REPORT_ID_SLOTS] = [0; HID_INPUT_REPORT_ID_SLOTS];
+static mut HID_INPUT_REPORT_PRESENT: [bool; HID_INPUT_REPORT_ID_SLOTS] = [false; HID_INPUT_REPORT_ID_SLOTS];
+static mut HID_INPUT_FIELD_COUNT: usize = 0;
+static mut HID_INPUT_HAS_REPORT_IDS: bool = false;
+static mut HID_INPUT_MAP_READY: bool = false;
+
+@system
+pub fn hid_input_field_invalid() -> HidInputField {
+    return HidInputField {
+        valid: false, report_id: 0, bit_offset: 0, bit_size: 0, flags: 0,
+        is_constant: false, is_variable: false, is_relative: false,
+        null_state: false, usage_valid: false, usage_page: 0, usage: 0,
+        array_usage_valid: false, array_usage_page: 0,
+        array_usage_min: 0, array_usage_max: 0,
+        logical_range_valid: false, logical_min: 0, logical_max: 0
+    };
+}
+
+@system
+pub fn hid_input_value_invalid() -> HidInputValue {
+    return HidInputValue {
+        valid: false, field_index: HID_INPUT_INVALID_FIELD, report_id: 0,
+        raw_value: 0, numeric_value: 0, numeric_signed: false,
+        null_value: false, usage_valid: false, usage_page: 0, usage: 0,
+        is_constant: false, is_variable: false, is_relative: false
+    };
+}
+
+@system
+fn hid_input_map_reset() -> void {
+    unsafe {
+        HID_INPUT_FIELD_COUNT = 0;
+        HID_INPUT_HAS_REPORT_IDS = false;
+        HID_INPUT_MAP_READY = false;
+        let mut index: usize = 0;
+        while index < HID_INPUT_MAX_FIELDS {
+            HID_INPUT_FIELDS[index] = hid_input_field_invalid();
+            index += 1;
+        }
+        index = 0;
+        while index < HID_INPUT_REPORT_ID_SLOTS {
+            HID_INPUT_REPORT_BITS[index] = 0;
+            HID_INPUT_REPORT_PRESENT[index] = false;
+            index += 1;
+        }
+    }
+}
+
+@system
+fn hid_input_read8(base: *const u8, offset: usize) -> u8 {
+    if base == (null as *const u8) { return 0; }
+    unsafe { return *(((base as usize) + offset) as *const u8); }
+}
+
+@system
+fn hid_input_item_size(prefix: u8) -> usize {
+    let code = prefix & 0x03;
+    if code == 0 { return 0; }
+    if code == 1 { return 1; }
+    if code == 2 { return 2; }
+    return 4;
+}
+
+@system
+fn hid_input_read_unsigned(base: *const u8, offset: usize, size: usize) -> u32 {
+    if base == (null as *const u8) || size > 4 { return 0; }
+    let mut value: u32 = 0;
+    let mut index: usize = 0;
+    while index < size {
+        value |= (hid_input_read8(base, offset + index) as u32) << ((index as u32) * 8);
+        index += 1;
+    }
+    return value;
+}
+
+@system
+fn hid_input_read_signed(base: *const u8, offset: usize, size: usize) -> i64 {
+    let raw = hid_input_read_unsigned(base, offset, size);
+    if size == 0 { return 0; }
+    if size == 1 {
+        if (raw & 0x80) != 0 { return (raw as i64) - 256; }
+        return raw as i64;
+    }
+    if size == 2 {
+        if (raw & 0x8000) != 0 { return (raw as i64) - 65536; }
+        return raw as i64;
+    }
+    if size == 4 {
+        if (raw & 0x80000000) != 0 { return (raw as i64) - 4294967296; }
+        return raw as i64;
+    }
+    return raw as i64;
+}
+
+@system
+fn hid_input_full_usage(usage_page: u32, value: u32, size: usize) -> u32 {
+    if size == 4 && value > 0xFFFF {
+        return value;
+    }
+    if usage_page > 0xFFFF || value > 0xFFFF { return 0xFFFFFFFF; }
+    return (usage_page << 16) | value;
+}
+
+@system
+fn hid_input_usage_page(full: u32) -> u32 { return (full >> 16) & 0xFFFF; }
+@system
+fn hid_input_usage_id(full: u32) -> u32 { return full & 0xFFFF; }
+
+@system
+fn hid_input_logical_max(minimum: i64, raw: u32, size: usize) -> i64 {
+    if minimum < 0 {
+        if size == 1 {
+            if (raw & 0x80) != 0 { return (raw as i64) - 256; }
+        } else if size == 2 {
+            if (raw & 0x8000) != 0 { return (raw as i64) - 65536; }
+        } else if size == 4 {
+            if (raw & 0x80000000) != 0 { return (raw as i64) - 4294967296; }
+        }
+    }
+    return raw as i64;
+}
+
+@system
+fn hid_input_local_range_valid(minimum: u32, maximum: u32,
+                               min_valid: bool, max_valid: bool) -> bool {
+    if !min_valid || !max_valid { return false; }
+    if hid_input_usage_page(minimum) != hid_input_usage_page(maximum) { return false; }
+    return hid_input_usage_id(minimum) <= hid_input_usage_id(maximum);
+}
+
+@system
+fn hid_input_local_list_contiguous(usages: *const u32, count: usize) -> bool {
+    if usages == (null as *const u32) || count == 0 || count > HID_INPUT_MAX_LOCAL_USAGES {
+        return false;
+    }
+    unsafe {
+        let first = *usages;
+        let page = hid_input_usage_page(first);
+        let mut expected = hid_input_usage_id(first);
+        let mut index: usize = 0;
+        while index < count {
+            let current = *(((usages as usize) + (index * 4)) as *const u32);
+            if hid_input_usage_page(current) != page ||
+               hid_input_usage_id(current) != expected {
+                return false;
+            }
+            if index + 1 < count {
+                if expected == 0xFFFF { return false; }
+                expected += 1;
+            }
+            index += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn hid_input_append_field(field: HidInputField) -> bool {
+    if !field.valid || field.bit_size == 0 || field.bit_size > HID_REPORT_MAX_REPORT_SIZE_BITS {
+        return false;
+    }
+    unsafe {
+        if HID_INPUT_FIELD_COUNT >= HID_INPUT_MAX_FIELDS { return false; }
+        HID_INPUT_FIELDS[HID_INPUT_FIELD_COUNT] = field;
+        HID_INPUT_FIELD_COUNT += 1;
+    }
+    return true;
+}
+
+@system
+fn hid_input_build_input_fields(report_id: u8,
+                                report_size: u32,
+                                report_count: u32,
+                                flags: u32,
+                                local_usages: *const u32,
+                                local_usage_count: usize,
+                                usage_minimum: u32,
+                                usage_maximum: u32,
+                                usage_minimum_valid: bool,
+                                usage_maximum_valid: bool,
+                                logical_minimum: i64,
+                                logical_maximum: i64,
+                                logical_range_valid: bool) -> bool {
+    if report_size == 0 || report_count == 0 ||
+       report_size > HID_REPORT_MAX_REPORT_SIZE_BITS ||
+       report_count > HID_REPORT_MAX_REPORT_COUNT ||
+       local_usage_count > HID_INPUT_MAX_LOCAL_USAGES {
+        return false;
+    }
+    if (flags & HID_INPUT_FLAG_BUFFERED_BYTES) != 0 { return false; }
+    let rid = report_id as usize;
+    if rid >= HID_INPUT_REPORT_ID_SLOTS { return false; }
+    let total_bits = report_size * report_count;
+    let mut bit_offset: u32 = 0;
+    unsafe { bit_offset = HID_INPUT_REPORT_BITS[rid]; }
+    if total_bits > HID_REPORT_MAX_AGGREGATE_BITS ||
+       bit_offset > HID_REPORT_MAX_AGGREGATE_BITS - total_bits {
+        return false;
+    }
+
+    let constant = (flags & HID_INPUT_FLAG_CONSTANT) != 0;
+    let variable = (flags & HID_INPUT_FLAG_VARIABLE) != 0;
+    let relative = (flags & HID_INPUT_FLAG_RELATIVE) != 0;
+    let null_state = (flags & HID_INPUT_FLAG_NULL_STATE) != 0;
+    let range_valid = hid_input_local_range_valid(
+        usage_minimum, usage_maximum, usage_minimum_valid, usage_maximum_valid);
+    let mut explicit_array_range = false;
+    if !variable && !constant && local_usage_count != 0 {
+        explicit_array_range = hid_input_local_list_contiguous(local_usages, local_usage_count);
+    }
+
+    let mut control: u32 = 0;
+    while control < report_count {
+        let mut field = hid_input_field_invalid();
+        field.valid = true;
+        field.report_id = report_id;
+        field.bit_offset = bit_offset + (control * report_size);
+        field.bit_size = report_size;
+        field.flags = flags;
+        field.is_constant = constant;
+        field.is_variable = variable;
+        field.is_relative = relative;
+        field.null_state = null_state;
+        field.logical_range_valid = logical_range_valid;
+        field.logical_min = logical_minimum;
+        field.logical_max = logical_maximum;
+
+        if !constant && variable {
+            let mut full: u32 = 0;
+            let mut usage_valid = false;
+            if local_usage_count != 0 {
+                let mut usage_index = control as usize;
+                if usage_index >= local_usage_count { usage_index = local_usage_count - 1; }
+                unsafe {
+                    full = *(((local_usages as usize) + (usage_index * 4)) as *const u32);
+                }
+                usage_valid = full != 0xFFFFFFFF;
+            } else if range_valid {
+                let page = hid_input_usage_page(usage_minimum);
+                let low = hid_input_usage_id(usage_minimum);
+                let high = hid_input_usage_id(usage_maximum);
+                let mut usage = low;
+                if control <= high - low { usage = low + control; }
+                else { usage = high; }
+                full = (page << 16) | usage;
+                usage_valid = true;
+            }
+            if usage_valid {
+                field.usage_valid = true;
+                field.usage_page = hid_input_usage_page(full);
+                field.usage = hid_input_usage_id(full);
+            }
+        } else if !constant && !variable {
+            if range_valid {
+                field.array_usage_valid = true;
+                field.array_usage_page = hid_input_usage_page(usage_minimum);
+                field.array_usage_min = hid_input_usage_id(usage_minimum);
+                field.array_usage_max = hid_input_usage_id(usage_maximum);
+            } else if explicit_array_range {
+                unsafe {
+                    let first = *local_usages;
+                    let last = *(((local_usages as usize) + ((local_usage_count - 1) * 4)) as *const u32);
+                    field.array_usage_valid = true;
+                    field.array_usage_page = hid_input_usage_page(first);
+                    field.array_usage_min = hid_input_usage_id(first);
+                    field.array_usage_max = hid_input_usage_id(last);
+                }
+            }
+        }
+
+        if !hid_input_append_field(field) { return false; }
+        control += 1;
+    }
+
+    unsafe {
+        HID_INPUT_REPORT_BITS[rid] = bit_offset + total_bits;
+        HID_INPUT_REPORT_PRESENT[rid] = true;
+    }
+    return true;
+}
+
+@system
+pub fn hid_input_report_map_build(base: *const u8, length: usize) -> bool {
+    hid_input_map_reset();
+    let summary = hid_report_descriptor_parse(base, length);
+    if !summary.valid || base == (null as *const u8) || length == 0 ||
+       length > HID_REPORT_DESCRIPTOR_MAX_BYTES {
+        return false;
+    }
+
+    let mut offset: usize = 0;
+    let mut items: u32 = 0;
+    let mut usage_page: u32 = 0;
+    let mut logical_minimum: i64 = 0;
+    let mut logical_minimum_valid = false;
+    let mut logical_maximum_raw: u32 = 0;
+    let mut logical_maximum_size: usize = 0;
+    let mut logical_maximum_valid = false;
+    let mut report_size: u32 = 0;
+    let mut report_count: u32 = 0;
+    let mut current_report_id: u8 = 0;
+    let mut report_ids_enabled = false;
+    let mut data_main_seen = false;
+
+    let mut local_usages: [u32; HID_INPUT_MAX_LOCAL_USAGES] = [0; HID_INPUT_MAX_LOCAL_USAGES];
+    let mut local_usage_count: usize = 0;
+    let mut usage_minimum: u32 = 0;
+    let mut usage_maximum: u32 = 0;
+    let mut usage_minimum_valid = false;
+    let mut usage_maximum_valid = false;
+
+    while offset < length {
+        if items >= HID_REPORT_DESCRIPTOR_MAX_ITEMS { hid_input_map_reset(); return false; }
+        let prefix = hid_input_read8(base, offset);
+        offset += 1;
+        if prefix == HID_ITEM_LONG_PREFIX { hid_input_map_reset(); return false; }
+        let size = hid_input_item_size(prefix);
+        if size > length - offset { hid_input_map_reset(); return false; }
+        let value_offset = offset;
+        let value = hid_input_read_unsigned(base, value_offset, size);
+        offset += size;
+        let item_type = (prefix >> 2) & 0x03;
+        let tag = (prefix >> 4) & 0x0F;
+
+        if item_type == HID_ITEM_TYPE_GLOBAL {
+            if tag == HID_GLOBAL_USAGE_PAGE {
+                if value > 0xFFFF { hid_input_map_reset(); return false; }
+                usage_page = value;
+            } else if tag == HID_GLOBAL_LOGICAL_MINIMUM {
+                logical_minimum = hid_input_read_signed(base, value_offset, size);
+                logical_minimum_valid = true;
+            } else if tag == HID_GLOBAL_LOGICAL_MAXIMUM {
+                logical_maximum_raw = value;
+                logical_maximum_size = size;
+                logical_maximum_valid = true;
+            } else if tag == HID_GLOBAL_REPORT_SIZE {
+                if value == 0 || value > HID_REPORT_MAX_REPORT_SIZE_BITS {
+                    hid_input_map_reset(); return false;
+                }
+                report_size = value;
+            } else if tag == HID_GLOBAL_REPORT_ID {
+                if value == 0 || value > 0xFF { hid_input_map_reset(); return false; }
+                if !report_ids_enabled && data_main_seen { hid_input_map_reset(); return false; }
+                report_ids_enabled = true;
+                current_report_id = value as u8;
+            } else if tag == HID_GLOBAL_REPORT_COUNT {
+                if value == 0 || value > HID_REPORT_MAX_REPORT_COUNT {
+                    hid_input_map_reset(); return false;
+                }
+                report_count = value;
+            } else if tag == HID_GLOBAL_PUSH || tag == HID_GLOBAL_POP {
+                hid_input_map_reset(); return false;
+            } else if tag > 6 {
+                hid_input_map_reset(); return false;
+            }
+        } else if item_type == HID_ITEM_TYPE_LOCAL {
+            if tag == HID_LOCAL_USAGE {
+                if local_usage_count >= HID_INPUT_MAX_LOCAL_USAGES {
+                    hid_input_map_reset(); return false;
+                }
+                let full = hid_input_full_usage(usage_page, value, size);
+                if full == 0xFFFFFFFF { hid_input_map_reset(); return false; }
+                local_usages[local_usage_count] = full;
+                local_usage_count += 1;
+            } else if tag == HID_LOCAL_USAGE_MINIMUM {
+                usage_minimum = hid_input_full_usage(usage_page, value, size);
+                if usage_minimum == 0xFFFFFFFF { hid_input_map_reset(); return false; }
+                usage_minimum_valid = true;
+            } else if tag == HID_LOCAL_USAGE_MAXIMUM {
+                usage_maximum = hid_input_full_usage(usage_page, value, size);
+                if usage_maximum == 0xFFFFFFFF { hid_input_map_reset(); return false; }
+                usage_maximum_valid = true;
+            } else if tag == HID_LOCAL_DELIMITER || tag > HID_LOCAL_DELIMITER {
+                hid_input_map_reset(); return false;
+            }
+        } else if item_type == HID_ITEM_TYPE_MAIN {
+            if tag == HID_MAIN_INPUT || tag == HID_MAIN_OUTPUT || tag == HID_MAIN_FEATURE {
+                data_main_seen = true;
+                if report_ids_enabled && current_report_id == 0 {
+                    hid_input_map_reset(); return false;
+                }
+                if report_size == 0 || report_count == 0 {
+                    hid_input_map_reset(); return false;
+                }
+            }
+            if tag == HID_MAIN_INPUT {
+                let logical_maximum = hid_input_logical_max(
+                    logical_minimum, logical_maximum_raw, logical_maximum_size);
+                let logical_range_valid = logical_minimum_valid && logical_maximum_valid &&
+                    logical_maximum >= logical_minimum;
+                if logical_minimum_valid && logical_maximum_valid && !logical_range_valid {
+                    hid_input_map_reset(); return false;
+                }
+                if !hid_input_build_input_fields(
+                    current_report_id, report_size, report_count, value,
+                    &local_usages[0], local_usage_count,
+                    usage_minimum, usage_maximum,
+                    usage_minimum_valid, usage_maximum_valid,
+                    logical_minimum, logical_maximum, logical_range_valid) {
+                    hid_input_map_reset(); return false;
+                }
+            } else if tag != HID_MAIN_OUTPUT && tag != HID_MAIN_FEATURE &&
+                      tag != HID_MAIN_COLLECTION && tag != HID_MAIN_END_COLLECTION {
+                hid_input_map_reset(); return false;
+            }
+            local_usage_count = 0;
+            usage_minimum = 0;
+            usage_maximum = 0;
+            usage_minimum_valid = false;
+            usage_maximum_valid = false;
+        } else {
+            hid_input_map_reset(); return false;
+        }
+        items += 1;
+    }
+
+    unsafe {
+        if HID_INPUT_FIELD_COUNT == 0 || summary.has_report_ids != report_ids_enabled {
+            hid_input_map_reset();
+            return false;
+        }
+        if report_ids_enabled && HID_INPUT_REPORT_PRESENT[0] {
+            hid_input_map_reset();
+            return false;
+        }
+        HID_INPUT_HAS_REPORT_IDS = report_ids_enabled;
+        HID_INPUT_MAP_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn hid_input_report_map_is_ready() -> bool { unsafe { return HID_INPUT_MAP_READY; } }
+@system
+pub fn hid_input_report_field_count() -> usize {
+    unsafe { if !HID_INPUT_MAP_READY { return 0; } return HID_INPUT_FIELD_COUNT; }
+}
+@system
+pub fn hid_input_report_has_report_ids() -> bool {
+    unsafe { return HID_INPUT_MAP_READY && HID_INPUT_HAS_REPORT_IDS; }
+}
+
+@system
+pub fn hid_input_report_field(index: usize) -> *const HidInputField {
+    unsafe {
+        if !HID_INPUT_MAP_READY || index >= HID_INPUT_FIELD_COUNT || !HID_INPUT_FIELDS[index].valid {
+            return null as *const HidInputField;
+        }
+        return &HID_INPUT_FIELDS[index];
+    }
+}
+
+@system
+pub fn hid_input_report_expected_bytes(report_id: u8) -> u16 {
+    unsafe {
+        if !HID_INPUT_MAP_READY { return 0; }
+        let index = report_id as usize;
+        if index >= HID_INPUT_REPORT_ID_SLOTS || !HID_INPUT_REPORT_PRESENT[index] {
+            return 0;
+        }
+        if HID_INPUT_HAS_REPORT_IDS && report_id == 0 { return 0; }
+        if !HID_INPUT_HAS_REPORT_IDS && report_id != 0 { return 0; }
+        let bits = HID_INPUT_REPORT_BITS[index];
+        if bits == 0 { return 0; }
+        let mut bytes = (bits + 7) / 8;
+        if HID_INPUT_HAS_REPORT_IDS { bytes += 1; }
+        if bytes > 0xFFFF { return 0; }
+        return bytes as u16;
+    }
+}
+
+@system
+fn hid_input_extract_bits(base: *const u8, length: usize,
+                          bit_offset: u32, bit_size: u32) -> u64 {
+    if base == (null as *const u8) || bit_size == 0 || bit_size > 64 { return 0; }
+    let end_bit = (bit_offset as u64) + (bit_size as u64);
+    if end_bit > (length as u64) * 8 { return 0; }
+    let mut result: u64 = 0;
+    let mut bit: u32 = 0;
+    while bit < bit_size {
+        let absolute = bit_offset + bit;
+        let byte = hid_input_read8(base, (absolute / 8) as usize);
+        let value = (byte >> ((absolute % 8) as u8)) & 1;
+        result |= (value as u64) << bit;
+        bit += 1;
+    }
+    return result;
+}
+
+@system
+fn hid_input_sign_extend(raw: u64, bits: u32) -> i64 {
+    if bits == 0 || bits > 64 { return 0; }
+    if bits == 64 { return raw as i64; }
+    let sign = (1 as u64) << (bits - 1);
+    if (raw & sign) == 0 { return raw as i64; }
+    let modulus = (1 as u64) << bits;
+    let magnitude = modulus - raw;
+    return -(magnitude as i64);
+}
+
+@system
+fn hid_input_wire_report_id(report: *const u8, length: usize) -> u16 {
+    if !hid_input_report_map_is_ready() || report == (null as *const u8) || length == 0 {
+        return 0xFFFF;
+    }
+    if hid_input_report_has_report_ids() {
+        let report_id = hid_input_read8(report, 0);
+        if report_id == 0 || hid_input_report_expected_bytes(report_id) == 0 { return 0xFFFF; }
+        return report_id as u16;
+    }
+    if hid_input_report_expected_bytes(0) == 0 { return 0xFFFF; }
+    return 0;
+}
+
+@system
+pub fn hid_input_report_decode_field(report: *const u8,
+                                     length: usize,
+                                     field_index: usize) -> HidInputValue {
+    let mut result = hid_input_value_invalid();
+    if !hid_input_report_map_is_ready() || report == (null as *const u8) || length == 0 {
+        return result;
+    }
+    let wire_id = hid_input_wire_report_id(report, length);
+    if wire_id == 0xFFFF { return result; }
+    let report_id = wire_id as u8;
+    let expected = hid_input_report_expected_bytes(report_id);
+    if expected == 0 || length != expected as usize { return result; }
+
+    let field_ptr = hid_input_report_field(field_index);
+    if field_ptr == (null as *const HidInputField) { return result; }
+    let field = unsafe { *field_ptr };
+    if field.report_id != report_id { return result; }
+
+    let mut payload = report;
+    let mut payload_length = length;
+    if hid_input_report_has_report_ids() {
+        payload = unsafe { ((report as usize) + 1) as *const u8 };
+        payload_length -= 1;
+    }
+    let end_bit = (field.bit_offset as u64) + (field.bit_size as u64);
+    if end_bit > (payload_length as u64) * 8 { return result; }
+    let raw = hid_input_extract_bits(payload, payload_length, field.bit_offset, field.bit_size);
+    let signed = field.logical_range_valid && field.logical_min < 0;
+    let mut numeric: i64 = 0;
+    if signed { numeric = hid_input_sign_extend(raw, field.bit_size); }
+    else {
+        if raw > 0x7FFFFFFFFFFFFFFF { return result; }
+        numeric = raw as i64;
+    }
+
+    let mut null_value = false;
+    if !field.is_constant && field.logical_range_valid &&
+       (numeric < field.logical_min || numeric > field.logical_max) {
+        if !field.null_state { return result; }
+        null_value = true;
+    }
+
+    result.valid = true;
+    result.field_index = field_index;
+    result.report_id = report_id;
+    result.raw_value = raw;
+    result.numeric_value = numeric;
+    result.numeric_signed = signed;
+    result.null_value = null_value;
+    result.is_constant = field.is_constant;
+    result.is_variable = field.is_variable;
+    result.is_relative = field.is_relative;
+
+    if !null_value && !field.is_constant {
+        if field.is_variable && field.usage_valid {
+            result.usage_valid = true;
+            result.usage_page = field.usage_page;
+            result.usage = field.usage;
+        } else if !field.is_variable && field.array_usage_valid && field.logical_range_valid {
+            if numeric >= field.logical_min {
+                let selector = (numeric - field.logical_min) as u64;
+                let span = (field.array_usage_max - field.array_usage_min) as u64;
+                if selector <= span {
+                    result.usage_valid = true;
+                    result.usage_page = field.array_usage_page;
+                    result.usage = field.array_usage_min + (selector as u32);
+                }
+            }
+        }
+    }
+    return result;
+}
+
+@system
+pub fn hid_input_report_validate(report: *const u8, length: usize) -> bool {
+    if !hid_input_report_map_is_ready() || report == (null as *const u8) || length == 0 {
+        return false;
+    }
+    let wire_id = hid_input_wire_report_id(report, length);
+    if wire_id == 0xFFFF { return false; }
+    let report_id = wire_id as u8;
+    let expected = hid_input_report_expected_bytes(report_id);
+    if expected == 0 || length != expected as usize { return false; }
+    let mut matched = false;
+    let count = hid_input_report_field_count();
+    let mut index: usize = 0;
+    while index < count {
+        let field = hid_input_report_field(index);
+        if field == (null as *const HidInputField) { return false; }
+        unsafe {
+            if (*field).report_id == report_id {
+                matched = true;
+                if !hid_input_report_decode_field(report, length, index).valid { return false; }
+            }
+        }
+        index += 1;
+    }
+    return matched;
+}
+
+@system
+pub fn hid_input_report_find_usage(report_id: u8,
+                                   usage_page: u32,
+                                   usage: u32,
+                                   ordinal: usize) -> usize {
+    if !hid_input_report_map_is_ready() { return HID_INPUT_INVALID_FIELD; }
+    let count = hid_input_report_field_count();
+    let mut seen: usize = 0;
+    let mut index: usize = 0;
+    while index < count {
+        let field = hid_input_report_field(index);
+        if field == (null as *const HidInputField) { return HID_INPUT_INVALID_FIELD; }
+        unsafe {
+            if (*field).report_id == report_id && (*field).usage_valid &&
+               (*field).usage_page == usage_page && (*field).usage == usage {
+                if seen == ordinal { return index; }
+                seen += 1;
+            }
+        }
+        index += 1;
+    }
+    return HID_INPUT_INVALID_FIELD;
+}
+
+@system
+pub fn hid_input_report_self_test() -> bool {
+    let keyboard: [u8; 63] = [
+        0x05,0x01,0x09,0x06,0xA1,0x01,
+        0x05,0x07,0x19,0xE0,0x29,0xE7,0x15,0x00,0x25,0x01,
+        0x75,0x01,0x95,0x08,0x81,0x02,
+        0x95,0x01,0x75,0x08,0x81,0x01,
+        0x95,0x05,0x75,0x01,0x05,0x08,0x19,0x01,0x29,0x05,0x91,0x02,
+        0x95,0x01,0x75,0x03,0x91,0x01,
+        0x95,0x06,0x75,0x08,0x15,0x00,0x25,0x65,0x05,0x07,
+        0x19,0x00,0x29,0x65,0x81,0x00,0xC0
+    ];
+    if !hid_input_report_map_build(&keyboard[0], 63) ||
+       hid_input_report_field_count() != 15 ||
+       hid_input_report_expected_bytes(0) != 8 ||
+       hid_input_report_has_report_ids() {
+        hid_input_map_reset(); return false;
+    }
+    let modifier = hid_input_report_field(1);
+    let array0 = hid_input_report_field(9);
+    if modifier == (null as *const HidInputField) || array0 == (null as *const HidInputField) {
+        hid_input_map_reset(); return false;
+    }
+    unsafe {
+        if !(*modifier).usage_valid || (*modifier).usage_page != 0x07 ||
+           (*modifier).usage != 0xE1 || (*modifier).bit_offset != 1 ||
+           !(*modifier).is_variable || !(*array0).array_usage_valid ||
+           (*array0).array_usage_page != 0x07 || (*array0).array_usage_min != 0 ||
+           (*array0).array_usage_max != 0x65 || (*array0).bit_offset != 16 {
+            hid_input_map_reset(); return false;
+        }
+    }
+    let keyboard_report: [u8; 8] = [0x02,0x00,0x04,0,0,0,0,0];
+    if !hid_input_report_validate(&keyboard_report[0], 8) { hid_input_map_reset(); return false; }
+    let shift = hid_input_report_decode_field(&keyboard_report[0], 8, 1);
+    let key = hid_input_report_decode_field(&keyboard_report[0], 8, 9);
+    if !shift.valid || shift.raw_value != 1 || !shift.usage_valid || shift.usage != 0xE1 ||
+       !key.valid || key.raw_value != 4 || !key.usage_valid || key.usage_page != 0x07 ||
+       key.usage != 4 || hid_input_report_validate(&keyboard_report[0], 7) {
+        hid_input_map_reset(); return false;
+    }
+
+    let mouse: [u8; 52] = [
+        0x05,0x01,0x09,0x02,0xA1,0x01,0x09,0x01,0xA1,0x00,
+        0x05,0x09,0x19,0x01,0x29,0x03,0x15,0x00,0x25,0x01,
+        0x95,0x03,0x75,0x01,0x81,0x02,0x95,0x01,0x75,0x05,0x81,0x01,
+        0x05,0x01,0x09,0x30,0x09,0x31,0x09,0x38,0x15,0x81,0x25,0x7F,
+        0x75,0x08,0x95,0x03,0x81,0x06,0xC0,0xC0
+    ];
+    if !hid_input_report_map_build(&mouse[0], 52) ||
+       hid_input_report_field_count() != 7 || hid_input_report_expected_bytes(0) != 4 {
+        hid_input_map_reset(); return false;
+    }
+    let mouse_report: [u8; 4] = [0x01,0xFF,0x02,0x00];
+    let x = hid_input_report_decode_field(&mouse_report[0], 4, 4);
+    let y = hid_input_report_decode_field(&mouse_report[0], 4, 5);
+    if !hid_input_report_validate(&mouse_report[0], 4) || !x.valid || !y.valid ||
+       !x.numeric_signed || x.numeric_value != -1 || !x.is_relative ||
+       !x.usage_valid || x.usage_page != 0x01 || x.usage != 0x30 ||
+       y.numeric_value != 2 || y.usage != 0x31 {
+        hid_input_map_reset(); return false;
+    }
+
+    let report_id_descriptor: [u8; 20] = [
+        0x05,0x01,0x09,0x02,0xA1,0x01,0x85,0x05,
+        0x09,0x30,0x15,0x81,0x25,0x7F,0x75,0x08,0x95,0x01,0x81,0x06
+    ];
+    // Sem EndCollection este descriptor deve falhar no parser HID-1.
+    if hid_input_report_map_build(&report_id_descriptor[0], 20) {
+        hid_input_map_reset(); return false;
+    }
+
+    let report_id_ok: [u8; 21] = [
+        0x05,0x01,0x09,0x02,0xA1,0x01,0x85,0x05,
+        0x09,0x30,0x15,0x81,0x25,0x7F,0x75,0x08,0x95,0x01,0x81,0x06,0xC0
+    ];
+    if !hid_input_report_map_build(&report_id_ok[0], 21) ||
+       !hid_input_report_has_report_ids() || hid_input_report_expected_bytes(5) != 2 {
+        hid_input_map_reset(); return false;
+    }
+    let id_report: [u8; 2] = [5,0xFE];
+    let id_value = hid_input_report_decode_field(&id_report[0], 2, 0);
+    if !id_value.valid || id_value.report_id != 5 || id_value.numeric_value != -2 ||
+       !id_value.usage_valid || id_value.usage != 0x30 {
+        hid_input_map_reset(); return false;
+    }
+
+    hid_input_map_reset();
+    return true;
+}
