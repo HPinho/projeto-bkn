@@ -2,358 +2,156 @@
 
 Atualizado em 2026-09-10 (America/Fortaleza).
 
-Este roadmap separa **implementado**, **em validação**, **comprovado** e **planejado**. Uma feature só é promovida a comprovada quando seus gates obrigatórios passam no mesmo SHA de runtime.
+Este roadmap separa `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU` e `⬜ PLANEJADO`. Uma feature só vira baseline quando CI principal + SMP 3/3 + NVMe-only fecham verdes para o mesmo candidato.
 
 ## Estado geral
 
-**Fundação Bare-Metal: ✅ CONCLUÍDA**  
-**Kernel Core: ✅ CONCLUÍDO E CERTIFICADO**  
-**Platform/Drivers: ▶️ EM DESENVOLVIMENTO**
+**Fase 0 — Fundação Bare-Metal: ✅ CONCLUÍDA**  
+**Fase 1 — Kernel Core: ✅ CONCLUÍDA E CERTIFICADA**  
+**Fase 2 — Platform/Drivers: ▶️ EM DESENVOLVIMENTO**
 
-## Baseline certificada da Fundação + Kernel Core
+## Baseline operacional verde
 
 ```text
-ee19f2624c29ae97075d761eab8807fac4794ccd
-fix(scheduler): isolate wait handoff from LAPIC preemption
+3f02decb2cacc94975113e1886ae3ed74cf8a698
+fix(acpi): mark AML pointer conversion unsafe
 ```
 
-Gates no mesmo SHA:
+Prova no mesmo SHA:
 
 | Gate | Resultado |
 |---|---|
-| CI principal #1041 / `34425865124` | ✅ PASS |
-| SMP #144 / `34425865126` | ✅ PASS — 3/3 boots |
-| NVMe-only #241 / `34425865156` | ✅ PASS |
+| CI principal #1048 / `34471015124` | ✅ PASS |
+| SMP #151 / `34471015170` | ✅ PASS — 3/3 boots |
+| NVMe-only #248 / `34471015070` | ✅ PASS |
 
-A antiga baseline `72422a7` permanece histórica. `ee19f26` é a baseline operacional atual porque revalidou o Kernel Core após a correção do handoff wait/wake e contém AML-2.
+### Regra nova de integração
 
-### Regressão WAIT_BLOCKED — ✅ ENCERRADA
-
-No SHA `26e5670`, AML-2 chegou a `ACPI_AML_NAMESPACE_READY`, NVMe #240 e SMP #143 passaram, mas o CI #1040 parou em `WAIT_BLOCKED`. A causa foi isolada na competição temporal entre o handoff software do wait/wake e o LAPIC periódico.
-
-`ee19f26` separou as provas:
-
-- wait/wake: `INT 0x43` com timer periódico temporariamente mascarado;
-- sleep: timer reativado somente depois de `SLEEP_BLOCKED`, preservando a prova de IRQ real.
-
-Os checkpoints `HEX=W` tornam a fronteira observável. CI #1041 + SMP #144 + NVMe #241 fecharam a regressão.
-
----
-
-## Política de acompanhamento
-
-Toda alteração relevante deve aparecer aqui e em `docs/KERNEL_HANDOFF.md` como:
-
-- `⏳ EM VALIDAÇÃO` enquanto o código existe mas os gates não fecharam;
-- `✅ COMPROVADO` com SHA e runs verdes;
-- `❌ FALHOU` com causa, diagnóstico e correção/next step.
-
-Nunca remover teste/marker para mascarar regressão, nunca substituir prova bare-metal por mock e nunca avançar para uma camada dependente enquanto a anterior estiver vermelha.
+Para evitar workflows vermelhos na baseline, `main` fica congelada no último checkpoint verde. Trabalho novo ocorre em branch/PR; falhas são corrigidas ali. A baseline só avança após os três gates obrigatórios passarem.
 
 ---
 
 ## Fase 0 — Fundação Bare-Metal
 
-**Estado: ✅ CONCLUÍDA.**
-
-Comprovado:
-
-- boot UEFI apenas como bootstrap;
-- ExitBootServices real;
-- zero UEFI pós-cutover;
-- stack própria/trampoline;
-- CR3 Baken;
-- PMM/VMM/direct-map;
-- W^X e guard stack;
-- GDT/TSS/LTR/IDT;
-- ACPI/MADT;
-- LAPIC/IOAPIC/IRQ/timer;
-- PCI/DMA;
-- xHCI/USB HID;
-- AHCI/NVMe/BlockDevice;
-- GPT/MBR/FAT32;
-- PAT/framebuffer WC.
-
----
+**✅ CONCLUÍDA.** Boot/ExitBootServices, CR3 Baken, PMM/VMM/DMA, W^X/guard stack, GDT/TSS/IDT, ACPI/APIC/IRQ/timer, PCI, xHCI/HID, AHCI/NVMe/BlockDevice, GPT/MBR/FAT32, PAT/framebuffer WC e zero UEFI pós-cutover comprovados.
 
 ## Fase 1 — Kernel Core
 
-**Estado: ✅ CONCLUÍDA E CERTIFICADA em `ee19f26`.**
+**✅ CONCLUÍDA E CERTIFICADA.** Scheduler preemptivo/SMP, wait/wake/sleep, heap, processos/address spaces, Ring3/syscalls/user-copy, isolamento de faults, FPU/SIMD, TLB shootdown, migração BSP->AP do mesmo TID e teardown seguro permanecem invariantes congelados.
 
-Comprovado:
-
-- scheduler preemptivo;
-- kernel threads;
-- wait/wakeup/sleep;
-- exit/reaper/stack release;
-- heap PMM-backed;
-- processos/PID/TID;
-- address spaces privados;
-- CR3 por processo;
-- Ring 3;
-- syscalls e user-copy;
-- isolamento de exceções CPL3 no BSP e AP;
-- FPU/SIMD por thread;
-- scheduler SMP;
-- active address-space tracking por CPU;
-- TLB shootdown root-aware;
-- processo Ring 3 real no AP;
-- migração BSP -> AP do mesmo TID;
-- preservação FPU/SIMD na migração;
-- ownership/retirement sincronizado sem dupla execução;
-- protocolo wait/wake isolado da preempção periódica sem enfraquecer sleep real.
-
-Critério permanente: mudanças nessa área exigem novamente CI + SMP 3/3 + NVMe no mesmo SHA.
+Checkpoint histórico de conclusão: `72422a79dfcec4c9c43bd3a83ef8a9ad90c7c2c8`.
 
 ---
 
-## Fase 2 — Platform e Drivers de produção
+# Fase 2 — Platform e Drivers
 
-**Estado: ▶️ EM DESENVOLVIMENTO.**
+## Trilha A — ACPI/AML
 
-### Trilha A — ACPI/AML
+### AML-0 — Catálogo DSDT/SSDT
+**✅ COMPROVADO.** Marker `BAKEN:ACPI_AML_TABLES_READY`.
 
-#### AML-0 — Catálogo DSDT/SSDT
+### AML-1 — Decoder estrutural
+**✅ COMPROVADO.** Cursor/PkgLength/NameString/NameSeg/inteiros. Marker `BAKEN:ACPI_AML_DECODER_READY`.
 
-**Estado: ✅ COMPROVADO.**
+### AML-2 — Namespace core
+**✅ COMPROVADO.** Namespace bounded e read-only fora da janela do loader. Marker `BAKEN:ACPI_AML_NAMESPACE_READY`.
 
-- DSDT via FADT validado;
-- SSDTs enumerados com limite fixo;
-- definition blocks somente após validação;
-- marker `BAKEN:ACPI_AML_TABLES_READY`.
+### AML-3 — Data objects grammar-aware
+**✅ COMPROVADO e revalidado em `3f02decb`.** String/Buffer/Package/VarPackage, budgets e fail-closed. Marker `BAKEN:ACPI_AML_DATA_READY`.
 
-#### AML-1 — Decoder estrutural mínimo
+### AML-4 — DSDT/SSDT -> namespace real
+**✅ COMPROVADO em `2a9974ad500ac65da360faf0d1f99461ef78b9bc`.**
 
-**Estado: ✅ COMPROVADO.**
+Gates:
+- CI #1046 / `34465896493` ✅;
+- SMP #149 / `34465896534` ✅;
+- NVMe #246 / `34465896564` ✅.
 
-- cursor fail-closed;
-- `PkgLength`;
-- `NameString` (`\`, `^`, DualName, MultiName);
-- `NameSeg`;
-- constantes integer AML;
-- marker `BAKEN:ACPI_AML_DECODER_READY`.
+Materializa Name/Scope/Device e armazena Method opaco. Marker `BAKEN:ACPI_AML_NAMESPACE_LOADED`.
 
-#### AML-2 — Namespace core read-only
+### AML-5 — Descoberta estática de dispositivos
+**✅ COMPROVADO na baseline `3f02decb`.**
 
-**Estado: ✅ COMPROVADO na baseline `ee19f26`.**
+Inclui `_HID`, `_CID`, `_UID`, `_ADR`, `_STA` constante, `_CRS` estático, EISA ID e ResourceTemplate bounded. Métodos permanecem diferidos. Marker `BAKEN:ACPI_AML_DEVICES_READY`.
 
-Implementado originalmente em `26e5670`:
+Histórico de regressão:
+- `a312c3e8` / CI #1047 (`34470298359`) ❌: criação de ponteiro cru fora de `unsafe` durante `build_modular`;
+- `3f02decb` ✅: fronteira `unsafe` corrigida sem mudar a lógica; CI #1048 + SMP #151 + NVMe #248 passaram.
 
-- storage estático de 256 nós;
-- raiz explícita;
-- Scope/Device/Name/Method preparados;
-- parent + NameSeg;
-- lookup absoluto/relativo;
-- parent prefix `^`;
-- duplicata/capacidade fail-closed;
-- construção privada e leitura pública após READY;
-- self-test estrutural;
-- namespace sintético limpo antes da publicação;
-- zero execução AML/hardware;
-- marker `BAKEN:ACPI_AML_NAMESPACE_READY`.
+### AML-6a — Evaluator isolado e sem efeitos de hardware
+**⏳ EM VALIDAÇÃO** na branch `aml6a-validation`.
 
-O namespace real ainda contém somente a raiz; o loader DSDT/SSDT real pertence a AML-4.
-
-#### AML-3 — Data objects / parser grammar-aware
-
-**Estado: ⏳ IMPLEMENTADO; EM VALIDAÇÃO FINAL.**
-
-Implementação:
+SHA técnico:
 
 ```text
-8966f2507a27fd7263fef31ffe0a965bff930772
-feat(acpi): add bounded AML data object parser
-```
-
-Correção de wiring do gate:
-
-```text
-a872661c8c093ff5874e734b77fd05dbb8a713a3
-fix(ci): require AML data proof in SMP gate
+17267c3d51456935aefbd5347a4041f4eb69a91b
 ```
 
 Implementado:
+- 7 Args e 8 Locals por frame;
+- `Store` restrito a Local/Arg/Null target;
+- `Return`;
+- aritmética e lógica inteira básica;
+- If/Else com PkgLength;
+- leitura read-only de Name estático;
+- aridade por MethodFlags;
+- serialized/SyncLevel rejeitado até existir lock;
+- fuel 4096 + depth 8;
+- sem nested Method, While, Sleep/Stall, Notify, OperationRegion/Field ou write global;
+- self-test bare-metal antes de `PLATFORM_READY`;
+- marker `BAKEN:ACPI_AML_EVALUATOR_READY`;
+- falha `HEX=T/U`.
 
-- `StringPrefix`;
-- `BufferOp`;
-- `PackageOp`;
-- `VarPackageOp`;
-- DataObject integer/string/buffer/package;
-- PackageElement com subset conhecido + NameString;
-- TermArg mínimo limitado a Integer constante;
-- packages aninhados com profundidade limitada;
-- orçamento global de objetos;
-- limite de elementos e string;
-- corpo delimitado por `PkgLength` e consumo exato;
-- unknown opcode/truncamento fail-closed;
-- zero scan cego, zero evaluator, zero OperationRegion;
-- self-tests bare-metal;
-- marker `BAKEN:ACPI_AML_DATA_READY`.
+O evaluator ainda não participa da descoberta real. Isso evita misturar engine + semântica de firmware em um único gate.
 
-Limites atuais:
+**Promoção:** somente após CI + SMP 3/3 + NVMe-only verdes no PR candidato.
 
-```text
-AML_DATA_MAX_DEPTH = 8
-AML_DATA_MAX_OBJECTS = 1024
-AML_DATA_MAX_PACKAGE_ELEMENTS = 255
-AML_DATA_MAX_STRING_BYTES = 4096
-```
+### AML-6b — Métodos predefinidos para discovery
+**⬜ BLOQUEADO ATÉ AML-6a VERDE.**
 
-Validação:
+Planejado:
+- chamar métodos zero-arg estritamente necessários (`_STA`, `_CRS`, `_HID`, `_CID`, `_UID`) quando o AML-5 registrar `requires_evaluator`;
+- validar tipo do retorno por predefined object;
+- preservar fuel/depth;
+- nenhuma OperationRegion até AML-7;
+- adicionar nested Method calls somente quando firmware real exigir e com profundidade/aridade controladas.
 
-- SMP #145 — ❌ falhou em `Verify SMP Contracts` antes de build/QEMU porque o novo marker ainda não aparecia literalmente no YAML; parser não foi executado nesse run;
-- correção `a872661c` adicionou `tests/test_acpi_aml_data.py` e `BAKEN:ACPI_AML_DATA_READY` ao workflow SMP;
-- CI #1043 / `34457568426` — ⏳ em execução;
-- SMP #146 / `34457568498` — ⏳ em execução; contratos + `compiler.py check kernel/src/main.sotlas` já ✅;
-- NVMe-only #243 / `34457568488` — ⏳ em execução; contratos já ✅.
+### AML-7 — OperationRegion / Field
+**⬜ PLANEJADO.** SystemMemory, SystemIO e PCIConfig mediados por camadas nativas, com bounds rígidos; Field/IndexField apenas quando necessário.
 
-**Promoção:** AML-3 só vira `✅ COMPROVADO` quando CI #1043, SMP #146 3/3 e NVMe #243 fecharem verdes no SHA `a872661c`.
+### AML-8 — ACPI power/routing
+**⬜ PLANEJADO.** `_PRT`/`_PIC`, `_S5`, sleep/wake posterior e EC somente após infraestrutura segura.
 
-#### AML-4 — Loader DSDT/SSDT -> namespace real
+## Trilha B — HID adicional
+**⬜ DEPOIS DO AML/RESOURCE CORE.** I2C-HID, report descriptors, touchpad/touchscreen, hot-plug.
 
-**Estado: ⬜ PRÓXIMO, BLOQUEADO ATÉ AML-3 FICAR VERDE.**
+## Trilha C — Storage de produção
+**⬜ PLANEJADO.** Block cache, VFS, FAT32 robusto, handles e async posterior.
 
-Escopo planejado:
+## Trilha D — Rede
+**⬜ PLANEJADO.** NIC, Ethernet/ARP, IPv4/IPv6, ICMP, UDP/TCP, DHCP/DNS.
 
-- `NameOp`;
-- `ScopeOp`;
-- `ExtOpPrefix + DeviceOp`;
-- `MethodOp` armazenado sem execução;
-- DSDT primeiro e SSDTs depois;
-- merge/resolução corretos para `\` e `^`;
-- parsing somente por produções conhecidas e limitadas;
-- duplicata/overflow/truncamento/opcode não suportado fail-closed;
-- marker futuro `BAKEN:ACPI_AML_NAMESPACE_LOADED`.
+## Trilha E — Áudio
+**⬜ PLANEJADO.** HDA, DMA/ring buffer, codec/mixer e API userspace.
 
-#### AML-5 — Descoberta de dispositivos
-
-**Estado: ⬜ PLANEJADO.**
-
-- `_HID`;
-- `_CID`;
-- `_UID`;
-- `_ADR`;
-- `_STA` quando constante;
-- `_CRS` estático;
-- EISA ID;
-- ResourceTemplate parser.
-
-#### AML-6 — Evaluator controlado
-
-**Estado: ⬜ PLANEJADO.**
-
-- execution context limitado;
-- Arg0..Arg6 / Local0..Local7;
-- Return/Store;
-- operações necessárias;
-- If/Else quando demandado;
-- chamadas de Method com aridade validada;
-- fuel, profundidade e timeout.
-
-#### AML-7 — OperationRegion / Field
-
-**Estado: ⬜ PLANEJADO.**
-
-- SystemMemory;
-- SystemIO;
-- PCIConfig;
-- Field/IndexField quando necessário;
-- bounds rigorosos;
-- acesso apenas por camadas nativas MMIO/PIO/PCI.
-
-#### AML-8 — ACPI power/routing de produção
-
-**Estado: ⬜ PLANEJADO.**
-
-- `_PRT` / `_PIC`;
-- `_S5`;
-- sleep/wake posterior;
-- EC quando houver infraestrutura segura.
-
-### Trilha B — HID adicional
-
-**Estado: ⬜ DEPOIS DO AML/RESOURCE CORE.**
-
-- descoberta de controlador I2C;
-- I2C-HID;
-- HID report descriptor genérico;
-- touchpad/touchscreen;
-- hot-plug/erro recuperável.
-
-### Trilha C — Storage de produção
-
-**Estado: ⬜ PLANEJADO.**
-
-- block cache;
-- VFS inicial;
-- FAT32 robusto;
-- handles/arquivos;
-- async/completion posterior.
-
-### Trilha D — Rede
-
-**Estado: ⬜ PLANEJADO.**
-
-- NIC;
-- Ethernet/ARP;
-- IPv4/IPv6;
-- ICMP;
-- UDP/TCP;
-- DHCP/DNS.
-
-### Trilha E — Áudio
-
-**Estado: ⬜ PLANEJADO.**
-
-- HDA/alternativa;
-- DMA/ring buffer;
-- codecs/mixer;
-- API userspace posterior.
-
-### Trilha F — GPU / composição
-
-**Estado: ⬜ PLANEJADO.**
-
-- framebuffer permanece fallback;
-- aceleração somente após modelo de memória seguro;
-- compositor separado do Kernel Core;
-- zero lógica gráfica específica dentro do compilador Sotlas.
+## Trilha F — GPU/composição
+**⬜ PLANEJADO.** Framebuffer como fallback; aceleração/compositor somente após modelo de memória seguro; zero lógica visual no compilador Sotlas.
 
 ---
 
-## Fase 3 — Serviços e userspace
+# Fase 3 — Serviços e userspace
 
-**Estado: ⬜ PLANEJADO.**
+**⬜ PLANEJADO.** ABI versionada, handles/permissões, VFS/file API, executáveis Sotlas, IPC, init/service manager e COW/demand paging posterior.
 
-- ABI de syscall versionada;
-- handles/permissões;
-- VFS/file API;
-- executáveis Sotlas;
-- IPC;
-- init/service manager;
-- logging/process manager;
-- COW/demand paging após política de faults/TLB comprovada.
+# Fase 4 — Experiência Baken
+
+**⬜ PLANEJADO.** Compositor, WM, input unificado, fontes/acessibilidade, shell, installer/OOBE, apps base, recuperação e E2E da imagem instalada.
 
 ---
 
-## Fase 4 — Experiência Baken
+## Gates permanentes
 
-**Estado: ⬜ PLANEJADO.**
-
-- compositor de produção;
-- window manager;
-- input unificado;
-- fontes/acessibilidade;
-- desktop/shell;
-- installer/OOBE;
-- apps base/configurações/recuperação;
-- testes end-to-end da imagem instalada.
-
----
-
-## Gates obrigatórios
-
-Antes de promover um checkpoint da Fase 2:
+Antes de promover qualquer checkpoint da Fase 2:
 
 ```text
 CI principal
@@ -361,22 +159,30 @@ SMP verification — 3/3 boots independentes
 NVMe-only verification
 ```
 
-Markers AML cumulativos obrigatórios agora:
+Markers AML acumulados na baseline `3f02decb`:
 
 ```text
 BAKEN:ACPI_AML_TABLES_READY
 BAKEN:ACPI_AML_DECODER_READY
 BAKEN:ACPI_AML_DATA_READY
 BAKEN:ACPI_AML_NAMESPACE_READY
+BAKEN:ACPI_AML_NAMESPACE_LOADED
+BAKEN:ACPI_AML_DEVICES_READY
+```
+
+Marker candidato AML-6a:
+
+```text
+BAKEN:ACPI_AML_EVALUATOR_READY
 ```
 
 ## Regras de prioridade
 
-1. não avançar feature de alto nível sobre gate vermelho;
-2. runtime real vale mais que teste de fonte isolado;
-3. Kernel Core permanece congelado salvo extensão necessária e revalidada;
-4. scheduler/process/page-table/CR3/TLB/FPU exigem CI + SMP + NVMe;
-5. cada sucessão AML recebe marker + teste antes de ser comprovada;
-6. nunca fazer scan cego de AML desconhecido;
-7. firmware AML é input não confiável: bounds, budget/fuel e fail-closed são obrigatórios;
-8. ausência de hardware opcional deve degradar com diagnóstico, nunca derrubar o kernel.
+1. `main` não recebe candidato com gate vermelho;
+2. runtime real vale mais que teste textual;
+3. Kernel Core fica congelado salvo necessidade comprovada;
+4. cada sucessão AML recebe bounds/budget/marker/diagnóstico;
+5. nunca fazer scan cego de AML desconhecido;
+6. firmware AML é input não confiável;
+7. hardware opcional deve degradar com diagnóstico, não corromper o kernel;
+8. qualquer falha e sua correção são registradas aqui e em `KERNEL_HANDOFF.md`.
