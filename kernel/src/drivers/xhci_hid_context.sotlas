@@ -1,9 +1,9 @@
-// Baken OS — preparação do Endpoint Context HID Interrupt IN.
+// Baken OS — HID-4c.2: Endpoint Context HID Interrupt IN por Slot ID.
 //
-// Após o parser de Configuration Descriptor selecionar uma interface HID Boot,
-// este módulo aloca uma Transfer Ring dedicada e escreve o novo Endpoint Context
-// no Input Context já associado ao slot. Não envia Configure Endpoint e não toca
-// doorbell; apenas prepara memória DMA coerente para o próximo comando xHCI.
+// Cada slot xHCI possui DCI/ring/interval próprios e é validado contra o epoch
+// do registro de transporte. O wrapper legado continua preparando o slot ativo
+// usando o Configuration Descriptor singleton; HID-4c.3 removerá esse último
+// acoplamento de configuração/descriptor.
 
 module kernel::drivers::xhci_hid_context;
 
@@ -11,6 +11,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::memory::dma::*;
 import kernel::memory::direct_map::*;
 import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_configuration::*;
 import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_slot::*;
@@ -19,6 +20,7 @@ import kernel::drivers::xhci_trb::*;
 
 pub const XHCI_HID_RING_SIZE: u64 = 4096;
 pub const XHCI_HID_RING_TRBS: u32 = 256;
+pub const XHCI_HID_CONTEXT_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
 pub const XHCI_ENDPOINT_CONTEXT_INTERVAL_SHIFT: u32 = 16;
 pub const XHCI_ENDPOINT_CONTEXT_CERR_SHIFT: u32 = 1;
 pub const XHCI_ENDPOINT_CONTEXT_CERR_3: u32 = 3;
@@ -29,35 +31,57 @@ pub const XHCI_ENDPOINT_CONTEXT_MAX_ESIT_PAYLOAD_SHIFT: u32 = 16;
 pub const XHCI_ENDPOINT_CONTEXT_AVG_TRB_LENGTH: u32 = 8;
 pub const XHCI_HID_MAX_CONTEXT_INDEX: u8 = 31;
 
-static mut XHCI_HID_CONTEXT_READY: bool = false;
-static mut XHCI_HID_CONTEXT_DCI: u8 = 0;
-static mut XHCI_HID_CONTEXT_RING: DmaBuffer = DmaBuffer {
-    virtual_address: null as *mut u8,
-    physical_address: 0,
-    size: 0,
-    alignment: 0,
-    owner: DMA_OWNER_CPU,
-    fence: 0,
-    valid: false
-};
-static mut XHCI_HID_CONTEXT_RING_PHYSICAL: u64 = 0;
-static mut XHCI_HID_CONTEXT_INTERVAL: u8 = 0;
+pub struct XhciHidContextRecord {
+    pub ready: bool;
+    pub epoch: u32;
+    pub dci: u8;
+    pub endpoint_address: u8;
+    pub max_packet: u16;
+    pub interval: u8;
+    pub ring: DmaBuffer;
+    pub ring_physical: u64;
+}
+
+static mut XHCI_HID_CONTEXTS: [XhciHidContextRecord; XHCI_HID_CONTEXT_SLOT_CAPACITY] = [
+    XhciHidContextRecord {
+        ready: false,
+        epoch: 0,
+        dci: 0,
+        endpoint_address: 0,
+        max_packet: 0,
+        interval: 0,
+        ring: DmaBuffer {
+            virtual_address: null as *mut u8,
+            physical_address: 0,
+            size: 0,
+            alignment: 0,
+            owner: DMA_OWNER_CPU,
+            fence: 0,
+            valid: false
+        },
+        ring_physical: 0
+    };
+    XHCI_HID_CONTEXT_SLOT_CAPACITY
+];
+static mut XHCI_HID_CONTEXT_ACTIVE_SLOT_ID: u8 = 0;
+
+@system
+fn xhci_hid_context_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_HID_CONTEXT_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
 
 @system
 fn xhci_hid_context_write32(base: *mut u8, offset: u64, value: u32) -> bool {
     if base == (null as *mut u8) { return false; }
-    unsafe {
-        *(((base as usize) + (offset as usize)) as *mut u32) = value;
-    }
+    unsafe { *(((base as usize) + (offset as usize)) as *mut u32) = value; }
     return true;
 }
 
 @system
 fn xhci_hid_context_write64(base: *mut u8, offset: u64, value: u64) -> bool {
     if base == (null as *mut u8) { return false; }
-    unsafe {
-        *(((base as usize) + (offset as usize)) as *mut u64) = value;
-    }
+    unsafe { *(((base as usize) + (offset as usize)) as *mut u64) = value; }
     return true;
 }
 
@@ -100,9 +124,6 @@ fn xhci_hid_context_ceil_log2(value: u32) -> u8 {
     return exponent;
 }
 
-// xHCI codifica o período como 2^(Interval-1) * 125 us. Para LS/FS,
-// bInterval é expresso em frames de 1 ms; portanto convertemos para microframes
-// e somamos 1 ao expoente. HS/SS já fornece expoente USB e vira bInterval-1.
 @system
 fn xhci_hid_context_compute_interval(speed_id: u8, usb_interval: u8) -> u8 {
     if usb_interval == 0 { return 0; }
@@ -122,53 +143,70 @@ fn xhci_hid_context_compute_interval(speed_id: u8, usb_interval: u8) -> u8 {
 }
 
 @system
-pub fn xhci_hid_context_prepare() -> bool {
-    unsafe {
-        XHCI_HID_CONTEXT_READY = false;
-        XHCI_HID_CONTEXT_DCI = 0;
-        XHCI_HID_CONTEXT_RING = dma_invalid_buffer();
-        XHCI_HID_CONTEXT_RING_PHYSICAL = 0;
-        XHCI_HID_CONTEXT_INTERVAL = 0;
-    }
-    if !xhci_context_is_ready() || !xhci_configuration_is_ready() || !xhci_slot_is_ready() {
+pub fn xhci_hid_context_is_ready_for(slot_id: u8) -> bool {
+    let index = xhci_hid_context_index(slot_id);
+    if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
         return false;
     }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
+    unsafe {
+        return XHCI_HID_CONTEXTS[index].ready &&
+               XHCI_HID_CONTEXTS[index].epoch == epoch;
+    }
+}
 
-    let endpoint_address = xhci_hid_endpoint_address();
-    let max_packet = xhci_hid_endpoint_max_packet();
-    let usb_interval = xhci_hid_endpoint_interval();
+@system
+pub fn xhci_hid_context_prepare_for_slot(slot_id: u8,
+                                         endpoint_address: u8,
+                                         max_packet: u16,
+                                         usb_interval: u8) -> bool {
+    if !xhci_context_is_ready_for(slot_id) || !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+    let index = xhci_hid_context_index(slot_id);
+    if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY { return false; }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    let port_id = xhci_device_table_port_id(slot_id);
+    if epoch == 0 || port_id == 0 { return false; }
+
+    unsafe {
+        if XHCI_HID_CONTEXTS[index].ready && XHCI_HID_CONTEXTS[index].epoch == epoch {
+            return XHCI_HID_CONTEXTS[index].endpoint_address == endpoint_address &&
+                   XHCI_HID_CONTEXTS[index].max_packet == max_packet;
+        }
+        if XHCI_HID_CONTEXTS[index].ready { return false; }
+    }
+
     let dci = xhci_hid_context_compute_dci(endpoint_address);
     if dci <= 1 || max_packet == 0 || usb_interval == 0 { return false; }
-
-    let port_id = xhci_slot_port_id();
     let snapshot = xhci_port_snapshot(port_id);
     if snapshot == (null as *const XhciPortSnapshot) { return false; }
     let speed_id = unsafe { (*snapshot).speed_id };
     let interval = xhci_hid_context_compute_interval(speed_id, usb_interval);
     if interval == 0 || interval > 15 { return false; }
 
-    let context_size = xhci_context_size();
-    if context_size != 32 && context_size != 64 { return false; }
-    let input_physical = xhci_context_input_physical();
+    let context_size = xhci_context_size_for(slot_id);
+    let input_physical = xhci_context_input_physical_for(slot_id);
     let input_virtual = direct_map_virtual_address(input_physical);
-    if input_physical == 0 || input_virtual == 0 { return false; }
+    if (context_size != 32 && context_size != 64) || input_physical == 0 || input_virtual == 0 {
+        return false;
+    }
     let input = unsafe { input_virtual as *mut u8 };
 
     let mut ring_buffer = dma_alloc(XHCI_HID_RING_SIZE, XHCI_HID_RING_SIZE);
-    if !dma_buffer_cpu_owned(&ring_buffer) { return false; }
-    if !xhci_hid_context_zero(ring_buffer.virtual_address, ring_buffer.size) { return false; }
+    if !dma_buffer_cpu_owned(&ring_buffer) ||
+       !xhci_hid_context_zero(ring_buffer.virtual_address, ring_buffer.size) {
+        return false;
+    }
     let ring = xhci_ring_bind(ring_buffer, XHCI_HID_RING_TRBS);
     if !xhci_ring_is_ready(&ring) { return false; }
-
     let link_index = XHCI_HID_RING_TRBS - 1;
     unsafe {
         let link = ((ring.virtual_base as usize) + ((link_index as usize) * 16)) as *mut XhciTrb;
         *link = xhci_trb_link(ring.physical_base, true, true);
     }
 
-    // O Input Control Context foi usado antes pelo Address Device. Para
-    // Configure Endpoint não devemos carregar o Add EP0 antigo: reescrevemos
-    // Drop=0 e Add={Slot, novo DCI} explicitamente.
     let drop_flags_offset: u64 = 0;
     let add_flags_offset: u64 = 4;
     let add_flag = 1 << (dci as u32);
@@ -176,23 +214,17 @@ pub fn xhci_hid_context_prepare() -> bool {
        !xhci_hid_context_write32(input, add_flags_offset,
            XHCI_INPUT_CONTROL_ADD_SLOT | add_flag) { return false; }
 
-    // Slot Context precisa anunciar o maior Context Entry válido.
     let slot_offset = context_size as u64;
     unsafe {
         let slot_dw0_ptr = ((input as usize) + (slot_offset as usize)) as *const u32;
         let slot_dw0 = *slot_dw0_ptr;
         let cleared = slot_dw0 & ~(0x1F << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
-        if !xhci_hid_context_write32(
-            input,
-            slot_offset,
-            cleared | ((dci as u32) << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT)
-        ) { return false; }
+        if !xhci_hid_context_write32(input, slot_offset,
+            cleared | ((dci as u32) << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT)) {
+            return false;
+        }
     }
 
-    // Input Context layout: Input Control é entrada 0; contexto DCI n começa em
-    // (n + 1) * ContextSize. Para endpoint periódico, Max ESIT Payload precisa
-    // refletir os bytes reservados por intervalo; para HID FS/LS sem burst isso
-    // corresponde ao Max Packet Size.
     let endpoint_offset = ((dci as u64) + 1) * (context_size as u64);
     let ep_dw0 = (interval as u32) << XHCI_ENDPOINT_CONTEXT_INTERVAL_SHIFT;
     let ep_dw1 = (XHCI_ENDPOINT_CONTEXT_CERR_3 << XHCI_ENDPOINT_CONTEXT_CERR_SHIFT) |
@@ -204,28 +236,79 @@ pub fn xhci_hid_context_prepare() -> bool {
        !xhci_hid_context_write32(input, endpoint_offset + 4, ep_dw1) ||
        !xhci_hid_context_write64(input, endpoint_offset + 8,
            ring.physical_base | XHCI_TR_DEQUEUE_DCS) ||
-       !xhci_hid_context_write32(input, endpoint_offset + 16, ep_dw4) { return false; }
+       !xhci_hid_context_write32(input, endpoint_offset + 16, ep_dw4) {
+        return false;
+    }
 
-    if x86_read_cr3_raw() == 0 { return false; }
-    if !dma_share_with_device(&mut ring_buffer) { return false; }
-
+    if x86_read_cr3_raw() == 0 || !dma_share_with_device(&mut ring_buffer) { return false; }
     unsafe {
-        XHCI_HID_CONTEXT_DCI = dci;
-        XHCI_HID_CONTEXT_RING = ring_buffer;
-        XHCI_HID_CONTEXT_RING_PHYSICAL = ring.physical_base;
-        XHCI_HID_CONTEXT_INTERVAL = interval;
-        XHCI_HID_CONTEXT_READY = true;
+        XHCI_HID_CONTEXTS[index].ready = true;
+        XHCI_HID_CONTEXTS[index].epoch = epoch;
+        XHCI_HID_CONTEXTS[index].dci = dci;
+        XHCI_HID_CONTEXTS[index].endpoint_address = endpoint_address;
+        XHCI_HID_CONTEXTS[index].max_packet = max_packet;
+        XHCI_HID_CONTEXTS[index].interval = interval;
+        XHCI_HID_CONTEXTS[index].ring = ring_buffer;
+        XHCI_HID_CONTEXTS[index].ring_physical = ring.physical_base;
+        XHCI_HID_CONTEXT_ACTIVE_SLOT_ID = slot_id;
     }
     return true;
 }
 
 @system
-pub fn xhci_hid_context_is_ready() -> bool { unsafe { return XHCI_HID_CONTEXT_READY; } }
+pub fn xhci_hid_context_prepare() -> bool {
+    let slot_id = xhci_context_slot_id();
+    if slot_id == 0 || !xhci_configuration_is_ready() { return false; }
+    return xhci_hid_context_prepare_for_slot(
+        slot_id,
+        xhci_hid_endpoint_address(),
+        xhci_hid_endpoint_max_packet(),
+        xhci_hid_endpoint_interval()
+    );
+}
+
 @system
-pub fn xhci_hid_context_dci() -> u8 { unsafe { return XHCI_HID_CONTEXT_DCI; } }
+pub fn xhci_hid_context_dci_for(slot_id: u8) -> u8 {
+    if !xhci_hid_context_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_HID_CONTEXTS[xhci_hid_context_index(slot_id)].dci; }
+}
+
 @system
-pub fn xhci_hid_context_ring_physical() -> u64 {
-    unsafe { return XHCI_HID_CONTEXT_RING_PHYSICAL; }
+pub fn xhci_hid_context_ring_physical_for(slot_id: u8) -> u64 {
+    if !xhci_hid_context_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_HID_CONTEXTS[xhci_hid_context_index(slot_id)].ring_physical; }
+}
+
+@system
+pub fn xhci_hid_context_interval_for(slot_id: u8) -> u8 {
+    if !xhci_hid_context_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_HID_CONTEXTS[xhci_hid_context_index(slot_id)].interval; }
+}
+
+@system
+pub fn xhci_hid_context_max_packet_for(slot_id: u8) -> u16 {
+    if !xhci_hid_context_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_HID_CONTEXTS[xhci_hid_context_index(slot_id)].max_packet; }
+}
+
+@system
+pub fn xhci_hid_context_active_slot_id() -> u8 {
+    unsafe { return XHCI_HID_CONTEXT_ACTIVE_SLOT_ID; }
+}
+
+@system
+pub fn xhci_hid_context_is_ready() -> bool {
+    return xhci_hid_context_is_ready_for(xhci_hid_context_active_slot_id());
 }
 @system
-pub fn xhci_hid_context_interval() -> u8 { unsafe { return XHCI_HID_CONTEXT_INTERVAL; } }
+pub fn xhci_hid_context_dci() -> u8 {
+    return xhci_hid_context_dci_for(xhci_hid_context_active_slot_id());
+}
+@system
+pub fn xhci_hid_context_ring_physical() -> u64 {
+    return xhci_hid_context_ring_physical_for(xhci_hid_context_active_slot_id());
+}
+@system
+pub fn xhci_hid_context_interval() -> u8 {
+    return xhci_hid_context_interval_for(xhci_hid_context_active_slot_id());
+}
