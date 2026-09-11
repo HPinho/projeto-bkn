@@ -60,7 +60,13 @@ class DmaReleaseTests(unittest.TestCase):
     def test_pmm_already_exposes_arbitrary_free_and_reuse_proof(self):
         pmm = PMM.read_text(encoding="utf-8")
         self.assertIn("pub fn pmm_free_pages(base: u64, count: u64) -> bool", pmm)
-        self.assertIn("if !pmm_allocator_run_is_used(region, first, count) { return false; }", pmm)
+        free_locked = function_body(
+            pmm,
+            "fn pmm_free_pages_locked(base: u64, count: u64) -> bool",
+            "pub fn pmm_free_pages_lifo",
+        )
+        self.assertIn("!pmm_allocator_run_is_used(region, first, count)", free_locked)
+        self.assertIn("pmm_allocator_mark_pages(base, count, false)", free_locked)
         self.assertIn("if !pmm_free_pages(first, 2)", pmm)
         self.assertIn("let recycled = pmm_alloc_pages(2);", pmm)
         self.assertIn("recycled != first", pmm)
