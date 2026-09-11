@@ -1,10 +1,9 @@
-// Baken OS — leitura e parsing do Configuration Descriptor USB.
+// Baken OS — HID-4c.3: Configuration Descriptor USB por Slot ID + epoch.
 //
-// O primeiro gate desta camada lê somente os 9 bytes do cabeçalho para obter
-// wTotalLength e bConfigurationValue. O segundo gate busca exatamente o
-// wTotalLength completo, mas ainda não interpreta Interface/HID/Endpoint.
-// O parser HID fica em etapa separada. Nenhuma função daqui configura endpoint
-// ou envia SET_CONFIGURATION.
+// Header, descriptor completo e seleção da interface HID pertencem ao mesmo
+// dispositivo xHCI. O parser continua sem configurar endpoint nem enviar
+// SET_CONFIGURATION. Wrappers sem argumento preservam o bring-up legado do
+// primeiro dispositivo, enquanto as APIs _for(slot_id) habilitam multi-device.
 
 module kernel::drivers::xhci_configuration;
 
@@ -15,6 +14,7 @@ import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_trb::*;
 import kernel::drivers::xhci_transfer::*;
 import kernel::drivers::xhci_descriptor::*;
+import kernel::drivers::xhci_device_table::*;
 
 pub const USB_DESCRIPTOR_TYPE_CONFIGURATION: u8 = 2;
 pub const USB_DESCRIPTOR_TYPE_INTERFACE: u8 = 4;
@@ -32,31 +32,164 @@ pub const USB_ENDPOINT_DIRECTION_IN: u8 = 0x80;
 pub const USB_ENDPOINT_TRANSFER_TYPE_MASK: u8 = 0x03;
 pub const USB_ENDPOINT_TRANSFER_INTERRUPT: u8 = 0x03;
 pub const XHCI_CONFIGURATION_DMA_SIZE: u64 = 4096;
+pub const XHCI_CONFIGURATION_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
 
-static mut XHCI_CONFIGURATION_HEADER_READY: bool = false;
-static mut XHCI_CONFIGURATION_HEADER_TOTAL_LENGTH: u16 = 0;
-static mut XHCI_CONFIGURATION_HEADER_VALUE: u8 = 0;
-static mut XHCI_CONFIGURATION_FULL_READY: bool = false;
-static mut XHCI_CONFIGURATION_FULL_TOTAL_LENGTH: u16 = 0;
-static mut XHCI_CONFIGURATION_FULL_VALUE: u8 = 0;
-static mut XHCI_CONFIGURATION_READY: bool = false;
-static mut XHCI_CONFIGURATION_VALUE: u8 = 0;
-static mut XHCI_CONFIGURATION_TOTAL_LENGTH: u16 = 0;
-static mut XHCI_HID_INTERFACE_NUMBER: u8 = 0;
-static mut XHCI_HID_PROTOCOL: u8 = 0;
-static mut XHCI_HID_ENDPOINT_ADDRESS: u8 = 0;
-static mut XHCI_HID_ENDPOINT_MAX_PACKET: u16 = 0;
-static mut XHCI_HID_ENDPOINT_INTERVAL: u8 = 0;
-static mut XHCI_HID_REPORT_DESCRIPTOR_LENGTH: u16 = 0;
-static mut XHCI_CONFIGURATION_BUFFER: DmaBuffer = DmaBuffer {
-    virtual_address: null as *mut u8,
-    physical_address: 0,
-    size: 0,
-    alignment: 0,
-    owner: DMA_OWNER_CPU,
-    fence: 0,
-    valid: false
-};
+pub struct XhciConfigurationState {
+    pub epoch: u32;
+    pub header_ready: bool;
+    pub header_total_length: u16;
+    pub header_value: u8;
+    pub full_ready: bool;
+    pub full_total_length: u16;
+    pub full_value: u8;
+    pub ready: bool;
+    pub value: u8;
+    pub total_length: u16;
+    pub hid_interface_number: u8;
+    pub hid_protocol: u8;
+    pub hid_endpoint_address: u8;
+    pub hid_endpoint_max_packet: u16;
+    pub hid_endpoint_interval: u8;
+    pub hid_report_descriptor_length: u16;
+    pub buffer: DmaBuffer;
+}
+
+static mut XHCI_CONFIGURATION_STATES: [XhciConfigurationState; XHCI_CONFIGURATION_SLOT_CAPACITY] = [
+    XhciConfigurationState {
+        epoch: 0,
+        header_ready: false,
+        header_total_length: 0,
+        header_value: 0,
+        full_ready: false,
+        full_total_length: 0,
+        full_value: 0,
+        ready: false,
+        value: 0,
+        total_length: 0,
+        hid_interface_number: 0,
+        hid_protocol: 0,
+        hid_endpoint_address: 0,
+        hid_endpoint_max_packet: 0,
+        hid_endpoint_interval: 0,
+        hid_report_descriptor_length: 0,
+        buffer: DmaBuffer {
+            virtual_address: null as *mut u8,
+            physical_address: 0,
+            size: 0,
+            alignment: 0,
+            owner: DMA_OWNER_CPU,
+            fence: 0,
+            valid: false
+        }
+    };
+    XHCI_CONFIGURATION_SLOT_CAPACITY
+];
+
+@system
+fn xhci_configuration_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_CONFIGURATION_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
+
+@system
+fn xhci_configuration_reset_state(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        XHCI_CONFIGURATION_STATES[index].epoch = epoch;
+        XHCI_CONFIGURATION_STATES[index].header_ready = false;
+        XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].header_value = 0;
+        XHCI_CONFIGURATION_STATES[index].full_ready = false;
+        XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].full_value = 0;
+        XHCI_CONFIGURATION_STATES[index].ready = false;
+        XHCI_CONFIGURATION_STATES[index].value = 0;
+        XHCI_CONFIGURATION_STATES[index].total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_interface_number = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_protocol = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
+        XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+    }
+    return true;
+}
+
+@system
+fn xhci_configuration_prepare_state(slot_id: u8) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       !xhci_address_is_ready_for(slot_id) ||
+       !xhci_context_is_ready_for(slot_id) ||
+       !xhci_ep0_is_ready_for(slot_id) ||
+       !xhci_device_descriptor_is_ready_for(slot_id) {
+        return false;
+    }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].epoch != epoch {
+            return xhci_configuration_reset_state(slot_id, epoch);
+        }
+    }
+    return true;
+}
+
+@system
+fn xhci_configuration_state_is_current(slot_id: u8) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY ||
+       !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    unsafe {
+        return epoch != 0 && XHCI_CONFIGURATION_STATES[index].epoch == epoch;
+    }
+}
+
+@system
+fn xhci_configuration_invalidate_after_header(slot_id: u8) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        XHCI_CONFIGURATION_STATES[index].full_ready = false;
+        XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].full_value = 0;
+        XHCI_CONFIGURATION_STATES[index].ready = false;
+        XHCI_CONFIGURATION_STATES[index].value = 0;
+        XHCI_CONFIGURATION_STATES[index].total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_interface_number = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_protocol = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
+        XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+    }
+    return true;
+}
+
+@system
+fn xhci_configuration_invalidate_after_full(slot_id: u8) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        XHCI_CONFIGURATION_STATES[index].ready = false;
+        XHCI_CONFIGURATION_STATES[index].value = 0;
+        XHCI_CONFIGURATION_STATES[index].total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_interface_number = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_protocol = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
+    }
+    return true;
+}
 
 @system
 fn xhci_configuration_read8(base: *const u8, offset: u64) -> u8 {
@@ -85,16 +218,18 @@ fn xhci_configuration_zero(base: *mut u8, size: u64) -> bool {
 }
 
 @system
-fn xhci_configuration_fetch(buffer: *mut DmaBuffer, length: u16) -> bool {
-    if buffer == (null as *mut DmaBuffer) || length == 0 { return false; }
+fn xhci_configuration_fetch_for_slot(slot_id: u8,
+                                     buffer: *mut DmaBuffer,
+                                     length: u16) -> bool {
+    if buffer == (null as *mut DmaBuffer) || length == 0 ||
+       !xhci_configuration_prepare_state(slot_id) {
+        return false;
+    }
     unsafe {
         if !(*buffer).valid || (*buffer).physical_address == 0 ||
            (*buffer).virtual_address == (null as *mut u8) { return false; }
         if (length as u64) > (*buffer).size { return false; }
     }
-
-    let slot_id = xhci_address_slot_id();
-    if slot_id == 0 || slot_id != xhci_context_slot_id() { return false; }
 
     let setup = xhci_trb_setup_stage(
         USB_REQUEST_TYPE_DEVICE_TO_HOST_STANDARD_DEVICE,
@@ -103,7 +238,7 @@ fn xhci_configuration_fetch(buffer: *mut DmaBuffer, length: u16) -> bool {
         0,
         length,
         XHCI_SETUP_TRT_IN_DATA,
-        xhci_ep0_producer_cycle()
+        xhci_ep0_producer_cycle_for(slot_id)
     );
     unsafe {
         let data = xhci_trb_data_stage(
@@ -112,26 +247,33 @@ fn xhci_configuration_fetch(buffer: *mut DmaBuffer, length: u16) -> bool {
             0,
             true,
             false,
-            xhci_ep0_producer_cycle()
+            xhci_ep0_producer_cycle_for(slot_id)
         );
-        let status = xhci_trb_status_stage(false, true, xhci_ep0_producer_cycle());
-        let status_physical = xhci_ep0_submit_control_td(setup, data, status, true);
+        let status = xhci_trb_status_stage(
+            false,
+            true,
+            xhci_ep0_producer_cycle_for(slot_id)
+        );
+        let status_physical = xhci_ep0_submit_control_td_for_slot(
+            slot_id, setup, data, status, true
+        );
         if status_physical == 0 { return false; }
         if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
-        return xhci_transfer_last_residual_length() == 0;
+        return xhci_transfer_last_residual_length_for(slot_id) == 0;
     }
 }
 
-// Primeiro gate de Configuration Descriptor: somente os nove bytes do header.
-// Não percorre Interface/HID/Endpoint e não antecipa a configuração do device.
+// Primeiro gate: somente os nove bytes do Configuration Descriptor header.
 @system
-pub fn xhci_probe_first_configuration_header() -> bool {
+pub fn xhci_probe_configuration_header_for_slot(slot_id: u8) -> bool {
+    if !xhci_configuration_prepare_state(slot_id) { return false; }
+    let index = xhci_configuration_index(slot_id);
     unsafe {
-        XHCI_CONFIGURATION_HEADER_READY = false;
-        XHCI_CONFIGURATION_HEADER_TOTAL_LENGTH = 0;
-        XHCI_CONFIGURATION_HEADER_VALUE = 0;
+        XHCI_CONFIGURATION_STATES[index].header_ready = false;
+        XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].header_value = 0;
     }
-    if !xhci_device_descriptor_is_ready() || !xhci_ep0_is_ready() { return false; }
+    if !xhci_configuration_invalidate_after_header(slot_id) { return false; }
 
     let mut buffer = dma_alloc(XHCI_CONFIGURATION_DMA_SIZE, XHCI_CONFIGURATION_DMA_SIZE);
     if !dma_buffer_cpu_owned(&buffer) { return false; }
@@ -139,7 +281,9 @@ pub fn xhci_probe_first_configuration_header() -> bool {
         return false;
     }
     if !dma_share_with_device(&mut buffer) { return false; }
-    if !xhci_configuration_fetch(&mut buffer, USB_CONFIGURATION_HEADER_LENGTH) { return false; }
+    if !xhci_configuration_fetch_for_slot(
+        slot_id, &mut buffer, USB_CONFIGURATION_HEADER_LENGTH
+    ) { return false; }
 
     let base = buffer.virtual_address as *const u8;
     let length = xhci_configuration_read8(base, 0);
@@ -153,44 +297,74 @@ pub fn xhci_probe_first_configuration_header() -> bool {
        configuration_value == 0 {
         return false;
     }
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
 
     unsafe {
-        XHCI_CONFIGURATION_HEADER_TOTAL_LENGTH = total_length;
-        XHCI_CONFIGURATION_HEADER_VALUE = configuration_value;
-        XHCI_CONFIGURATION_HEADER_READY = true;
+        XHCI_CONFIGURATION_STATES[index].header_total_length = total_length;
+        XHCI_CONFIGURATION_STATES[index].header_value = configuration_value;
+        XHCI_CONFIGURATION_STATES[index].header_ready = true;
     }
     return true;
 }
 
 @system
+pub fn xhci_probe_first_configuration_header() -> bool {
+    let slot_id = xhci_address_slot_id();
+    if slot_id == 0 { return false; }
+    return xhci_probe_configuration_header_for_slot(slot_id);
+}
+
+@system
+pub fn xhci_configuration_header_is_ready_for(slot_id: u8) -> bool {
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].header_ready; }
+}
+
+@system
 pub fn xhci_configuration_header_is_ready() -> bool {
-    unsafe { return XHCI_CONFIGURATION_HEADER_READY; }
+    return xhci_configuration_header_is_ready_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_configuration_header_total_length_for(slot_id: u8) -> u16 {
+    if !xhci_configuration_header_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].header_total_length; }
 }
 
 @system
 pub fn xhci_configuration_header_total_length() -> u16 {
-    unsafe { return XHCI_CONFIGURATION_HEADER_TOTAL_LENGTH; }
+    return xhci_configuration_header_total_length_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_configuration_header_value_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_header_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].header_value; }
 }
 
 @system
 pub fn xhci_configuration_header_value() -> u8 {
-    unsafe { return XHCI_CONFIGURATION_HEADER_VALUE; }
+    return xhci_configuration_header_value_for(xhci_address_slot_id());
 }
 
-// Segundo gate: lê o Configuration Descriptor completo usando exatamente o
-// wTotalLength já provado pelo header. Não chama o parser HID.
+// Segundo gate: lê o descriptor completo usando o wTotalLength do mesmo slot.
 @system
-pub fn xhci_read_first_configuration_full() -> bool {
-    unsafe {
-        XHCI_CONFIGURATION_FULL_READY = false;
-        XHCI_CONFIGURATION_FULL_TOTAL_LENGTH = 0;
-        XHCI_CONFIGURATION_FULL_VALUE = 0;
-        XHCI_CONFIGURATION_BUFFER = dma_invalid_buffer();
+pub fn xhci_read_configuration_full_for_slot(slot_id: u8) -> bool {
+    if !xhci_configuration_prepare_state(slot_id) ||
+       !xhci_configuration_header_is_ready_for(slot_id) {
+        return false;
     }
-    if !xhci_configuration_header_is_ready() || !xhci_ep0_is_ready() { return false; }
+    let index = xhci_configuration_index(slot_id);
+    unsafe {
+        XHCI_CONFIGURATION_STATES[index].full_ready = false;
+        XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].full_value = 0;
+        XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+    }
+    if !xhci_configuration_invalidate_after_full(slot_id) { return false; }
 
-    let total_length = xhci_configuration_header_total_length();
-    let configuration_value = xhci_configuration_header_value();
+    let total_length = xhci_configuration_header_total_length_for(slot_id);
+    let configuration_value = xhci_configuration_header_value_for(slot_id);
     if total_length < USB_CONFIGURATION_HEADER_LENGTH ||
        (total_length as u64) > XHCI_CONFIGURATION_DMA_SIZE ||
        configuration_value == 0 {
@@ -201,7 +375,7 @@ pub fn xhci_read_first_configuration_full() -> bool {
     if !dma_buffer_cpu_owned(&buffer) { return false; }
     if !xhci_configuration_zero(buffer.virtual_address, total_length as u64) { return false; }
     if !dma_share_with_device(&mut buffer) { return false; }
-    if !xhci_configuration_fetch(&mut buffer, total_length) { return false; }
+    if !xhci_configuration_fetch_for_slot(slot_id, &mut buffer, total_length) { return false; }
 
     let base = buffer.virtual_address as *const u8;
     if xhci_configuration_read8(base, 0) < (USB_CONFIGURATION_HEADER_LENGTH as u8) ||
@@ -210,34 +384,64 @@ pub fn xhci_read_first_configuration_full() -> bool {
        xhci_configuration_read8(base, 5) != configuration_value {
         return false;
     }
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
 
     unsafe {
-        XHCI_CONFIGURATION_BUFFER = buffer;
-        XHCI_CONFIGURATION_FULL_TOTAL_LENGTH = total_length;
-        XHCI_CONFIGURATION_FULL_VALUE = configuration_value;
-        XHCI_CONFIGURATION_FULL_READY = true;
+        XHCI_CONFIGURATION_STATES[index].buffer = buffer;
+        XHCI_CONFIGURATION_STATES[index].full_total_length = total_length;
+        XHCI_CONFIGURATION_STATES[index].full_value = configuration_value;
+        XHCI_CONFIGURATION_STATES[index].full_ready = true;
     }
     return true;
 }
 
 @system
+pub fn xhci_read_first_configuration_full() -> bool {
+    let slot_id = xhci_address_slot_id();
+    if slot_id == 0 { return false; }
+    return xhci_read_configuration_full_for_slot(slot_id);
+}
+
+@system
+pub fn xhci_configuration_full_is_ready_for(slot_id: u8) -> bool {
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].full_ready; }
+}
+
+@system
 pub fn xhci_configuration_full_is_ready() -> bool {
-    unsafe { return XHCI_CONFIGURATION_FULL_READY; }
+    return xhci_configuration_full_is_ready_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_configuration_full_total_length_for(slot_id: u8) -> u16 {
+    if !xhci_configuration_full_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].full_total_length; }
 }
 
 @system
 pub fn xhci_configuration_full_total_length() -> u16 {
-    unsafe { return XHCI_CONFIGURATION_FULL_TOTAL_LENGTH; }
+    return xhci_configuration_full_total_length_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_configuration_full_value_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_full_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].full_value; }
 }
 
 @system
 pub fn xhci_configuration_full_value() -> u8 {
-    unsafe { return XHCI_CONFIGURATION_FULL_VALUE; }
+    return xhci_configuration_full_value_for(xhci_address_slot_id());
 }
 
 @system
-fn xhci_configuration_parse(base: *const u8, total_length: u16) -> bool {
-    if base == (null as *const u8) || total_length < USB_CONFIGURATION_HEADER_LENGTH {
+fn xhci_configuration_parse_for_slot(slot_id: u8,
+                                     base: *const u8,
+                                     total_length: u16) -> bool {
+    if base == (null as *const u8) ||
+       total_length < USB_CONFIGURATION_HEADER_LENGTH ||
+       !xhci_configuration_state_is_current(slot_id) {
         return false;
     }
     if xhci_configuration_read8(base, 0) < (USB_CONFIGURATION_HEADER_LENGTH as u8) ||
@@ -290,14 +494,15 @@ fn xhci_configuration_parse(base: *const u8, total_length: u16) -> bool {
                 endpoint_address = address;
                 endpoint_packet = xhci_configuration_read16(base, offset + 4) & 0x07FF;
                 endpoint_interval = xhci_configuration_read8(base, offset + 6);
-                if endpoint_packet == 0 { return false; }
+                if endpoint_packet == 0 || hid_report_length == 0 { return false; }
+                let index = xhci_configuration_index(slot_id);
                 unsafe {
-                    XHCI_HID_INTERFACE_NUMBER = hid_interface;
-                    XHCI_HID_PROTOCOL = hid_protocol;
-                    XHCI_HID_REPORT_DESCRIPTOR_LENGTH = hid_report_length;
-                    XHCI_HID_ENDPOINT_ADDRESS = endpoint_address;
-                    XHCI_HID_ENDPOINT_MAX_PACKET = endpoint_packet;
-                    XHCI_HID_ENDPOINT_INTERVAL = endpoint_interval;
+                    XHCI_CONFIGURATION_STATES[index].hid_interface_number = hid_interface;
+                    XHCI_CONFIGURATION_STATES[index].hid_protocol = hid_protocol;
+                    XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = hid_report_length;
+                    XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = endpoint_address;
+                    XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = endpoint_packet;
+                    XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = endpoint_interval;
                 }
                 return true;
             }
@@ -309,53 +514,135 @@ fn xhci_configuration_parse(base: *const u8, total_length: u16) -> bool {
 }
 
 @system
-pub fn xhci_get_first_hid_configuration() -> bool {
-    unsafe {
-        XHCI_CONFIGURATION_READY = false;
-        XHCI_CONFIGURATION_VALUE = 0;
-        XHCI_CONFIGURATION_TOTAL_LENGTH = 0;
-        XHCI_HID_INTERFACE_NUMBER = 0;
-        XHCI_HID_PROTOCOL = 0;
-        XHCI_HID_ENDPOINT_ADDRESS = 0;
-        XHCI_HID_ENDPOINT_MAX_PACKET = 0;
-        XHCI_HID_ENDPOINT_INTERVAL = 0;
-        XHCI_HID_REPORT_DESCRIPTOR_LENGTH = 0;
+pub fn xhci_get_hid_configuration_for_slot(slot_id: u8) -> bool {
+    if !xhci_configuration_prepare_state(slot_id) ||
+       !xhci_configuration_full_is_ready_for(slot_id) {
+        return false;
     }
-    if !xhci_configuration_full_is_ready() { return false; }
+    let index = xhci_configuration_index(slot_id);
+    if !xhci_configuration_invalidate_after_full(slot_id) { return false; }
 
-    let total_length = xhci_configuration_full_total_length();
-    let configuration_value = xhci_configuration_full_value();
+    let total_length = xhci_configuration_full_total_length_for(slot_id);
+    let configuration_value = xhci_configuration_full_value_for(slot_id);
     unsafe {
-        if !XHCI_CONFIGURATION_BUFFER.valid ||
-           XHCI_CONFIGURATION_BUFFER.virtual_address == (null as *mut u8) {
+        if !XHCI_CONFIGURATION_STATES[index].buffer.valid ||
+           XHCI_CONFIGURATION_STATES[index].buffer.virtual_address == (null as *mut u8) {
             return false;
         }
-        let base = XHCI_CONFIGURATION_BUFFER.virtual_address as *const u8;
-        if !xhci_configuration_parse(base, total_length) { return false; }
-        XHCI_CONFIGURATION_VALUE = configuration_value;
-        XHCI_CONFIGURATION_TOTAL_LENGTH = total_length;
-        XHCI_CONFIGURATION_READY = true;
+        let base = XHCI_CONFIGURATION_STATES[index].buffer.virtual_address as *const u8;
+        if !xhci_configuration_parse_for_slot(slot_id, base, total_length) { return false; }
+    }
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
+    unsafe {
+        XHCI_CONFIGURATION_STATES[index].value = configuration_value;
+        XHCI_CONFIGURATION_STATES[index].total_length = total_length;
+        XHCI_CONFIGURATION_STATES[index].ready = true;
     }
     return true;
 }
 
 @system
-pub fn xhci_configuration_is_ready() -> bool { unsafe { return XHCI_CONFIGURATION_READY; } }
+pub fn xhci_get_first_hid_configuration() -> bool {
+    let slot_id = xhci_address_slot_id();
+    if slot_id == 0 { return false; }
+    return xhci_get_hid_configuration_for_slot(slot_id);
+}
+
 @system
-pub fn xhci_configuration_value() -> u8 { unsafe { return XHCI_CONFIGURATION_VALUE; } }
+pub fn xhci_configuration_is_ready_for(slot_id: u8) -> bool {
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].ready; }
+}
+
 @system
-pub fn xhci_configuration_total_length() -> u16 { unsafe { return XHCI_CONFIGURATION_TOTAL_LENGTH; } }
+pub fn xhci_configuration_is_ready() -> bool {
+    return xhci_configuration_is_ready_for(xhci_address_slot_id());
+}
+
 @system
-pub fn xhci_hid_interface_number() -> u8 { unsafe { return XHCI_HID_INTERFACE_NUMBER; } }
+pub fn xhci_configuration_value_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].value; }
+}
+
 @system
-pub fn xhci_hid_protocol() -> u8 { unsafe { return XHCI_HID_PROTOCOL; } }
+pub fn xhci_configuration_value() -> u8 {
+    return xhci_configuration_value_for(xhci_address_slot_id());
+}
+
 @system
-pub fn xhci_hid_endpoint_address() -> u8 { unsafe { return XHCI_HID_ENDPOINT_ADDRESS; } }
+pub fn xhci_configuration_total_length_for(slot_id: u8) -> u16 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].total_length; }
+}
+
 @system
-pub fn xhci_hid_endpoint_max_packet() -> u16 { unsafe { return XHCI_HID_ENDPOINT_MAX_PACKET; } }
+pub fn xhci_configuration_total_length() -> u16 {
+    return xhci_configuration_total_length_for(xhci_address_slot_id());
+}
+
 @system
-pub fn xhci_hid_endpoint_interval() -> u8 { unsafe { return XHCI_HID_ENDPOINT_INTERVAL; } }
+pub fn xhci_hid_interface_number_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].hid_interface_number; }
+}
+
+@system
+pub fn xhci_hid_interface_number() -> u8 {
+    return xhci_hid_interface_number_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_hid_protocol_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].hid_protocol; }
+}
+
+@system
+pub fn xhci_hid_protocol() -> u8 {
+    return xhci_hid_protocol_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_hid_endpoint_address_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].hid_endpoint_address; }
+}
+
+@system
+pub fn xhci_hid_endpoint_address() -> u8 {
+    return xhci_hid_endpoint_address_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_hid_endpoint_max_packet_for(slot_id: u8) -> u16 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].hid_endpoint_max_packet; }
+}
+
+@system
+pub fn xhci_hid_endpoint_max_packet() -> u16 {
+    return xhci_hid_endpoint_max_packet_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_hid_endpoint_interval_for(slot_id: u8) -> u8 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].hid_endpoint_interval; }
+}
+
+@system
+pub fn xhci_hid_endpoint_interval() -> u8 {
+    return xhci_hid_endpoint_interval_for(xhci_address_slot_id());
+}
+
+@system
+pub fn xhci_hid_report_descriptor_length_for(slot_id: u8) -> u16 {
+    if !xhci_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe { return XHCI_CONFIGURATION_STATES[xhci_configuration_index(slot_id)].hid_report_descriptor_length; }
+}
+
 @system
 pub fn xhci_hid_report_descriptor_length() -> u16 {
-    unsafe { return XHCI_HID_REPORT_DESCRIPTOR_LENGTH; }
+    return xhci_hid_report_descriptor_length_for(xhci_address_slot_id());
 }
