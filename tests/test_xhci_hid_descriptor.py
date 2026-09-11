@@ -11,18 +11,24 @@ SMP_YML = ROOT / ".github/workflows/baken_smp.yml"
 
 
 class XhciHidDescriptorTests(unittest.TestCase):
-    def test_report_descriptor_uses_standard_interface_request(self):
+    def test_report_descriptor_uses_standard_interface_request_for_same_slot(self):
         text = XHCI.read_text(encoding="utf-8")
         self.assertIn("USB_REQUEST_TYPE_DEVICE_TO_HOST_STANDARD_INTERFACE: u8 = 0x81", text)
         self.assertIn("USB_HID_REPORT_DESCRIPTOR_VALUE: u16 = 0x2200", text)
         self.assertIn("USB_REQUEST_GET_DESCRIPTOR", text)
         self.assertIn("interface_number as u16", text)
         self.assertIn("XHCI_SETUP_TRT_IN_DATA", text)
-        self.assertIn("xhci_transfer_wait_ep0_completion", text)
+        self.assertIn("xhci_ep0_producer_cycle_for(slot_id)", text)
+        self.assertIn("xhci_ep0_submit_control_td_for_slot(", text)
+        self.assertIn("xhci_transfer_wait_ep0_completion(slot_id, status_physical)", text)
+        self.assertIn("xhci_transfer_last_residual_length_for(slot_id) == 0", text)
 
-    def test_descriptor_length_comes_from_hid_descriptor(self):
+    def test_descriptor_length_and_protocol_come_from_matching_configuration_slot(self):
         text = XHCI.read_text(encoding="utf-8")
-        self.assertIn("let length = xhci_hid_report_descriptor_length()", text)
+        self.assertIn("let length = xhci_hid_report_descriptor_length_for(slot_id)", text)
+        self.assertIn("let interface_number = xhci_hid_interface_number_for(slot_id)", text)
+        self.assertIn("let protocol = xhci_hid_protocol_for(slot_id)", text)
+        self.assertIn("xhci_hid_endpoint_max_packet_for(slot_id)", text)
         self.assertIn("hid_report_descriptor_parse", text)
         self.assertNotIn("XHCI_HID_BOOT_KEYBOARD_LENGTH", text)
 
@@ -31,22 +37,36 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertIn("protocol == USB_HID_PROTOCOL_KEYBOARD && !info.has_keyboard_application", text)
         self.assertIn("protocol == USB_HID_PROTOCOL_MOUSE && !info.has_mouse_application", text)
         self.assertIn("if !info.has_report_ids", text)
-        self.assertIn("input_bytes > xhci_hid_endpoint_max_packet()", text)
+        self.assertIn("input_bytes > xhci_hid_endpoint_max_packet_for(slot_id)", text)
+
+    def test_descriptor_state_is_partitioned_by_slot_and_epoch(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("pub struct XhciHidDescriptorState", text)
+        self.assertIn("pub epoch: u32", text)
+        self.assertIn("pub input_device_id: u32", text)
+        self.assertIn("pub input_device_generation: u32", text)
+        self.assertIn("static mut XHCI_HID_DESCRIPTOR_STATES:", text)
+        self.assertIn("XHCI_DEVICE_SLOT_CAPACITY", text)
+        self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
+        self.assertNotIn("static mut XHCI_HID_DESCRIPTOR_READY:", text)
+        self.assertNotIn("static mut XHCI_HID_INPUT_DEVICE_ID:", text)
+        self.assertNotIn("static mut XHCI_HID_INPUT_DEVICE_GENERATION:", text)
+        self.assertNotIn("static mut XHCI_HID_DESCRIPTOR_BUFFER:", text)
 
     def test_identity_precedes_per_device_map_event_model_and_bind(self):
         text = XHCI.read_text(encoding="utf-8")
-        body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
+        body = text.split("fn xhci_hid_descriptor_probe_internal_for_slot(slot_id: u8) -> bool", 1)[1]
         body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
         registry = body.index("input_device_registry_init()")
-        attach = body.index("xhci_hid_attach_input_device(protocol, interface_number)")
-        build = body.index("hid_input_device_map_build(device_id, generation")
+        attach = body.index("xhci_hid_attach_input_device_for_slot(slot_id, protocol, interface_number)")
+        build = body.index("hid_input_device_map_build(")
         legacy_marker = body.index("xhci_hid_input_map_emit_ready_marker()")
         device_map_marker = body.index("xhci_hid_device_map_emit_ready_marker()")
         event_init = body.index("hid_input_events_initialize()")
-        event_bind = body.index("xhci_hid_bind_input_events()")
+        event_bind = body.index("xhci_hid_bind_input_events_for_slot(slot_id)")
         event_ready = body.index("xhci_hid_event_model_emit_ready_marker()")
         device_ready = body.index("xhci_hid_device_emit_ready_marker()")
-        descriptor_store = body.index("XHCI_HID_DESCRIPTOR_BUFFER = buffer")
+        descriptor_store = body.index("XHCI_HID_DESCRIPTOR_STATES[index].buffer = buffer")
         self.assertLess(registry, attach)
         self.assertLess(attach, build)
         self.assertLess(build, legacy_marker)
@@ -57,24 +77,26 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertLess(event_ready, device_ready)
         self.assertLess(device_ready, descriptor_store)
 
-    def test_hid4_binding_uses_generation_safe_registry_and_map(self):
+    def test_hid4_binding_uses_generation_safe_per_slot_registry_and_map(self):
         text = XHCI.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::input_device::*;", text)
         self.assertIn("import kernel::drivers::hid_input_device_map::*;", text)
+        self.assertIn("import kernel::drivers::xhci_device_table::*;", text)
         self.assertIn("INPUT_TRANSPORT_USB", text)
         self.assertIn("input_device_attach(", text)
+        self.assertIn("slot_id as u32", text)
         self.assertIn("input_device_activate(handle.device_id, handle.generation)", text)
-        self.assertIn("hid_input_device_map_build(device_id, generation", text)
+        self.assertIn("hid_input_device_map_build(", text)
         self.assertIn("hid_input_events_bind_device(device_id, generation)", text)
-        self.assertIn("XHCI_HID_INPUT_DEVICE_ID", text)
-        self.assertIn("XHCI_HID_INPUT_DEVICE_GENERATION", text)
-        self.assertIn("pub fn xhci_hid_descriptor_input_map_is_ready()", text)
-        self.assertIn("pub fn xhci_hid_descriptor_input_device_is_active()", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_id_for(slot_id: u8)", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_generation_for(slot_id: u8)", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_map_is_ready_for(slot_id: u8)", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_is_active_for(slot_id: u8)", text)
 
-    def test_release_invalidates_then_purges_events_state_and_map(self):
+    def test_release_invalidates_then_purges_events_state_and_map_per_slot(self):
         text = XHCI.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_hid_descriptor_release_input_device() -> bool", 1)[1]
-        body = body.split("fn xhci_hid_descriptor_reset", 1)[0]
+        body = text.split("pub fn xhci_hid_descriptor_release_input_device_for_slot(slot_id: u8) -> bool", 1)[1]
+        body = body.split("pub fn xhci_hid_descriptor_release_input_device()", 1)[0]
         detach = body.index("input_device_detach(device_id, generation)")
         purge = body.index("input_event_purge_device(device_id, generation)")
         event_unbind = body.index("hid_input_events_unbind_device(device_id, generation)")
@@ -82,6 +104,18 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertLess(detach, purge)
         self.assertLess(purge, event_unbind)
         self.assertLess(event_unbind, map_unbind)
+
+    def test_legacy_wrappers_remain_for_first_device_runtime(self):
+        text = XHCI.read_text(encoding="utf-8")
+        self.assertIn("pub fn xhci_hid_descriptor_initialize() -> bool", text)
+        self.assertIn("return xhci_hid_descriptor_initialize_for_slot(slot_id)", text)
+        self.assertIn("pub fn xhci_hid_descriptor_is_ready() -> bool", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_id() -> u32", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_generation() -> u32", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_map_is_ready() -> bool", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_device_is_active() -> bool", text)
+        self.assertIn("pub fn xhci_hid_descriptor_length() -> u16", text)
+        self.assertIn("pub fn xhci_hid_descriptor_input_bytes() -> u16", text)
 
     def test_device_and_per_device_map_markers_exist(self):
         text = XHCI.read_text(encoding="utf-8")
