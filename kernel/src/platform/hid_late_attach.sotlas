@@ -11,6 +11,8 @@ import kernel::arch::x86_64::serial::*;
 import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_slot::*;
 import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_hid_enumeration::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_transfer::*;
@@ -92,6 +94,22 @@ fn platform_hid_late_attach_prove_interleaving(first_slot: u8,
     // de completion. O dispatcher usa o Slot ID que veio do próprio Event TRB.
     if !xhci_hid_report_submit_for_slot(second_slot) { return false; }
     if !platform_hid_late_attach_emit_interleave_stage(50) { return false; }
+
+    // Diagnóstico temporário: valida individualmente as pré-condições públicas
+    // do submit do teclado antes de entrar nos detalhes físicos do ring.
+    if !xhci_hid_descriptor_input_map_is_ready_for(first_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(112) { return false; }
+    if !xhci_hid_descriptor_input_device_is_active_for(first_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(113) { return false; }
+    if xhci_hid_report_transfer_pending_for(first_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(114) { return false; }
+    if xhci_hid_context_dci_for(first_slot) <= 1 { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(115) { return false; }
+    if xhci_hid_context_max_packet_for(first_slot) == 0 { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(116) { return false; }
+    if xhci_hid_context_ring_physical_for(first_slot) == 0 { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(117) { return false; }
+
     if !xhci_hid_report_submit_for_slot(first_slot) { return false; }
     if !platform_hid_late_attach_emit_interleave_stage(51) { return false; }
     if !xhci_hid_report_transfer_pending_for(first_slot) ||
