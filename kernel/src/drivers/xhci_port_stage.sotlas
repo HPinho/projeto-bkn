@@ -1,9 +1,8 @@
-// Baken OS — estágio pós-No-op para preparar a primeira porta USB real.
+// Baken OS — estágio pós-No-op para preparar uma porta USB real.
 //
-// Pré-condição: o primeiro No-op Command já foi concluído por DMA. Esta camada
-// inicializa o produtor stateful do Command Ring, lê Supported Protocol,
-// inventaria PORTSC e executa apenas o reset apropriado da primeira porta
-// conectada. Não envia Enable Slot e não aloca Device/Input Contexts.
+// O caminho legado prepara a primeira porta e inicializa o produtor do Command
+// Ring uma única vez. HID-4c.4 adiciona seleção explícita por port_id sem
+// reinicializar o Command Ring já em uso por outros slots.
 
 module kernel::drivers::xhci_port_stage;
 
@@ -13,25 +12,78 @@ import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_protocol::*;
 import kernel::drivers::xhci_port_reset::*;
 
+// Estado transitório: representa somente a porta atualmente preparada.
+// Identidade multi-device durável pertence a xhci_device_table por Slot ID+epoch.
 static mut XHCI_PORT_STAGE_READY: bool = false;
 static mut XHCI_PORT_STAGE_PORT_ID: u8 = 0;
 static mut XHCI_PORT_STAGE_PROTOCOL_MAJOR: u8 = 0;
 static mut XHCI_PORT_STAGE_SLOT_TYPE: u8 = 0;
 
 @system
-pub fn xhci_port_stage_prepare_first() -> bool {
+fn xhci_port_stage_clear_state() {
     unsafe {
         XHCI_PORT_STAGE_READY = false;
         XHCI_PORT_STAGE_PORT_ID = 0;
         XHCI_PORT_STAGE_PROTOCOL_MAJOR = 0;
         XHCI_PORT_STAGE_SLOT_TYPE = 0;
     }
+}
+
+@system
+fn xhci_port_stage_publish(port_id: u8, protocol: u8, slot_type: u8) -> bool {
+    if port_id == 0 { return false; }
+    unsafe {
+        XHCI_PORT_STAGE_PORT_ID = port_id;
+        XHCI_PORT_STAGE_PROTOCOL_MAJOR = protocol;
+        XHCI_PORT_STAGE_SLOT_TYPE = slot_type;
+        XHCI_PORT_STAGE_READY = true;
+    }
+    return true;
+}
+
+// Seleciona e prepara uma porta conectada explícita. Esta função pressupõe que
+// o Command Ring já foi preparado pelo bring-up inicial e nunca o reinicializa.
+@system
+pub fn xhci_port_stage_prepare_for(port_id: u8) -> bool {
+    xhci_port_stage_clear_state();
+    if port_id == 0 || !xhci_start_is_ready() || !xhci_start_noop_completed() ||
+       !xhci_command_is_ready() {
+        return false;
+    }
+
+    if xhci_protocol_scan() == 0 { return false; }
+    let port_count = xhci_port_scan();
+    if port_count == 0 || (port_id as u16) > port_count { return false; }
+
+    let snapshot = xhci_port_snapshot(port_id);
+    if snapshot == (null as *const XhciPortSnapshot) { return false; }
+    unsafe {
+        if !(*snapshot).valid || !(*snapshot).connected { return false; }
+    }
+
+    let protocol = xhci_protocol_major_for_port(port_id);
+    let slot_type = xhci_protocol_slot_type_for_port(port_id);
+    if protocol != XHCI_PROTOCOL_USB2_MAJOR && protocol != XHCI_PROTOCOL_USB3_MAJOR {
+        return false;
+    }
+
+    if !xhci_port_reset_for(port_id) || !xhci_port_reset_is_ready() { return false; }
+    if xhci_port_reset_port_id() != port_id ||
+       xhci_port_reset_protocol_major() != protocol {
+        return false;
+    }
+    return xhci_port_stage_publish(port_id, protocol, slot_type);
+}
+
+// Wrapper legado do primeiro device. Preserva a ordem histórica: prepara o
+// Command Ring após o No-op, inventaria a primeira porta e usa o reset legado.
+@system
+pub fn xhci_port_stage_prepare_first() -> bool {
+    xhci_port_stage_clear_state();
 
     if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
     if !xhci_command_prepare_after_noop() || !xhci_command_is_ready() { return false; }
 
-    // Faça uma varredura explícita antes do reset para que falhas de capability
-    // ou ausência de dispositivo não sejam confundidas com falha de PORTSC.
     if xhci_protocol_scan() == 0 { return false; }
     if xhci_port_scan() == 0 || xhci_connected_port_count() == 0 { return false; }
 
@@ -43,23 +95,24 @@ pub fn xhci_port_stage_prepare_first() -> bool {
         return false;
     }
 
-    // O helper repete scan/protocol internamente por segurança e só retorna
-    // sucesso quando CCS=1 e PED=1 após PR/WPR (ou SuperSpeed já Enabled).
     if !xhci_port_reset_first_connected() || !xhci_port_reset_is_ready() { return false; }
     if xhci_port_reset_port_id() != port_id ||
-       xhci_port_reset_protocol_major() != protocol { return false; }
-
-    unsafe {
-        XHCI_PORT_STAGE_PORT_ID = port_id;
-        XHCI_PORT_STAGE_PROTOCOL_MAJOR = protocol;
-        XHCI_PORT_STAGE_SLOT_TYPE = slot_type;
-        XHCI_PORT_STAGE_READY = true;
+       xhci_port_reset_protocol_major() != protocol {
+        return false;
     }
-    return true;
+    return xhci_port_stage_publish(port_id, protocol, slot_type);
 }
 
 @system
 pub fn xhci_port_stage_is_ready() -> bool { unsafe { return XHCI_PORT_STAGE_READY; } }
+
+@system
+pub fn xhci_port_stage_is_ready_for(port_id: u8) -> bool {
+    if port_id == 0 { return false; }
+    unsafe {
+        return XHCI_PORT_STAGE_READY && XHCI_PORT_STAGE_PORT_ID == port_id;
+    }
+}
 
 @system
 pub fn xhci_port_stage_port_id() -> u8 { unsafe { return XHCI_PORT_STAGE_PORT_ID; } }

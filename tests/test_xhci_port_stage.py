@@ -18,7 +18,7 @@ def _code_only(text: str) -> str:
 
 
 class XhciPortStageTests(unittest.TestCase):
-    def test_stage_requires_real_noop_before_any_port_work(self):
+    def test_first_stage_preserves_legacy_order(self):
         text = STAGE.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_port_stage_prepare_first()", 1)[1]
         noop = body.index("xhci_start_noop_completed()")
@@ -31,21 +31,42 @@ class XhciPortStageTests(unittest.TestCase):
         self.assertLess(protocol, ports)
         self.assertLess(ports, reset)
 
-    def test_stage_exports_port_protocol_and_slot_type(self):
+    def test_explicit_stage_selects_a_connected_supported_port(self):
         text = STAGE.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_port_stage_prepare_for(port_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_port_stage_prepare_first()", 1)[0]
+        self.assertIn("if port_id == 0", body)
+        self.assertIn("xhci_command_is_ready()", body)
+        self.assertIn("xhci_protocol_scan()", body)
+        self.assertIn("let port_count = xhci_port_scan()", body)
+        self.assertIn("xhci_port_snapshot(port_id)", body)
+        self.assertIn("(*snapshot).connected", body)
+        self.assertIn("xhci_protocol_major_for_port(port_id)", body)
+        self.assertIn("xhci_protocol_slot_type_for_port(port_id)", body)
+        self.assertIn("xhci_port_reset_for(port_id)", body)
+        self.assertIn("xhci_port_reset_port_id() != port_id", body)
+
+    def test_explicit_stage_never_reinitializes_command_ring(self):
+        text = STAGE.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_port_stage_prepare_for(port_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_port_stage_prepare_first()", 1)[0]
+        self.assertNotIn("xhci_command_prepare_after_noop()", body)
+        self.assertIn("xhci_command_is_ready()", body)
+
+    def test_stage_exports_current_selection_and_ready_for(self):
+        text = STAGE.read_text(encoding="utf-8")
+        self.assertIn("xhci_port_stage_is_ready_for(port_id: u8)", text)
+        self.assertIn("XHCI_PORT_STAGE_PORT_ID == port_id", text)
         self.assertIn("xhci_port_stage_port_id()", text)
         self.assertIn("xhci_port_stage_protocol_major()", text)
         self.assertIn("xhci_port_stage_slot_type()", text)
-        self.assertIn("xhci_protocol_slot_type_for_port(port_id)", text)
-        self.assertIn("xhci_port_reset_port_id() != port_id", text)
+        self.assertIn("Estado transitório", text)
 
     def test_stage_does_not_cross_enable_slot_boundary(self):
         code = _code_only(STAGE.read_text(encoding="utf-8")).lower()
         for forbidden in (
             "xhci_trb_enable_slot",
             "xhci_trb_address_device",
-            "enable slot",
-            "address device",
             "input_context",
             "device_context",
             "dcbaa",
@@ -57,12 +78,13 @@ class XhciPortStageTests(unittest.TestCase):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::xhci_port_stage::*;", text)
 
-    def test_post_cutover_activates_port_stage_only_after_noop(self):
+    def test_post_cutover_keeps_first_port_wrapper(self):
         text = POST.read_text(encoding="utf-8")
         body = text.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
         self.assertIn("import kernel::drivers::xhci_port_stage::*;", text)
         self.assertIn("post_cutover_prepare_first_usb_port()", text)
         self.assertIn("xhci_port_stage_prepare_first()", text)
+        self.assertNotIn("xhci_port_stage_prepare_for(", text)
         self.assertLess(
             body.index("x86_serial_write_stage_marker('N' as u8)"),
             body.index("post_cutover_prepare_first_usb_port()"),

@@ -54,6 +54,24 @@ class XhciPortTests(unittest.TestCase):
         self.assertIn("xhci_first_connected_port()", text)
         self.assertIn("xhci_port_snapshot(port_id: u8)", text)
 
+    def test_multi_port_iterator_is_bounded_and_uses_snapshot_state(self):
+        text = PORT.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_port_next_connected(after_port_id: u8)", 1)[1]
+        self.assertIn("let count = xhci_port_count()", body)
+        self.assertIn("count > 255", body)
+        self.assertIn("(after_port_id as u16) + 1", body)
+        self.assertIn("while port <= count", body)
+        self.assertIn("xhci_port_snapshot(port_id)", body)
+        self.assertIn("(*snapshot).connected", body)
+        self.assertIn("return 0;", body)
+
+    def test_multi_port_iterator_remains_read_only(self):
+        text = PORT.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_port_next_connected(after_port_id: u8)", 1)[1]
+        self.assertNotIn("x86_mmio_write32", body)
+        self.assertNotIn("xhci_port_reset_for", body)
+        self.assertNotIn("xhci_slot_enable_port", body)
+
     def test_port_module_is_in_canonical_graph(self):
         text = MAIN.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::xhci_port::*;", text)

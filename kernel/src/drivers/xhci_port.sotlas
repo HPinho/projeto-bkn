@@ -2,7 +2,8 @@
 //
 // Lê PORTSC somente depois que o controller está rodando e o No-op Command já
 // foi concluído. Não limpa change bits, não faz Port Reset/Warm Reset e não
-// escreve PORTSC. A próxima fase usa este inventário para escolher uma porta.
+// escreve PORTSC. HID-4c.4 expõe iteração bounded das portas conectadas sem
+// depender exclusivamente de first_connected.
 
 module kernel::drivers::xhci_port;
 
@@ -143,4 +144,27 @@ pub fn xhci_port_snapshot(port_id: u8) -> *const XhciPortSnapshot {
         if !XHCI_PORTS[index].valid { return null as *const XhciPortSnapshot; }
         return &XHCI_PORTS[index];
     }
+}
+
+// Retorna a próxima porta conectada no inventário atual após after_port_id.
+// Não toca hardware e não refaz o scan: o chamador controla quando revalidar
+// PORTSC. Zero significa fim da iteração ou inventário inválido.
+@system
+pub fn xhci_port_next_connected(after_port_id: u8) -> u8 {
+    let count = xhci_port_count();
+    if count == 0 || count > 255 { return 0; }
+    let mut port: u16 = (after_port_id as u16) + 1;
+    while port <= count {
+        let port_id = port as u8;
+        let snapshot = xhci_port_snapshot(port_id);
+        if snapshot != (null as *const XhciPortSnapshot) {
+            unsafe {
+                if (*snapshot).valid && (*snapshot).connected {
+                    return port_id;
+                }
+            }
+        }
+        port += 1;
+    }
+    return 0;
 }

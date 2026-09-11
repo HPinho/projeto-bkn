@@ -10,11 +10,10 @@ Este arquivo é o registro operacional de continuidade. O roadmap estratégico e
 - trilha atual: **Trilha B — HID/input de produção**;
 - etapa atual: **HID-4c Multi-slot xHCI**;
 - subetapa atual: **HID-4c.4 — enumeração simultânea real**;
-- primeiro corte HID-4c.4: **reset explícito por porta**;
-- branch de trabalho: **`main`**;
-- Kernel Core: **congelado/invariant-preserving**;
-- `docs/BAKEN_OS_ROADMAP.md`: documento estratégico contínuo;
-- `docs/KERNEL_HANDOFF.md`: estado operacional de continuidade.
+- checkpoint certificado mais recente: **HID-4c.4a — reset explícito por porta**;
+- candidato atual: **HID-4c.4b — inventário/seleção multi-port**;
+- branch: **`main`**;
+- Kernel Core: **congelado/invariant-preserving**.
 
 ## Política de certificação
 
@@ -24,76 +23,90 @@ Um incremento só vira baseline quando os três gates passam no **mesmo SHA**:
 2. Baken OS SMP Bring-up Verification;
 3. Baken OS NVMe-only Bare-Metal Verification.
 
-Regras:
-
-- trabalhar em microcortes diretamente em `main`;
-- partir do último checkpoint verde;
-- não empilhar mudança funcional sobre candidato vermelho;
-- não remover marker/proof/teste nem ampliar timeout para mascarar regressão;
-- build Sotlas e runtime QEMU valem mais que guardrail textual;
-- APIs `_for(slot_id)` usam exclusivamente o mesmo slot;
-- hardware, descriptors e eventos são input não confiável e falham fechado.
+Não empilhar mudança funcional sobre candidato vermelho. Não remover marker/proof/teste nem ampliar timeout para mascarar regressão. APIs `_for(slot_id)` consomem estado/resultados do mesmo slot. Hardware, descriptors e eventos são input não confiável e falham fechado.
 
 ---
 
 # Última baseline certificada
 
 ```text
-6eec0dcc36a32c26108629e5ede9f0b929fef2e2
-feat(xhci): close HID-4c.3 slot coherence
+8ef11b5e9298552d52eee3954ccd305e4421708d
+feat(xhci): start HID-4c.4 per-port reset
 ```
 
 Provas no mesmo SHA:
 
-- CI #1138 / `34555120197` ✅ — suíte completa, grafo Sotlas, build nativo, ISO e QEMU;
-- SMP #241 / `34555120203` ✅ — contracts, build e prova SMP;
-- NVMe #338 / `34555120228` ✅ — contracts, build, fixture e QEMU NVMe-only.
+- CI #1139 / `34557045054` ✅;
+- SMP #242 / `34557045108` ✅;
+- NVMe #339 / `34557045133` ✅.
 
-Com esse SHA, **HID-4c.3 está fechado**.
-
-A reconstrução segura de HID-4c.3 partiu de:
-
-```text
-9558e5b3cb83064cc6a0b1548f03b3ed12c35a22
-test(xhci): guard transfer results per slot
-```
-
-Esse baseline foi triplo verde em CI #1127 / SMP #230 / NVMe #327.
+Essa baseline mantém o caminho QEMU legado do primeiro teclado verde e adiciona `xhci_port_reset_for(port_id)` sem remover `xhci_port_reset_first_connected()`.
 
 ---
 
-# Candidato corrente — HID-4c.4a
+# Candidato corrente — HID-4c.4b
 
-Objetivo: remover a dependência de `first_connected` do reset de porta sem alterar o bring-up legado.
+Objetivo: permitir seleção sequencial e bounded de portas conectadas sem reinicializar infraestrutura global já usada pelo primeiro device.
+
+## Inventário read-only
 
 Novo contrato:
 
 ```text
-xhci_port_reset_for(port_id)
+xhci_port_next_connected(after_port_id)
+```
+
+Garantias:
+
+- usa somente o inventário atual de `xhci_port_scan()`;
+- começa em `after_port_id + 1`;
+- percorre até `xhci_port_count()`;
+- retorna somente snapshot `valid && connected`;
+- retorna `0` ao final;
+- não escreve MMIO;
+- não executa reset, Enable Slot ou doorbell.
+
+Exemplo de iteração futura:
+
+```text
+port = xhci_port_next_connected(0)
+while port != 0:
+    preparar/enumeração da porta
+    port = xhci_port_next_connected(port)
+```
+
+## Staging por porta explícita
+
+Novo contrato:
+
+```text
+xhci_port_stage_prepare_for(port_id)
 ```
 
 Pré-condições e garantias:
 
-- `port_id != 0`;
-- `port_id` dentro do inventário retornado por `xhci_port_scan()`;
-- controller iniciado e No-op já concluído;
-- Supported Protocol revalidado para a porta;
-- CCS presente antes do reset;
-- USB2: PR → PRC → PED;
-- USB3: PED já presente ou WPR → WRC → PED;
-- PORTSC write image remove PED, RW1C, PR/WPR/LWS antes de adicionar o bit intencional;
-- CCS + PED exigidos após sucesso;
-- estado `XHCI_PORT_RESET_*` representa somente a última operação concluída, não identidade multi-device.
+- controller iniciado e No-op real concluído;
+- `xhci_command_is_ready()` já verdadeiro;
+- Supported Protocol + PORTSC são revalidados;
+- `port_id` precisa estar no inventário e conectado;
+- protocolo precisa ser USB2 ou USB3;
+- usa `xhci_port_reset_for(port_id)`;
+- confirma que `xhci_port_reset_port_id()` e protocolo correspondem à porta solicitada;
+- publica somente o staging transitório da porta atual.
 
-Compatibilidade obrigatória:
+**Invariante crítico:** `xhci_port_stage_prepare_for(port_id)` não chama `xhci_command_prepare_after_noop()`. Esse helper reinicializa enqueue index, producer cycle, last slot e Event Consumer e só pertence ao bring-up inicial. Reexecutá-lo depois do primeiro dispositivo poderia invalidar o Command Ring em uso.
+
+O wrapper legado:
 
 ```text
-xhci_port_reset_first_connected()
+xhci_port_stage_prepare_first()
 ```
 
-continua selecionando `xhci_first_connected_port()` e delega para `xhci_port_reset_for(port_id)`.
+continua preservando a ordem histórica, inclusive `xhci_command_prepare_after_noop()` e `xhci_port_reset_first_connected()`.
 
-Se o candidato ficar triplo verde, o próximo microcorte é HID-4c.4b: inventário/seleção bounded de múltiplas portas conectadas elegíveis.
+`XHCI_PORT_STAGE_*` representa apenas a seleção transitória corrente; identidade multi-device durável continua em `xhci_device_table` por Slot ID + epoch.
+
+Se este candidato ficar triplo verde, o próximo checkpoint será **HID-4c.4c — pipeline completo por porta**.
 
 ---
 
@@ -125,24 +138,11 @@ Se o candidato ficar triplo verde, o próximo microcorte é HID-4c.4b: inventár
 
 ## HID-4c.1 — transport core
 
-**✅ VALIDADO.**
-
-- tabela bounded de Slot IDs;
-- port mapping/state/epoch;
-- Device/Input Context e EP0 por slot;
-- DCBAA correto;
-- Address Device por slot;
-- wrappers do primeiro device preservados.
+**✅ VALIDADO.** Tabela bounded de Slot IDs, port mapping/state/epoch, Device/Input Context e EP0 por slot, DCBAA correto e Address Device por slot.
 
 ## HID-4c.2 — endpoint/report transport per-slot
 
-**✅ PRESENTE E REVALIDADO.**
-
-- HID context por slot+epoch;
-- DCI/ring/max packet/interval por slot;
-- Configure Endpoint per-slot;
-- report DMA/ring/produtor/fallback Boot por slot;
-- completion por slot/DCI/TRB.
+**✅ PRESENTE E REVALIDADO.** HID context, DCI/ring/max packet/interval, Configure Endpoint, report DMA/ring/produtor e completion por slot/DCI/TRB.
 
 ## HID-4c.3 — concluído
 
@@ -154,19 +154,15 @@ Se o candidato ficar triplo verde, o próximo microcorte é HID-4c.4b: inventár
 | HID Report Descriptor + InputDevice binding | `4ae0a5c6341dd6ea62d2ea05b62001382bfa467d` — CI #1135 / SMP #238 / NVMe #335 |
 | HID report runtime per-slot | `93fe9d9639b366b9395b0b49f0f293bdf64de588` — CI #1136 / SMP #239 / NVMe #336 |
 | SET_CONFIGURATION per-slot | `0ef4c670727a2d0b68324c4281972b2992fefb5c` — CI #1137 / SMP #240 / NVMe #337 |
-| slot coherence final | `6eec0dcc36a32c26108629e5ede9f0b929fef2e2` — CI #1138 / SMP #241 / NVMe #338 |
+| Slot coherence final | `6eec0dcc36a32c26108629e5ede9f0b929fef2e2` — CI #1138 / SMP #241 / NVMe #338 |
 
 ## HID-4c.4 — atual
 
-Sequência segura:
-
-1. **4c.4a** reset explícito por porta — candidato atual;
-2. **4c.4b** iterar portas conectadas elegíveis de modo bounded;
-3. **4c.4c** Reset → Enable Slot → Context → Address → descriptors → HID endpoint → SET_CONFIGURATION por porta/slot;
-4. **4c.4d** manter keyboard como primeiro HID e adicionar mouse como segundo device;
-5. **4c.4e** provar reports/identidade independentes e expandir demux apenas se necessário.
-
-Não reaplicar automaticamente a antiga cadeia experimental HID-4c.4.
+1. **4c.4a reset explícito por porta** — ✅ `8ef11b5e...`, triplo verde;
+2. **4c.4b inventário/seleção multi-port** — ⏳ candidato atual;
+3. **4c.4c pipeline completo por porta** — próximo após triplo verde;
+4. **4c.4d dual-device runtime** — keyboard primeiro + mouse segundo;
+5. **4c.4e interleaving/event demux** — prova final de independência.
 
 ### Caminho legado obrigatório do primeiro teclado
 
@@ -189,56 +185,34 @@ post_cutover_prepare_first_usb_port
 
 O proof continua exigindo Boot keyboard report real, comprimento mínimo de 8 bytes, Usage ID `4` (`A`) e `POST_CUTOVER_HID_REPORT_ATTEMPTS = 8`.
 
-### QEMU
+---
 
-Baseline verde: `qemu-xhci` + `usb-kbd`, `sendkey a` pelo monitor.
+# Próximo corte se HID-4c.4b ficar verde
 
-Para HID-4c.4:
-
-- keyboard permanece o primeiro HID;
-- mouse entra depois como segundo device/slot;
-- slot, epoch, endpoint/DCI, ring, generation e mapa permanecem independentes;
-- Transfer Event de outro slot/DCI/TRB nunca satisfaz waiter incorreto.
+**HID-4c.4c — pipeline completo por porta.** Antes de programar, auditar as assinaturas reais de context/address/descriptor/configure endpoint/set configuration. O pipeline deve receber um `port_id` explícito, usar o `slot_type` do staging, criar um Slot ID novo e carregar o mesmo `slot_id` por toda a cadeia. Não modificar o post-cutover do primeiro teclado até existir prova independente do segundo device.
 
 ---
 
 # ACPI/AML
 
-**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 fechados; checkpoint `7803447a`.
-
-I2C-HID só começa depois de transporte I2C/ACPI seguro.
-
----
+**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8; checkpoint `7803447a`.
 
 # Storage e demais trilhas
 
-Continuam na Fase 2, fora do checkpoint HID atual.
-
-Storage alvo:
-
-```text
-BlockDevice → Block Cache → Volume Manager → VFS
-           → FAT32 / exFAT / NTFS / ext / ISO-UDF / BakenFS
-```
-
-Rede, áudio, GPU/composição e power/hot-plug avançado também permanecem posteriores ao foco HID atual.
-
----
+Continuam na Fase 2, fora do checkpoint HID atual. Storage alvo: `BlockDevice → Block Cache → Volume Manager → VFS → FAT32/exFAT/NTFS/ext/ISO-UDF/BakenFS`. Rede, áudio, GPU/composição e power/hot-plug avançado permanecem posteriores.
 
 # Sotlas / toolchain
 
-`HPinho/LangSotlas` permanece toolchain separada. Não fazer migração ampla da toolchain durante HID-4c. Preferir sintaxe e intrinsics já comprovados no baseline verde.
+`HPinho/LangSotlas` permanece toolchain separada. Não fazer migração ampla durante HID-4c. Preferir sintaxe e intrinsics já comprovados.
 
 ---
 
 # Regra de continuidade
 
-Antes de programar:
-
-1. confirmar `main` e SHA atual;
+1. confirmar `main` e SHA;
 2. verificar CI/SMP/NVMe do mesmo SHA;
-3. ler este handoff e a seção HID-4c do roadmap;
-4. inspecionar assinaturas reais no head atual;
-5. fazer um único microcorte funcional;
+3. ler roadmap + handoff;
+4. inspecionar assinaturas reais;
+5. fazer um microcorte funcional;
 6. preservar wrappers, markers e proofs;
 7. se qualquer gate ficar vermelho, corrigir o próprio checkpoint antes de avançar.

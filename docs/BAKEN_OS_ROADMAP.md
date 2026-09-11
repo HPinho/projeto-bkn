@@ -16,15 +16,11 @@ Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only*
 
 ## Posição atual
 
-O desenvolvimento está na **Fase 2 — Platform/Drivers**, na **Trilha B — HID/input de produção**, agora dentro do **HID-4c.4 — enumeração simultânea real de múltiplos dispositivos xHCI**.
+O desenvolvimento está na **Fase 2 — Platform/Drivers**, **Trilha B — HID/input de produção**, dentro do **HID-4c.4 — enumeração simultânea real de múltiplos dispositivos xHCI**.
 
-O **HID-4c.3 foi encerrado e certificado**. A infraestrutura interna relevante já trabalha por `slot_id + epoch`; o foco deixa de ser remover singletons e passa a ser provar múltiplas portas/dispositivos reais no mesmo controlador.
-
-Em termos da Fase 2 inteira, o HID está avançado, mas Platform/Drivers ainda inclui trabalho futuro importante: HID-4d hot-plug/recovery, storage de produção/VFS, rede, áudio, GPU/composição e power/hot-plug avançado.
+O **HID-4c.3 está encerrado e certificado**. O **HID-4c.4a — reset explícito por porta** também está certificado. O candidato atual é **HID-4c.4b — inventário/seleção multi-port**, preparando a transição de `first_connected` para iteração bounded de portas reais.
 
 O Kernel Core permanece congelado. Drivers novos não podem relaxar invariantes de SMP, scheduler, memória, TLB, Ring3, FPU/SIMD ou teardown.
-
-A política atual é trabalhar diretamente em `main`, por microcortes verificáveis, sempre a partir do último checkpoint verde.
 
 ---
 
@@ -73,8 +69,6 @@ Scheduler preemptivo/SMP, wait/wake/sleep, heap, processos/address spaces, Ring3
 ### HID-3 — certificado
 
 Runtime `51631f23`; head `2775c12a`: CI #1066 ✅; SMP #169 ✅; NVMe #266 ✅.
-
-Markers `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:USB_HID_EVENT_READY` permanecem obrigatórios.
 
 ### HID-4a — certificado
 
@@ -129,68 +123,71 @@ A retomada segura posterior partiu de `9558e5b3cb83064cc6a0b1548f03b3ed12c35a22`
 | HID Report Descriptor + InputDevice binding | `4ae0a5c6341dd6ea62d2ea05b62001382bfa467d` — CI #1135 / SMP #238 / NVMe #335 |
 | HID report runtime per-slot | `93fe9d9639b366b9395b0b49f0f293bdf64de588` — CI #1136 / SMP #239 / NVMe #336 |
 | SET_CONFIGURATION per-slot | `0ef4c670727a2d0b68324c4281972b2992fefb5c` — CI #1137 / SMP #240 / NVMe #337 |
-| Report gate final / slot coherence | `6eec0dcc36a32c26108629e5ede9f0b929fef2e2` — CI #1138 / SMP #241 / NVMe #338 |
-
-### Baseline certificada atual
-
-```text
-6eec0dcc36a32c26108629e5ede9f0b929fef2e2
-feat(xhci): close HID-4c.3 slot coherence
-```
-
-- CI #1138 / `34555120197` ✅ — suíte, grafo Sotlas, build nativo, ISO e QEMU;
-- SMP #241 / `34555120203` ✅ — contracts, build e prova SMP;
-- NVMe #338 / `34555120228` ✅ — contracts, build, fixture e QEMU NVMe-only.
-
-O caminho `xhci_hid_report_prepare_for_slot(slot_id)` agora exige readiness, configuration value, HID map e identidade do mesmo slot; wrappers globais ficaram restritos ao caminho legado single-device.
+| Slot coherence final | `6eec0dcc36a32c26108629e5ede9f0b929fef2e2` — CI #1138 / SMP #241 / NVMe #338 |
 
 ### HID-4c.4 — enumeração simultânea real
 
 **⏳ ETAPA ATUAL.**
 
-Objetivo final: provar no mesmo xHC pelo menos **keyboard + mouse simultâneos**, com Slot IDs independentes e reports corretamente atribuídos.
-
-| Subetapa | Estado | Objetivo |
+| Subetapa | Estado | Checkpoint / objetivo |
 |---|---|---|
-| HID-4c.4a Reset explícito por porta | ⏳ | `xhci_port_reset_for(port_id)` bounded, preservando wrapper da primeira porta |
-| HID-4c.4b Inventário/seleção multi-port | ⬜ | iterar portas conectadas elegíveis sem depender de `first_connected` |
+| HID-4c.4a Reset explícito por porta | ✅ | `8ef11b5e9298552d52eee3954ccd305e4421708d` — CI #1139 / SMP #242 / NVMe #339 |
+| HID-4c.4b Inventário/seleção multi-port | ⏳ | candidato atual: iteração bounded + staging explícito por `port_id` |
 | HID-4c.4c Pipeline completo por porta | ⬜ | Reset → Enable Slot → Context → Address → descriptors → endpoint → SET_CONFIGURATION |
 | HID-4c.4d Dual-device runtime proof | ⬜ | keyboard primeiro + mouse segundo no QEMU |
 | HID-4c.4e Interleaving/event demux | ⬜ | provar eventos independentes; expandir demux somente se necessário |
 
-#### Candidato atual — HID-4c.4a
-
-O primeiro bloqueio encontrado para multi-device real foi o reset: `xhci_slot_enable_port(port_id, slot_type)` já aceita porta explícita, mas o reset anterior operava apenas `xhci_first_connected_port()`.
-
-O candidato atual introduz:
+### Baseline certificada atual
 
 ```text
-xhci_port_reset_for(port_id)
+8ef11b5e9298552d52eee3954ccd305e4421708d
+feat(xhci): start HID-4c.4 per-port reset
+```
+
+- CI #1139 / `34557045054` ✅;
+- SMP #242 / `34557045108` ✅;
+- NVMe #339 / `34557045133` ✅.
+
+### Candidato atual — HID-4c.4b
+
+O inventário de portas já era bounded e read-only, mas expunha apenas `xhci_first_connected_port()`. O candidato adiciona:
+
+```text
+xhci_port_next_connected(after_port_id)
+```
+
+para percorrer snapshots conectados sem tocar hardware. A iteração usa somente o inventário atual, retorna `0` ao final e nunca executa reset, Enable Slot ou doorbell.
+
+O staging também passa a aceitar:
+
+```text
+xhci_port_stage_prepare_for(port_id)
 ```
 
 com estas regras:
 
-- `port_id != 0` e dentro do inventário bounded;
-- controller iniciado e No-op já provado;
-- Supported Protocol e PORTSC revalidados antes do write;
-- CCS obrigatório antes e depois;
-- USB2 usa PR + PRC + PED;
-- USB3 usa PED existente ou WPR + WRC + PED;
-- writes de PORTSC continuam removendo PED/RW1C/reset bits da imagem-base;
-- `xhci_port_reset_first_connected()` continua existindo como wrapper legado;
-- o estado global de reset representa apenas a última operação concluída, nunca identidade multi-device.
+- exige controller/No-op já prontos;
+- exige `xhci_command_is_ready()`;
+- **não chama `xhci_command_prepare_after_noop()`**, evitando rebobinar Command Ring/Event Consumer depois do primeiro device;
+- revalida Supported Protocol + PORTSC;
+- exige snapshot válido e conectado;
+- aceita somente USB2/USB3 suportado;
+- chama `xhci_port_reset_for(port_id)` e confirma que o reset concluído pertence à mesma porta/protocolo;
+- `XHCI_PORT_STAGE_*` permanece estado transitório da seleção atual, não identidade multi-device;
+- `xhci_port_stage_prepare_first()` continua sendo o wrapper legado e preserva a ordem histórica do primeiro teclado.
 
-Após triplo verde deste corte, HID-4c.4b passa a iterar portas conectadas elegíveis e preparar a segunda porta sem alterar o caminho histórico do primeiro teclado.
+Se este corte ficar triplo verde, o próximo checkpoint é **HID-4c.4c**, que usará a porta explicitamente preparada para executar a cadeia real por dispositivo: Enable Slot → Context → Address → descriptors → HID endpoint → SET_CONFIGURATION.
 
 ### Regras de segurança HID-4c
 
 - não empilhar mudança funcional sobre candidato vermelho;
 - API `_for(slot_id)` nunca decide identidade/configuração/resultados usando outro slot;
-- hardware/descriptors/eventos são input não confiável e devem falhar fechado;
+- hardware/descriptors/eventos são input não confiável e falham fechado;
 - Slot ID reutilizado exige epoch novo;
 - o proof legado `sendkey a` permanece obrigatório;
 - não relaxar timeout, marker ou proof para obter verde;
-- não reaplicar em bloco a antiga cadeia experimental HID-4c.4.
+- não reaplicar em bloco a antiga cadeia experimental HID-4c.4;
+- staging multi-port nunca reinicializa o Command Ring após o bring-up inicial.
 
 ### HID-4d — hot-plug/recovery
 
@@ -236,8 +233,6 @@ AHCI / NVMe / futuros USB Mass Storage
 | STORAGE-9 Page/file cache + mmap | ⬜ |
 | STORAGE-10 Async I/O + recovery | ⬜ |
 | STORAGE-11 FS avançados/ZFS | ⬜ |
-
-BakenFS será o filesystem nativo/preferencial sem eliminar interoperabilidade.
 
 ## Trilha D — Rede
 
