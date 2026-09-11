@@ -74,20 +74,31 @@ class HidInputDeviceMapTests(unittest.TestCase):
         self.assertIn("hid_input_device_map_validate(", report)
         self.assertIn("hid_input_device_map_has_report_ids(device_id, device_generation)", report)
         self.assertNotIn("hid_input_report_validate(", report)
-        self.assertIn("hid_input_device_map_build(device_id, generation", descriptor)
+        self.assertIn("hid_input_device_map_build(", descriptor)
+        self.assertIn("device_id, generation, buffer.virtual_address", descriptor)
         self.assertNotIn("hid_input_report_map_build(buffer.virtual_address", descriptor)
 
     def test_xhci_identity_precedes_per_device_map_and_event_bind(self):
         text = XHCI_DESCRIPTOR.read_text(encoding="utf-8")
-        body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
+        body = text.split(
+            "fn xhci_hid_descriptor_probe_internal_for_slot(slot_id: u8) -> bool", 1
+        )[1]
         body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
-        attach = body.index("xhci_hid_attach_input_device(protocol, interface_number)")
-        build = body.index("hid_input_device_map_build(device_id, generation")
+        attach = body.index(
+            "xhci_hid_attach_input_device_for_slot(slot_id, protocol, interface_number)"
+        )
+        identity = body.index("let device_id = xhci_hid_descriptor_input_device_id_for(slot_id)")
+        generation = body.index(
+            "let generation = xhci_hid_descriptor_input_device_generation_for(slot_id)"
+        )
+        build = body.index("hid_input_device_map_build(")
         map_marker = body.index("xhci_hid_device_map_emit_ready_marker()")
         event_init = body.index("hid_input_events_initialize()")
-        event_bind = body.index("xhci_hid_bind_input_events()")
+        event_bind = body.index("xhci_hid_bind_input_events_for_slot(slot_id)")
         device_ready = body.index("xhci_hid_device_emit_ready_marker()")
-        self.assertLess(attach, build)
+        self.assertLess(attach, identity)
+        self.assertLess(identity, generation)
+        self.assertLess(generation, build)
         self.assertLess(build, map_marker)
         self.assertLess(map_marker, event_init)
         self.assertLess(event_init, event_bind)
