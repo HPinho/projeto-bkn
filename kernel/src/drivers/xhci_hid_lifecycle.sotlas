@@ -1,8 +1,9 @@
-// Baken OS — HID-4d.1/4d.2b: detach quarantine e Stop Endpoint seguro.
+// Baken OS — HID-4d.1/4d.2b/4d.3b1: detach quarantine e teardown gate seguro.
 //
 // DETACH_PENDING permanece generation-safe. HID-4d.2b para apenas o endpoint
 // HID do mesmo slot+epoch, drena o TD outstanding e registra endpoint_stopped.
-// Não desmonta InputDevice, contexts, rings, descriptors nem libera Slot ID.
+// HID-4d.3b1 abre uma transacao logica idempotente somente depois do drain,
+// sem desmontar InputDevice, contexts, rings, descriptors nem liberar Slot ID.
 
 module kernel::drivers::xhci_hid_lifecycle;
 
@@ -21,6 +22,7 @@ pub struct XhciHidLifecycleState {
     pub epoch: u32;
     pub detach_detected: bool;
     pub endpoint_stopped: bool;
+    pub logical_teardown_started: bool;
 }
 
 static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE_SLOT_CAPACITY] = [
@@ -28,7 +30,8 @@ static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE
         valid: false,
         epoch: 0,
         detach_detected: false,
-        endpoint_stopped: false
+        endpoint_stopped: false,
+        logical_teardown_started: false
     };
     XHCI_HID_LIFECYCLE_SLOT_CAPACITY
 ];
@@ -55,6 +58,7 @@ fn xhci_hid_lifecycle_publish_detach(slot_id: u8, epoch: u32) -> bool {
         XHCI_HID_LIFECYCLE_STATES[index].epoch = epoch;
         XHCI_HID_LIFECYCLE_STATES[index].detach_detected = true;
         XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = false;
+        XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started = false;
     }
     return true;
 }
@@ -203,6 +207,42 @@ pub fn xhci_hid_lifecycle_can_finalize_for(slot_id: u8, epoch: u32) -> bool {
     if xhci_hid_report_transfer_pending_for(slot_id) { return false; }
     if xhci_transfer_pending_is_ready_for(slot_id) { return false; }
     return true;
+}
+
+// HID-4d.3b1: abre a transacao de teardown logico somente para a geracao
+// corrente, depois de Stop Endpoint + drain. Nenhum recurso e liberado aqui.
+// Chamadas repetidas para o mesmo slot+epoch sao idempotentes; um epoch antigo
+// falha fechado antes de alterar o estado da geracao nova.
+@system
+pub fn xhci_hid_lifecycle_begin_logical_teardown_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_can_finalize_for(slot_id, epoch) { return false; }
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY { return false; }
+    unsafe {
+        if !XHCI_HID_LIFECYCLE_STATES[index].valid ||
+           XHCI_HID_LIFECYCLE_STATES[index].epoch != epoch ||
+           !XHCI_HID_LIFECYCLE_STATES[index].detach_detected ||
+           !XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped {
+            return false;
+        }
+        if XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started { return true; }
+        XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_hid_lifecycle_logical_teardown_started_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_HID_LIFECYCLE_STATES[index].valid &&
+               XHCI_HID_LIFECYCLE_STATES[index].epoch == epoch &&
+               XHCI_HID_LIFECYCLE_STATES[index].detach_detected &&
+               XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped &&
+               XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started;
+    }
 }
 
 @system
