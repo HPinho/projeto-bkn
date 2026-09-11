@@ -292,6 +292,26 @@ pub fn input_device_detach(device_id: u32, generation: u32) -> bool {
     return detached;
 }
 
+// HID-4d teardown helper: reporta a generation corrente do slot lógico mesmo
+// quando o record está DETACHED/invalid. Zero continua reservado para falha/
+// identidade inválida, então callers podem distinguir "generation mudou" de
+// uma leitura que não pôde ser comprovada sob o lock do registry.
+@system
+pub fn input_device_generation_for_id(device_id: u32) -> u32 {
+    let slot = input_device_slot(device_id);
+    if slot >= INPUT_DEVICE_CAPACITY { return INPUT_DEVICE_GENERATION_INVALID; }
+    let flags = input_device_lock_irq();
+    if flags == 0 { return INPUT_DEVICE_GENERATION_INVALID; }
+    let mut generation = INPUT_DEVICE_GENERATION_INVALID;
+    unsafe {
+        if INPUT_DEVICE_READY && INPUT_DEVICES[slot].device_id == device_id {
+            generation = INPUT_DEVICES[slot].generation;
+        }
+    }
+    input_device_unlock_irq(flags);
+    return generation;
+}
+
 @system
 pub fn input_device_is_active(device_id: u32, generation: u32) -> bool {
     let slot = input_device_slot(device_id);
