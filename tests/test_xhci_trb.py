@@ -24,15 +24,17 @@ class XhciTrbTests(unittest.TestCase):
         self.assertIn("XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11", text)
         self.assertIn("XHCI_TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12", text)
         self.assertIn("XHCI_TRB_TYPE_EVALUATE_CONTEXT: u32 = 13", text)
+        self.assertIn("XHCI_TRB_TYPE_STOP_ENDPOINT: u32 = 15", text)
         self.assertIn("XHCI_TRB_TYPE_NOOP_COMMAND: u32 = 23", text)
 
-    def test_type_cycle_slot_and_flag_bitfields_are_explicit(self):
+    def test_type_cycle_slot_endpoint_and_flag_bitfields_are_explicit(self):
         text = TRB.read_text(encoding="utf-8")
         self.assertIn("XHCI_TRB_CYCLE_BIT: u32 = 1", text)
         self.assertIn("XHCI_TRB_TOGGLE_CYCLE_BIT: u32 = 1 << 1", text)
         self.assertIn("XHCI_TRB_BSR_OR_DC_BIT: u32 = 1 << 9", text)
         self.assertIn("XHCI_TRB_TYPE_SHIFT: u32 = 10", text)
         self.assertIn("XHCI_TRB_SLOT_TYPE_SHIFT: u32 = 16", text)
+        self.assertIn("XHCI_TRB_ENDPOINT_ID_SHIFT: u32 = 16", text)
         self.assertIn("XHCI_TRB_SLOT_ID_SHIFT: u32 = 24", text)
 
     def test_input_context_pointer_is_16_byte_aligned(self):
@@ -46,6 +48,18 @@ class XhciTrbTests(unittest.TestCase):
         self.assertIn("if toggle_cycle", text)
         self.assertIn("XHCI_TRB_TOGGLE_CYCLE_BIT", text)
 
+    def test_stop_endpoint_encodes_slot_and_endpoint_without_side_effects(self):
+        text = TRB.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_trb_stop_endpoint", 1)[1]
+        body = body.split("fn xhci_setup_packet_parameter", 1)[0]
+        self.assertIn("XHCI_TRB_TYPE_STOP_ENDPOINT", body)
+        self.assertIn("((endpoint_id as u32) & 0x1F) << XHCI_TRB_ENDPOINT_ID_SHIFT", body)
+        self.assertIn("(slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT", body)
+        self.assertIn("parameter: 0", body)
+        self.assertIn("status: 0", body)
+        self.assertNotIn("xhci_command_submit", body)
+        self.assertNotIn("doorbell", body.lower())
+
     def test_trb_constructors_have_no_submission_side_effects(self):
         code = code_without_comments(TRB).lower()
         for token in (
@@ -54,12 +68,13 @@ class XhciTrbTests(unittest.TestCase):
         ):
             self.assertNotIn(token, code, token)
 
-    def test_address_configure_and_evaluate_encode_slot_id(self):
+    def test_address_configure_evaluate_and_stop_encode_slot_id(self):
         text = TRB.read_text(encoding="utf-8")
-        self.assertGreaterEqual(text.count("(slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT"), 4)
+        self.assertGreaterEqual(text.count("(slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT"), 5)
         self.assertIn("if block_set_address_request", text)
         self.assertIn("if deconfigure", text)
         self.assertIn("pub fn xhci_trb_evaluate_context", text)
+        self.assertIn("pub fn xhci_trb_stop_endpoint", text)
 
 
 if __name__ == "__main__":

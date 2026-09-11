@@ -17,6 +17,7 @@ pub const XHCI_TRB_TYPE_DISABLE_SLOT: u32 = 10;
 pub const XHCI_TRB_TYPE_ADDRESS_DEVICE: u32 = 11;
 pub const XHCI_TRB_TYPE_CONFIGURE_ENDPOINT: u32 = 12;
 pub const XHCI_TRB_TYPE_EVALUATE_CONTEXT: u32 = 13;
+pub const XHCI_TRB_TYPE_STOP_ENDPOINT: u32 = 15;
 pub const XHCI_TRB_TYPE_NOOP_COMMAND: u32 = 23;
 
 pub const XHCI_TRB_CYCLE_BIT: u32 = 1;
@@ -27,6 +28,7 @@ pub const XHCI_TRB_BSR_OR_DC_BIT: u32 = 1 << 9;
 pub const XHCI_TRB_TYPE_SHIFT: u32 = 10;
 pub const XHCI_TRB_DIR_IN_BIT: u32 = 1 << 16;
 pub const XHCI_TRB_SLOT_TYPE_SHIFT: u32 = 16;
+pub const XHCI_TRB_ENDPOINT_ID_SHIFT: u32 = 16;
 pub const XHCI_TRB_SLOT_ID_SHIFT: u32 = 24;
 pub const XHCI_SETUP_TRT_SHIFT: u32 = 16;
 pub const XHCI_SETUP_TRT_NO_DATA: u32 = 0;
@@ -134,6 +136,19 @@ pub fn xhci_trb_evaluate_context(input_context_physical: u64,
         status: 0,
         control: control
     };
+}
+
+// HID-4d.2a prepara o comando que será usado no microcorte seguinte. O
+// construtor é puro: ainda não há emissão de Stop Endpoint neste checkpoint.
+@system
+pub fn xhci_trb_stop_endpoint(slot_id: u8,
+                              endpoint_id: u8,
+                              cycle: bool) -> XhciTrb {
+    let control = xhci_trb_type_bits(XHCI_TRB_TYPE_STOP_ENDPOINT) |
+        (((endpoint_id as u32) & 0x1F) << XHCI_TRB_ENDPOINT_ID_SHIFT) |
+        ((slot_id as u32) << XHCI_TRB_SLOT_ID_SHIFT) |
+        xhci_trb_cycle_bits(cycle);
+    return XhciTrb { parameter: 0, status: 0, control: control };
 }
 
 @system

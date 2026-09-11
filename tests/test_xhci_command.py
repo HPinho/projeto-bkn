@@ -50,19 +50,33 @@ class XhciCommandTests(unittest.TestCase):
         self.assertNotIn("XHCI_EVENT_DEQUEUE_INDEX", text)
         self.assertNotIn("xhci_command_update_erdp", text)
 
-    def test_command_waiter_skips_only_port_status_change_events(self):
+    def test_command_waiter_routes_known_async_events_before_command_completion(self):
         text = COMMAND.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
         port = body.index("event_type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT")
         validate_port = body.index("xhci_port_status_change_port_id(event) == 0", port)
         consume = body.index("xhci_event_consumer_consume()", validate_port)
-        continue_wait = body.index("continue;", consume)
-        command = body.index("event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", continue_wait)
+        port_continue = body.index("continue;", consume)
+        transfer = body.index("event_type == XHCI_TRB_TYPE_TRANSFER_EVENT", port_continue)
+        route = body.index("xhci_transfer_route_next_event()", transfer)
+        transfer_continue = body.index("continue;", route)
+        command = body.index("event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", transfer_continue)
         self.assertLess(port, validate_port)
         self.assertLess(validate_port, consume)
-        self.assertLess(consume, continue_wait)
-        self.assertLess(continue_wait, command)
+        self.assertLess(consume, port_continue)
+        self.assertLess(port_continue, transfer)
+        self.assertLess(transfer, route)
+        self.assertLess(route, transfer_continue)
+        self.assertLess(transfer_continue, command)
         self.assertIn("return false;", body[command:])
+
+    def test_transfer_events_are_delegated_to_per_slot_demux(self):
+        text = COMMAND.read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::xhci_transfer::*;", text)
+        body = text.split("if event_type == XHCI_TRB_TYPE_TRANSFER_EVENT", 1)[1]
+        body = body.split("if event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", 1)[0]
+        self.assertIn("xhci_transfer_route_next_event()", body)
+        self.assertNotIn("xhci_event_consumer_consume()", body)
 
     def test_slot_id_state_is_fail_closed_per_command(self):
         text = COMMAND.read_text(encoding="utf-8")

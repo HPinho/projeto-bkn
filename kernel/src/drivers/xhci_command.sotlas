@@ -1,9 +1,11 @@
 // Baken OS — produtor único do Command Ring e polling de completions xHCI.
 //
 // Esta camada só é ativada após o No-op inicial ter sido realmente completado.
-// O primeiro Command TRB livre é o índice 1. O Event Ring não possui mais cursor
-// privado aqui: Command Completion e futuros Transfer Events compartilham o
-// consumidor único kernel::drivers::xhci_event_consumer.
+// O primeiro Command TRB livre é o índice 1. O Event Ring não possui cursor
+// privado aqui: Command Completion, Port Status Change e Transfer Events usam o
+// consumidor único kernel::drivers::xhci_event_consumer. HID-4d.2a permite que
+// Transfer Events legítimos sejam roteados para a mailbox owner enquanto um
+// Command Completion é aguardado, sem perder nem atribuir completion errada.
 
 module kernel::drivers::xhci_command;
 
@@ -18,6 +20,7 @@ import kernel::drivers::xhci_ring::*;
 import kernel::drivers::xhci_trb::*;
 import kernel::drivers::xhci_event::*;
 import kernel::drivers::xhci_event_consumer::*;
+import kernel::drivers::xhci_transfer::*;
 
 pub const XHCI_COMMAND_POLL_LIMIT: u64 = 10000000;
 pub const XHCI_COMMAND_FIRST_FREE_INDEX: u32 = 1;
@@ -123,8 +126,6 @@ pub fn xhci_command_submit(command: XhciTrb) -> u64 {
         let index = XHCI_COMMAND_ENQUEUE_INDEX;
         let cycle = XHCI_COMMAND_PRODUCER_CYCLE;
 
-        // Quando o comando ocupa o último TRB utilizável, o xHC seguirá o Link
-        // TRB imediatamente; publique-o com o mesmo PCS antes do doorbell.
         if index == (usable - 1) && !xhci_command_publish_link(cycle) { return 0; }
 
         let slot = xhci_command_slot_virtual(index);
@@ -135,8 +136,6 @@ pub fn xhci_command_submit(command: XhciTrb) -> u64 {
             xhci_trb_cycle_bits(cycle);
         *slot = published;
 
-        // Compiler barrier + serializing privileged read. Não depende do syntax
-        // node `quench`, que o bootstrap legado não reconhece.
         if x86_read_cr3_raw() == 0 { return 0; }
         if !xhci_command_ring_doorbell0() { return 0; }
         if !xhci_command_advance_producer() { return 0; }
@@ -159,10 +158,7 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
         if event != (null as *const XhciTrb) {
             let event_type = xhci_event_type(event);
 
-            // Reset de porta e mudanças de link geram Port Status Change Events
-            // assíncronos. Eles podem preceder o Command Completion de Enable
-            // Slot no mesmo Event Ring. Consuma apenas esse tipo conhecido e
-            // continue esperando; Transfer Events pertencem ao waiter de I/O.
+            // Port Status Change é assíncrono e não pertence a um waiter de I/O.
             if event_type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
                 if xhci_port_status_change_port_id(event) == 0 { return false; }
                 if !xhci_event_consumer_consume() { return false; }
@@ -170,6 +166,18 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
                 continue;
             }
 
+            // HID-4d.2a: um TD pode completar enquanto um comando de lifecycle
+            // está outstanding. O Command Ring não consome o Transfer Event por
+            // conta própria; delega ao demux per-slot+epoch, que preserva o evento
+            // na mailbox owner e avança o Event Ring exatamente uma vez.
+            if event_type == XHCI_TRB_TYPE_TRANSFER_EVENT {
+                if !xhci_transfer_route_next_event() { return false; }
+                spins += 1;
+                continue;
+            }
+
+            // Tipos não reconhecidos continuam fail-closed. Somente PSC e
+            // Transfer Event podem ser atravessados enquanto aguardamos comando.
             if event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT {
                 return false;
             }
@@ -209,4 +217,5 @@ pub fn xhci_command_event_consumer_cycle() -> bool {
 }
 
 @system
-pub fn xhci_command_last_slot_id() -> u8 { unsafe { return XHCI_COMMAND_LAST_SLOT_ID; } }
+pub fn xhci_command_last_slot_id() -> u8 { unsafe { return XHCI_COMMAND_LAST_SLOT_ID; }
+}
