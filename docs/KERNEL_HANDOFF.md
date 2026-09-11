@@ -1,6 +1,6 @@
 # Baken OS / Sotlas — Kernel & Platform Handoff
 
-Atualizado em 2026-09-10 (America/Fortaleza).
+Atualizado em 2026-09-11 (America/Fortaleza).
 
 Este arquivo é o registro operacional de continuidade. O roadmap estratégico está em `docs/BAKEN_OS_ROADMAP.md`; aqui ficam o SHA confiável, o candidato atual, os invariantes e o próximo corte seguro.
 
@@ -9,11 +9,12 @@ Este arquivo é o registro operacional de continuidade. O roadmap estratégico e
 - fase atual: **Fase 2 — Platform/Drivers**;
 - trilha atual: **Trilha B — HID/input de produção**;
 - etapa atual: **HID-4c Multi-slot xHCI**;
-- subetapa: **HID-4c.3 — fechamento dos singletons transport-specific**;
-- estado da subetapa: **implementação completa; certificação final do report gate em andamento**;
+- subetapa atual: **HID-4c.4 — enumeração simultânea real**;
+- primeiro corte HID-4c.4: **reset explícito por porta**;
 - branch de trabalho: **`main`**;
 - Kernel Core: **congelado/invariant-preserving**;
-- próximo bloco após triplo verde: **HID-4c.4 — keyboard + mouse simultâneos reais no mesmo xHC**.
+- `docs/BAKEN_OS_ROADMAP.md`: documento estratégico contínuo;
+- `docs/KERNEL_HANDOFF.md`: estado operacional de continuidade.
 
 ## Política de certificação
 
@@ -30,67 +31,69 @@ Regras:
 - não empilhar mudança funcional sobre candidato vermelho;
 - não remover marker/proof/teste nem ampliar timeout para mascarar regressão;
 - build Sotlas e runtime QEMU valem mais que guardrail textual;
-- qualquer API `_for(slot_id)` deve consumir estado/resultados do mesmo slot;
-- descriptors/eventos/hardware são input não confiável e devem falhar fechado.
+- APIs `_for(slot_id)` usam exclusivamente o mesmo slot;
+- hardware, descriptors e eventos são input não confiável e falham fechado.
 
 ---
 
 # Última baseline certificada
 
 ```text
-0ef4c670727a2d0b68324c4281972b2992fefb5c
-feat(xhci): isolate set configuration per slot
+6eec0dcc36a32c26108629e5ede9f0b929fef2e2
+feat(xhci): close HID-4c.3 slot coherence
 ```
 
 Provas no mesmo SHA:
 
-- CI #1137 / `34553335969` ✅ — suíte completa, grafo Sotlas, build nativo, ISO e QEMU;
-- SMP #240 / `34553335968` ✅ — contracts, build e prova SMP;
-- NVMe #337 / `34553335991` ✅ — contracts, build, fixture e QEMU NVMe-only.
+- CI #1138 / `34555120197` ✅ — suíte completa, grafo Sotlas, build nativo, ISO e QEMU;
+- SMP #241 / `34555120203` ✅ — contracts, build e prova SMP;
+- NVMe #338 / `34555120228` ✅ — contracts, build, fixture e QEMU NVMe-only.
 
-Essa baseline é descendente do rollback seguro:
+Com esse SHA, **HID-4c.3 está fechado**.
+
+A reconstrução segura de HID-4c.3 partiu de:
 
 ```text
 9558e5b3cb83064cc6a0b1548f03b3ed12c35a22
 test(xhci): guard transfer results per slot
 ```
 
-`9558e5b` foi triplo verde em CI #1127 / SMP #230 / NVMe #327 e é a origem da reconstrução incremental de HID-4c.3.
+Esse baseline foi triplo verde em CI #1127 / SMP #230 / NVMe #327.
 
 ---
 
-# Candidato corrente — fechamento HID-4c.3
+# Candidato corrente — HID-4c.4a
 
-O último microcorte move a decisão final de readiness do report para o mesmo Slot ID.
+Objetivo: remover a dependência de `first_connected` do reset de porta sem alterar o bring-up legado.
 
-Dentro de:
-
-```text
-xhci_hid_report_prepare_for_slot(slot_id)
-```
-
-o runtime passa a exigir:
+Novo contrato:
 
 ```text
-xhci_hid_context_is_ready_for(slot_id)
-xhci_configure_endpoint_is_ready_for(slot_id)
-xhci_set_configuration_is_ready_for(slot_id)
-xhci_set_configuration_value_for(slot_id) == xhci_configuration_value_for(slot_id)
-xhci_hid_descriptor_input_map_is_ready_for(slot_id)
-InputDevice ativo cuja transport_address == slot_id
+xhci_port_reset_for(port_id)
 ```
 
-O wrapper:
+Pré-condições e garantias:
+
+- `port_id != 0`;
+- `port_id` dentro do inventário retornado por `xhci_port_scan()`;
+- controller iniciado e No-op já concluído;
+- Supported Protocol revalidado para a porta;
+- CCS presente antes do reset;
+- USB2: PR → PRC → PED;
+- USB3: PED já presente ou WPR → WRC → PED;
+- PORTSC write image remove PED, RW1C, PR/WPR/LWS antes de adicionar o bit intencional;
+- CCS + PED exigidos após sucesso;
+- estado `XHCI_PORT_RESET_*` representa somente a última operação concluída, não identidade multi-device.
+
+Compatibilidade obrigatória:
 
 ```text
-xhci_hid_report_prepare()
+xhci_port_reset_first_connected()
 ```
 
-somente resolve o slot ativo de Configure Endpoint e delega para `_for_slot`; ele não decide mais readiness de SET_CONFIGURATION globalmente.
+continua selecionando `xhci_first_connected_port()` e delega para `xhci_port_reset_for(port_id)`.
 
-Guardrail obrigatório: o corpo de `xhci_hid_report_prepare_for_slot(slot_id)` não pode voltar a chamar `xhci_set_configuration_is_ready()`.
-
-Se CI + SMP + NVMe ficarem verdes no SHA deste candidato, declarar **HID-4c.3 fechado** e iniciar HID-4c.4.
+Se o candidato ficar triplo verde, o próximo microcorte é HID-4c.4b: inventário/seleção bounded de múltiplas portas conectadas elegíveis.
 
 ---
 
@@ -104,52 +107,31 @@ Se CI + SMP + NVMe ficarem verdes no SHA deste candidato, declarar **HID-4c.3 fe
 6. teardown ocorre apenas após abandono físico do frame anterior;
 7. `BAKEN:HEX=E:` continua terminal;
 8. wait/sleep, TLB, Ring3, PMM/VMM e SMP não podem ser relaxados para acomodar drivers;
-9. xHCI/HID não pode depender de UEFI após cutover;
-10. Slot ID reutilizado nunca pode reaproveitar estado sem validar `epoch`.
-
----
-
-# ACPI/AML
-
-**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 fechados; checkpoint `7803447a`.
-
-Não reabrir ACPI/AML por causa do HID xHCI. I2C-HID só começa depois de transporte I2C/ACPI seguro.
+9. xHCI/HID não depende de UEFI pós-cutover;
+10. Slot ID reutilizado nunca reaproveita estado sem validar `epoch`.
 
 ---
 
 # HID / input de produção
 
-## HID-0
+## HID-0..HID-4b
 
-**✅ COMPROVADO.** Boot HID xHCI com Interrupt IN real.
-
-## HID-1
-
-**✅ COMPROVADO em `1b3f94cc`.** Report Descriptor real via EP0 e parser bounded.
-
-## HID-2
-
-**✅ COMPROVADO em `a2e04a78`.** Field map/decoder por Report ID, Usage, offsets e flags.
-
-## HID-3
-
-**✅ COMPROVADO em `2775c12a`.** Event model/fila normalizada.
-
-## HID-4a
-
-**✅ CERTIFICADO em `12c308b3`.** `device_id + generation`, lifecycle e fila SMP-safe.
-
-## HID-4b
-
-**✅ CERTIFICADO em `dbc5669a`.** HID field map persistente por `device_id + generation`.
+- HID-0 Boot HID xHCI: ✅;
+- HID-1 Report Descriptor: ✅ `1b3f94cc`;
+- HID-2 Field map/decoder: ✅ `a2e04a78`;
+- HID-3 Event model: ✅ `2775c12a`;
+- HID-4a Identity/lifecycle: ✅ `12c308b3`;
+- HID-4b Per-device HID map: ✅ `dbc5669a`.
 
 ## HID-4c.1 — transport core
 
 **✅ VALIDADO.**
 
-- tabela de 256 Slot IDs com port mapping/state/epoch;
-- context/address/EP0 por slot;
-- DCBAA no índice correto;
+- tabela bounded de Slot IDs;
+- port mapping/state/epoch;
+- Device/Input Context e EP0 por slot;
+- DCBAA correto;
+- Address Device por slot;
 - wrappers do primeiro device preservados.
 
 ## HID-4c.2 — endpoint/report transport per-slot
@@ -160,25 +142,31 @@ Não reabrir ACPI/AML por causa do HID xHCI. I2C-HID só começa depois de trans
 - DCI/ring/max packet/interval por slot;
 - Configure Endpoint per-slot;
 - report DMA/ring/produtor/fallback Boot por slot;
-- completion identificada por slot/DCI/TRB.
+- completion por slot/DCI/TRB.
 
-## HID-4c.3 — checkpoints
+## HID-4c.3 — concluído
 
-| Componente | Estado | Checkpoint |
-|---|---|---|
-| Device Descriptor per-slot | ✅ | `d85d9f2424818f4cf9e2fc61967ac7cd9cace2a3` — CI #1128 / SMP #231 / NVMe #328 |
-| Evaluate Context per-slot | ✅ | `3688423e85a9c214755cc4c966c27910680663dc` — CI #1131 / SMP #234 / NVMe #331 |
-| Configuration Descriptor per-slot | ✅ | `72fa58228c24578ee50c39ca166d82ccc17a46a0` — CI #1132 / SMP #235 / NVMe #332 |
-| HID Report Descriptor + InputDevice binding | ✅ | `4ae0a5c6341dd6ea62d2ea05b62001382bfa467d` — CI #1135 / SMP #238 / NVMe #335 |
-| HID report runtime identity/result per-slot | ✅ | `93fe9d9639b366b9395b0b49f0f293bdf64de588` — CI #1136 / SMP #239 / NVMe #336 |
-| SET_CONFIGURATION per-slot | ✅ | `0ef4c670727a2d0b68324c4281972b2992fefb5c` — CI #1137 / SMP #240 / NVMe #337 |
-| report prepare + configuration value do mesmo slot | ⏳ | candidato atual; aguarda triplo verde |
+| Componente | Checkpoint |
+|---|---|
+| Device Descriptor per-slot | `d85d9f2424818f4cf9e2fc61967ac7cd9cace2a3` — CI #1128 / SMP #231 / NVMe #328 |
+| Evaluate Context per-slot | `3688423e85a9c214755cc4c966c27910680663dc` — CI #1131 / SMP #234 / NVMe #331 |
+| Configuration Descriptor per-slot | `72fa58228c24578ee50c39ca166d82ccc17a46a0` — CI #1132 / SMP #235 / NVMe #332 |
+| HID Report Descriptor + InputDevice binding | `4ae0a5c6341dd6ea62d2ea05b62001382bfa467d` — CI #1135 / SMP #238 / NVMe #335 |
+| HID report runtime per-slot | `93fe9d9639b366b9395b0b49f0f293bdf64de588` — CI #1136 / SMP #239 / NVMe #336 |
+| SET_CONFIGURATION per-slot | `0ef4c670727a2d0b68324c4281972b2992fefb5c` — CI #1137 / SMP #240 / NVMe #337 |
+| slot coherence final | `6eec0dcc36a32c26108629e5ede9f0b929fef2e2` — CI #1138 / SMP #241 / NVMe #338 |
 
-### Erros já encontrados na retomada
+## HID-4c.4 — atual
 
-- `e82246b...` chamou nome de API de Device Descriptor inexistente; corrigido em `3688423e...` usando as assinaturas certificadas reais;
-- a migração do HID descriptor revelou guardrails singleton antigos; corrigidos em `0e50c8a...` e `4ae0a5c...` sem relaxar semântica;
-- não reaplicar a antiga cadeia experimental HID-4c.3/4c.4 por cherry-pick em bloco.
+Sequência segura:
+
+1. **4c.4a** reset explícito por porta — candidato atual;
+2. **4c.4b** iterar portas conectadas elegíveis de modo bounded;
+3. **4c.4c** Reset → Enable Slot → Context → Address → descriptors → HID endpoint → SET_CONFIGURATION por porta/slot;
+4. **4c.4d** manter keyboard como primeiro HID e adicionar mouse como segundo device;
+5. **4c.4e** provar reports/identidade independentes e expandir demux apenas se necessário.
+
+Não reaplicar automaticamente a antiga cadeia experimental HID-4c.4.
 
 ### Caminho legado obrigatório do primeiro teclado
 
@@ -199,71 +187,58 @@ post_cutover_prepare_first_usb_port
 → storage
 ```
 
-O proof continua exigindo Boot keyboard report real, comprimento mínimo de 8 bytes e Usage ID `4` (`A`), com `POST_CUTOVER_HID_REPORT_ATTEMPTS = 8`.
+O proof continua exigindo Boot keyboard report real, comprimento mínimo de 8 bytes, Usage ID `4` (`A`) e `POST_CUTOVER_HID_REPORT_ATTEMPTS = 8`.
 
 ### QEMU
 
-O runtime certificado usa `qemu-xhci` + `usb-kbd` e injeta `sendkey a` pelo monitor.
+Baseline verde: `qemu-xhci` + `usb-kbd`, `sendkey a` pelo monitor.
 
-No HID-4c.4:
+Para HID-4c.4:
 
-- keyboard continua primeiro HID para preservar o proof histórico;
-- mouse entra como segundo device/slot;
-- cada device deve manter slot, epoch, endpoint/DCI, ring, mapa, generation e evento independentes;
-- não aceitar Transfer Event de outro slot/DCI/TRB;
-- não reutilizar automaticamente os commits experimentais antigos.
+- keyboard permanece o primeiro HID;
+- mouse entra depois como segundo device/slot;
+- slot, epoch, endpoint/DCI, ring, generation e mapa permanecem independentes;
+- Transfer Event de outro slot/DCI/TRB nunca satisfaz waiter incorreto.
 
 ---
 
-# Próximo bloco após triplo verde
+# ACPI/AML
 
-**HID-4c.4 — enumeração simultânea real.**
+**✅ CORE CONCLUÍDO E CERTIFICADO.** AML-0..AML-8 fechados; checkpoint `7803447a`.
 
-Sequência recomendada:
-
-1. auditar APIs de port/slot/event disponíveis no head certificado;
-2. iterar portas conectadas elegíveis de modo bounded;
-3. Enable Slot → Context → Address → descriptors → endpoint → SET_CONFIGURATION por porta/slot;
-4. manter teclado no primeiro slot e adicionar mouse no segundo;
-5. provar reports independentes e identidade correta;
-6. só depois introduzir event demux/interleaving adicional se a prova real exigir;
-7. certificar CI + SMP + NVMe no mesmo SHA antes de HID-4d.
-
-Após HID-4c.4: **HID-4d hot-plug/recovery**.
+I2C-HID só começa depois de transporte I2C/ACPI seguro.
 
 ---
 
 # Storage e demais trilhas
 
-Storage de produção/VFS, rede, áudio e GPU/composição pertencem à Fase 2, mas ficam fora do checkpoint HID atual.
+Continuam na Fase 2, fora do checkpoint HID atual.
 
-Arquitetura planejada de storage:
+Storage alvo:
 
 ```text
 BlockDevice → Block Cache → Volume Manager → VFS
            → FAT32 / exFAT / NTFS / ext / ISO-UDF / BakenFS
 ```
 
-Não misturar essas implementações ao fechamento HID.
+Rede, áudio, GPU/composição e power/hot-plug avançado também permanecem posteriores ao foco HID atual.
 
 ---
 
 # Sotlas / toolchain
 
-`HPinho/LangSotlas` permanece toolchain/repositório separado. Atomics, IRQ save/restore, fences, slices, Result e SIR podem ser aproveitados depois, seletivamente. Não fazer migração ampla da toolchain durante HID-4c.
-
-Preferir sempre formas de sintaxe já compiladas na baseline verde.
+`HPinho/LangSotlas` permanece toolchain separada. Não fazer migração ampla da toolchain durante HID-4c. Preferir sintaxe e intrinsics já comprovados no baseline verde.
 
 ---
 
-# Regra de continuidade para o próximo chat/agente
+# Regra de continuidade
 
 Antes de programar:
 
 1. confirmar `main` e SHA atual;
 2. verificar CI/SMP/NVMe do mesmo SHA;
 3. ler este handoff e a seção HID-4c do roadmap;
-4. inspecionar assinaturas reais no head atual — nunca inferir nomes de API;
+4. inspecionar assinaturas reais no head atual;
 5. fazer um único microcorte funcional;
-6. preservar wrappers, markers e proofs existentes;
-7. parar e corrigir o próprio checkpoint se qualquer gate ficar vermelho.
+6. preservar wrappers, markers e proofs;
+7. se qualquer gate ficar vermelho, corrigir o próprio checkpoint antes de avançar.

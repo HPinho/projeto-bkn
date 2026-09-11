@@ -1,8 +1,10 @@
 // Baken OS — reset de porta xHCI consciente do Supported Protocol.
 //
 // USB 2.x usa Port Reset (PR). USB 3.x já habilitado não é tocado; caso esteja
-// conectado porém desabilitado, usa Warm Port Reset (WPR). Escritas em PORTSC
-// nunca reutilizam o snapshot bruto: PED e bits RW1C são limpos da imagem-base.
+// conectado porém desabilitado, usa Warm Port Reset (WPR). HID-4c.4 generaliza
+// a operação para um port_id explícito, preservando o wrapper da primeira porta.
+// Escritas em PORTSC nunca reutilizam o snapshot bruto: PED e bits RW1C são
+// limpos da imagem-base antes de qualquer write.
 
 module kernel::drivers::xhci_port_reset;
 
@@ -28,9 +30,20 @@ pub const XHCI_PORTSC_CHANGE_MASK: u32 = XHCI_PORTSC_CSC | XHCI_PORTSC_PEC |
     XHCI_PORTSC_CEC;
 pub const XHCI_PORT_RESET_POLL_LIMIT: u64 = 10000000;
 
+// Estes campos representam somente a última operação de reset concluída.
+// Identidade multi-device permanece em xhci_device_table por Slot ID + epoch.
 static mut XHCI_PORT_RESET_READY: bool = false;
 static mut XHCI_PORT_RESET_PORT_ID: u8 = 0;
 static mut XHCI_PORT_RESET_PROTOCOL_MAJOR: u8 = 0;
+
+@system
+fn xhci_port_reset_clear_state() {
+    unsafe {
+        XHCI_PORT_RESET_READY = false;
+        XHCI_PORT_RESET_PORT_ID = 0;
+        XHCI_PORT_RESET_PROTOCOL_MAJOR = 0;
+    }
+}
 
 @system
 fn xhci_port_reset_page_base(address: u64) -> u64 {
@@ -110,19 +123,19 @@ fn xhci_port_reset_usb3(address: u64) -> bool {
     return false;
 }
 
+// HID-4c.4: reset explícito e bounded de uma porta conectada já inventariada.
+// A função revalida protocol/PORTSC antes de tocar hardware e falha fechado para
+// port_id inválido, porta desconectada ou protocolo fora de USB2/USB3.
 @system
-pub fn xhci_port_reset_first_connected() -> bool {
-    unsafe {
-        XHCI_PORT_RESET_READY = false;
-        XHCI_PORT_RESET_PORT_ID = 0;
-        XHCI_PORT_RESET_PROTOCOL_MAJOR = 0;
+pub fn xhci_port_reset_for(port_id: u8) -> bool {
+    xhci_port_reset_clear_state();
+    if port_id == 0 || !xhci_start_is_ready() || !xhci_start_noop_completed() {
+        return false;
     }
-    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
     if xhci_protocol_scan() == 0 { return false; }
-    if xhci_port_scan() == 0 || xhci_connected_port_count() == 0 { return false; }
+    let port_count = xhci_port_scan();
+    if port_count == 0 || (port_id as u16) > port_count { return false; }
 
-    let port_id = xhci_first_connected_port();
-    if port_id == 0 { return false; }
     let protocol = xhci_protocol_major_for_port(port_id);
     if protocol != XHCI_PROTOCOL_USB2_MAJOR && protocol != XHCI_PROTOCOL_USB3_MAJOR {
         return false;
@@ -130,6 +143,9 @@ pub fn xhci_port_reset_first_connected() -> bool {
 
     let address = xhci_port_reset_address(port_id);
     if address == 0 || !xhci_port_reset_map(address) { return false; }
+    let before = x86_mmio_read32(address);
+    if (before & XHCI_PORTSC_CCS) == 0 { return false; }
+
     let ok = if protocol == XHCI_PROTOCOL_USB2_MAJOR {
         xhci_port_reset_usb2(address)
     } else {
@@ -145,6 +161,18 @@ pub fn xhci_port_reset_first_connected() -> bool {
         XHCI_PORT_RESET_READY = true;
     }
     return true;
+}
+
+@system
+pub fn xhci_port_reset_first_connected() -> bool {
+    xhci_port_reset_clear_state();
+    if !xhci_start_is_ready() || !xhci_start_noop_completed() { return false; }
+    if xhci_protocol_scan() == 0 { return false; }
+    if xhci_port_scan() == 0 || xhci_connected_port_count() == 0 { return false; }
+
+    let port_id = xhci_first_connected_port();
+    if port_id == 0 { return false; }
+    return xhci_port_reset_for(port_id);
 }
 
 @system
