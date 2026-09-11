@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails HID-4d.3b para conclusão do teardown lógico generation-safe."""
+"""Guardrails HID-4d.3b para conclusão SMP-safe do teardown lógico generation-safe."""
 
 from pathlib import Path
 import re
@@ -86,6 +86,12 @@ class XhciHidLogicalTeardownCompleteTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.source = LIFECYCLE.read_text(encoding="utf-8")
         cls.publish = function_body(cls.source, "xhci_hid_lifecycle_publish_detach")
+        cls.lock = function_body(
+            cls.source, "xhci_hid_lifecycle_teardown_lock_irq"
+        )
+        cls.unlock = function_body(
+            cls.source, "xhci_hid_lifecycle_teardown_unlock_irq"
+        )
         cls.complete = function_body(
             cls.source, "xhci_hid_lifecycle_complete_logical_teardown_for"
         )
@@ -109,21 +115,47 @@ class XhciHidLogicalTeardownCompleteTests(unittest.TestCase):
             ".logical_teardown_complete = false;",
         )
 
-    def test_orchestrator_requires_started_exact_epoch_before_any_cleanup(self):
+    def test_teardown_has_dedicated_smp_lock_and_irq_save_restore(self):
+        self.assertIn("import kernel::sync::spinlock::*;", self.source)
+        self.assertRegex(
+            self.source,
+            r"static\s+mut\s+XHCI_HID_LIFECYCLE_TEARDOWN_LOCK\s*:\s*SpinLock",
+        )
+        ordered_positions(
+            self.lock,
+            "x86_irq_save_disable()",
+            "spinlock_lock(&mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK)",
+        )
+        ordered_positions(
+            self.unlock,
+            "spinlock_unlock(&mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK)",
+            "x86_irq_restore(flags)",
+        )
+
+    def test_orchestrator_locks_before_started_gate_and_any_cleanup(self):
+        lock = "xhci_hid_lifecycle_teardown_lock_irq()"
         started = "xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch)"
         first_cleanup = "xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch)"
-        self.assertTrue(self.complete.lstrip().startswith(f"if !{started}"))
-        self.assertGreater(self.complete.find(first_cleanup), self.complete.find(started))
+        lock_pos, started_pos, cleanup_pos = ordered_positions(
+            self.complete, lock, started, first_cleanup
+        )
+        self.assertLess(lock_pos, started_pos)
+        self.assertLess(started_pos, cleanup_pos)
 
     def test_orchestrator_is_idempotent_only_after_exact_started_gate(self):
         started = self.complete.find(
             "xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch)"
         )
         already_complete = self.complete.find(
-            "XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete { return true; }"
+            "already_complete = XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete"
+        )
+        first_cleanup = self.complete.find(
+            "xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch)"
         )
         self.assertGreaterEqual(started, 0)
         self.assertGreater(already_complete, started)
+        self.assertGreater(first_cleanup, already_complete)
+        self.assertIn("if complete_ok && !already_complete", self.complete)
 
     def test_orchestrator_enforces_logical_cleanup_order(self):
         ordered_positions(
@@ -153,10 +185,10 @@ class XhciHidLogicalTeardownCompleteTests(unittest.TestCase):
             "XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = true;"
         )
 
-        after_identity = self.complete.find(started, identity)
-        after_descriptor = self.complete.find(started, descriptor)
-        after_report = self.complete.find(started, report)
-        after_transfer = self.complete.find(started, transfer)
+        after_identity = self.complete.find(started, identity + 1)
+        after_descriptor = self.complete.find(started, descriptor + 1)
+        after_report = self.complete.find(started, report + 1)
+        after_transfer = self.complete.find(started, transfer + 1)
 
         self.assertGreater(after_identity, identity)
         self.assertLess(after_identity, descriptor)
@@ -193,6 +225,23 @@ class XhciHidLogicalTeardownCompleteTests(unittest.TestCase):
             "XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started",
         ):
             self.assertIn(token, prefix)
+
+    def test_lock_covers_all_cleanup_and_is_released_before_return(self):
+        lock = self.complete.find("xhci_hid_lifecycle_teardown_lock_irq()")
+        first_cleanup = self.complete.find(
+            "xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch)"
+        )
+        final_write = self.complete.rfind(
+            "XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = true;"
+        )
+        unlock = self.complete.rfind("xhci_hid_lifecycle_teardown_unlock_irq(flags)")
+        final_return = self.complete.rfind("return complete_ok;")
+        self.assertGreater(first_cleanup, lock)
+        self.assertGreater(final_write, first_cleanup)
+        self.assertGreater(unlock, final_write)
+        self.assertGreater(final_return, unlock)
+        critical = self.complete[first_cleanup:unlock]
+        self.assertNotRegex(critical, r"\breturn\b")
 
     def test_complete_query_is_exact_generation_scoped(self):
         self.assertIn(
