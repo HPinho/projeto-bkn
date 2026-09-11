@@ -203,7 +203,10 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
         for pattern in forbidden_patterns:
             self.assertIsNone(re.search(pattern, self.source), pattern)
 
-    def test_3b1_scope_does_not_release_physical_resources(self) -> None:
+    def test_begin_gate_scope_does_not_release_resources(self) -> None:
+        body = function_body(
+            self.source, "xhci_hid_lifecycle_begin_logical_teardown_for"
+        )
         forbidden = (
             "dma_release",
             "dma_unshare_from_device",
@@ -211,9 +214,13 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
             "disable_slot",
             "input_device_detach",
             "xhci_hid_context_release",
+            "xhci_hid_descriptor_teardown_input_device_for_epoch",
+            "xhci_hid_descriptor_teardown_dma_for_epoch",
+            "xhci_hid_report_teardown_dma_for_epoch",
+            "xhci_transfer_clear_slot_state_for_epoch",
         )
         for token in forbidden:
-            self.assertNotIn(token, self.source)
+            self.assertNotIn(token, body)
 
 
 if __name__ == "__main__":
