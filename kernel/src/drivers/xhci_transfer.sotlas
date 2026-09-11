@@ -1,9 +1,9 @@
-// Baken OS — HID-4c.3: espera de Transfer Events com resultado por Slot ID.
+// Baken OS — HID-4c.4e: demultiplexação bounded de Transfer Events por Slot ID.
 //
-// O Event Ring mantém consumidor global único, porém completion code e residual
-// length deixam de ser singletons. Cada resultado é associado a slot+epoch e ao
-// Endpoint ID esperado, impedindo leitura stale quando múltiplos devices usam o
-// mesmo consumidor de eventos.
+// O Event Ring continua com consumidor global único. Events já consumidos são
+// preservados em uma mailbox por slot+epoch até o waiter dono daquele transfer
+// recolher o resultado. Assim um waiter nunca atribui ao teclado um completion
+// do mouse (ou vice-versa), nem perde o evento apenas por ter chegado primeiro.
 
 module kernel::drivers::xhci_transfer;
 
@@ -27,6 +27,15 @@ pub struct XhciTransferResult {
     pub completion_code: u8;
 }
 
+pub struct XhciTransferPendingEvent {
+    pub valid: bool;
+    pub epoch: u32;
+    pub endpoint_id: u8;
+    pub trb_pointer: u64;
+    pub residual_length: u32;
+    pub completion_code: u8;
+}
+
 static mut XHCI_TRANSFER_RESULTS: [XhciTransferResult; XHCI_TRANSFER_SLOT_CAPACITY] = [
     XhciTransferResult {
         valid: false,
@@ -37,7 +46,21 @@ static mut XHCI_TRANSFER_RESULTS: [XhciTransferResult; XHCI_TRANSFER_SLOT_CAPACI
     };
     XHCI_TRANSFER_SLOT_CAPACITY
 ];
+
+static mut XHCI_TRANSFER_PENDING_EVENTS: [XhciTransferPendingEvent; XHCI_TRANSFER_SLOT_CAPACITY] = [
+    XhciTransferPendingEvent {
+        valid: false,
+        epoch: 0,
+        endpoint_id: 0,
+        trb_pointer: 0,
+        residual_length: 0,
+        completion_code: 0
+    };
+    XHCI_TRANSFER_SLOT_CAPACITY
+];
+
 static mut XHCI_TRANSFER_ACTIVE_SLOT_ID: u8 = 0;
+static mut XHCI_TRANSFER_ROUTED_EVENT_COUNT: u64 = 0;
 
 @system
 fn xhci_transfer_index(slot_id: u8) -> usize {
@@ -61,6 +84,151 @@ fn xhci_transfer_clear_result(slot_id: u8, epoch: u32, endpoint_id: u8) -> bool 
 }
 
 @system
+fn xhci_transfer_clear_pending_index(index: usize) -> bool {
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+    unsafe {
+        XHCI_TRANSFER_PENDING_EVENTS[index].valid = false;
+        XHCI_TRANSFER_PENDING_EVENTS[index].epoch = 0;
+        XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id = 0;
+        XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer = 0;
+        XHCI_TRANSFER_PENDING_EVENTS[index].residual_length = 0;
+        XHCI_TRANSFER_PENDING_EVENTS[index].completion_code = 0;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_transfer_pending_is_ready_for(slot_id: u8) -> bool {
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
+    unsafe {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+           XHCI_TRANSFER_PENDING_EVENTS[index].epoch != epoch {
+            xhci_transfer_clear_pending_index(index);
+            return false;
+        }
+        return XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id != 0 &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer != 0;
+    }
+}
+
+@system
+pub fn xhci_transfer_pending_matches(slot_id: u8,
+                                     endpoint_id: u8,
+                                     completion_trb_physical: u64) -> bool {
+    if endpoint_id == 0 || completion_trb_physical == 0 ||
+       !xhci_transfer_pending_is_ready_for(slot_id) {
+        return false;
+    }
+    let index = xhci_transfer_index(slot_id);
+    unsafe {
+        return XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id == endpoint_id &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer == completion_trb_physical;
+    }
+}
+
+@system
+fn xhci_transfer_publish_pending_event(event: *const XhciTrb) -> bool {
+    if event == (null as *const XhciTrb) ||
+       xhci_event_type(event) != XHCI_TRB_TYPE_TRANSFER_EVENT ||
+       xhci_transfer_event_has_event_data(event) {
+        return false;
+    }
+
+    let slot_id = xhci_event_slot_id(event);
+    let endpoint_id = xhci_transfer_event_endpoint_id(event);
+    let trb_pointer = xhci_transfer_event_trb_pointer(event);
+    if slot_id == 0 || endpoint_id == 0 || trb_pointer == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    let index = xhci_transfer_index(slot_id);
+    if epoch == 0 || index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+           XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch {
+            // Uma mailbox por slot é intencional: hoje só existe um TD HID/EP0
+            // outstanding por slot. Segundo completion sem coleta é overflow.
+            return false;
+        }
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid {
+            xhci_transfer_clear_pending_index(index);
+        }
+        XHCI_TRANSFER_PENDING_EVENTS[index].valid = true;
+        XHCI_TRANSFER_PENDING_EVENTS[index].epoch = epoch;
+        XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id = endpoint_id;
+        XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer = trb_pointer;
+        XHCI_TRANSFER_PENDING_EVENTS[index].residual_length =
+            xhci_transfer_event_residual_length(event);
+        XHCI_TRANSFER_PENDING_EVENTS[index].completion_code =
+            xhci_event_completion_code(event);
+    }
+
+    if !xhci_event_consumer_consume() {
+        xhci_transfer_clear_pending_index(index);
+        return false;
+    }
+    unsafe { XHCI_TRANSFER_ROUTED_EVENT_COUNT += 1; }
+    return true;
+}
+
+@system
+fn xhci_transfer_take_pending(slot_id: u8,
+                              epoch: u32,
+                              endpoint_id: u8,
+                              completion_trb_physical: u64) -> bool {
+    if epoch == 0 || !xhci_transfer_pending_matches(
+        slot_id, endpoint_id, completion_trb_physical
+    ) {
+        return false;
+    }
+    let index = xhci_transfer_index(slot_id);
+    unsafe {
+        let residual = XHCI_TRANSFER_PENDING_EVENTS[index].residual_length;
+        let completion = XHCI_TRANSFER_PENDING_EVENTS[index].completion_code;
+        XHCI_TRANSFER_RESULTS[index].valid = true;
+        XHCI_TRANSFER_RESULTS[index].epoch = epoch;
+        XHCI_TRANSFER_RESULTS[index].endpoint_id = endpoint_id;
+        XHCI_TRANSFER_RESULTS[index].residual_length = residual;
+        XHCI_TRANSFER_RESULTS[index].completion_code = completion;
+        XHCI_TRANSFER_ACTIVE_SLOT_ID = slot_id;
+        xhci_transfer_clear_pending_index(index);
+        return completion == XHCI_COMPLETION_CODE_SUCCESS;
+    }
+}
+
+// Consome exatamente o próximo Transfer Event disponível e o roteia para a
+// mailbox do Slot ID carregado pelo próprio Event TRB. É usado tanto pelo waiter
+// quanto pelo proof 4c.4e que arma dois HIDs antes de coletar as completions.
+@system
+pub fn xhci_transfer_route_next_event() -> bool {
+    if !xhci_start_is_ready() || !xhci_event_consumer_is_ready() { return false; }
+    let operational = xhci_controller_operational_base();
+    if operational == 0 { return false; }
+
+    let mut spins: u64 = 0;
+    while spins < XHCI_TRANSFER_POLL_LIMIT {
+        let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
+        if (status & XHCI_USBSTS_HOST_CONTROLLER_ERROR) != 0 { return false; }
+        let event = xhci_event_consumer_peek();
+        if event != (null as *const XhciTrb) {
+            return xhci_transfer_publish_pending_event(event);
+        }
+        spins += 1;
+    }
+    return false;
+}
+
+@system
 pub fn xhci_transfer_wait_completion(slot_id: u8,
                                      endpoint_id: u8,
                                      completion_trb_physical: u64) -> bool {
@@ -75,6 +243,15 @@ pub fn xhci_transfer_wait_completion(slot_id: u8,
     let operational = xhci_controller_operational_base();
     if operational == 0 { return false; }
 
+    if xhci_transfer_pending_is_ready_for(slot_id) {
+        if !xhci_transfer_pending_matches(slot_id, endpoint_id, completion_trb_physical) {
+            return false;
+        }
+        return xhci_transfer_take_pending(
+            slot_id, epoch, endpoint_id, completion_trb_physical
+        );
+    }
+
     let mut spins: u64 = 0;
     while spins < XHCI_TRANSFER_POLL_LIMIT {
         let status = x86_mmio_read32(operational + XHCI_OP_USBSTS);
@@ -82,28 +259,25 @@ pub fn xhci_transfer_wait_completion(slot_id: u8,
 
         let event = xhci_event_consumer_peek();
         if event != (null as *const XhciTrb) {
-            if xhci_event_type(event) != XHCI_TRB_TYPE_TRANSFER_EVENT { return false; }
-            if xhci_event_slot_id(event) != slot_id { return false; }
-            if xhci_transfer_event_endpoint_id(event) != endpoint_id { return false; }
-            if xhci_transfer_event_has_event_data(event) { return false; }
-            if xhci_transfer_event_trb_pointer(event) != completion_trb_physical {
+            if xhci_event_type(event) != XHCI_TRB_TYPE_TRANSFER_EVENT ||
+               xhci_transfer_event_has_event_data(event) {
                 return false;
             }
-
-            let completion = xhci_event_completion_code(event);
-            let residual = xhci_transfer_event_residual_length(event);
-            unsafe {
-                let index = xhci_transfer_index(slot_id);
-                XHCI_TRANSFER_RESULTS[index].valid = true;
-                XHCI_TRANSFER_RESULTS[index].epoch = epoch;
-                XHCI_TRANSFER_RESULTS[index].endpoint_id = endpoint_id;
-                XHCI_TRANSFER_RESULTS[index].completion_code = completion;
-                XHCI_TRANSFER_RESULTS[index].residual_length = residual;
-                XHCI_TRANSFER_ACTIVE_SLOT_ID = slot_id;
+            let event_slot = xhci_event_slot_id(event);
+            let event_endpoint = xhci_transfer_event_endpoint_id(event);
+            let event_pointer = xhci_transfer_event_trb_pointer(event);
+            if event_slot == slot_id &&
+               (event_endpoint != endpoint_id || event_pointer != completion_trb_physical) {
+                // Mesmo slot com TD inesperado continua fail-closed. O demux só
+                // permite avançar sobre completions pertencentes a outro slot.
+                return false;
             }
-            if !xhci_event_success(event) { return false; }
-            if !xhci_event_consumer_consume() { return false; }
-            return true;
+            if !xhci_transfer_publish_pending_event(event) { return false; }
+            if event_slot == slot_id {
+                return xhci_transfer_take_pending(
+                    slot_id, epoch, endpoint_id, completion_trb_physical
+                );
+            }
         }
         spins += 1;
     }
@@ -150,6 +324,11 @@ pub fn xhci_transfer_last_completion_code_for(slot_id: u8) -> u8 {
 pub fn xhci_transfer_last_endpoint_id_for(slot_id: u8) -> u8 {
     if !xhci_transfer_result_is_valid_for(slot_id) { return 0; }
     unsafe { return XHCI_TRANSFER_RESULTS[xhci_transfer_index(slot_id)].endpoint_id; }
+}
+
+@system
+pub fn xhci_transfer_routed_event_count() -> u64 {
+    unsafe { return XHCI_TRANSFER_ROUTED_EVENT_COUNT; }
 }
 
 @system

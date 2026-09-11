@@ -10,8 +10,8 @@ Este arquivo registra o estado operacional para continuidade. O roadmap estraté
 - trilha: **Trilha B — HID/input de produção**;
 - etapa: **HID-4c Multi-slot xHCI**;
 - subetapa: **HID-4c.4 — enumeração simultânea real**;
-- checkpoint certificado mais recente: **HID-4c.4c — pipeline completo por porta**;
-- candidato atual: **HID-4c.4d — dual-device runtime proof**;
+- checkpoint certificado mais recente: **HID-4c.4d — dual-device runtime proof**;
+- candidato atual: **HID-4c.4e — interleaving/event demux**;
 - branch: **`main`**;
 - Kernel Core: **congelado/invariant-preserving**.
 
@@ -23,7 +23,7 @@ Um incremento só vira baseline quando os três gates passam no **mesmo SHA**:
 2. Baken OS SMP Bring-up Verification;
 3. Baken OS NVMe-only Bare-Metal Verification.
 
-Para HID-4c.4d existe ainda uma prova específica adicional: **Baken OS HID Dual-device Verification**, que não substitui os três gates acima.
+Para HID-4c.4d+ existe ainda a prova específica **Baken OS HID Dual-device Verification**, que não substitui os três gates acima.
 
 Não empilhar mudança funcional sobre candidato vermelho. Não remover marker/proof/teste nem ampliar timeout para mascarar regressão. APIs `_for(slot_id)` consomem estado/resultados do mesmo slot.
 
@@ -32,73 +32,133 @@ Não empilhar mudança funcional sobre candidato vermelho. Não remover marker/p
 # Última baseline certificada
 
 ```text
-20b016973d12d4d669cf54ea79623a9116eb341f
-feat(xhci): add per-port HID enumeration pipeline
+6e2ad50d613fcaf11bfa2c48d74f477ee6b76bfe
+feat(xhci): prove dual HID runtime
 ```
 
 Provas:
 
-- CI #1141 / `34591682640` ✅;
-- SMP #244 / `34591682675` ✅;
-- NVMe #341 / `34591682642` ✅.
+- CI #1142 / `34594304063` ✅;
+- SMP #245 / `34594304079` ✅;
+- NVMe #342 / `34594304338` ✅;
+- HID Dual-device #1 / `34594304283` ✅.
 
 Essa baseline certifica:
 
-- `xhci_hid_enumerate_port(port_id) -> slot_id`;
-- toda a cadeia per-slot de Port Stage até HID Report Ring;
-- rollback fail-closed com Disable Slot confirmado;
-- quarentena `FAILED` sem reuse prematuro de epoch/context;
-- caminho legado do primeiro teclado intacto.
+- teclado continua sendo o primeiro HID e conserva o proof `sendkey a`;
+- mouse é enumerado pelo pipeline per-port em um segundo Slot ID;
+- existem pelo menos dois slots xHCI ativos e independentes;
+- segundo slot chega a `HID_READY` com protocolo Boot mouse;
+- segundo slot possui report ring e DMA próprios;
+- Interrupt IN real do mouse completa antes de `BAKEN:USB_HID_DUAL_READY`;
+- ausência de segundo HID permanece não fatal em hardware normal.
 
 ---
 
-# Candidato corrente — HID-4c.4d
+# Candidato corrente — HID-4c.4e
 
-Novo módulo:
+Objetivo: permitir keyboard e mouse com Transfer TDs simultaneamente outstanding no mesmo xHC, sem duplicar o consumidor do Event Ring e sem atribuir completion ao slot errado.
 
-```text
-kernel::platform::hid_late_attach
-```
+## Event Ring / transfer demux
 
-API principal:
+O módulo `xhci_event_consumer` permanece o **único** dono de dequeue index, Consumer Cycle State e ERDP.
 
-```text
-platform_hid_late_attach_second_mouse()
-```
-
-## Contrato de runtime
-
-1. o primeiro slot deve continuar sendo o teclado já certificado pelo `post_cutover`;
-2. `xhci_hid_enumerate_next_connected(0)` seleciona a próxima porta sem Slot ID;
-3. o segundo Slot ID precisa ser diferente do primeiro;
-4. `xhci_slot_active_count()` precisa confirmar pelo menos dois slots;
-5. `xhci_hid_enumeration_is_ready_for(second_slot)` precisa estar verdadeiro;
-6. `xhci_hid_protocol_for(second_slot)` precisa ser `USB_HID_PROTOCOL_MOUSE`;
-7. `xhci_hid_report_poll_slot_once(second_slot)` precisa completar Interrupt IN real;
-8. o comprimento recebido precisa ser ao menos `XHCI_HID_BOOT_MOUSE_MIN_LENGTH`;
-9. só então é emitido `BAKEN:USB_HID_DUAL_READY`.
-
-O estado publica também `platform_hid_late_attach_is_ready()` e o Slot ID certificado do segundo HID.
-
-## Integração
-
-`baken_native_kernel_run()` chama o late attach imediatamente após validar o framebuffer e antes da inicialização AML/serviços. A chamada é deliberadamente **não fatal**:
+`xhci_transfer` adiciona uma mailbox bounded por Slot ID:
 
 ```text
-platform_hid_late_attach_second_mouse();
+XhciTransferPendingEvent {
+    valid,
+    epoch,
+    endpoint_id,
+    trb_pointer,
+    residual_length,
+    completion_code
+}
 ```
 
-Hardware sem segundo HID continua inicializando. A ausência do marker não impede boot normal; somente o workflow de prova dual exige esse resultado.
+Fluxo:
 
-O `post_cutover.sotlas` permanece inalterado. Isso preserva literalmente o proof histórico do primeiro teclado.
+```text
+xhci_event_consumer_peek()
+→ valida Transfer Event
+→ lê Slot ID / Endpoint ID / TRB pointer do próprio Event TRB
+→ publica na mailbox slot+epoch correspondente
+→ xhci_event_consumer_consume()
+→ waiter do slot coleta somente endpoint+TRB exatos
+```
+
+APIs centrais:
+
+```text
+xhci_transfer_pending_is_ready_for(slot_id)
+xhci_transfer_pending_matches(slot_id, endpoint_id, trb_physical)
+xhci_transfer_route_next_event()
+xhci_transfer_wait_completion(slot_id, endpoint_id, trb_physical)
+```
+
+Regras fail-closed:
+
+- event de outro slot é preservado, não descartado;
+- event do mesmo slot com endpoint ou TRB inesperados continua falhando;
+- Event Data não é aceito nesse caminho;
+- mailbox de epoch stale é invalidada;
+- segundo completion para uma mailbox ocupada do mesmo epoch é overflow e falha;
+- Host Controller Error continua terminal para o waiter/dispatcher;
+- nenhum código novo acessa diretamente índice/cycle/ERDP do Event Ring.
+
+## HID report submit/complete
+
+`xhci_hid_report` separa a antiga operação monolítica em:
+
+```text
+xhci_hid_report_submit_for_slot(slot_id)
+xhci_hid_report_complete_for_slot(slot_id)
+```
+
+O contrato atual permite somente um TD HID outstanding por slot. O state guarda:
+
+```text
+transfer_pending
+pending_trb_physical
+pending_transfer_length
+```
+
+O wrapper legado permanece:
+
+```text
+xhci_hid_report_poll_slot_once(slot_id)
+→ submit_for_slot(slot_id)
+→ complete_for_slot(slot_id)
+```
+
+Assim `post_cutover_prove_first_usb_hid_keyboard_report()` continua chamando a mesma API histórica.
+
+## Prova runtime de interleaving
+
+Depois de `BAKEN:USB_HID_DUAL_READY`, `platform_hid_late_attach` tenta a prova adicional 4c.4e:
+
+```text
+submit mouse
+→ submit keyboard
+→ ambos os TDs ficam outstanding
+→ route_next_event()
+→ route_next_event()
+→ exige mailbox do keyboard
+→ exige mailbox do mouse
+→ complete keyboard pelo seu Slot ID/DCI/TRB
+→ complete mouse pelo seu Slot ID/DCI/TRB
+→ exige ambos os pending states vazios
+→ valida tamanhos de report Boot
+→ BAKEN:USB_HID_INTERLEAVE_READY
+```
+
+A ordem de chegada das duas completions não é presumida: o próprio Event TRB determina a mailbox. A ordem de coleta é independente da ordem de submit.
+
+A falha dessa prova adicional não transforma keyboard+mouse em requisito universal de boot. O workflow dedicado é quem exige o marker de interleaving.
 
 ## Workflow dedicado
 
-```text
-.github/workflows/baken_hid_dual.yml
-```
-
-QEMU deve ser iniciado nessa ordem:
+`.github/workflows/baken_hid_dual.yml` continua usando:
 
 ```text
 -device qemu-xhci,id=xhci
@@ -106,20 +166,19 @@ QEMU deve ser iniciado nessa ordem:
 -device usb-mouse,bus=xhci.0
 ```
 
-A prova injeta repetidamente:
+Injeção:
 
 ```text
 sendkey a
 mouse_move 5 3
 ```
 
-O workflow só fica verde quando o serial contém:
+O timeout não foi ampliado. O workflow exige agora os dois markers:
 
 ```text
 BAKEN:USB_HID_DUAL_READY
+BAKEN:USB_HID_INTERLEAVE_READY
 ```
-
-Esse marker não pode ser produzido por teste textual; ele só é emitido depois do report real do segundo slot.
 
 ---
 
@@ -175,8 +234,8 @@ Em falha após Enable Slot, o record vai para `FAILED`, identidade HID é desmon
 - HID-4c.4a `8ef11b5e9298552d52eee3954ccd305e4421708d` ✅;
 - HID-4c.4b `ff98c978ea9f11f78217369a9ec856ffcdf7a45b` ✅;
 - HID-4c.4c `20b016973d12d4d669cf54ea79623a9116eb341f` ✅;
-- HID-4c.4d ⏳ candidato atual;
-- HID-4c.4e ⬜ interleaving/event demux;
+- HID-4c.4d `6e2ad50d613fcaf11bfa2c48d74f477ee6b76bfe` ✅;
+- HID-4c.4e ⏳ candidato atual;
 - HID-4d ⬜ hot-plug/recovery.
 
 ### Caminho legado obrigatório do primeiro teclado
@@ -202,18 +261,19 @@ O proof continua exigindo Boot keyboard report real, mínimo de 8 bytes, Usage I
 
 ---
 
-# Próximo corte se HID-4c.4d ficar verde
+# Próximo corte se HID-4c.4e ficar verde
 
-**HID-4c.4e — interleaving/event demux.**
+**HID-4d — hot-plug/recovery.**
 
-Objetivo:
+Objetivo inicial:
 
-- manter keyboard e mouse ativos ao mesmo tempo;
-- alternar eventos reais dos dois devices;
-- provar completions atribuídas corretamente por Slot ID/DCI/TRB;
-- provar que eventos `InputDevice + generation` não vazam entre slots;
-- expandir o Event Ring demux somente se a prova runtime demonstrar necessidade;
-- preservar integralmente o primeiro-keyboard proof.
+- detectar detach físico sem polling infinito;
+- cancelar/invalidar TDs pendentes antes de teardown;
+- desmontar InputDevice/map/event binding generation-safe;
+- limpar report/descriptor/configuration/EP0/context state do epoch antigo;
+- confirmar Disable Slot;
+- só então liberar Slot ID para reuse com epoch novo;
+- provar detach → reattach → reenumeração sem estado stale.
 
 ---
 
@@ -233,7 +293,7 @@ Rede, áudio, GPU/composição e power/hot-plug avançado permanecem posteriores
 
 1. confirmar `main` e SHA;
 2. verificar CI/SMP/NVMe do mesmo SHA;
-3. em HID-4c.4d+, verificar também o workflow runtime específico quando aplicável;
+3. em HID-4c.4d+, verificar também o workflow runtime específico;
 4. ler roadmap + handoff;
 5. inspecionar assinaturas reais;
 6. fazer um microcorte funcional;

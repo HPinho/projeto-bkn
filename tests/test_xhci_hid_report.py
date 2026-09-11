@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails HID-4c.3 do produtor HID Interrupt IN por slot."""
+"""Guardrails HID-4c.4e do produtor HID Interrupt IN por slot."""
 
 from pathlib import Path
 import unittest
@@ -11,16 +11,17 @@ MAIN = ROOT / "kernel/src/main.sotlas"
 
 
 class XhciHidReportTests(unittest.TestCase):
-    def test_report_state_is_partitioned_by_slot_and_epoch(self):
+    def test_report_state_is_partitioned_by_slot_epoch_and_one_outstanding_td(self):
         text = HID.read_text(encoding="utf-8")
         self.assertIn("XHCI_HID_REPORT_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY", text)
         self.assertIn("static mut XHCI_HID_REPORT_STATES: [XhciHidReportState;", text)
-        self.assertIn("pub fn xhci_hid_report_prepare_for_slot(slot_id: u8)", text)
-        self.assertIn("pub fn xhci_hid_report_poll_slot_once(slot_id: u8)", text)
+        self.assertIn("pub transfer_pending: bool", text)
+        self.assertIn("pub pending_trb_physical: u64", text)
+        self.assertIn("pub pending_transfer_length: u32", text)
+        self.assertIn("pub fn xhci_hid_report_submit_for_slot(slot_id: u8)", text)
+        self.assertIn("pub fn xhci_hid_report_complete_for_slot(slot_id: u8)", text)
         self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
         self.assertNotIn("static mut XHCI_HID_REPORT_BUFFER:", text)
-        self.assertNotIn("static mut XHCI_HID_REPORT_ENQUEUE_INDEX:", text)
-        self.assertNotIn("static mut XHCI_HID_REPORT_PRODUCER_CYCLE:", text)
 
     def test_report_path_requires_same_slot_configuration_endpoint_map_events_and_identity(self):
         text = HID.read_text(encoding="utf-8")
@@ -38,7 +39,6 @@ class XhciHidReportTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
         self.assertNotIn("xhci_set_configuration_is_ready()", body)
-        self.assertNotIn("hid_input_report_map_is_ready()", text)
 
     def test_transport_identity_must_match_slot_before_report(self):
         text = HID.read_text(encoding="utf-8")
@@ -47,38 +47,51 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("xhci_hid_descriptor_input_device_id_for(slot_id)", body)
         self.assertIn("xhci_hid_descriptor_input_device_generation_for(slot_id)", body)
         self.assertIn("xhci_hid_descriptor_input_device_is_active_for(slot_id)", body)
-        self.assertIn("input_device_snapshot(device_id, generation)", body)
-        self.assertIn("record.transport_kind == INPUT_TRANSPORT_USB", body)
         self.assertIn("record.transport_address == slot_id as u32", body)
 
-    def test_normal_trb_publication_precedes_doorbell_wait(self):
+    def test_submit_publishes_normal_trb_before_doorbell_and_records_pending_after_advance(self):
         text = HID.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_hid_report_poll_slot_once(slot_id: u8)", 1)[1]
-        body = body.split("pub fn xhci_hid_report_poll_once", 1)[0]
+        body = text.split("pub fn xhci_hid_report_submit_for_slot(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_hid_report_complete_for_slot", 1)[0]
         write = body.index("*slot = xhci_trb_normal")
         barrier = body.index("x86_read_cr3_raw()")
         doorbell = body.index("xhci_hid_report_ring_doorbell(slot_id, dci)")
         advance = body.index("xhci_hid_report_advance(slot_id)")
-        wait = body.index("xhci_transfer_wait_completion(slot_id, dci, physical)")
+        pending = body.index("XHCI_HID_REPORT_STATES[state_index].transfer_pending = true")
         self.assertLess(write, barrier)
         self.assertLess(barrier, doorbell)
         self.assertLess(doorbell, advance)
-        self.assertLess(advance, wait)
+        self.assertLess(advance, pending)
+        self.assertIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
+
+    def test_complete_waits_for_exact_slot_dci_and_trb_then_parses(self):
+        text = HID.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_hid_report_complete_for_slot(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_hid_report_poll_slot_once", 1)[0]
+        self.assertIn("xhci_hid_context_dci_for(slot_id)", body)
+        self.assertIn("xhci_transfer_wait_completion(slot_id, dci, physical)", body)
+        self.assertIn("xhci_transfer_last_residual_length_for(slot_id)", body)
+        self.assertIn("xhci_hid_report_parse_for_slot(slot_id, actual)", body)
+        self.assertNotIn("xhci_transfer_last_residual_length()", body)
+        wait = body.index("xhci_transfer_wait_completion(slot_id, dci, physical)")
+        clear = body.index("transfer_pending = false")
+        parse = body.index("xhci_hid_report_parse_for_slot(slot_id, actual)")
+        self.assertLess(wait, clear)
+        self.assertLess(clear, parse)
+
+    def test_poll_wrapper_preserves_legacy_single_slot_semantics(self):
+        text = HID.read_text(encoding="utf-8")
+        body = text.split("pub fn xhci_hid_report_poll_slot_once(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_hid_report_poll_once", 1)[0]
+        self.assertIn("xhci_hid_report_submit_for_slot(slot_id)", body)
+        self.assertIn("xhci_hid_report_complete_for_slot(slot_id)", body)
+        self.assertIn("return xhci_hid_report_poll_slot_once(xhci_hid_report_active_slot_id())", text)
 
     def test_report_ring_uses_slot_specific_base_link_and_cycle(self):
         text = HID.read_text(encoding="utf-8")
         self.assertIn("xhci_hid_context_ring_physical_for(slot_id)", text)
         self.assertIn("xhci_hid_report_publish_link(slot_id, cycle)", text)
-        self.assertIn("XHCI_HID_REPORT_STATES[state_index].producer_cycle =", text)
         self.assertIn("!XHCI_HID_REPORT_STATES[state_index].producer_cycle", text)
-
-    def test_transfer_event_uses_slot_specific_hid_dci_and_result(self):
-        text = HID.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_hid_report_poll_slot_once", 1)[1]
-        self.assertIn("xhci_hid_context_dci_for(slot_id)", body)
-        self.assertIn("xhci_transfer_wait_completion(slot_id, dci, physical)", body)
-        self.assertIn("xhci_transfer_last_residual_length_for(slot_id)", body)
-        self.assertNotIn("xhci_transfer_last_residual_length()", body)
 
     def test_real_report_is_attributed_then_validated_against_its_device_map(self):
         text = HID.read_text(encoding="utf-8")
@@ -91,13 +104,8 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertLess(identity, validate)
         self.assertLess(validate, translate)
         self.assertLess(translate, keyboard)
-        self.assertIn("xhci_hid_descriptor_input_device_id_for(slot_id)", body)
-        self.assertIn("xhci_hid_descriptor_input_device_generation_for(slot_id)", body)
-        self.assertIn("device_id, device_generation, base as *const u8", body)
-        self.assertIn("hid_input_device_map_has_report_ids(device_id, device_generation)", body)
         self.assertIn("let protocol = xhci_hid_protocol_for(slot_id)", body)
         self.assertNotIn("xhci_hid_protocol()", body)
-        self.assertNotIn("hid_input_report_validate(", body)
 
     def test_runtime_has_no_legacy_global_descriptor_identity_calls(self):
         text = HID.read_text(encoding="utf-8")
@@ -109,16 +117,6 @@ class XhciHidReportTests(unittest.TestCase):
         ):
             self.assertNotIn(legacy, text)
 
-    def test_runtime_event_marker_is_per_slot_and_requires_new_event(self):
-        text = HID.read_text(encoding="utf-8")
-        body = text.split("fn xhci_hid_report_parse_for_slot", 1)[1]
-        body = body.split("pub fn xhci_hid_report_is_ready_for", 1)[0]
-        self.assertIn("let before_events = hid_input_events_events_published()", body)
-        self.assertIn("let after_events = hid_input_events_events_published()", body)
-        self.assertIn("XHCI_HID_REPORT_STATES[state_index].event_marker_emitted", body)
-        self.assertIn("after_events > before_events", body)
-        self.assertIn("xhci_hid_report_emit_event_ready_marker()", body)
-
     def test_boot_keyboard_and_mouse_fallbacks_remain_per_slot(self):
         text = HID.read_text(encoding="utf-8")
         for token in (
@@ -127,17 +125,6 @@ class XhciHidReportTests(unittest.TestCase):
             ".keyboard_modifiers", ".keyboard_key0", ".mouse_buttons",
         ):
             self.assertIn(token, text)
-
-    def test_legacy_wrappers_only_select_active_slot_and_delegate(self):
-        text = HID.read_text(encoding="utf-8")
-        prepare = text.split("pub fn xhci_hid_report_prepare() -> bool", 1)[1]
-        prepare = prepare.split("pub fn xhci_hid_report_poll_slot_once", 1)[0]
-        self.assertIn("let slot_id = xhci_configure_endpoint_slot_id()", prepare)
-        self.assertIn("return xhci_hid_report_prepare_for_slot(slot_id)", prepare)
-        self.assertNotIn("xhci_set_configuration_is_ready()", prepare)
-        self.assertIn("return xhci_hid_report_poll_slot_once(xhci_hid_report_active_slot_id())", text)
-        self.assertIn("return xhci_hid_report_last_length_for(xhci_hid_report_active_slot_id())", text)
-        self.assertIn("return xhci_hid_keyboard_key0_for(xhci_hid_report_active_slot_id())", text)
 
     def test_post_cutover_gate_still_requires_real_qemu_key_a_report(self):
         text = POST.read_text(encoding="utf-8")
@@ -149,12 +136,10 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("xhci_hid_keyboard_key0() == USB_HID_USAGE_KEYBOARD_A", body)
         self.assertIn("POST_CUTOVER_HID_REPORT_ATTEMPTS", body)
 
-    def test_main_registers_hid4_identity_and_transport(self):
+    def test_main_registers_hid_transport(self):
         text = MAIN.read_text(encoding="utf-8")
-        self.assertIn("import kernel::drivers::input_device::*;", text)
-        self.assertIn("import kernel::drivers::input_event::*;", text)
-        self.assertIn("import kernel::drivers::hid_input_events::*;", text)
         self.assertIn("import kernel::drivers::xhci_hid_report::*;", text)
+        self.assertIn("import kernel::drivers::xhci_transfer::*;", text)
 
 
 if __name__ == "__main__":

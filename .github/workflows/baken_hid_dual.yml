@@ -25,9 +25,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64 socat
 
-      - name: Verify HID dual-device contracts
+      - name: Verify HID multi-device contracts
         run: |
           python3 tests/test_hid_dual_runtime.py
+          python3 tests/test_xhci_transfer.py
+          python3 tests/test_xhci_hid_report.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -44,7 +46,7 @@ jobs:
           python3 tools/scripts/create_uefi_iso.py
           test -s build/baken_os.iso
 
-      - name: Prove keyboard and mouse on independent xHCI slots
+      - name: Prove keyboard and mouse interleaving on independent xHCI slots
         timeout-minutes: 4
         shell: bash
         run: |
@@ -77,15 +79,15 @@ jobs:
           done
           test -S build/qemu-hid-dual.sock
 
-          marker_seen=0
+          interleave_seen=0
           injection_failed=0
           for i in $(seq 1 600); do
             if ! printf 'sendkey a\nmouse_move 5 3\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1; then
               injection_failed=1
               break
             fi
-            if grep -q 'BAKEN:USB_HID_DUAL_READY' build/qemu-hid-dual.log 2>/dev/null; then
-              marker_seen=1
+            if grep -q 'BAKEN:USB_HID_INTERLEAVE_READY' build/qemu-hid-dual.log 2>/dev/null; then
+              interleave_seen=1
               break
             fi
             sleep 0.2
@@ -101,11 +103,12 @@ jobs:
             echo '::error::Falha ao injetar eventos HID no monitor QEMU.'
             exit 1
           fi
-          if test "$marker_seen" -ne 1; then
-            echo '::error::O kernel não publicou BAKEN:USB_HID_DUAL_READY.'
+          if test "$interleave_seen" -ne 1; then
+            echo '::error::O kernel não publicou BAKEN:USB_HID_INTERLEAVE_READY.'
             exit 1
           fi
           grep -q 'BAKEN:USB_HID_DUAL_READY' build/qemu-hid-dual.log
+          grep -q 'BAKEN:USB_HID_INTERLEAVE_READY' build/qemu-hid-dual.log
 
       - name: Upload HID dual-device diagnostics
         if: always()
