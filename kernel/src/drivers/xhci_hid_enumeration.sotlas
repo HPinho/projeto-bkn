@@ -1,0 +1,196 @@
+// Baken OS — HID-4c.4c: pipeline explícito de enumeração HID por porta xHCI.
+//
+// Este módulo compõe apenas APIs per-slot já certificadas. O caminho legado do
+// primeiro teclado permanece em post_cutover.sotlas e não chama este orquestrador.
+// Em falha após Enable Slot, o slot é desabilitado no hardware e fica localmente
+// em FAILED/quarentena; o reuso só será permitido em HID-4d após cleanup explícito
+// de todos os estados per-slot/epoch.
+
+module kernel::drivers::xhci_hid_enumeration;
+
+import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_trb::*;
+import kernel::drivers::xhci_port::*;
+import kernel::drivers::xhci_port_stage::*;
+import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_address::*;
+import kernel::drivers::xhci_ep0::*;
+import kernel::drivers::xhci_descriptor::*;
+import kernel::drivers::xhci_evaluate_context::*;
+import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_configure_endpoint::*;
+import kernel::drivers::xhci_hid_descriptor::*;
+import kernel::drivers::xhci_set_configuration::*;
+import kernel::drivers::xhci_hid_report::*;
+
+pub const XHCI_HID_ENUMERATION_SCAN_LIMIT: u16 = 256;
+
+@system
+fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_command_is_ready() ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+
+    // Quarentena primeiro; depois invalida identidade pública antes de parar
+    // o transporte. Nenhum consumidor deve tratar este slot como HID pronto.
+    if !xhci_device_table_set_state(slot_id, epoch, XHCI_DEVICE_STATE_FAILED) {
+        return false;
+    }
+    let identity_released = xhci_hid_descriptor_release_input_device_for_slot(slot_id);
+
+    let command = xhci_trb_disable_slot(slot_id, xhci_command_producer_cycle());
+    let command_physical = xhci_command_submit(command);
+    if command_physical == 0 || !xhci_command_wait_completion(command_physical) ||
+       xhci_command_last_slot_id() != slot_id {
+        return false;
+    }
+
+    // Não chama xhci_device_table_release(): xhci_context e outros módulos ainda
+    // não possuem teardown completo de estado antigo. Manter FAILED impede que
+    // um Slot ID seja reutilizado sobre estado stale antes do HID-4d.
+    return identity_released;
+}
+
+@system
+fn xhci_hid_enumeration_restore_active(previous_active: u8) -> bool {
+    if previous_active == 0 { return true; }
+    if !xhci_device_table_slot_is_valid(previous_active) { return false; }
+    return xhci_device_table_set_active(previous_active);
+}
+
+@system
+fn xhci_hid_enumeration_fail(slot_id: u8,
+                             epoch: u32,
+                             previous_active: u8) -> u8 {
+    xhci_hid_enumeration_disable_failed_slot(slot_id, epoch);
+    xhci_hid_enumeration_restore_active(previous_active);
+    return 0;
+}
+
+@system
+pub fn xhci_hid_enumeration_is_ready_for(slot_id: u8) -> bool {
+    if slot_id == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_HID_READY {
+        return false;
+    }
+    return xhci_context_is_ready_for(slot_id) &&
+        xhci_address_is_ready_for(slot_id) &&
+        xhci_ep0_is_ready_for(slot_id) &&
+        xhci_device_descriptor_is_ready_for(slot_id) &&
+        xhci_configuration_is_ready_for(slot_id) &&
+        xhci_hid_context_is_ready_for(slot_id) &&
+        xhci_configure_endpoint_is_ready_for(slot_id) &&
+        xhci_set_configuration_is_ready_for(slot_id) &&
+        xhci_hid_descriptor_is_ready_for(slot_id) &&
+        xhci_hid_report_is_ready_for(slot_id);
+}
+
+// Enumera exatamente uma porta conectada e ainda não associada a Slot ID.
+// Retorna o Slot ID pronto para reports, ou 0. Nenhuma etapa usa wrapper global
+// para decidir descriptor/configuração/endpoint do dispositivo recém-criado.
+@system
+pub fn xhci_hid_enumerate_port(port_id: u8) -> u8 {
+    if port_id == 0 { return 0; }
+    if xhci_device_table_find_slot_for_port(port_id) != 0 { return 0; }
+
+    let previous_active = xhci_device_table_active_slot_id();
+    if !xhci_port_stage_prepare_for(port_id) ||
+       !xhci_port_stage_is_ready_for(port_id) {
+        return 0;
+    }
+
+    let slot_type = xhci_port_stage_slot_type();
+    let slot_id = xhci_slot_enable_port(port_id, slot_type);
+    if slot_id == 0 { return 0; }
+
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 || xhci_device_table_port_id(slot_id) != port_id ||
+       xhci_device_table_slot_type(slot_id) != slot_type {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+
+    if !xhci_context_prepare_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_address_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_ep0_prepare_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_probe_device_descriptor_8_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_reconcile_ep0_from_descriptor_probe_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_get_device_descriptor_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_probe_configuration_header_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_read_configuration_full_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_get_hid_configuration_for_slot(slot_id) ||
+       !xhci_configuration_is_ready_for(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+
+    let endpoint_address = xhci_hid_endpoint_address_for(slot_id);
+    let endpoint_max_packet = xhci_hid_endpoint_max_packet_for(slot_id);
+    let endpoint_interval = xhci_hid_endpoint_interval_for(slot_id);
+    if endpoint_address == 0 || endpoint_max_packet == 0 || endpoint_interval == 0 {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+
+    if !xhci_hid_context_prepare_for_slot(
+        slot_id, endpoint_address, endpoint_max_packet, endpoint_interval
+    ) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_configure_hid_endpoint_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_set_configuration_for_slot(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    if !xhci_hid_report_prepare_for_slot(slot_id) ||
+       !xhci_hid_enumeration_is_ready_for(slot_id) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+
+    // O device recém-enumerado permanece acessível por Slot ID, mas a seleção
+    // compatível anterior é restaurada para não deslocar o legado do teclado 1.
+    if !xhci_hid_enumeration_restore_active(previous_active) {
+        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
+    }
+    return slot_id;
+}
+
+// Procura a próxima porta conectada sem Slot ID e tenta enumerá-la uma vez.
+// Não pula silenciosamente uma porta nova que falhou: falha fechado e deixa o
+// slot, se criado, em quarentena FAILED para investigação/recovery posterior.
+@system
+pub fn xhci_hid_enumerate_next_connected(after_port_id: u8) -> u8 {
+    if xhci_port_scan() == 0 { return 0; }
+
+    let mut cursor = after_port_id;
+    let mut scanned: u16 = 0;
+    while scanned < XHCI_HID_ENUMERATION_SCAN_LIMIT {
+        let port_id = xhci_port_next_connected(cursor);
+        if port_id == 0 { return 0; }
+        if xhci_device_table_find_slot_for_port(port_id) == 0 {
+            return xhci_hid_enumerate_port(port_id);
+        }
+        cursor = port_id;
+        scanned += 1;
+    }
+    return 0;
+}
