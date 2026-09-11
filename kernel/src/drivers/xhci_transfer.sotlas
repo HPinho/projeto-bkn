@@ -97,6 +97,33 @@ fn xhci_transfer_clear_pending_index(index: usize) -> bool {
     return true;
 }
 
+// HID-4d.3b2 prerequisite: exact-generation mailbox query. Unlike the
+// compatibility wrapper, this function never follows the slot's implicit
+// current epoch and never mutates a stale mailbox while answering a query.
+@system
+pub fn xhci_transfer_pending_is_ready_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+
+    let mut ready = false;
+    unsafe {
+        ready = XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+                XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch &&
+                XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id != 0 &&
+                XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer != 0;
+    }
+
+    if !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    return ready;
+}
+
 @system
 pub fn xhci_transfer_pending_is_ready_for(slot_id: u8) -> bool {
     let index = xhci_transfer_index(slot_id);
@@ -111,11 +138,8 @@ pub fn xhci_transfer_pending_is_ready_for(slot_id: u8) -> bool {
             xhci_transfer_clear_pending_index(index);
             return false;
         }
-        return XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
-               XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch &&
-               XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id != 0 &&
-               XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer != 0;
     }
+    return xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch);
 }
 
 @system

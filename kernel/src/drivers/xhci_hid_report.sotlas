@@ -368,15 +368,40 @@ pub fn xhci_hid_report_prepare() -> bool {
     return xhci_hid_report_prepare_for_slot(slot_id);
 }
 
+// HID-4d.3b2 prerequisite: exact-generation query used by lifecycle teardown.
+// The caller supplies the expected epoch; a slot rollover before or after the
+// report-state read fails closed instead of silently following the new device.
+@system
+pub fn xhci_hid_report_transfer_pending_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    let state_index = xhci_hid_report_index(slot_id);
+    if state_index >= XHCI_HID_REPORT_SLOT_CAPACITY || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+
+    let mut pending = false;
+    unsafe {
+        pending = XHCI_HID_REPORT_STATES[state_index].ready &&
+                  XHCI_HID_REPORT_STATES[state_index].epoch == epoch &&
+                  XHCI_HID_REPORT_STATES[state_index].transfer_pending &&
+                  XHCI_HID_REPORT_STATES[state_index].pending_trb_physical != 0 &&
+                  XHCI_HID_REPORT_STATES[state_index].pending_transfer_length != 0;
+    }
+
+    if !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    return pending;
+}
+
 @system
 pub fn xhci_hid_report_transfer_pending_for(slot_id: u8) -> bool {
-    if !xhci_hid_report_is_ready_for(slot_id) { return false; }
-    let state_index = xhci_hid_report_index(slot_id);
-    unsafe {
-        return XHCI_HID_REPORT_STATES[state_index].transfer_pending &&
-               XHCI_HID_REPORT_STATES[state_index].pending_trb_physical != 0 &&
-               XHCI_HID_REPORT_STATES[state_index].pending_transfer_length != 0;
-    }
+    if !xhci_device_table_slot_is_valid(slot_id) { return false; }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
+    return xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch);
 }
 
 @system
