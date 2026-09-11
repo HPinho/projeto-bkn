@@ -8,8 +8,8 @@ Atualizado em 2026-09-11 (America/Fortaleza).
 - trilha: **Trilha B — HID/input de produção**
 - HID-4c multi-slot xHCI: **✅ concluído e certificado**
 - HID-4d hot-plug/recovery: **⏳ em desenvolvimento**
-- última baseline integralmente certificada: **lifecycle pending checks exact-epoch — `1c8b81b3cd021d12e46a964f54024f661bc1c2b3`**
-- próximo microcorte funcional: **cleanup lógico real de InputDevice/map/descriptors/report DMA, generation-safe e retry-safe**
+- última baseline integralmente certificada: **identity teardown generation-safe — `81c486e35985e442adef39ab63d2c96f7e581a2b`**
+- próximo microcorte funcional: **descriptor DMA exact-epoch, retry-safe, após identity teardown**
 - macroetapa atual: **HID-4d.3b — teardown HID lógico generation-safe**
 - branch: **`main`**
 - Kernel Core: **congelado/invariant-preserving**
@@ -27,7 +27,37 @@ Não empilhar funcionalidade sobre candidato vermelho. Não enfraquecer markers,
 
 ---
 
-# Baseline certificada atual — lifecycle exact-epoch
+# Baseline certificada atual — identity teardown generation-safe
+
+```text
+81c486e35985e442adef39ab63d2c96f7e581a2b
+feat(hid): add generation-safe identity teardown
+```
+
+Provas no mesmo SHA:
+
+- CI #1166 ✅
+- SMP #269 ✅
+- NVMe #366 ✅
+- HID Dual-device #25 ✅
+
+Escopo certificado:
+
+- `input_device_generation_for_id(device_id)` lê a generation corrente sob o mesmo lock do registry e continua observável após o record ficar `DETACHED`;
+- `xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch)` exige `slot_id + epoch + DETACH_PENDING` exatos;
+- o helper preserva a identidade antiga até concluir event-unbind, purge e map-unbind;
+- `input_device_detach(old_id, old_generation)` só é chamado se a generation corrente ainda for exatamente a antiga;
+- se `device_id` já avançou para nova generation, o teardown velho nunca detach a geração nova;
+- a identidade armazenada no descriptor só é zerada no fim, após revalidação do mesmo epoch/id/generation;
+- chamadas repetidas após cleanup já concluído são idempotentes;
+- o helper histórico de rollback da enumeração permanece separado;
+- nenhum DMA, Transfer Ring, endpoint context, Device/Input Context ou Slot ID é liberado neste corte.
+
+Esse checkpoint autoriza avançar para o lifetime dos buffers persistentes de 4d.3b, começando pelo **descriptor DMA exact-epoch**.
+
+---
+
+# Baseline anterior — lifecycle exact-epoch
 
 ```text
 1c8b81b3cd021d12e46a964f54024f661bc1c2b3
@@ -49,8 +79,6 @@ Escopo deliberadamente pequeno e já certificado:
 - revalidações `DETACH_PENDING + epoch` antes/entre/depois permanecem como barreira TOCTOU;
 - `xhci_hid_report_drain_cancelled_for_slot(slot_id)` permanece temporariamente como compatibilidade slot-only, cercada por revalidação exata;
 - nenhum DMA, InputDevice, descriptor, ring, context ou Slot ID é liberado neste corte.
-
-Esse checkpoint autoriza iniciar o cleanup lógico real do 4d.3b, ainda sem Drop Endpoint, sem liberar HID Transfer Ring e sem `Disable Slot`.
 
 ---
 
@@ -92,8 +120,12 @@ slot_id + epoch + endpoint_id + TRB physical pointer
 | pending queries exact-epoch | ✅ | `b6b7efacfa41eac6a89400b83f409b18b6b72a38` — CI #1162 / SMP #265 / NVMe #362 / HID Dual #21 |
 | demux/waiter exact-epoch | ✅ | `5fa048986ab4cfb8313530e9945e513633ea944f` — CI #1163 / SMP #266 / NVMe #363 / HID Dual #22 |
 | lifecycle pending checks exact-epoch | ✅ | `1c8b81b3cd021d12e46a964f54024f661bc1c2b3` — CI #1164 / SMP #267 / NVMe #364 / HID Dual #23 |
+| identity teardown InputDevice/events/map | ✅ | `81c486e35985e442adef39ab63d2c96f7e581a2b` — CI #1166 / SMP #269 / NVMe #366 / HID Dual #25 |
+| descriptor DMA exact-epoch | ⬜ | próximo microcorte |
+| report DMA + mailbox/result lógico | ⬜ | depois do descriptor DMA |
+| `logical_teardown_complete` | ⬜ | fecha 4d.3b |
 
-A macroetapa **4d.3b ainda não está concluída**: falta o cleanup lógico real e retry-safe de InputDevice/map/bindings/descriptors/report DMA e mailbox/result lógico.
+A macroetapa **4d.3b ainda não está concluída**: a identidade lógica está desmontada de forma generation-safe, mas ainda faltam os buffers persistentes descriptor/report, o estado lógico de transfer e o gate final de conclusão.
 
 ---
 
@@ -181,33 +213,53 @@ Os usos de `pmm_free_pages_lifo()` dentro de `dma_alloc()` e `dma_alloc_for_devi
 4. **HID-4d.3a ✅** — liberar DMA temporário de enumeração após a última referência do controller.
 5. **HID-4d.3b0 ✅** — permitir `dma_release()` fora de ordem via PMM bitmap-backed.
 6. **HID-4d.3b1 ✅** — abrir gate de teardown lógico somente para o `slot_id + epoch` exato.
-7. **HID-4d.3b ⏳** — concluir teardown HID lógico generation-safe, incluindo InputDevice/map/descriptor/report DMA e mailbox/result lógico.
-8. **HID-4d.3c ⬜** — Drop Endpoint/reconfiguração + release seguro de rings.
-9. **HID-4d.4 ⬜** — Disable Slot + release de Device/Input Context + EP0.
-10. **HID-4d.5 ⬜** — drain/barrier, reuse de Slot ID apenas com epoch novo e rejeição de estado stale.
-11. **HID-4d.6 ⬜** — prova runtime detach/reconnect e hotplug stress.
+7. **HID-4d.3b identity teardown ✅** — remover event binding, purgar fila, desmontar field map e detach da generation antiga sem tocar em generation nova.
+8. **HID-4d.3b descriptor DMA ⬜** — liberar descriptor persistente com ownership/epoch exatos.
+9. **HID-4d.3b report/transfer lógico ⬜** — liberar report DMA e limpar mailbox/result sem tocar no ring.
+10. **HID-4d.3b completion gate ⬜** — publicar `logical_teardown_complete` só após todos os sub-cleanups.
+11. **HID-4d.3c ⬜** — Drop Endpoint/reconfiguração + release seguro de rings.
+12. **HID-4d.4 ⬜** — Disable Slot + release de Device/Input Context + EP0.
+13. **HID-4d.5 ⬜** — drain/barrier, reuse de Slot ID apenas com epoch novo e rejeição de estado stale.
+14. **HID-4d.6 ⬜** — prova runtime detach/reconnect e hotplug stress.
 
 ---
 
 # Ordem planejada para concluir 4d.3b
 
-O cleanup deve ser **retry-safe** e preservar a identidade antiga até que todas as etapas dependentes tenham terminado:
+O cleanup deve ser **retry-safe**. A primeira metade já está certificada:
 
 ```text
 preservar old device_id + generation
-→ hid_input_events_unbind_device(old_id, old_generation)
-→ input_event_purge_device(old_id, old_generation)
-→ hid_input_device_map_unbind(old_id, old_generation)
-→ input_device_detach(old_id, old_generation)
-→ descriptor DMA: unshare se necessário → CPU-owned → dma_release
-→ report DMA: somente após Stop Endpoint + terminal drain → unshare → dma_release
-→ limpar mailbox/result lógico exact-epoch sem tocar no Transfer Ring
-→ marcar logical_teardown_complete
+→ hid_input_events_unbind_device(old_id, old_generation) ✅
+→ input_event_purge_device(old_id, old_generation) ✅
+→ hid_input_device_map_unbind(old_id, old_generation) ✅
+→ input_device_detach(old_id, old_generation) com generation guard ✅
+→ limpar identidade guardada somente no final ✅
+→ descriptor DMA: unshare se necessário → CPU-owned → dma_release ⬜
+→ report DMA: somente após Stop Endpoint + terminal drain → unshare → dma_release ⬜
+→ limpar mailbox/result lógico exact-epoch sem tocar no Transfer Ring ⬜
+→ marcar logical_teardown_complete ⬜
 ```
 
-A ordem event-unbind → purge → map-unbind é obrigatória porque o report decode agora é serializado pelo mesmo lifecycle lock de events; quando o unbind retorna, nenhum decoder antigo deve continuar lendo o field map daquela geração.
+A ordem event-unbind → purge → map-unbind continua obrigatória porque o report decode é serializado pelo mesmo lifecycle lock de events; quando o unbind retorna, nenhum decoder antigo continua lendo o field map daquela geração.
 
-Não reutilizar `xhci_hid_descriptor_release_input_device_for_slot()` cegamente no teardown de hotplug: o helper histórico detachava o InputDevice antes dos demais sub-cleanups e podia perder a identidade exata em caso de falha intermediária. O caminho de hotplug precisa de helper dedicado, generation-safe e idempotente.
+O helper de hotplug agora é dedicado e não reutiliza o rollback histórico de enumeração. Ele também lê a generation corrente do registry antes do detach; se o `device_id` já pertence a uma generation posterior, a geração nova fica intocada.
+
+## Próximo microcorte — descriptor DMA exact-epoch
+
+Contrato planejado:
+
+```text
+slot_id + epoch + DETACH_PENDING exatos
+→ identity teardown já concluído
+→ descriptor state ainda pertence ao mesmo epoch
+→ se buffer SHARED: dma_unshare_from_device
+→ exigir dma_buffer_cpu_owned
+→ dma_release
+→ invalidar descriptor ready/info do mesmo epoch
+```
+
+O helper deve ser idempotente se o buffer já estiver liberado e deve revalidar o epoch entre ownership transition, release e publicação do estado lógico. Nenhum HID Transfer Ring ou context entra nesse corte.
 
 ## HID-4d.3c — endpoint/rings
 
@@ -259,9 +311,11 @@ O xHCI Transfer Event não transporta o software `epoch`. Portanto, antes de per
 9. `dma_release()` normal deve aceitar release arbitrário; rollback imediato de allocator pode permanecer LIFO.
 10. Nenhum DMA pode ser liberado enquanto hardware ainda o referencia.
 11. Pending queries, demux e lifecycle generation-sensitive devem receber epoch esperado explicitamente; wrappers slot-only ficam restritos à compatibilidade cercada por revalidação.
-12. Kernel Core, SMP, scheduler, TLB, Ring3 e FPU/SIMD não podem ser relaxados para acomodar driver.
-13. `BAKEN:HEX=E:` permanece terminal.
-14. `sendkey a`, `DUAL_READY` e `INTERLEAVE_READY` continuam preservados.
+12. Teardown de uma identidade antiga nunca pode detach ou apagar uma generation nova do mesmo `device_id`.
+13. A identidade do descriptor só é apagada depois dos sub-cleanups dependentes da generation antiga.
+14. Kernel Core, SMP, scheduler, TLB, Ring3 e FPU/SIMD não podem ser relaxados para acomodar driver.
+15. `BAKEN:HEX=E:` permanece terminal.
+16. `sendkey a`, `DUAL_READY` e `INTERLEAVE_READY` continuam preservados.
 
 ---
 
@@ -294,4 +348,4 @@ post_cutover_prepare_first_usb_port
 4. inspecionar ownership/lifetime real antes de liberar DMA
 5. fazer um microcorte funcional por vez
 6. se qualquer gate falhar, corrigir o próprio checkpoint antes de avançar
-7. próxima implementação: **HID-4d.3b cleanup lógico real per-epoch**, começando por identidade/InputDevice/events/map retry-safe, ainda sem Drop Endpoint ou `Disable Slot`
+7. próxima implementação: **HID-4d.3b descriptor DMA exact-epoch**, retry-safe, após identity teardown e ainda sem Drop Endpoint, Transfer Ring release ou `Disable Slot`
