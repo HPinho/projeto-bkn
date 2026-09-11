@@ -193,15 +193,21 @@ class XhciHidReportTransferTeardownTests(unittest.TestCase):
             self.assertIn(token, self.transfer_gate)
 
     def test_transfer_clear_refuses_live_same_epoch_mailbox_before_mutation(self):
-        same_epoch = (
-            "XHCI_TRANSFER_PENDING_EVENTS[index].valid &&\n"
-            "           XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch"
-        )
-        self.assertGreaterEqual(self.transfer_clear.count(same_epoch), 2)
-        first_refusal = self.transfer_clear.find(same_epoch)
-        clear_pending = self.transfer_clear.find("xhci_transfer_clear_pending_index(index)")
-        self.assertGreaterEqual(first_refusal, 0)
-        self.assertGreater(clear_pending, first_refusal)
+        valid_token = "XHCI_TRANSFER_PENDING_EVENTS[index].valid"
+        epoch_token = "XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch"
+        clear_token = "xhci_transfer_clear_pending_index(index)"
+
+        first_valid = self.transfer_clear.find(valid_token)
+        first_epoch = self.transfer_clear.find(epoch_token, first_valid)
+        second_valid = self.transfer_clear.find(valid_token, first_epoch + len(epoch_token))
+        second_epoch = self.transfer_clear.find(epoch_token, second_valid)
+        clear_pending = self.transfer_clear.find(clear_token, second_epoch)
+
+        self.assertGreaterEqual(first_valid, 0)
+        self.assertGreater(first_epoch, first_valid)
+        self.assertGreater(second_valid, first_epoch)
+        self.assertGreater(second_epoch, second_valid)
+        self.assertGreater(clear_pending, second_epoch)
         self.assertGreaterEqual(
             self.transfer_clear.count(
                 "xhci_transfer_teardown_epoch_matches(slot_id, epoch)"
