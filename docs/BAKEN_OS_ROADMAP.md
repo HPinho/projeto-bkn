@@ -26,11 +26,17 @@ O trabalho atual está em **HID-4d — hot-plug/recovery**:
 - **HID-4d.2a — coexistência Command Completion + Transfer Event:** ✅ CERTIFICADO
 - **HID-4d.2b — `Stop Endpoint` + drain terminal:** ✅ CERTIFICADO
 - **HID-4d.3a — lifetime de DMA temporário:** ✅ CERTIFICADO
-- **HID-4d.3b0 — `dma_release()` com liberação arbitrária:** ⏳ CANDIDATO ATUAL
-- HID-4d.3b — teardown HID lógico generation-safe: ⬜
+- **HID-4d.3b0 — `dma_release()` com liberação arbitrária:** ✅ CERTIFICADO
+- **HID-4d.3b1 — gate de teardown lógico generation-safe:** ✅ CERTIFICADO
+- **HID-4d.3b — teardown HID lógico generation-safe:** ⏳ EM DESENVOLVIMENTO
+  - serialização SMP do report decode vs detach: ✅ CERTIFICADA
+  - pending queries exact-epoch: ✅ CERTIFICADAS
+  - demux/waiter exact-epoch: ✅ CERTIFICADO
+  - lifecycle pending checks exact-epoch: ⏳ EM VALIDAÇÃO
+  - liberação lógica real de InputDevice/map/descriptor/report DMA: ⬜
 - HID-4d.3c — Drop Endpoint / rings: ⬜
 - HID-4d.4 — `Disable Slot` + context release: ⬜
-- HID-4d.5 — reuse de Slot ID + epoch novo: ⬜
+- HID-4d.5 — reuse de Slot ID + epoch novo + drain/barrier: ⬜
 - HID-4d.6 — runtime proof / hotplug stress: ⬜
 
 O Kernel Core permanece congelado e invariant-preserving.
@@ -169,7 +175,14 @@ O Device Descriptor completo e o Configuration Descriptor completo continuam per
 
 ### HID-4d.3b0 — arbitrary DMA release
 
-**⏳ CANDIDATO ATUAL.**
+**✅ CERTIFICADO.** Checkpoint `913663e673eb73ba127644bef98427e658bf95cb`.
+
+Provas no mesmo SHA:
+
+- CI #1156 ✅
+- SMP #259 ✅
+- NVMe #356 ✅
+- HID Dual-device #15 ✅
 
 O teardown real não pode depender da ordem global de alocação entre dispositivos. O PMM já fornece `pmm_free_pages(base, count)` bitmap-backed, lock/IRQ-safe e capaz de liberar ranges fora de ordem; portanto o allocator não é redesenhado.
 
@@ -192,18 +205,50 @@ Os `pmm_free_pages_lifo()` de `dma_alloc()` e `dma_alloc_for_device()` permanece
 
 Guardrails do corte: `tests/test_dma_release.py` + atualização da expectativa legada em `tests/test_dma_contract.py`.
 
+### HID-4d.3b — teardown HID lógico generation-safe
+
+A macroetapa **4d.3b continua em desenvolvimento**. Os microcortes abaixo são pré-requisitos certificados para executar a liberação lógica real sem permitir que uma geração antiga destrua estado novo.
+
+| Microcorte / hardening | Estado | Checkpoint / provas |
+|---|---|---|
+| 4d.3b1 — gate lógico `slot_id + epoch` | ✅ | `f2139d41580384d7ef392f789afabbb35b19e313` — CI #1159 / SMP #262 / NVMe #359 / HID Dual #18 |
+| Serialização SMP report decode × detach | ✅ | `6eb10542e4ab024dda2c28ba25dfcb97fb83dbcb` — CI #1161 / SMP #264 / NVMe #361 / HID Dual #20 |
+| Pending queries exact-epoch | ✅ | `b6b7efacfa41eac6a89400b83f409b18b6b72a38` — CI #1162 / SMP #265 / NVMe #362 / HID Dual #21 |
+| Demux/waiter exact-epoch | ✅ | `5fa048986ab4cfb8313530e9945e513633ea944f` — CI #1163 / SMP #266 / NVMe #363 / HID Dual #22 |
+| Lifecycle pending checks exact-epoch | ⏳ | `1c8b81b3cd021d12e46a964f54024f661bc1c2b3` — CI #1164 / SMP #267 / NVMe #364 / HID Dual #23 em validação |
+| Cleanup lógico de InputDevice/map/descriptors/report DMA | ⬜ | próximo microcorte após certificação do lifecycle |
+
+O Event Ring permanece com **consumidor global único**. A mailbox de Transfer Events e o waiter generation-sensitive usam a identidade `slot_id + epoch + endpoint_id + TRB pointer`. Como o Transfer Event TRB do xHCI não carrega o `epoch` de software, a reutilização física de Slot ID continua proibida até a prova de drain/barrier de **HID-4d.5**.
+
+A liberação lógica real de 4d.3b deve permanecer retry-safe e preservar a identidade antiga até o fim do cleanup. Ordem planejada:
+
+```text
+preservar device_id + generation antigos
+→ hid_input_events_unbind_device(old_id, old_generation)
+→ input_event_purge_device(old_id, old_generation)
+→ hid_input_device_map_unbind(old_id, old_generation)
+→ input_device_detach(old_id, old_generation)
+→ liberar descriptor/report DMA somente após ownership CPU e epoch exato
+→ limpar mailbox/result lógico exact-epoch
+→ marcar logical_teardown_complete
+```
+
+Não pertencem ao 4d.3b: Drop Endpoint, liberação do HID Transfer Ring, Disable Slot, Device/Input Context ou EP0 Ring.
+
 ### Próximos microcortes HID-4d
 
-1. **4d.3b — teardown HID lógico generation-safe:** report DMA, HID report state, InputDevice, field map, descriptor state e bindings, sempre validando `slot_id + epoch`.
+1. **4d.3b — teardown HID lógico generation-safe:** concluir cleanup de report DMA, HID report state, InputDevice, field map, descriptor state e bindings, sempre validando `slot_id + epoch`.
 2. **4d.3c — endpoint/rings:** Drop Endpoint/reconfiguração equivalente, remover referência do xHC, unshare/free do Transfer Ring e limpar endpoint state.
 3. **4d.4 — Disable Slot + contexts:** Command Completion validado, remover DCBAA reference e liberar Device/Input Context + EP0 Ring.
-4. **4d.5 — Slot ID reuse:** provar Slot X / epoch N → teardown → Slot X / epoch N+1 sem estado stale.
+4. **4d.5 — Slot ID reuse:** provar Slot X / epoch N → drain/barrier → teardown → Slot X / epoch N+1 sem estado stale.
 5. **4d.6 — runtime proof:** detach/reconnect em múltiplos ciclos, keyboard/mouse independentes e ausência de leaks/stale completions observáveis.
 
 ### Invariantes HID permanentes
 
 - Event Ring possui um único consumidor global.
-- API `_for(slot_id)` só usa identidade/resultados do mesmo slot e epoch.
+- APIs generation-sensitive de pending/demux/lifecycle usam `slot_id + epoch` explícitos; wrappers slot-only ficam apenas em caminhos de compatibilidade devidamente cercados.
+- Transfer completion roteada para mailbox é identificada por `slot_id + epoch + endpoint_id + TRB pointer`.
+- Transfer Event TRB não contém software epoch; Slot ID não pode ser fisicamente reutilizado antes do drain/barrier de 4d.5.
 - Slot ID reutilizado exige cleanup completo e epoch novo.
 - `DETACH_PENDING` bloqueia novos TDs, mas não apaga um TD já outstanding.
 - Stop Endpoint só marca `endpoint_stopped` depois de Command Completion e drain terminal.
