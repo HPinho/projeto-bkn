@@ -117,6 +117,82 @@ pub fn xhci_hid_descriptor_release_input_device_for_slot(slot_id: u8) -> bool {
     return released;
 }
 
+// HID-4d.3b: teardown lógico dedicado ao hotplug. Diferente do helper legado
+// de rollback acima, preserva device_id+generation até events/fila/map terem sido
+// desmontados. Só então detached a generation antiga. Repetições são seguras:
+// se o registry já avançou para uma generation nova, ela nunca é detached.
+@system
+fn xhci_hid_descriptor_teardown_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_hid_descriptor_index(slot_id);
+    if index >= XHCI_HID_DESCRIPTOR_SLOT_CAPACITY || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_HID_DESCRIPTOR_STATES[index].epoch == epoch; }
+}
+
+@system
+pub fn xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_hid_descriptor_index(slot_id);
+    let device_id = unsafe { XHCI_HID_DESCRIPTOR_STATES[index].input_device_id };
+    let generation = unsafe { XHCI_HID_DESCRIPTOR_STATES[index].input_device_generation };
+
+    if device_id == INPUT_DEVICE_ID_NONE && generation == INPUT_DEVICE_GENERATION_INVALID {
+        return true;
+    }
+    if device_id == INPUT_DEVICE_ID_NONE || generation == INPUT_DEVICE_GENERATION_INVALID ||
+       !input_device_registry_is_ready() || !input_event_queue_is_ready() ||
+       !hid_input_device_map_core_is_ready() || !hid_input_events_is_ready() {
+        return false;
+    }
+
+    if hid_input_events_device_is_bound(device_id, generation) {
+        if !hid_input_events_unbind_device(device_id, generation) { return false; }
+    }
+    if hid_input_events_device_is_bound(device_id, generation) { return false; }
+    if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+    if !input_event_purge_device(device_id, generation) { return false; }
+    if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+    if hid_input_device_map_is_ready(device_id, generation) {
+        if !hid_input_device_map_unbind(device_id, generation) { return false; }
+    }
+    if hid_input_device_map_is_ready(device_id, generation) { return false; }
+    if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+    let current_generation = input_device_generation_for_id(device_id);
+    if current_generation == INPUT_DEVICE_GENERATION_INVALID { return false; }
+    if current_generation == generation {
+        let record = input_device_snapshot(device_id, generation);
+        if !record.valid || !input_device_detach(device_id, generation) { return false; }
+        let detached_generation = input_device_generation_for_id(device_id);
+        if detached_generation == INPUT_DEVICE_GENERATION_INVALID ||
+           detached_generation == generation {
+            return false;
+        }
+    }
+    if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        if XHCI_HID_DESCRIPTOR_STATES[index].input_device_id == INPUT_DEVICE_ID_NONE &&
+           XHCI_HID_DESCRIPTOR_STATES[index].input_device_generation == INPUT_DEVICE_GENERATION_INVALID {
+            return true;
+        }
+        if XHCI_HID_DESCRIPTOR_STATES[index].epoch != epoch ||
+           XHCI_HID_DESCRIPTOR_STATES[index].input_device_id != device_id ||
+           XHCI_HID_DESCRIPTOR_STATES[index].input_device_generation != generation {
+            return false;
+        }
+        XHCI_HID_DESCRIPTOR_STATES[index].input_device_id = INPUT_DEVICE_ID_NONE;
+        XHCI_HID_DESCRIPTOR_STATES[index].input_device_generation = INPUT_DEVICE_GENERATION_INVALID;
+    }
+    return true;
+}
+
 @system
 pub fn xhci_hid_descriptor_release_input_device() -> bool {
     let slot_id = xhci_address_slot_id();
