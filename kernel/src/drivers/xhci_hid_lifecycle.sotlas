@@ -1,18 +1,22 @@
-// Baken OS — HID-4d.1/4d.2b/4d.3b1: detach quarantine e teardown gate seguro.
+// Baken OS — HID-4d.1/4d.2b/4d.3b: detach quarantine e teardown lógico seguro.
 //
 // DETACH_PENDING permanece generation-safe. HID-4d.2b para apenas o endpoint
 // HID do mesmo slot+epoch, drena o TD outstanding e registra endpoint_stopped.
-// HID-4d.3b1 abre uma transacao logica idempotente somente depois do drain.
+// HID-4d.3b abre uma transacao logica idempotente somente depois do drain e
+// conclui identity/descriptor/report/transfer state em ordem exact-epoch.
 // As consultas de pending/quiescence usadas pelo lifecycle recebem o epoch
 // esperado explicitamente; o drain legado per-slot permanece cercado por
 // revalidacao exata de slot+epoch ate sua migracao dedicada.
-// Nao desmonta InputDevice, contexts, rings, descriptors nem libera Slot ID.
+// Drop Endpoint, rings, contexts e Slot ID continuam fora desta etapa.
 
 module kernel::drivers::xhci_hid_lifecycle;
 
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
 import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_transfer::*;
 import kernel::drivers::xhci_command::*;
@@ -26,6 +30,7 @@ pub struct XhciHidLifecycleState {
     pub detach_detected: bool;
     pub endpoint_stopped: bool;
     pub logical_teardown_started: bool;
+    pub logical_teardown_complete: bool;
 }
 
 static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE_SLOT_CAPACITY] = [
@@ -34,17 +39,42 @@ static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE
         epoch: 0,
         detach_detected: false,
         endpoint_stopped: false,
-        logical_teardown_started: false
+        logical_teardown_started: false,
+        logical_teardown_complete: false
     };
     XHCI_HID_LIFECYCLE_SLOT_CAPACITY
 ];
 static mut XHCI_HID_LIFECYCLE_LAST_SCAN_OK: bool = false;
 static mut XHCI_HID_LIFECYCLE_DETACH_PENDING_COUNT: u16 = 0;
+static mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 
 @system
 fn xhci_hid_lifecycle_index(slot_id: u8) -> usize {
     if slot_id == 0 { return XHCI_HID_LIFECYCLE_SLOT_CAPACITY; }
     return slot_id as usize;
+}
+
+// Serializa a sequência que pode chegar a dma_release. O lock é global nesta
+// etapa porque teardown é raro e isso evita dois CPUs desmontarem o mesmo slot
+// simultaneamente. IRQ save/restore segue o padrão dos registries SMP-safe.
+@system
+fn xhci_hid_lifecycle_teardown_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn xhci_hid_lifecycle_teardown_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
 }
 
 @system
@@ -62,6 +92,7 @@ fn xhci_hid_lifecycle_publish_detach(slot_id: u8, epoch: u32) -> bool {
         XHCI_HID_LIFECYCLE_STATES[index].detach_detected = true;
         XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = false;
         XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started = false;
+        XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = false;
     }
     return true;
 }
@@ -257,6 +288,87 @@ pub fn xhci_hid_lifecycle_logical_teardown_started_for(slot_id: u8, epoch: u32) 
                XHCI_HID_LIFECYCLE_STATES[index].detach_detected &&
                XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped &&
                XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started;
+    }
+}
+
+// HID-4d.3b: fecha a transacao logica somente depois de todos os sub-cleanups
+// generation-safe. O lock cobre toda a sequência que pode chegar a dma_release,
+// eliminando double-free entre CPUs. Cada etapa continua revalidando o epoch.
+@system
+pub fn xhci_hid_lifecycle_complete_logical_teardown_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY || epoch == 0 { return false; }
+
+    let flags = xhci_hid_lifecycle_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    let mut already_complete = false;
+    unsafe {
+        if complete_ok {
+            already_complete = XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete;
+        }
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_descriptor_teardown_dma_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_report_teardown_dma_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_transfer_clear_slot_state_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) &&
+                      xhci_hid_lifecycle_quiescent_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        unsafe {
+            if !XHCI_HID_LIFECYCLE_STATES[index].valid ||
+               XHCI_HID_LIFECYCLE_STATES[index].epoch != epoch ||
+               !XHCI_HID_LIFECYCLE_STATES[index].detach_detected ||
+               !XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped ||
+               !XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started {
+                complete_ok = false;
+            } else {
+                XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = true;
+            }
+        }
+    }
+
+    xhci_hid_lifecycle_teardown_unlock_irq(flags);
+    return complete_ok;
+}
+
+@system
+pub fn xhci_hid_lifecycle_logical_teardown_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_HID_LIFECYCLE_STATES[index].valid &&
+               XHCI_HID_LIFECYCLE_STATES[index].epoch == epoch &&
+               XHCI_HID_LIFECYCLE_STATES[index].detach_detected &&
+               XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped &&
+               XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started &&
+               XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete;
     }
 }
 
