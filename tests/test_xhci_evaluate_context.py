@@ -56,8 +56,8 @@ class XhciEvaluateContextTests(unittest.TestCase):
     def test_descriptor_probe_is_normalized_per_slot(self):
         self.assertIn("xhci_descriptor_ep0_max_packet_bytes(raw: u8)", self.text)
         self.assertIn("if raw == 9 { return 512; }", self.text)
-        self.assertIn("xhci_device_descriptor_probe_max_packet0_for_slot(slot_id)", self.text)
-        self.assertIn("xhci_device_descriptor_probe_is_ready_for_slot(slot_id)", self.text)
+        self.assertIn("xhci_device_descriptor_probe_max_packet0_for(slot_id)", self.text)
+        self.assertIn("xhci_device_descriptor_probe_is_ready_for(slot_id)", self.text)
 
     def test_reconcile_uses_matching_ep0_and_falls_back_to_evaluate(self):
         self.assertIn("pub fn xhci_reconcile_ep0_from_descriptor_probe_for_slot(slot_id: u8)", self.text)

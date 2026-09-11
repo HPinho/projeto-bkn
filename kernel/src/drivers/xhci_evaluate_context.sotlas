@@ -95,7 +95,6 @@ pub fn xhci_evaluate_ep0_max_packet_for_slot(slot_id: u8, max_packet: u16) -> bo
             ((max_packet as u32) << XHCI_EVALUATE_EP0_MAX_PACKET_SHIFT);
     }
 
-    // Publication barrier antes de entregar o Input Context ao controller.
     if x86_read_cr3_raw() == 0 { return false; }
     let command = xhci_trb_evaluate_context(
         input_physical,
@@ -123,13 +122,10 @@ pub fn xhci_evaluate_ep0_max_packet(max_packet: u16) -> bool {
     return xhci_evaluate_ep0_max_packet_for_slot(slot_id, max_packet);
 }
 
-// Reconciliador pós-probe por slot: se o Context já nasceu com o MPS correto,
-// não envia comando redundante. Se divergir, prova a correção por Evaluate
-// Context real usando exatamente o slot que forneceu o Device Descriptor.
 @system
 pub fn xhci_reconcile_ep0_from_descriptor_probe_for_slot(slot_id: u8) -> bool {
     if !xhci_device_table_slot_is_valid(slot_id) ||
-       !xhci_device_descriptor_probe_is_ready_for_slot(slot_id) ||
+       !xhci_device_descriptor_probe_is_ready_for(slot_id) ||
        !xhci_context_is_ready_for(slot_id) {
         return false;
     }
@@ -141,7 +137,7 @@ pub fn xhci_reconcile_ep0_from_descriptor_probe_for_slot(slot_id: u8) -> bool {
     }
 
     let target = xhci_descriptor_ep0_max_packet_bytes(
-        xhci_device_descriptor_probe_max_packet0_for_slot(slot_id)
+        xhci_device_descriptor_probe_max_packet0_for(slot_id)
     );
     if target == 0 { return false; }
 
