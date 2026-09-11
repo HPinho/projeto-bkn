@@ -35,6 +35,7 @@ import kernel::scheduler::smp_probe::*;
 import kernel::platform::inventory::*;
 import kernel::platform::device_catalog::*;
 import kernel::platform::storage_binding::*;
+import kernel::platform::hid_late_attach::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -184,6 +185,11 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
                                height: u32, pixels_per_scanline: u32) -> ! {
     if framebuffer == (null as *mut u32) || width == 0 || height == 0 ||
        pixels_per_scanline < width { loop {} }
+
+    // HID-4c.4d: late attach é oportunista e não fatal. O proof legado do
+    // primeiro teclado já terminou em post_cutover; hardware sem segundo HID
+    // continua inicializando normalmente. O workflow dual exige o marker real.
+    platform_hid_late_attach_second_mouse();
 
     // Fase 2/AML: catálogo -> decoder/data -> namespace -> loader -> discovery.
     // AML-5 apenas consulta objetos estáticos; Method/OperationRegion não são executados.

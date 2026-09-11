@@ -1,0 +1,90 @@
+// Baken OS — HID-4c.4d: late attach não fatal do segundo HID xHCI.
+//
+// O primeiro teclado continua pertencendo ao proof legado de post_cutover.
+// Esta etapa roda depois da fundação e tenta conectar apenas o próximo device
+// HID disponível ao runtime de plataforma. Ausência/falha do segundo HID não
+// bloqueia hardware real; o workflow dedicado exige o marker de sucesso.
+
+module kernel::platform::hid_late_attach;
+
+import kernel::arch::x86_64::serial::*;
+import kernel::drivers::xhci_address::*;
+import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_hid_enumeration::*;
+import kernel::drivers::xhci_hid_report::*;
+
+pub const PLATFORM_HID_LATE_ATTACH_ATTEMPTS: u32 = 8;
+
+static mut PLATFORM_HID_LATE_ATTACH_ATTEMPTED: bool = false;
+static mut PLATFORM_HID_LATE_ATTACH_READY: bool = false;
+static mut PLATFORM_HID_LATE_ATTACH_SLOT_ID: u8 = 0;
+
+@system
+fn platform_hid_late_attach_emit_ready_marker() -> bool {
+    // BAKEN:USB_HID_DUAL_READY\n
+    let marker: [u8; 25] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,68,85,
+        65,76,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 25 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+pub fn platform_hid_late_attach_second_mouse() -> bool {
+    unsafe {
+        if PLATFORM_HID_LATE_ATTACH_READY { return true; }
+        if PLATFORM_HID_LATE_ATTACH_ATTEMPTED { return false; }
+        PLATFORM_HID_LATE_ATTACH_ATTEMPTED = true;
+    }
+
+    let first_slot = xhci_address_slot_id();
+    if first_slot == 0 || xhci_hid_protocol_for(first_slot) != USB_HID_PROTOCOL_KEYBOARD {
+        return false;
+    }
+
+    // Começa do início do inventário e pula portas que já possuem Slot ID.
+    // No QEMU certificado isso preserva usb-kbd como primeiro device e seleciona
+    // usb-mouse como o próximo dispositivo conectado.
+    let second_slot = xhci_hid_enumerate_next_connected(0);
+    if second_slot == 0 || second_slot == first_slot || xhci_slot_active_count() < 2 {
+        return false;
+    }
+    if !xhci_hid_enumeration_is_ready_for(second_slot) ||
+       xhci_hid_protocol_for(second_slot) != USB_HID_PROTOCOL_MOUSE {
+        return false;
+    }
+
+    let mut attempts: u32 = 0;
+    while attempts < PLATFORM_HID_LATE_ATTACH_ATTEMPTS {
+        if !xhci_hid_report_poll_slot_once(second_slot) { return false; }
+        if xhci_hid_report_last_length_for(second_slot) >= XHCI_HID_BOOT_MOUSE_MIN_LENGTH {
+            if !platform_hid_late_attach_emit_ready_marker() { return false; }
+            unsafe {
+                PLATFORM_HID_LATE_ATTACH_SLOT_ID = second_slot;
+                PLATFORM_HID_LATE_ATTACH_READY = true;
+            }
+            return true;
+        }
+        attempts += 1;
+    }
+    return false;
+}
+
+@system
+pub fn platform_hid_late_attach_is_ready() -> bool {
+    unsafe { return PLATFORM_HID_LATE_ATTACH_READY; }
+}
+
+@system
+pub fn platform_hid_late_attach_slot_id() -> u8 {
+    unsafe {
+        if !PLATFORM_HID_LATE_ATTACH_READY { return 0; }
+        return PLATFORM_HID_LATE_ATTACH_SLOT_ID;
+    }
+}

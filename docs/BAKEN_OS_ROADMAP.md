@@ -4,7 +4,7 @@ Atualizado em 2026-09-11 (America/Fortaleza).
 
 Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`.
 
-Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only** passam no mesmo SHA. Teste textual não substitui build Sotlas nativo, ISO nem prova QEMU.
+Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only** passam no mesmo SHA. Teste textual não substitui build Sotlas nativo, ISO nem prova QEMU. Etapas que introduzem um proof de hardware específico podem exigir um workflow runtime adicional sem substituir esses três gates.
 
 ## Estado geral
 
@@ -18,7 +18,7 @@ Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only*
 
 O desenvolvimento está na **Fase 2 — Platform/Drivers**, **Trilha B — HID/input de produção**, dentro do **HID-4c.4 — enumeração simultânea real de múltiplos dispositivos xHCI**.
 
-O **HID-4c.3 está encerrado e certificado**. O **HID-4c.4a** e o **HID-4c.4b** também estão certificados. O candidato atual é **HID-4c.4c — pipeline completo por porta**, que compõe as APIs per-slot já certificadas sem alterar o caminho legado do primeiro teclado.
+O **HID-4c.3 está encerrado e certificado**. **HID-4c.4a, HID-4c.4b e HID-4c.4c também estão certificados**. O candidato atual é **HID-4c.4d — dual-device runtime proof**, mantendo o teclado legado como primeiro HID e anexando um mouse como segundo Slot ID independente.
 
 O Kernel Core permanece congelado. Drivers novos não podem relaxar invariantes de SMP, scheduler, memória, TLB, Ring3, FPU/SIMD ou teardown.
 
@@ -102,48 +102,33 @@ HID context por slot+epoch, DCI/ring/max packet/interval, Configure Endpoint, re
 |---|---|---|
 | HID-4c.4a Reset explícito por porta | ✅ | `8ef11b5e9298552d52eee3954ccd305e4421708d` — CI #1139 / SMP #242 / NVMe #339 |
 | HID-4c.4b Inventário/seleção multi-port | ✅ | `ff98c978ea9f11f78217369a9ec856ffcdf7a45b` — CI #1140 / SMP #243 / NVMe #340 |
-| HID-4c.4c Pipeline completo por porta | ⏳ | candidato atual: porta explícita → Slot ID → cadeia HID completa |
-| HID-4c.4d Dual-device runtime proof | ⬜ | keyboard primeiro + mouse segundo no QEMU |
-| HID-4c.4e Interleaving/event demux | ⬜ | provar eventos independentes; expandir demux somente se necessário |
+| HID-4c.4c Pipeline completo por porta | ✅ | `20b016973d12d4d669cf54ea79623a9116eb341f` — CI #1141 / SMP #244 / NVMe #341 |
+| HID-4c.4d Dual-device runtime proof | ⏳ | candidato atual: keyboard primeiro + mouse segundo no QEMU |
+| HID-4c.4e Interleaving/event demux | ⬜ | provar eventos independentes e alternados; expandir demux somente se necessário |
 
 ### Baseline certificada atual
 
 ```text
-ff98c978ea9f11f78217369a9ec856ffcdf7a45b
-feat(xhci): add bounded multi-port staging
+20b016973d12d4d669cf54ea79623a9116eb341f
+feat(xhci): add per-port HID enumeration pipeline
 ```
 
-- CI #1140 / `34558394871` ✅;
-- SMP #243 / `34558394930` ✅;
-- NVMe #340 / `34558394895` ✅.
+- CI #1141 / `34591682640` ✅;
+- SMP #244 / `34591682675` ✅;
+- NVMe #341 / `34591682642` ✅.
 
-### Candidato atual — HID-4c.4c
-
-Novo módulo:
-
-```text
-kernel::drivers::xhci_hid_enumeration
-```
-
-Contrato principal:
-
-```text
-xhci_hid_enumerate_port(port_id) -> slot_id
-```
-
-Pipeline:
+Essa baseline certifica o pipeline por porta:
 
 ```text
 Port Stage explícito
 → Enable Slot
-→ Device/Input Context + EP0 ring
+→ Device/Input Context + EP0
 → Address Device
-→ EP0 producer
 → Device Descriptor 8 bytes
-→ Evaluate Context / bMaxPacketSize0
+→ Evaluate Context
 → Device Descriptor completo
-→ Configuration header
-→ Configuration completo + parser HID
+→ Configuration Descriptor
+→ parser HID
 → HID endpoint context
 → Configure Endpoint
 → SET_CONFIGURATION
@@ -151,31 +136,72 @@ Port Stage explícito
 → HID report ring ready
 ```
 
-Regras:
+O mesmo `slot_id` é propagado em toda a cadeia. Em falha pós-Enable Slot, o dispositivo é marcado `FAILED`, identidade HID é desmontada, Disable Slot precisa ser confirmado pelo xHC e o registro permanece em quarentena até existir teardown completo em HID-4d.
 
-- um único `slot_id` é carregado de ponta a ponta;
-- nenhuma etapa do novo pipeline usa wrapper `first_*` ou singleton para decidir o device;
-- porta já associada a Slot ID não é reenumerada;
-- o `slot_type` vem do staging da mesma porta;
-- `xhci_hid_enumeration_is_ready_for(slot_id)` exige toda a cadeia final do mesmo slot;
-- o helper `xhci_hid_enumerate_next_connected(after_port_id)` é bounded e pula apenas portas já associadas a slots válidos;
-- uma porta nova que falha não é silenciosamente ignorada.
+### Candidato atual — HID-4c.4d dual-device runtime
 
-### Rollback/quarentena do candidato
+Novo estágio de plataforma:
 
-Se houver falha depois de Enable Slot:
+```text
+kernel::platform::hid_late_attach
+```
 
-1. o registro vira `XHCI_DEVICE_STATE_FAILED`;
-2. eventual `InputDevice`/map/event binding do slot é desmontado;
-3. um **Disable Slot Command** é enviado ao xHC;
-4. a Command Completion precisa referenciar o mesmo Slot ID;
-5. o registro local permanece em **quarentena FAILED**.
+Contrato:
 
-O candidato **não chama `xhci_device_table_release()`**. Hoje `xhci_context` e outros módulos ainda podem manter estado `ready` do epoch anterior; liberar cedo permitiria reuse de Slot ID sobre estado stale. Cleanup completo + reuse ficam no HID-4d.
+```text
+platform_hid_late_attach_second_mouse()
+```
+
+Regras do candidato:
+
+- o caminho `post_cutover` do primeiro teclado permanece literalmente intacto;
+- o late attach roda somente depois do proof/fundação e **não é fatal** se não houver segundo HID;
+- o primeiro slot precisa continuar sendo Boot keyboard;
+- `xhci_hid_enumerate_next_connected(0)` seleciona a próxima porta ainda sem Slot ID;
+- o segundo Slot ID precisa ser diferente do primeiro e `xhci_slot_active_count() >= 2`;
+- o segundo device precisa chegar a `xhci_hid_enumeration_is_ready_for(second_slot)`;
+- o protocolo do segundo slot precisa ser `USB_HID_PROTOCOL_MOUSE`;
+- a prova final chama `xhci_hid_report_poll_slot_once(second_slot)` e exige comprimento real de Boot mouse;
+- somente depois dessa completion o kernel publica `BAKEN:USB_HID_DUAL_READY`.
+
+A ausência/falha do segundo dispositivo não bloqueia o boot normal. A prova forte pertence ao workflow dedicado:
+
+```text
+Baken OS HID Dual-device Verification
+```
+
+Esse workflow executa QEMU com a ordem obrigatória:
+
+```text
+qemu-xhci
+→ usb-kbd
+→ usb-mouse
+```
+
+mantém `sendkey a` para o primeiro teclado, injeta `mouse_move 5 3` para o segundo device e só fica verde se o marker `BAKEN:USB_HID_DUAL_READY` aparecer no serial. Os três gates CI/SMP/NVMe continuam obrigatórios no mesmo SHA; o workflow dual é a prova adicional específica do HID-4c.4d.
 
 ### Compatibilidade
 
-O caminho em `post_cutover.sotlas` do primeiro teclado permanece inalterado. O novo orquestrador é compilado no grafo, mas não é chamado pelo proof legado neste corte. HID-4c.4d será o primeiro estágio a conectar explicitamente uma segunda porta/device ao runtime QEMU.
+O caminho histórico permanece:
+
+```text
+post_cutover_prepare_first_usb_port
+→ post_cutover_enable_first_usb_slot
+→ post_cutover_prepare_first_usb_context
+→ post_cutover_address_first_usb_device
+→ post_cutover_probe_first_usb_descriptor
+→ post_cutover_reconcile_first_usb_ep0
+→ post_cutover_read_full_usb_device_descriptor
+→ post_cutover_probe_first_usb_configuration_header
+→ post_cutover_read_full_usb_configuration_descriptor
+→ post_cutover_parse_first_usb_hid_interface
+→ post_cutover_configure_first_usb_hid_endpoint
+→ post_cutover_set_first_usb_configuration
+→ post_cutover_prove_first_usb_hid_keyboard_report
+→ storage
+```
+
+O proof continua exigindo Boot keyboard report real, mínimo de 8 bytes, Usage ID `4` (`A`) e `POST_CUTOVER_HID_REPORT_ATTEMPTS = 8`.
 
 ### Regras permanentes HID-4c
 
@@ -186,7 +212,12 @@ O caminho em `post_cutover.sotlas` do primeiro teclado permanece inalterado. O n
 - `sendkey a` do primeiro teclado permanece obrigatório;
 - não relaxar timeout, marker ou proof para obter verde;
 - staging multi-port nunca reinicializa o Command Ring após o bring-up inicial;
-- não criar marker falso de “dual device” antes da prova QEMU real.
+- `DUAL_READY` só pode ser publicado após completion Interrupt IN real do segundo slot;
+- o late attach de HIDs adicionais não pode transformar presença de segundo device em requisito universal de boot.
+
+### HID-4c.4e — próximo após 4c.4d verde
+
+**⬜ PLANEJADO.** Provar interleaving keyboard/mouse, completions alternadas no mesmo Event Ring, atribuição correta por Slot ID/DCI/TRB e independência de `InputDevice + generation`. Só alterar demux se a prova real demonstrar necessidade.
 
 ### HID-4d — hot-plug/recovery
 
