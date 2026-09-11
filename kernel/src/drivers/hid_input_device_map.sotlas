@@ -37,6 +37,9 @@ static mut HID_DEVICE_MAP_GENERATIONS: [u32; HID_DEVICE_MAP_CAPACITY] = [0; HID_
 static mut HID_DEVICE_MAP_READY_SLOTS: [bool; HID_DEVICE_MAP_CAPACITY] = [false; HID_DEVICE_MAP_CAPACITY];
 static mut HID_DEVICE_MAP_BUILD_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 static mut HID_DEVICE_MAP_CORE_READY: bool = false;
+// O self-test usa IDs sintéticos 1/2 e, portanto, só pode tocar o armazenamento
+// antes do primeiro binding runtime. Depois de aprovado ele vira consulta one-shot.
+static mut HID_DEVICE_MAP_SELF_TEST_PASSED: bool = false;
 
 @system
 fn hid_input_device_map_slot(device_id: u32) -> usize {
@@ -93,6 +96,19 @@ fn hid_input_device_map_context_matches(device_id: u32, generation: u32) -> bool
         return HID_DEVICE_MAP_CORE_READY && HID_DEVICE_MAP_READY_SLOTS[slot] &&
                HID_DEVICE_MAP_GENERATIONS[slot] == generation;
     }
+}
+
+@system
+fn hid_input_device_map_has_live_bindings() -> bool {
+    unsafe {
+        if !HID_DEVICE_MAP_CORE_READY { return false; }
+        let mut slot: usize = 0;
+        while slot < HID_DEVICE_MAP_CAPACITY {
+            if HID_DEVICE_MAP_READY_SLOTS[slot] { return true; }
+            slot += 1;
+        }
+    }
+    return false;
 }
 
 @system
@@ -457,6 +473,12 @@ pub fn hid_input_device_map_find_usage(device_id: u32,
 @system
 pub fn hid_input_device_map_self_test() -> bool {
     if !hid_input_device_map_initialize() { return false; }
+    unsafe {
+        if HID_DEVICE_MAP_SELF_TEST_PASSED { return true; }
+    }
+    // O teste usa intencionalmente os slots 1/2. Se qualquer mapa runtime já
+    // existir antes da primeira certificação, não é seguro sobrescrevê-lo.
+    if hid_input_device_map_has_live_bindings() { return false; }
 
     let keyboard: [u8; 63] = [
         0x05,0x01,0x09,0x06,0xA1,0x01,
@@ -513,5 +535,6 @@ pub fn hid_input_device_map_self_test() -> bool {
     if !hid_input_device_map_unbind(2, 7) || hid_input_device_map_is_ready(2, 7) {
         return false;
     }
+    unsafe { HID_DEVICE_MAP_SELF_TEST_PASSED = true; }
     return true;
 }

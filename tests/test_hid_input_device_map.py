@@ -60,6 +60,21 @@ class HidInputDeviceMapTests(unittest.TestCase):
         self.assertIn("hid_input_device_map_unbind(1, 11)", body)
         self.assertIn("hid_input_device_map_is_ready(2, 7)", body)
 
+    def test_self_test_is_one_shot_and_never_clobbers_runtime_maps(self):
+        text = DEVICE_MAP.read_text(encoding="utf-8")
+        self.assertIn("static mut HID_DEVICE_MAP_SELF_TEST_PASSED: bool = false", text)
+        self.assertIn("fn hid_input_device_map_has_live_bindings() -> bool", text)
+        body = text.split("pub fn hid_input_device_map_self_test()", 1)[1]
+        cached = body.index("if HID_DEVICE_MAP_SELF_TEST_PASSED { return true; }")
+        live_guard = body.index("if hid_input_device_map_has_live_bindings() { return false; }")
+        first_build = body.index("hid_input_device_map_build(1, 11")
+        second_unbind = body.index("hid_input_device_map_unbind(2, 7)")
+        certified = body.index("HID_DEVICE_MAP_SELF_TEST_PASSED = true")
+        self.assertLess(cached, live_guard)
+        self.assertLess(live_guard, first_build)
+        self.assertLess(second_unbind, certified)
+        self.assertNotIn("HID_DEVICE_MAP_SELF_TEST_PASSED = false", body)
+
     def test_runtime_consumers_do_not_use_singleton_map(self):
         events = HID_EVENTS.read_text(encoding="utf-8")
         report = XHCI_REPORT.read_text(encoding="utf-8")
