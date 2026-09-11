@@ -116,7 +116,7 @@ class XhciHidLifecycleTests(unittest.TestCase):
             "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)",
             "XHCI_HID_LIFECYCLE_STATES[index].epoch != epoch",
             "xhci_hid_context_dci_for(slot_id)",
-            "xhci_hid_report_transfer_pending_for(slot_id)",
+            "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)",
             "xhci_trb_stop_endpoint(",
             "xhci_command_submit(command)",
             "xhci_command_wait_completion(command_physical)",
@@ -126,6 +126,7 @@ class XhciHidLifecycleTests(unittest.TestCase):
             "XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = true",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
         assert_order(
             self,
             body,
@@ -179,8 +180,8 @@ class XhciHidLifecycleTests(unittest.TestCase):
 
         quiescent = function_body(text, "xhci_hid_lifecycle_quiescent_for")
         exact = "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)"
-        report = "xhci_hid_report_transfer_pending_for(slot_id)"
-        mailbox = "xhci_transfer_pending_is_ready_for(slot_id)"
+        report = "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)"
+        mailbox = "xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)"
         first_exact = quiescent.find(exact)
         report_pos = quiescent.find(report)
         second_exact = quiescent.find(exact, report_pos + len(report))
@@ -191,6 +192,8 @@ class XhciHidLifecycleTests(unittest.TestCase):
         self.assertGreater(second_exact, report_pos)
         self.assertGreater(mailbox_pos, second_exact)
         self.assertGreater(final_exact, mailbox_pos)
+        self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", quiescent)
+        self.assertNotIn("xhci_transfer_pending_is_ready_for(slot_id)", quiescent)
 
     def test_lifecycle_does_not_use_global_singleton_slot_apis(self):
         text = LIFECYCLE.read_text(encoding="utf-8")

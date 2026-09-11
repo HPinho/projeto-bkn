@@ -144,8 +144,8 @@ class XhciHidCancelTests(unittest.TestCase):
         text = LIFECYCLE.read_text(encoding="utf-8")
         body = function_body(text, "xhci_hid_lifecycle_quiescent_for")
         exact = "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)"
-        report = "xhci_hid_report_transfer_pending_for(slot_id)"
-        mailbox = "xhci_transfer_pending_is_ready_for(slot_id)"
+        report = "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)"
+        mailbox = "xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)"
 
         first_exact = body.find(exact)
         report_pos = body.find(report)
@@ -158,6 +158,8 @@ class XhciHidCancelTests(unittest.TestCase):
         self.assertGreater(second_exact, report_pos)
         self.assertGreater(mailbox_pos, second_exact)
         self.assertGreater(final_exact, mailbox_pos)
+        self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
+        self.assertNotIn("xhci_transfer_pending_is_ready_for(slot_id)", body)
 
 
 if __name__ == "__main__":

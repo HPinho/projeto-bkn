@@ -108,11 +108,11 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
             ".logical_teardown_started = false;",
         )
 
-    def test_quiescence_brackets_slot_scoped_compatibility_apis(self) -> None:
+    def test_quiescence_uses_exact_epoch_pending_apis_with_revalidation(self) -> None:
         body = function_body(self.source, "xhci_hid_lifecycle_quiescent_for")
         exact = "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)"
-        report = "xhci_hid_report_transfer_pending_for(slot_id)"
-        mailbox = "xhci_transfer_pending_is_ready_for(slot_id)"
+        report = "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)"
+        mailbox = "xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)"
 
         first_exact = body.find(exact)
         report_pos = body.find(report)
@@ -125,11 +125,13 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
         self.assertGreater(second_exact, report_pos)
         self.assertGreater(mailbox_pos, second_exact)
         self.assertGreater(final_exact, mailbox_pos)
+        self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
+        self.assertNotIn("xhci_transfer_pending_is_ready_for(slot_id)", body)
 
-    def test_stop_endpoint_revalidates_epoch_around_slot_only_drain(self) -> None:
+    def test_stop_endpoint_uses_exact_pending_and_revalidates_slot_only_drain(self) -> None:
         body = function_body(self.source, "xhci_hid_lifecycle_stop_endpoint_for")
         exact = "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)"
-        pending = "xhci_hid_report_transfer_pending_for(slot_id)"
+        pending = "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)"
         command_wait = "xhci_command_wait_completion(command_physical)"
         drain = "xhci_hid_report_drain_cancelled_for_slot(slot_id)"
         quiescent = "xhci_hid_lifecycle_quiescent_for(slot_id, epoch)"
@@ -137,6 +139,7 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
         pending_pos = body.find(pending)
         self.assertGreaterEqual(pending_pos, 0)
         self.assertGreater(body.find(exact, pending_pos + len(pending)), pending_pos)
+        self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
 
         wait_pos = body.find(command_wait)
         drain_pos = body.find(drain)
