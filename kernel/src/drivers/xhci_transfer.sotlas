@@ -99,6 +99,66 @@ fn xhci_transfer_clear_pending_index(index: usize) -> bool {
     return true;
 }
 
+// HID-4d.3b: gate exato para limpar somente estado lógico de transfer após
+// Stop Endpoint + drain. O caller de lifecycle ainda é responsável por provar
+// endpoint_stopped/quiescence; este módulo não importa o lifecycle para manter
+// o grafo acíclico. DETACH_PENDING impede novos submits para esta geração.
+@system
+fn xhci_transfer_teardown_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    return true;
+}
+
+// Limpa mailbox/result lógico do slot+epoch sem consumir Event Ring e sem tocar
+// no Transfer Ring físico. Uma mailbox válida do mesmo epoch é sempre recusada:
+// ela ainda representa uma completion que precisa ser tomada/drenada. Mailbox
+// stale de outro epoch pode ser descartada porque o device-table continua preso
+// ao epoch esperado; reuso físico de Slot ID segue proibido até HID-4d.5.
+@system
+pub fn xhci_transfer_clear_slot_state_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_transfer_teardown_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+           XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch {
+            return false;
+        }
+    }
+    if !xhci_transfer_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+    // Revalida imediatamente antes da mutação. DETACH_PENDING + proibição de
+    // slot reuse antes de 4d.5 garantem que uma geração nova não pode aparecer
+    // legitimamente neste índice durante este microcorte.
+    unsafe {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+           XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch {
+            return false;
+        }
+    }
+    if !xhci_transfer_clear_pending_index(index) { return false; }
+    if !xhci_transfer_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        XHCI_TRANSFER_RESULTS[index].valid = false;
+        XHCI_TRANSFER_RESULTS[index].epoch = 0;
+        XHCI_TRANSFER_RESULTS[index].endpoint_id = 0;
+        XHCI_TRANSFER_RESULTS[index].residual_length = 0;
+        XHCI_TRANSFER_RESULTS[index].completion_code = 0;
+        if XHCI_TRANSFER_ACTIVE_SLOT_ID == slot_id {
+            XHCI_TRANSFER_ACTIVE_SLOT_ID = 0;
+        }
+    }
+    return xhci_transfer_teardown_epoch_matches(slot_id, epoch);
+}
+
 // HID-4d.3b2 prerequisite: exact-generation mailbox query. Unlike the
 // compatibility wrapper, this function never follows the slot's implicit
 // current epoch and never mutates a stale mailbox while answering a query.
