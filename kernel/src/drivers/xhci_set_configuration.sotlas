@@ -1,12 +1,12 @@
-// Baken OS — ativa a configuração USB selecionada após Configure Endpoint.
+// Baken OS — HID-4c.3: SET_CONFIGURATION USB por Slot ID + epoch.
 //
-// Envia SET_CONFIGURATION como control transfer sem Data Stage: Setup OUT
-// seguido por Status IN + IOC no EP0. Após o dispositivo confirmar a
-// configuração, lê e valida o HID Report Descriptor real antes de publicar
-// este estágio como pronto. Não publica transfers Interrupt IN nesta fase.
+// Cada Slot ID mantém confirmação e configuration value próprios. O caminho
+// legado do primeiro HID continua como wrapper sobre o slot ativo do Configure
+// Endpoint, mas toda a operação real usa APIs _for(slot_id) de ponta a ponta.
 
 module kernel::drivers::xhci_set_configuration;
 
+import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_configuration::*;
 import kernel::drivers::xhci_configure_endpoint::*;
 import kernel::drivers::xhci_address::*;
@@ -17,24 +17,97 @@ import kernel::drivers::xhci_hid_descriptor::*;
 
 pub const USB_REQUEST_SET_CONFIGURATION: u8 = 9;
 pub const USB_REQUEST_TYPE_HOST_TO_DEVICE_STANDARD_DEVICE: u8 = 0x00;
+pub const XHCI_SET_CONFIGURATION_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
 
-static mut XHCI_SET_CONFIGURATION_READY: bool = false;
-static mut XHCI_SET_CONFIGURATION_VALUE: u8 = 0;
+pub struct XhciSetConfigurationState {
+    pub ready: bool;
+    pub epoch: u32;
+    pub value: u8;
+}
+
+static mut XHCI_SET_CONFIGURATION_STATES: [XhciSetConfigurationState; XHCI_SET_CONFIGURATION_SLOT_CAPACITY] = [
+    XhciSetConfigurationState {
+        ready: false,
+        epoch: 0,
+        value: 0
+    };
+    XHCI_SET_CONFIGURATION_SLOT_CAPACITY
+];
+static mut XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID: u8 = 0;
 
 @system
-pub fn xhci_set_first_configuration() -> bool {
-    unsafe {
-        XHCI_SET_CONFIGURATION_READY = false;
-        XHCI_SET_CONFIGURATION_VALUE = 0;
+fn xhci_set_configuration_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_SET_CONFIGURATION_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
+
+@system
+fn xhci_set_configuration_prepare_state(slot_id: u8) -> bool {
+    let index = xhci_set_configuration_index(slot_id);
+    if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY ||
+       !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
     }
-    if !xhci_configuration_is_ready() || !xhci_configure_endpoint_is_ready() ||
-       !xhci_ep0_is_ready() || !xhci_address_is_ready() { return false; }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
+    unsafe {
+        if XHCI_SET_CONFIGURATION_STATES[index].epoch != epoch {
+            XHCI_SET_CONFIGURATION_STATES[index].ready = false;
+            XHCI_SET_CONFIGURATION_STATES[index].epoch = epoch;
+            XHCI_SET_CONFIGURATION_STATES[index].value = 0;
+        }
+    }
+    return true;
+}
 
-    let configuration_value = xhci_configuration_value();
-    let slot_id = xhci_address_slot_id();
-    if configuration_value == 0 || slot_id == 0 { return false; }
-    if xhci_configure_endpoint_slot_id() != slot_id { return false; }
+@system
+pub fn xhci_set_configuration_is_ready_for(slot_id: u8) -> bool {
+    let index = xhci_set_configuration_index(slot_id);
+    if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY ||
+       !xhci_device_table_slot_is_valid(slot_id) {
+        return false;
+    }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
+    unsafe {
+        return XHCI_SET_CONFIGURATION_STATES[index].ready &&
+               XHCI_SET_CONFIGURATION_STATES[index].epoch == epoch &&
+               XHCI_SET_CONFIGURATION_STATES[index].value != 0;
+    }
+}
 
+@system
+pub fn xhci_set_configuration_for_slot(slot_id: u8) -> bool {
+    if !xhci_device_table_slot_is_valid(slot_id) ||
+       !xhci_address_is_ready_for(slot_id) ||
+       !xhci_configuration_is_ready_for(slot_id) ||
+       !xhci_configure_endpoint_is_ready_for(slot_id) ||
+       !xhci_ep0_is_ready_for(slot_id) {
+        return false;
+    }
+    if !xhci_set_configuration_prepare_state(slot_id) { return false; }
+
+    let index = xhci_set_configuration_index(slot_id);
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    let configuration_value = xhci_configuration_value_for(slot_id);
+    if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY || epoch == 0 ||
+       configuration_value == 0 {
+        return false;
+    }
+
+    unsafe {
+        if XHCI_SET_CONFIGURATION_STATES[index].ready &&
+           XHCI_SET_CONFIGURATION_STATES[index].epoch == epoch &&
+           XHCI_SET_CONFIGURATION_STATES[index].value == configuration_value &&
+           xhci_hid_descriptor_is_ready_for(slot_id) {
+            XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID = slot_id;
+            return true;
+        }
+        XHCI_SET_CONFIGURATION_STATES[index].ready = false;
+        XHCI_SET_CONFIGURATION_STATES[index].value = 0;
+    }
+
+    let cycle = xhci_ep0_producer_cycle_for(slot_id);
     let setup = xhci_trb_setup_stage(
         USB_REQUEST_TYPE_HOST_TO_DEVICE_STANDARD_DEVICE,
         USB_REQUEST_SET_CONFIGURATION,
@@ -42,13 +115,14 @@ pub fn xhci_set_first_configuration() -> bool {
         0,
         0,
         XHCI_SETUP_TRT_NO_DATA,
-        xhci_ep0_producer_cycle()
+        cycle
     );
-    let unused_data = xhci_trb_normal(0, 0, 0, false, xhci_ep0_producer_cycle());
+    let unused_data = xhci_trb_normal(0, 0, 0, false, cycle);
     // Sem Data Stage, Status segue na direção oposta ao request (IN).
-    let status = xhci_trb_status_stage(true, true, xhci_ep0_producer_cycle());
+    let status = xhci_trb_status_stage(true, true, cycle);
 
-    let status_physical = xhci_ep0_submit_control_td(
+    let status_physical = xhci_ep0_submit_control_td_for_slot(
+        slot_id,
         setup,
         unused_data,
         status,
@@ -56,27 +130,51 @@ pub fn xhci_set_first_configuration() -> bool {
     );
     if status_physical == 0 { return false; }
     if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
-    if xhci_transfer_last_residual_length() != 0 { return false; }
+    if xhci_transfer_last_residual_length_for(slot_id) != 0 { return false; }
 
     // O request SET_CONFIGURATION já foi confirmado pelo device. Antes de
-    // publicar READY, prova o caminho standard-interface GET_DESCRIPTOR(Report)
-    // e o parser bounded sobre os bytes retornados pelo hardware/QEMU.
-    if !xhci_hid_descriptor_initialize() || !xhci_hid_descriptor_is_ready() {
+    // publicar READY, prova GET_DESCRIPTOR(Report) e o parser bounded usando
+    // exatamente o mesmo Slot ID/epoch.
+    if !xhci_hid_descriptor_initialize_for_slot(slot_id) ||
+       !xhci_hid_descriptor_is_ready_for(slot_id) {
         return false;
     }
 
     unsafe {
-        XHCI_SET_CONFIGURATION_VALUE = configuration_value;
-        XHCI_SET_CONFIGURATION_READY = true;
+        XHCI_SET_CONFIGURATION_STATES[index].epoch = epoch;
+        XHCI_SET_CONFIGURATION_STATES[index].value = configuration_value;
+        XHCI_SET_CONFIGURATION_STATES[index].ready = true;
+        XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID = slot_id;
     }
     return true;
 }
 
 @system
-pub fn xhci_set_configuration_is_ready() -> bool {
-    unsafe { return XHCI_SET_CONFIGURATION_READY; }
+pub fn xhci_set_first_configuration() -> bool {
+    let slot_id = xhci_configure_endpoint_active_slot_id();
+    if slot_id == 0 || !xhci_configure_endpoint_is_ready() { return false; }
+    return xhci_set_configuration_for_slot(slot_id);
 }
+
+@system
+pub fn xhci_set_configuration_value_for(slot_id: u8) -> u8 {
+    if !xhci_set_configuration_is_ready_for(slot_id) { return 0; }
+    unsafe {
+        return XHCI_SET_CONFIGURATION_STATES[xhci_set_configuration_index(slot_id)].value;
+    }
+}
+
+@system
+pub fn xhci_set_configuration_active_slot_id() -> u8 {
+    unsafe { return XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID; }
+}
+
+@system
+pub fn xhci_set_configuration_is_ready() -> bool {
+    return xhci_set_configuration_is_ready_for(xhci_set_configuration_active_slot_id());
+}
+
 @system
 pub fn xhci_set_configuration_value() -> u8 {
-    unsafe { return XHCI_SET_CONFIGURATION_VALUE; }
+    return xhci_set_configuration_value_for(xhci_set_configuration_active_slot_id());
 }

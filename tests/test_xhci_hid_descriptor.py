@@ -128,11 +128,16 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertIn("fn xhci_hid_device_emit_failure_marker()", text)
         self.assertIn("let marker: [u8; 28]", text)
 
-    def test_set_configuration_proves_descriptor_before_ready(self):
+    def test_set_configuration_proves_matching_descriptor_before_ready(self):
         text = SETCFG.read_text(encoding="utf-8")
-        descriptor = text.index("xhci_hid_descriptor_initialize()")
-        ready = text.index("XHCI_SET_CONFIGURATION_READY = true")
+        body = text.split("pub fn xhci_set_configuration_for_slot(slot_id: u8)", 1)[1]
+        body = body.split("pub fn xhci_set_first_configuration()", 1)[0]
+        descriptor = body.index("xhci_hid_descriptor_initialize_for_slot(slot_id)")
+        ready = body.rindex("XHCI_SET_CONFIGURATION_STATES[index].ready = true")
         self.assertLess(descriptor, ready)
+        self.assertIn("xhci_hid_descriptor_is_ready_for(slot_id)", body)
+        self.assertNotIn("xhci_hid_descriptor_initialize()", body)
+        self.assertNotIn("XHCI_SET_CONFIGURATION_READY = true", text)
         self.assertIn("import kernel::drivers::xhci_hid_descriptor::*;", text)
 
     def test_graph_registers_generic_and_transport_modules(self):
