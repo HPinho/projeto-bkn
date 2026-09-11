@@ -27,14 +27,17 @@ class Hid4RuntimeContractTests(unittest.TestCase):
                       DEVICE_MAP.read_text(encoding="utf-8"))
         self.assertIn("INPUT_EVENT_QUEUE_CAPACITY: usize = 512", EVENT.read_text(encoding="utf-8"))
 
-    def test_xhci_transport_is_identity_and_map_bound(self):
+    def test_xhci_transport_is_identity_and_map_bound_per_slot(self):
         descriptor = XHCI_DESCRIPTOR.read_text(encoding="utf-8")
         report = XHCI_REPORT.read_text(encoding="utf-8")
         self.assertIn("input_device_attach(", descriptor)
         self.assertIn("INPUT_TRANSPORT_USB", descriptor)
         self.assertIn("hid_input_device_map_build(", descriptor)
-        self.assertIn("xhci_hid_descriptor_input_device_is_active()", report)
-        self.assertIn("xhci_hid_descriptor_input_map_is_ready()", report)
+        self.assertIn("xhci_hid_descriptor_input_device_is_active_for(slot_id)", report)
+        self.assertIn("xhci_hid_descriptor_input_map_is_ready_for(slot_id)", report)
+        self.assertIn("xhci_hid_descriptor_input_device_id_for(slot_id)", report)
+        self.assertIn("xhci_hid_descriptor_input_device_generation_for(slot_id)", report)
+        self.assertIn("xhci_hid_protocol_for(slot_id)", report)
         self.assertIn("hid_input_events_process_report_for_device(", report)
         self.assertIn("input_device_snapshot(device_id, generation)", report)
         self.assertIn("record.transport_address == slot_id as u32", report)
@@ -53,7 +56,7 @@ class Hid4RuntimeContractTests(unittest.TestCase):
         self.assertLess(purge, event_unbind)
         self.assertLess(event_unbind, map_unbind)
 
-    def test_hid4c_transport_and_descriptor_state_are_partitioned(self):
+    def test_hid4c_transport_descriptor_and_report_binding_are_partitioned(self):
         table = XHCI_DEVICE_TABLE.read_text(encoding="utf-8")
         context = XHCI_HID_CONTEXT.read_text(encoding="utf-8")
         configure = XHCI_CONFIGURE.read_text(encoding="utf-8")
@@ -73,9 +76,15 @@ class Hid4RuntimeContractTests(unittest.TestCase):
         self.assertNotIn("static mut XHCI_HID_DESCRIPTOR_BUFFER:", descriptor)
         self.assertNotIn("static mut XHCI_HID_REPORT_BUFFER:", report)
 
-        # O report runtime ainda usa wrappers legados; o próximo corte liga-o
-        # diretamente ao descriptor/binding do mesmo slot.
-        self.assertIn("xhci_hid_descriptor_input_device_id()", report)
+        # HID-4c.3: o report runtime deve consumir descriptor/binding e resultado
+        # de transferência exclusivamente pelo mesmo slot.
+        self.assertIn("xhci_hid_descriptor_input_device_id_for(slot_id)", report)
+        self.assertIn("xhci_transfer_last_residual_length_for(slot_id)", report)
+        self.assertNotIn("xhci_hid_descriptor_input_device_id()", report)
+        self.assertNotIn("xhci_hid_descriptor_input_device_generation()", report)
+        self.assertNotIn("xhci_hid_descriptor_input_device_is_active()", report)
+        self.assertNotIn("xhci_hid_descriptor_input_map_is_ready()", report)
+        self.assertNotIn("xhci_hid_protocol()", report)
         self.assertNotIn("MULTI_DEVICE_READY", descriptor)
         self.assertNotIn("MULTI_DEVICE_READY", report)
 

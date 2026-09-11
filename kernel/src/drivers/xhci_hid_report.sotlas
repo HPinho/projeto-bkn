@@ -1,9 +1,8 @@
-// Baken OS — HID-4c.2: polling HID Interrupt IN por Slot ID.
+// Baken OS — HID-4c.3: polling HID Interrupt IN vinculado por Slot ID.
 //
-// Ring producer, cycle state, DMA report buffer e fallback Boot ficam separados
-// por slot+epoch. A identidade HID lógica ainda vem do descriptor ativo; enquanto
-// HID-4c.3 não particiona Configuration/HID descriptor, o vínculo é conferido
-// contra transport_address=slot_id antes de aceitar/publicar qualquer report.
+// Ring producer, cycle state, DMA report buffer, identidade lógica, mapa HID e
+// fallback Boot ficam separados por slot+epoch. O SET_CONFIGURATION permanece
+// no wrapper legado até o checkpoint dedicado seguinte.
 
 module kernel::drivers::xhci_hid_report;
 
@@ -117,10 +116,10 @@ fn xhci_hid_report_zero(base: *mut u8, size: u64) -> bool {
 
 @system
 fn xhci_hid_report_identity_matches_slot(slot_id: u8) -> bool {
-    let device_id = xhci_hid_descriptor_input_device_id();
-    let generation = xhci_hid_descriptor_input_device_generation();
+    let device_id = xhci_hid_descriptor_input_device_id_for(slot_id);
+    let generation = xhci_hid_descriptor_input_device_generation_for(slot_id);
     if device_id == INPUT_DEVICE_ID_NONE || generation == INPUT_DEVICE_GENERATION_INVALID ||
-       !xhci_hid_descriptor_input_device_is_active() {
+       !xhci_hid_descriptor_input_device_is_active_for(slot_id) {
         return false;
     }
     let record = input_device_snapshot(device_id, generation);
@@ -225,8 +224,8 @@ fn xhci_hid_report_parse_for_slot(slot_id: u8, length: u32) -> bool {
         return false;
     }
     let base = unsafe { XHCI_HID_REPORT_STATES[state_index].buffer.virtual_address };
-    let device_id = xhci_hid_descriptor_input_device_id();
-    let device_generation = xhci_hid_descriptor_input_device_generation();
+    let device_id = xhci_hid_descriptor_input_device_id_for(slot_id);
+    let device_generation = xhci_hid_descriptor_input_device_generation_for(slot_id);
     if base == (null as *mut u8) || length == 0 ||
        !hid_input_device_map_is_ready(device_id, device_generation) ||
        !hid_input_events_is_ready() || !input_event_queue_is_ready() {
@@ -253,7 +252,7 @@ fn xhci_hid_report_parse_for_slot(slot_id: u8, length: u32) -> bool {
     }
 
     if hid_input_device_map_has_report_ids(device_id, device_generation) { return true; }
-    let protocol = xhci_hid_protocol();
+    let protocol = xhci_hid_protocol_for(slot_id);
     unsafe {
         if protocol == USB_HID_PROTOCOL_KEYBOARD {
             if length < XHCI_HID_BOOT_KEYBOARD_LENGTH { return false; }
@@ -299,7 +298,7 @@ pub fn xhci_hid_report_prepare_for_slot(slot_id: u8) -> bool {
     if !xhci_hid_context_is_ready_for(slot_id) ||
        !xhci_configure_endpoint_is_ready_for(slot_id) ||
        !xhci_set_configuration_is_ready() ||
-       !xhci_hid_descriptor_input_map_is_ready() || !hid_input_events_is_ready() ||
+       !xhci_hid_descriptor_input_map_is_ready_for(slot_id) || !hid_input_events_is_ready() ||
        !input_event_queue_is_ready() || !xhci_hid_report_identity_matches_slot(slot_id) {
         return false;
     }
@@ -361,7 +360,7 @@ pub fn xhci_hid_report_prepare() -> bool {
 pub fn xhci_hid_report_poll_slot_once(slot_id: u8) -> bool {
     if !xhci_hid_report_is_ready_for(slot_id) ||
        !xhci_hid_report_identity_matches_slot(slot_id) ||
-       !xhci_hid_descriptor_input_map_is_ready() {
+       !xhci_hid_descriptor_input_map_is_ready_for(slot_id) {
         return false;
     }
     let state_index = xhci_hid_report_index(slot_id);
@@ -397,7 +396,7 @@ pub fn xhci_hid_report_poll_slot_once(slot_id: u8) -> bool {
         if !xhci_hid_report_ring_doorbell(slot_id, dci) { return false; }
         if !xhci_hid_report_advance(slot_id) { return false; }
         if !xhci_transfer_wait_completion(slot_id, dci, physical) { return false; }
-        let residual = xhci_transfer_last_residual_length();
+        let residual = xhci_transfer_last_residual_length_for(slot_id);
         if residual > transfer_length { return false; }
         let actual = transfer_length - residual;
         XHCI_HID_REPORT_STATES[state_index].last_length = actual;

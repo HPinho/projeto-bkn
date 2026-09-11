@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails HID-4c.2 do produtor HID Interrupt IN por slot."""
+"""Guardrails HID-4c.3 do produtor HID Interrupt IN por slot."""
 
 from pathlib import Path
 import unittest
@@ -29,7 +29,7 @@ class XhciHidReportTests(unittest.TestCase):
             "xhci_hid_context_is_ready_for(slot_id)",
             "xhci_configure_endpoint_is_ready_for(slot_id)",
             "xhci_set_configuration_is_ready()",
-            "xhci_hid_descriptor_input_map_is_ready()",
+            "xhci_hid_descriptor_input_map_is_ready_for(slot_id)",
             "hid_input_events_is_ready()",
             "input_event_queue_is_ready()",
             "xhci_hid_report_identity_matches_slot(slot_id)",
@@ -41,6 +41,9 @@ class XhciHidReportTests(unittest.TestCase):
         text = HID.read_text(encoding="utf-8")
         body = text.split("fn xhci_hid_report_identity_matches_slot", 1)[1]
         body = body.split("fn xhci_hid_report_ring_slot", 1)[0]
+        self.assertIn("xhci_hid_descriptor_input_device_id_for(slot_id)", body)
+        self.assertIn("xhci_hid_descriptor_input_device_generation_for(slot_id)", body)
+        self.assertIn("xhci_hid_descriptor_input_device_is_active_for(slot_id)", body)
         self.assertIn("input_device_snapshot(device_id, generation)", body)
         self.assertIn("record.transport_kind == INPUT_TRANSPORT_USB", body)
         self.assertIn("record.transport_address == slot_id as u32", body)
@@ -66,12 +69,13 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("XHCI_HID_REPORT_STATES[state_index].producer_cycle =", text)
         self.assertIn("!XHCI_HID_REPORT_STATES[state_index].producer_cycle", text)
 
-    def test_transfer_event_uses_slot_specific_hid_dci(self):
+    def test_transfer_event_uses_slot_specific_hid_dci_and_result(self):
         text = HID.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_hid_report_poll_slot_once", 1)[1]
         self.assertIn("xhci_hid_context_dci_for(slot_id)", body)
         self.assertIn("xhci_transfer_wait_completion(slot_id, dci, physical)", body)
-        self.assertIn("xhci_transfer_last_residual_length()", body)
+        self.assertIn("xhci_transfer_last_residual_length_for(slot_id)", body)
+        self.assertNotIn("xhci_transfer_last_residual_length()", body)
 
     def test_real_report_is_attributed_then_validated_against_its_device_map(self):
         text = HID.read_text(encoding="utf-8")
@@ -84,9 +88,23 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertLess(identity, validate)
         self.assertLess(validate, translate)
         self.assertLess(translate, keyboard)
+        self.assertIn("xhci_hid_descriptor_input_device_id_for(slot_id)", body)
+        self.assertIn("xhci_hid_descriptor_input_device_generation_for(slot_id)", body)
         self.assertIn("device_id, device_generation, base as *const u8", body)
         self.assertIn("hid_input_device_map_has_report_ids(device_id, device_generation)", body)
+        self.assertIn("let protocol = xhci_hid_protocol_for(slot_id)", body)
+        self.assertNotIn("xhci_hid_protocol()", body)
         self.assertNotIn("hid_input_report_validate(", body)
+
+    def test_runtime_has_no_legacy_global_descriptor_identity_calls(self):
+        text = HID.read_text(encoding="utf-8")
+        for legacy in (
+            "xhci_hid_descriptor_input_device_id()",
+            "xhci_hid_descriptor_input_device_generation()",
+            "xhci_hid_descriptor_input_device_is_active()",
+            "xhci_hid_descriptor_input_map_is_ready()",
+        ):
+            self.assertNotIn(legacy, text)
 
     def test_runtime_event_marker_is_per_slot_and_requires_new_event(self):
         text = HID.read_text(encoding="utf-8")
