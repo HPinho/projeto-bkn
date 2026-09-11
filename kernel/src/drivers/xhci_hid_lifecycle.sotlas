@@ -1,18 +1,20 @@
-// Baken OS — HID-4d.1/4d.2b/4d.3b1: detach quarantine e teardown gate seguro.
+// Baken OS — HID-4d.1/4d.2b/4d.3b: detach quarantine e teardown lógico seguro.
 //
 // DETACH_PENDING permanece generation-safe. HID-4d.2b para apenas o endpoint
 // HID do mesmo slot+epoch, drena o TD outstanding e registra endpoint_stopped.
-// HID-4d.3b1 abre uma transacao logica idempotente somente depois do drain.
+// HID-4d.3b abre uma transacao logica idempotente somente depois do drain e
+// conclui identity/descriptor/report/transfer state em ordem exact-epoch.
 // As consultas de pending/quiescence usadas pelo lifecycle recebem o epoch
 // esperado explicitamente; o drain legado per-slot permanece cercado por
 // revalidacao exata de slot+epoch ate sua migracao dedicada.
-// Nao desmonta InputDevice, contexts, rings, descriptors nem libera Slot ID.
+// Drop Endpoint, rings, contexts e Slot ID continuam fora desta etapa.
 
 module kernel::drivers::xhci_hid_lifecycle;
 
 import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_transfer::*;
 import kernel::drivers::xhci_command::*;
@@ -26,6 +28,7 @@ pub struct XhciHidLifecycleState {
     pub detach_detected: bool;
     pub endpoint_stopped: bool;
     pub logical_teardown_started: bool;
+    pub logical_teardown_complete: bool;
 }
 
 static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE_SLOT_CAPACITY] = [
@@ -34,7 +37,8 @@ static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE
         epoch: 0,
         detach_detected: false,
         endpoint_stopped: false,
-        logical_teardown_started: false
+        logical_teardown_started: false,
+        logical_teardown_complete: false
     };
     XHCI_HID_LIFECYCLE_SLOT_CAPACITY
 ];
@@ -62,6 +66,7 @@ fn xhci_hid_lifecycle_publish_detach(slot_id: u8, epoch: u32) -> bool {
         XHCI_HID_LIFECYCLE_STATES[index].detach_detected = true;
         XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = false;
         XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started = false;
+        XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = false;
     }
     return true;
 }
@@ -257,6 +262,63 @@ pub fn xhci_hid_lifecycle_logical_teardown_started_for(slot_id: u8, epoch: u32) 
                XHCI_HID_LIFECYCLE_STATES[index].detach_detected &&
                XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped &&
                XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started;
+    }
+}
+
+// HID-4d.3b: fecha a transacao logica somente depois de todos os sub-cleanups
+// generation-safe. Cada etapa e seguida de uma revalidacao exact-epoch antes de
+// permitir a seguinte. Os helpers sao idempotentes, portanto uma falha parcial
+// pode ser retomada sem tocar em uma generation nova.
+@system
+pub fn xhci_hid_lifecycle_complete_logical_teardown_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete { return true; }
+    }
+
+    if !xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
+
+    if !xhci_hid_descriptor_teardown_dma_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
+
+    if !xhci_hid_report_teardown_dma_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
+
+    if !xhci_transfer_clear_slot_state_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) ||
+       !xhci_hid_lifecycle_quiescent_for(slot_id, epoch) {
+        return false;
+    }
+
+    unsafe {
+        if !XHCI_HID_LIFECYCLE_STATES[index].valid ||
+           XHCI_HID_LIFECYCLE_STATES[index].epoch != epoch ||
+           !XHCI_HID_LIFECYCLE_STATES[index].detach_detected ||
+           !XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped ||
+           !XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started {
+            return false;
+        }
+        if XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete { return true; }
+        XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_hid_lifecycle_logical_teardown_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_HID_LIFECYCLE_STATES[index].valid &&
+               XHCI_HID_LIFECYCLE_STATES[index].epoch == epoch &&
+               XHCI_HID_LIFECYCLE_STATES[index].detach_detected &&
+               XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped &&
+               XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started &&
+               XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete;
     }
 }
 
