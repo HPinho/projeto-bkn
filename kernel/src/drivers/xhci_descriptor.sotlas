@@ -1,9 +1,8 @@
-// Baken OS — HID-4c.3: transferências de controle USB para Device Descriptor por Slot ID.
+// Baken OS — HID-4c.3/HID-4d.3a: Device Descriptor por Slot ID.
 //
-// O primeiro gate lê somente os 8 bytes iniciais para descobrir bMaxPacketSize0.
-// A leitura completa de 18 bytes permanece separada e só deve ser usada depois
-// que o EP0 estiver com o Max Packet Size correto. Cada slot mantém descriptor,
-// probe e epoch próprios; wrappers legados preservam o bring-up do primeiro device.
+// O probe curto de 8 bytes descobre bMaxPacketSize0 e usa DMA temporário. Em
+// HID-4d.3a esse buffer é devolvido ao PMM assim que a transferência terminou e
+// os bytes foram validados, preservando a disciplina LIFO necessária ao teardown.
 
 module kernel::drivers::xhci_descriptor;
 
@@ -129,6 +128,19 @@ fn xhci_descriptor_zero(buffer: *mut u8, size: u64) -> bool {
 }
 
 @system
+fn xhci_descriptor_release_temporary(buffer: *mut DmaBuffer) -> bool {
+    if buffer == (null as *mut DmaBuffer) { return false; }
+    unsafe {
+        if !(*buffer).valid { return true; }
+    }
+    if dma_buffer_shared(buffer as *const DmaBuffer) {
+        if !dma_unshare_from_device(buffer) { return false; }
+    }
+    if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
+    return dma_release(buffer);
+}
+
+@system
 fn xhci_descriptor_read8(base: *const u8, offset: u64) -> u8 {
     if base == (null as *const u8) { return 0; }
     unsafe { return *(((base as usize) + (offset as usize)) as *const u8); }
@@ -189,10 +201,15 @@ pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8) -> bool {
     let max_packet0 = xhci_descriptor_read8(base, 7);
     if length != (USB_DEVICE_DESCRIPTOR_LENGTH as u8) ||
        descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE || max_packet0 == 0 {
+        xhci_descriptor_release_temporary(&mut buffer);
         return false;
     }
 
-    if !xhci_descriptor_state_is_current(slot_id) { return false; }
+    if !xhci_descriptor_state_is_current(slot_id) {
+        xhci_descriptor_release_temporary(&mut buffer);
+        return false;
+    }
+    if !xhci_descriptor_release_temporary(&mut buffer) { return false; }
     unsafe {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = max_packet0;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_ready = true;

@@ -1,9 +1,8 @@
-// Baken OS — HID-4c.3: Configuration Descriptor USB por Slot ID + epoch.
+// Baken OS — HID-4c.3/HID-4d.3a: Configuration Descriptor por Slot ID.
 //
-// Header, descriptor completo e seleção da interface HID pertencem ao mesmo
-// dispositivo xHCI. O parser continua sem configurar endpoint nem enviar
-// SET_CONFIGURATION. Wrappers sem argumento preservam o bring-up legado do
-// primeiro dispositivo, enquanto as APIs _for(slot_id) habilitam multi-device.
+// O header de 9 bytes usa DMA temporário apenas para descobrir wTotalLength e
+// bConfigurationValue. HID-4d.3a devolve esse buffer ao PMM após o parse para
+// manter a pilha de alocações reversível durante o teardown generation-safe.
 
 module kernel::drivers::xhci_configuration;
 
@@ -218,6 +217,19 @@ fn xhci_configuration_zero(base: *mut u8, size: u64) -> bool {
 }
 
 @system
+fn xhci_configuration_release_temporary(buffer: *mut DmaBuffer) -> bool {
+    if buffer == (null as *mut DmaBuffer) { return false; }
+    unsafe {
+        if !(*buffer).valid { return true; }
+    }
+    if dma_buffer_shared(buffer as *const DmaBuffer) {
+        if !dma_unshare_from_device(buffer) { return false; }
+    }
+    if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
+    return dma_release(buffer);
+}
+
+@system
 fn xhci_configuration_fetch_for_slot(slot_id: u8,
                                      buffer: *mut DmaBuffer,
                                      length: u16) -> bool {
@@ -263,7 +275,6 @@ fn xhci_configuration_fetch_for_slot(slot_id: u8,
     }
 }
 
-// Primeiro gate: somente os nove bytes do Configuration Descriptor header.
 @system
 pub fn xhci_probe_configuration_header_for_slot(slot_id: u8) -> bool {
     if !xhci_configuration_prepare_state(slot_id) { return false; }
@@ -295,9 +306,14 @@ pub fn xhci_probe_configuration_header_for_slot(slot_id: u8) -> bool {
        total_length < USB_CONFIGURATION_HEADER_LENGTH ||
        (total_length as u64) > XHCI_CONFIGURATION_DMA_SIZE ||
        configuration_value == 0 {
+        xhci_configuration_release_temporary(&mut buffer);
         return false;
     }
-    if !xhci_configuration_state_is_current(slot_id) { return false; }
+    if !xhci_configuration_state_is_current(slot_id) {
+        xhci_configuration_release_temporary(&mut buffer);
+        return false;
+    }
+    if !xhci_configuration_release_temporary(&mut buffer) { return false; }
 
     unsafe {
         XHCI_CONFIGURATION_STATES[index].header_total_length = total_length;
@@ -347,7 +363,6 @@ pub fn xhci_configuration_header_value() -> u8 {
     return xhci_configuration_header_value_for(xhci_address_slot_id());
 }
 
-// Segundo gate: lê o descriptor completo usando o wTotalLength do mesmo slot.
 @system
 pub fn xhci_read_configuration_full_for_slot(slot_id: u8) -> bool {
     if !xhci_configuration_prepare_state(slot_id) ||
