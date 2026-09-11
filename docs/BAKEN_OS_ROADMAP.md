@@ -32,8 +32,8 @@ O trabalho atual está em **HID-4d — hot-plug/recovery**:
   - serialização SMP do report decode vs detach: ✅ CERTIFICADA
   - pending queries exact-epoch: ✅ CERTIFICADAS
   - demux/waiter exact-epoch: ✅ CERTIFICADO
-  - lifecycle pending checks exact-epoch: ⏳ EM VALIDAÇÃO
-  - liberação lógica real de InputDevice/map/descriptor/report DMA: ⬜
+  - lifecycle pending checks exact-epoch: ✅ CERTIFICADO
+  - liberação lógica real de InputDevice/map/descriptor/report DMA: ⬜ PRÓXIMO MICROCORTE
 - HID-4d.3c — Drop Endpoint / rings: ⬜
 - HID-4d.4 — `Disable Slot` + context release: ⬜
 - HID-4d.5 — reuse de Slot ID + epoch novo + drain/barrier: ⬜
@@ -215,8 +215,8 @@ A macroetapa **4d.3b continua em desenvolvimento**. Os microcortes abaixo são p
 | Serialização SMP report decode × detach | ✅ | `6eb10542e4ab024dda2c28ba25dfcb97fb83dbcb` — CI #1161 / SMP #264 / NVMe #361 / HID Dual #20 |
 | Pending queries exact-epoch | ✅ | `b6b7efacfa41eac6a89400b83f409b18b6b72a38` — CI #1162 / SMP #265 / NVMe #362 / HID Dual #21 |
 | Demux/waiter exact-epoch | ✅ | `5fa048986ab4cfb8313530e9945e513633ea944f` — CI #1163 / SMP #266 / NVMe #363 / HID Dual #22 |
-| Lifecycle pending checks exact-epoch | ⏳ | `1c8b81b3cd021d12e46a964f54024f661bc1c2b3` — CI #1164 / SMP #267 / NVMe #364 / HID Dual #23 em validação |
-| Cleanup lógico de InputDevice/map/descriptors/report DMA | ⬜ | próximo microcorte após certificação do lifecycle |
+| Lifecycle pending checks exact-epoch | ✅ | `1c8b81b3cd021d12e46a964f54024f661bc1c2b3` — CI #1164 / SMP #267 / NVMe #364 / HID Dual #23 |
+| Cleanup lógico de InputDevice/map/descriptors/report DMA | ⬜ | próximo microcorte |
 
 O Event Ring permanece com **consumidor global único**. A mailbox de Transfer Events e o waiter generation-sensitive usam a identidade `slot_id + epoch + endpoint_id + TRB pointer`. Como o Transfer Event TRB do xHCI não carrega o `epoch` de software, a reutilização física de Slot ID continua proibida até a prova de drain/barrier de **HID-4d.5**.
 
