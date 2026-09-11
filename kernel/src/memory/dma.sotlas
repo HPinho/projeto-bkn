@@ -199,7 +199,7 @@ pub fn dma_release(buffer: *mut DmaBuffer) -> bool {
     if !dma_allocator_available() { return false; }
     unsafe {
         let page_count = (*buffer).size / BAKEN_PAGE_SIZE;
-        if page_count == 0 || !pmm_free_pages_lifo((*buffer).physical_address, page_count) {
+        if page_count == 0 || !pmm_free_pages((*buffer).physical_address, page_count) {
             return false;
         }
         (*buffer) = dma_invalid_buffer();

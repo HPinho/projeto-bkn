@@ -25,10 +25,13 @@ O trabalho atual está em **HID-4d — hot-plug/recovery**:
 - **HID-4d.1 — detecção e quarentena de detach:** ✅ CERTIFICADO
 - **HID-4d.2a — coexistência Command Completion + Transfer Event:** ✅ CERTIFICADO
 - **HID-4d.2b — `Stop Endpoint` + drain terminal:** ✅ CERTIFICADO
-- **HID-4d.3a — lifetime de DMA temporário / preparação LIFO:** ⏳ CANDIDATO ATUAL
-- HID-4d.3b — teardown generation-safe de buffers e estados persistentes: ⬜
-- HID-4d.4 — `Disable Slot` + release + reuse com epoch novo: ⬜
-- HID-4d.5 — prova detach → reattach → reenumeração: ⬜
+- **HID-4d.3a — lifetime de DMA temporário:** ✅ CERTIFICADO
+- **HID-4d.3b0 — `dma_release()` com liberação arbitrária:** ⏳ CANDIDATO ATUAL
+- HID-4d.3b — teardown HID lógico generation-safe: ⬜
+- HID-4d.3c — Drop Endpoint / rings: ⬜
+- HID-4d.4 — `Disable Slot` + context release: ⬜
+- HID-4d.5 — reuse de Slot ID + epoch novo: ⬜
+- HID-4d.6 — runtime proof / hotplug stress: ⬜
 
 O Kernel Core permanece congelado e invariant-preserving.
 
@@ -129,16 +132,30 @@ Provas no mesmo SHA:
 
 O corte certifica `DETACH_PENDING → Stop Endpoint → Command Completion → drain terminal`, aceitando apenas SUCCESS ou os Completion Codes xHCI 26/27/28 para o TD parado. O TD cancelado nunca passa pelo parser HID e `endpoint_stopped` só é publicado após mailbox e report pending estarem vazios.
 
-### HID-4d.3a — lifetime de DMA temporário / preparação LIFO
+### HID-4d.3a — lifetime de DMA temporário
 
-**⏳ CANDIDATO ATUAL.**
+**✅ CERTIFICADO.**
+
+Checkpoint:
+
+```text
+322a472edd3cc30e6fb1d28384802ec1a1844809
+fix(xhci): release temporary enumeration DMA
+```
+
+Provas no mesmo SHA:
+
+- CI #1154 / `34621455000` ✅
+- SMP #257 / `34621454947` ✅
+- NVMe #354 / `34621454968` ✅
+- HID Dual-device #13 / `34621454938` ✅
 
 A auditoria do teardown encontrou dois buffers de enumeração que eram temporários, mas permaneciam alocados sem referência persistente:
 
 1. `GET_DESCRIPTOR(Device)` de 8 bytes, usado apenas para `bMaxPacketSize0`;
 2. header de 9 bytes do `Configuration Descriptor`, usado apenas para `wTotalLength` e `bConfigurationValue`.
 
-Como `dma_release()` devolve páginas ao PMM via `pmm_free_pages_lifo`, esses buffers impediriam liberar corretamente as alocações persistentes mais antigas durante hot-unplug. O 4d.3a passa a executar, somente após Transfer Completion + parse válido:
+O 4d.3a passa a executar, somente após Transfer Completion + parse válido:
 
 ```text
 DMA temporário shared
@@ -148,13 +165,40 @@ DMA temporário shared
 → só então publica probe/header ready
 ```
 
-O Device Descriptor completo e o Configuration Descriptor completo continuam persistentes no estado do slot e **não** são liberados neste corte. O objetivo é apenas tornar a pilha de alocações reversível antes do teardown profundo.
+O Device Descriptor completo e o Configuration Descriptor completo continuam persistentes no estado do slot e **não** são liberados neste corte.
+
+### HID-4d.3b0 — arbitrary DMA release
+
+**⏳ CANDIDATO ATUAL.**
+
+O teardown real não pode depender da ordem global de alocação entre dispositivos. O PMM já fornece `pmm_free_pages(base, count)` bitmap-backed, lock/IRQ-safe e capaz de liberar ranges fora de ordem; portanto o allocator não é redesenhado.
+
+Este microcorte altera somente o backend normal de `dma_release()`:
+
+```text
+pmm_free_pages_lifo(buffer.physical_address, page_count)
+→ pmm_free_pages(buffer.physical_address, page_count)
+```
+
+O contrato permanece fail-closed:
+
+- `buffer != null`;
+- somente `DMA_OWNER_CPU` ou `DMA_OWNER_COMPLETED` passam por `dma_buffer_cpu_owned()`;
+- `DMA_OWNER_DEVICE` e `DMA_OWNER_SHARED` continuam proibidos;
+- allocator precisa estar disponível;
+- o `DmaBuffer` só é invalidado depois de o PMM confirmar o free.
+
+Os `pmm_free_pages_lifo()` de `dma_alloc()` e `dma_alloc_for_device()` permanecem intactos quando representam rollback imediato da própria alocação recém-feita.
+
+Guardrails do corte: `tests/test_dma_release.py` + atualização da expectativa legada em `tests/test_dma_contract.py`.
 
 ### Próximos microcortes HID-4d
 
-1. **4d.3b — teardown persistente por epoch:** report DMA → HID Report Descriptor/InputDevice/map → transfer state → HID ring → configuration/device descriptor → EP0/device context, em ordem LIFO comprovada.
-2. **4d.4 — Disable Slot + release:** somente depois de 4d.3b; liberar device-table record e permitir reuse com epoch novo.
-3. **4d.5 — runtime proof:** detach → cancel → teardown → reattach → reenumeração, sem estado stale.
+1. **4d.3b — teardown HID lógico generation-safe:** report DMA, HID report state, InputDevice, field map, descriptor state e bindings, sempre validando `slot_id + epoch`.
+2. **4d.3c — endpoint/rings:** Drop Endpoint/reconfiguração equivalente, remover referência do xHC, unshare/free do Transfer Ring e limpar endpoint state.
+3. **4d.4 — Disable Slot + contexts:** Command Completion validado, remover DCBAA reference e liberar Device/Input Context + EP0 Ring.
+4. **4d.5 — Slot ID reuse:** provar Slot X / epoch N → teardown → Slot X / epoch N+1 sem estado stale.
+5. **4d.6 — runtime proof:** detach/reconnect em múltiplos ciclos, keyboard/mouse independentes e ausência de leaks/stale completions observáveis.
 
 ### Invariantes HID permanentes
 
@@ -165,7 +209,8 @@ O Device Descriptor completo e o Configuration Descriptor completo continuam per
 - Stop Endpoint só marca `endpoint_stopped` depois de Command Completion e drain terminal.
 - TD cancelado não pode virar evento de teclado/mouse.
 - DMA temporário de enumeração deve ser liberado assim que não puder mais ser referenciado pelo controller.
-- drivers não chamam `pmm_free_pages_lifo` diretamente; lifetime passa pela API DMA.
+- drivers não chamam PMM free diretamente; lifetime passa pela API DMA.
+- `dma_release()` normal usa free arbitrário; rollback imediato de uma alocação recém-feita pode continuar LIFO.
 - `sendkey a`, `DUAL_READY` e `INTERLEAVE_READY` continuam obrigatórios nos respectivos proofs.
 - não ampliar timeout, remover marker ou enfraquecer teste para obter verde.
 - hardware, descriptors e events são input não confiável e devem falhar fechado.

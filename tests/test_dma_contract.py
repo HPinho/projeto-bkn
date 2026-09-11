@@ -14,7 +14,7 @@ class DmaContractTests(unittest.TestCase):
         for token in ("pub fn dma_allocator_available() -> bool","pmm_allocator_is_active()","vmm_is_active()","vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE","if !pmm_inventory_is_valid()","if !dma_allocator_available()","pmm_alloc_pages_aligned(page_count, alignment)","direct_map_virtual_address(physical)","if rounded < size { return dma_invalid_buffer(); }"): self.assertIn(token,text)
         alloc=text.split("pub fn dma_alloc(size: u64, alignment: u64)",1)[1].split("pub fn dma_submit_to_device",1)[0]
         self.assertIn("if !dma_buffer_valid(&buffer)",alloc); self.assertIn("pmm_free_pages_lifo(physical, page_count)",alloc)
-        for token in ("valid: true","pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool","pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool","pub fn dma_release(buffer: *mut DmaBuffer) -> bool","pmm_free_pages_lifo((*buffer).physical_address, page_count)"): self.assertIn(token,text)
+        for token in ("valid: true","pub fn dma_submit_to_device(buffer: *mut DmaBuffer, fence: u64) -> bool","pub fn dma_complete_from_device(buffer: *mut DmaBuffer, fence: u64) -> bool","pub fn dma_release(buffer: *mut DmaBuffer) -> bool","pmm_free_pages((*buffer).physical_address, page_count)"): self.assertIn(token,text)
     def test_constrained_dma_applies_device_limits_before_exposing_buffer(self):
         body=DMA.read_text(encoding="utf-8").split("pub fn dma_alloc_for_device",1)[1]
         for token in ("pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)","last > max_address","physical / boundary != last / boundary","pmm_free_pages_lifo(physical, page_count)"): self.assertIn(token,body)
