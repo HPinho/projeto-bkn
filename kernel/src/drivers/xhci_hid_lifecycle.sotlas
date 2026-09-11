@@ -3,8 +3,9 @@
 // DETACH_PENDING permanece generation-safe. HID-4d.2b para apenas o endpoint
 // HID do mesmo slot+epoch, drena o TD outstanding e registra endpoint_stopped.
 // HID-4d.3b1 abre uma transacao logica idempotente somente depois do drain.
-// Wrappers de transporte ainda slot-scoped ficam cercados por revalidacao
-// explicita de slot+epoch para impedir rollover/stale generation no lifecycle.
+// As consultas de pending/quiescence usadas pelo lifecycle recebem o epoch
+// esperado explicitamente; o drain legado per-slot permanece cercado por
+// revalidacao exata de slot+epoch ate sua migracao dedicada.
 // Nao desmonta InputDevice, contexts, rings, descriptors nem libera Slot ID.
 
 module kernel::drivers::xhci_hid_lifecycle;
@@ -74,15 +75,15 @@ pub fn xhci_hid_lifecycle_is_detach_pending_for(slot_id: u8, epoch: u32) -> bool
     return xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING;
 }
 
-// HID-4d.3b1: as APIs de pending report/mailbox ainda sao per-slot e resolvem o
-// epoch corrente internamente. O lifecycle nunca as usa sem revalidar o epoch
-// antes, entre e depois das consultas; qualquer rollover falha fechado.
+// HID-4d.3b prerequisite: report pending e transfer mailbox sao consultados
+// pela identidade exata slot+epoch. As revalidacoes de DETACH_PENDING antes,
+// entre e depois das consultas continuam como barreira TOCTOU fail-closed.
 @system
 fn xhci_hid_lifecycle_quiescent_for(slot_id: u8, epoch: u32) -> bool {
     if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
-    if xhci_hid_report_transfer_pending_for(slot_id) { return false; }
+    if xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch) { return false; }
     if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
-    if xhci_transfer_pending_is_ready_for(slot_id) { return false; }
+    if xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch) { return false; }
     return xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch);
 }
 
@@ -193,7 +194,7 @@ pub fn xhci_hid_lifecycle_stop_endpoint_for(slot_id: u8, epoch: u32) -> bool {
     let dci = xhci_hid_context_dci_for(slot_id);
     if dci <= 1 { return false; }
     if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
-    let had_pending = xhci_hid_report_transfer_pending_for(slot_id);
+    let had_pending = xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch);
     if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
 
     let command = xhci_trb_stop_endpoint(
