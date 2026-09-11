@@ -2,8 +2,10 @@
 //
 // DETACH_PENDING permanece generation-safe. HID-4d.2b para apenas o endpoint
 // HID do mesmo slot+epoch, drena o TD outstanding e registra endpoint_stopped.
-// HID-4d.3b1 abre uma transacao logica idempotente somente depois do drain,
-// sem desmontar InputDevice, contexts, rings, descriptors nem liberar Slot ID.
+// HID-4d.3b1 abre uma transacao logica idempotente somente depois do drain.
+// Wrappers de transporte ainda slot-scoped ficam cercados por revalidacao
+// explicita de slot+epoch para impedir rollover/stale generation no lifecycle.
+// Nao desmonta InputDevice, contexts, rings, descriptors nem libera Slot ID.
 
 module kernel::drivers::xhci_hid_lifecycle;
 
@@ -70,6 +72,18 @@ pub fn xhci_hid_lifecycle_is_detach_pending_for(slot_id: u8, epoch: u32) -> bool
         return false;
     }
     return xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING;
+}
+
+// HID-4d.3b1: as APIs de pending report/mailbox ainda sao per-slot e resolvem o
+// epoch corrente internamente. O lifecycle nunca as usa sem revalidar o epoch
+// antes, entre e depois das consultas; qualquer rollover falha fechado.
+@system
+fn xhci_hid_lifecycle_quiescent_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
+    if xhci_hid_report_transfer_pending_for(slot_id) { return false; }
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
+    if xhci_transfer_pending_is_ready_for(slot_id) { return false; }
+    return xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch);
 }
 
 @system
@@ -178,7 +192,9 @@ pub fn xhci_hid_lifecycle_stop_endpoint_for(slot_id: u8, epoch: u32) -> bool {
 
     let dci = xhci_hid_context_dci_for(slot_id);
     if dci <= 1 { return false; }
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
     let had_pending = xhci_hid_report_transfer_pending_for(slot_id);
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
 
     let command = xhci_trb_stop_endpoint(
         slot_id, dci, xhci_command_producer_cycle()
@@ -188,14 +204,14 @@ pub fn xhci_hid_lifecycle_stop_endpoint_for(slot_id: u8, epoch: u32) -> bool {
        xhci_command_last_slot_id() != slot_id {
         return false;
     }
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
 
-    if had_pending && !xhci_hid_report_drain_cancelled_for_slot(slot_id) {
-        return false;
+    if had_pending {
+        if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
+        if !xhci_hid_report_drain_cancelled_for_slot(slot_id) { return false; }
+        if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
     }
-    if xhci_hid_report_transfer_pending_for(slot_id) ||
-       xhci_transfer_pending_is_ready_for(slot_id) {
-        return false;
-    }
+    if !xhci_hid_lifecycle_quiescent_for(slot_id, epoch) { return false; }
 
     unsafe { XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = true; }
     return true;
@@ -204,9 +220,7 @@ pub fn xhci_hid_lifecycle_stop_endpoint_for(slot_id: u8, epoch: u32) -> bool {
 @system
 pub fn xhci_hid_lifecycle_can_finalize_for(slot_id: u8, epoch: u32) -> bool {
     if !xhci_hid_lifecycle_endpoint_stopped_for(slot_id, epoch) { return false; }
-    if xhci_hid_report_transfer_pending_for(slot_id) { return false; }
-    if xhci_transfer_pending_is_ready_for(slot_id) { return false; }
-    return true;
+    return xhci_hid_lifecycle_quiescent_for(slot_id, epoch);
 }
 
 // HID-4d.3b1: abre a transacao de teardown logico somente para a geracao
