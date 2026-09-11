@@ -139,15 +139,21 @@ class XhciHidLifecycleTests(unittest.TestCase):
 
     def test_stop_cut_still_does_not_release_slot_or_identity(self):
         text = LIFECYCLE.read_text(encoding="utf-8")
+        body = function_body(text, "xhci_hid_lifecycle_stop_endpoint_for")
         for forbidden in (
             "xhci_trb_disable_slot",
             "xhci_hid_descriptor_release_input_device_for_slot",
             "input_device_detach",
             "xhci_device_table_release(",
             "dma_release",
+            "dma_unshare_from_device",
             "xhci_hid_context_release",
+            "xhci_hid_descriptor_teardown_input_device_for_epoch",
+            "xhci_hid_descriptor_teardown_dma_for_epoch",
+            "xhci_hid_report_teardown_dma_for_epoch",
+            "xhci_transfer_clear_slot_state_for_epoch",
         ):
-            self.assertNotIn(forbidden, text)
+            self.assertNotIn(forbidden, body)
 
     def test_scan_is_bounded_and_refreshes_port_inventory_once(self):
         text = LIFECYCLE.read_text(encoding="utf-8")
