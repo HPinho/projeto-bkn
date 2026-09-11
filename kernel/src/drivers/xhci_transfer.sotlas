@@ -186,12 +186,11 @@ fn xhci_transfer_take_pending(slot_id: u8,
                               epoch: u32,
                               endpoint_id: u8,
                               completion_trb_physical: u64) -> bool {
-    if epoch == 0 || !xhci_transfer_pending_matches(
-        slot_id, endpoint_id, completion_trb_physical
-    ) {
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY || epoch == 0 ||
+       !xhci_transfer_pending_matches(slot_id, endpoint_id, completion_trb_physical) {
         return false;
     }
-    let index = xhci_transfer_index(slot_id);
     unsafe {
         let residual = XHCI_TRANSFER_PENDING_EVENTS[index].residual_length;
         let completion = XHCI_TRANSFER_PENDING_EVENTS[index].completion_code;
