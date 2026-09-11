@@ -193,6 +193,70 @@ pub fn xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id: u8, epoch: u
     return true;
 }
 
+// HID-4d.3b: lifetime do Report Descriptor persistente. O control transfer que
+// preenche este buffer já terminou; ainda assim o teardown só devolve as páginas
+// depois de a identidade lógica ter sido desmontada e enquanto slot+epoch seguem
+// exatamente em DETACH_PENDING. Se unshare já ocorreu numa tentativa anterior,
+// o estado CPU-owned é aceito e dma_release pode ser repetido com segurança.
+@system
+pub fn xhci_hid_descriptor_teardown_dma_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_hid_descriptor_index(slot_id);
+    unsafe {
+        if XHCI_HID_DESCRIPTOR_STATES[index].input_device_id != INPUT_DEVICE_ID_NONE ||
+           XHCI_HID_DESCRIPTOR_STATES[index].input_device_generation != INPUT_DEVICE_GENERATION_INVALID {
+            return false;
+        }
+    }
+
+    let mut buffer_valid = false;
+    unsafe { buffer_valid = XHCI_HID_DESCRIPTOR_STATES[index].buffer.valid; }
+    if buffer_valid {
+        let mut shared = false;
+        let mut cpu_owned = false;
+        unsafe {
+            shared = dma_buffer_shared(&XHCI_HID_DESCRIPTOR_STATES[index].buffer);
+            cpu_owned = dma_buffer_cpu_owned(&XHCI_HID_DESCRIPTOR_STATES[index].buffer);
+        }
+        if !shared && !cpu_owned { return false; }
+
+        if shared {
+            unsafe {
+                if !dma_unshare_from_device(&mut XHCI_HID_DESCRIPTOR_STATES[index].buffer) {
+                    return false;
+                }
+            }
+            if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+        }
+
+        unsafe {
+            if !dma_buffer_cpu_owned(&XHCI_HID_DESCRIPTOR_STATES[index].buffer) {
+                return false;
+            }
+        }
+        if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+
+        unsafe {
+            if !dma_release(&mut XHCI_HID_DESCRIPTOR_STATES[index].buffer) {
+                return false;
+            }
+        }
+        if !xhci_hid_descriptor_teardown_epoch_matches(slot_id, epoch) { return false; }
+    }
+
+    unsafe {
+        if XHCI_HID_DESCRIPTOR_STATES[index].epoch != epoch ||
+           XHCI_HID_DESCRIPTOR_STATES[index].input_device_id != INPUT_DEVICE_ID_NONE ||
+           XHCI_HID_DESCRIPTOR_STATES[index].input_device_generation != INPUT_DEVICE_GENERATION_INVALID {
+            return false;
+        }
+        XHCI_HID_DESCRIPTOR_STATES[index].ready = false;
+        XHCI_HID_DESCRIPTOR_STATES[index].buffer = dma_invalid_buffer();
+        XHCI_HID_DESCRIPTOR_STATES[index].info = hid_report_descriptor_invalid();
+    }
+    return true;
+}
+
 @system
 pub fn xhci_hid_descriptor_release_input_device() -> bool {
     let slot_id = xhci_address_slot_id();
