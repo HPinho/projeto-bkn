@@ -4,7 +4,7 @@ Atualizado em 2026-09-10 (America/Fortaleza).
 
 Estados: `✅ COMPROVADO`, `⏳ EM VALIDAÇÃO`, `❌ FALHOU`, `⬜ PLANEJADO`.
 
-Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only** passam no mesmo candidato de runtime. Teste textual não substitui build nativo nem prova QEMU.
+Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only** passam no mesmo SHA. Teste textual não substitui build Sotlas nativo, ISO nem prova QEMU.
 
 ## Estado geral
 
@@ -16,17 +16,19 @@ Uma feature só vira baseline integrada quando **CI principal + SMP + NVMe-only*
 
 ## Posição atual
 
-O desenvolvimento está na **Fase 2 — Platform/Drivers**, Trilha B de input, dentro do **HID-4c Multi-slot xHCI**.
+O desenvolvimento está na **Fase 2 — Platform/Drivers**, na **Trilha B — HID/input de produção**, no fechamento do **HID-4c.3 — remoção dos singletons restantes do transporte xHCI**.
 
-O Kernel Core permanece congelado. O trabalho corrente remove os últimos estados singleton do transporte USB/HID e prepara a enumeração simultânea de múltiplos dispositivos HID reais no mesmo xHC.
+Em termos da Fase 2 inteira, o HID está em estágio avançado, mas **Platform/Drivers ainda não está perto de terminar como um todo**: ACPI/AML core está fechado; a fundação de storage existe; porém storage de produção/VFS, rede, áudio, GPU/composição, power/hot-plug avançado e HID-4d ainda permanecem futuros.
 
-A política atual é trabalhar diretamente em `main`, em incrementos pequenos e verificáveis. Cada incremento parte do último checkpoint verde, preserva o caminho single-device certificado e usa somente APIs confirmadas na baseline.
+O Kernel Core permanece congelado. Desenvolvimento novo em drivers deve preservar seus invariantes de SMP, memória, Ring3, TLB, FPU/SIMD, scheduler e teardown.
+
+A política atual é trabalhar diretamente em `main`, por microcortes verificáveis, sempre a partir do último checkpoint verde.
 
 ---
 
 # Baseline de retomada HID-4c
 
-Após a cadeia experimental HID-4c.3/4c.4 apresentar regressões, `main` foi restaurada ao último baseline totalmente verde:
+Após regressões na antiga cadeia experimental HID-4c.3/4c.4, `main` foi restaurada ao último baseline totalmente verde:
 
 ```text
 9558e5b3cb83064cc6a0b1548f03b3ed12c35a22
@@ -37,7 +39,7 @@ test(xhci): guard transfer results per slot
 - SMP #230 ✅;
 - NVMe #327 ✅.
 
-A partir desse SHA, HID-4c passou a avançar novamente por cortes pequenos, sem reaplicar automaticamente os commits experimentais posteriores.
+A partir desse SHA, HID-4c passou a ser reconstruído em incrementos pequenos, sem reaplicar automaticamente os commits experimentais removidos.
 
 ---
 
@@ -97,8 +99,6 @@ Markers `BAKEN:USB_HID_EVENT_MODEL_READY` e `BAKEN:USB_HID_EVENT_READY` permanec
 
 CI #1072 ✅; SMP #175 ✅; NVMe #272 ✅.
 
-Entrega registro bounded de devices, identidade `device_id + generation`, lifecycle explícito, queue/event state generation-safe e binding xHCI→InputDevice.
-
 ### HID-4b — certificado
 
 ```text
@@ -108,7 +108,7 @@ feat(hid): isolate input maps per device
 
 CI #1074 ✅; SMP #177 ✅; NVMe #274 ✅.
 
-Entrega mapa HID-2 persistente por `device_id + generation`, parser HID-1 stateless, tradução ligada ao mapa correto e teardown seguro. HID-4b não declarava xHCI multi-device completo; removeu o bloqueio semântico para HID-4c.
+HID-4b entrega mapa HID persistente por `device_id + generation`, parser HID-1 stateless, tradução ligada ao mapa correto e teardown generation-safe.
 
 ---
 
@@ -116,7 +116,7 @@ Entrega mapa HID-2 persistente por `device_id + generation`, parser HID-1 statel
 
 **⏳ EM DESENVOLVIMENTO DIRETO NA `main`.**
 
-Objetivo: retirar os singletons restantes do transporte xHCI e permitir que porta, Slot ID, Device/Input Context, EP0, descriptor state, HID endpoint/ring, configuration state, report buffer, identidade e eventos sejam associados ao device/interface correto.
+Objetivo: permitir que porta, Slot ID, Device/Input Context, EP0, descriptor state, HID endpoint/ring, configuration state, report buffer, identidade e eventos sejam associados ao device/interface correto, sem depender de singletons internos.
 
 ### HID-4c.1 — multi-slot transport core
 
@@ -124,14 +124,14 @@ Objetivo: retirar os singletons restantes do transporte xHCI e permitir que port
 
 - `xhci_device_table.sotlas` fixed-capacity de 256 Slot IDs;
 - associação `slot_id ↔ port_id`, `slot_type`, estado e `epoch`;
-- contexto DMA, Device Context, Input Context e EP0 ring por Slot ID;
+- Device Context, Input Context e EP0 ring por Slot ID;
 - DCBAA publicado no índice correto;
 - Address Device e USB address por slot+epoch;
 - wrappers legados preservados.
 
 Checkpoint histórico `22ede5d7`: CI #1078 ✅; SMP #181 ✅; NVMe #278 ✅.
 
-A baseline de retomada `9558e5b` inclui também EP0/transfer result por slot e foi revalidada em CI #1127 + SMP #230 + NVMe #327.
+A baseline `9558e5b` inclui também EP0/transfer result por slot e foi revalidada em CI #1127 + SMP #230 + NVMe #327.
 
 ### HID-4c.2 — HID Interrupt IN por slot/interface
 
@@ -147,50 +147,76 @@ A baseline de retomada `9558e5b` inclui também EP0/transfer result por slot e f
 
 ### HID-4c.3 — remoção dos singletons restantes
 
-**⏳ ETAPA ATUAL.**
+**⏳ IMPLEMENTAÇÃO COMPLETA; CERTIFICAÇÃO FINAL EM ANDAMENTO.**
 
 | Subetapa | Estado | Checkpoint / prova |
 |---|---|---|
 | Device Descriptor per-slot | ✅ | `d85d9f2424818f4cf9e2fc61967ac7cd9cace2a3` — CI #1128 / SMP #231 / NVMe #328 |
 | Evaluate Context per-slot | ✅ | `3688423e85a9c214755cc4c966c27910680663dc` — CI #1131 / SMP #234 / NVMe #331 |
 | Configuration Descriptor per-slot | ✅ | `72fa58228c24578ee50c39ca166d82ccc17a46a0` — CI #1132 / SMP #235 / NVMe #332 |
-| HID Report Descriptor + InputDevice binding per-slot | ✅ | head consolidado `4ae0a5c6341dd6ea62d2ea05b62001382bfa467d` — CI #1135 / SMP #238 / NVMe #335 |
+| HID Report Descriptor + InputDevice binding per-slot | ✅ | `4ae0a5c6341dd6ea62d2ea05b62001382bfa467d` — CI #1135 / SMP #238 / NVMe #335 |
 | HID report runtime ligado ao mesmo slot | ✅ | `93fe9d9639b366b9395b0b49f0f293bdf64de588` — CI #1136 / SMP #239 / NVMe #336 |
-| SET_CONFIGURATION per-slot | ⏳ | candidato atual; estado `slot_id + epoch`, EP0/result/HID descriptor do mesmo slot |
-| Report gate final usando SET_CONFIGURATION per-slot | ⬜ | remover a última consulta global do caminho `prepare_for_slot` |
+| SET_CONFIGURATION per-slot | ✅ | `0ef4c670727a2d0b68324c4281972b2992fefb5c` — CI #1137 / SMP #240 / NVMe #337 |
+| Report gate final usando SET_CONFIGURATION per-slot | ⏳ | candidato deste commit: `prepare_for_slot` usa readiness + configuration value do mesmo slot; aguarda triplo verde |
 
-O checkpoint `93fe9d...` é a **última baseline comprovada** antes do candidato atual. Nele, suíte completa, grafo modular, build Sotlas, ISO, QEMU, SMP e NVMe-only passaram.
+### Última baseline certificada
 
-### Regra de segurança HID-4c.3
+```text
+0ef4c670727a2d0b68324c4281972b2992fefb5c
+feat(xhci): isolate set configuration per slot
+```
 
-- não empilhar uma nova mudança funcional sobre candidato vermelho;
-- nenhum wrapper legado pode decidir identidade de outro slot dentro de uma API `_for(slot_id)`;
-- toda transferência deve consumir completion/result do mesmo slot;
+- CI #1137 / `34553335969` ✅ — suíte completa, grafo Sotlas, build nativo, ISO e QEMU;
+- SMP #240 / `34553335968` ✅ — contracts, build e prova SMP;
+- NVMe #337 / `34553335991` ✅ — contracts, build, fixture e QEMU NVMe-only.
+
+### Candidato final HID-4c.3
+
+O último microcorte remove a consulta global de `SET_CONFIGURATION` de `xhci_hid_report_prepare_for_slot(slot_id)`.
+
+O caminho agora exige simultaneamente:
+
+```text
+xhci_hid_context_is_ready_for(slot_id)
+xhci_configure_endpoint_is_ready_for(slot_id)
+xhci_set_configuration_is_ready_for(slot_id)
+xhci_set_configuration_value_for(slot_id) == xhci_configuration_value_for(slot_id)
+xhci_hid_descriptor_input_map_is_ready_for(slot_id)
+identidade InputDevice correspondente ao mesmo slot
+```
+
+O wrapper `xhci_hid_report_prepare()` somente seleciona o slot ativo e delega. A lógica interna multi-slot não consulta mais readiness global de SET_CONFIGURATION.
+
+Se este candidato passar CI + SMP + NVMe no mesmo SHA, **HID-4c.3 estará fechado** e o próximo bloco passa a ser HID-4c.4.
+
+### Regras de segurança HID-4c.3
+
+- não empilhar mudança funcional sobre candidato vermelho;
+- API `_for(slot_id)` nunca pode decidir identidade/configuração/resultados usando outro slot;
+- toda transferência consome completion/result do mesmo slot;
 - `epoch` invalida estado stale quando Slot ID é reutilizado;
 - o proof legado `sendkey a` continua obrigatório;
 - não relaxar timeout, marker ou teste para obter verde.
 
 ### HID-4c.4 — enumeração simultânea real
 
-**⬜ PRÓXIMO BLOCO APÓ HID-4c.3.**
+**⬜ PRÓXIMO BLOCO APÓ O TRIPLO VERDE DO FECHAMENTO HID-4c.3.**
 
 Objetivos:
 
-- enumerar múltiplas portas conectadas elegíveis;
-- Enable Slot + Context + Address independentes por porta;
-- configurar pelo menos keyboard + mouse simultâneos no mesmo xHC;
-- cada device com Slot ID, epoch, endpoint/DCI, ring, descriptor state, `device_id + generation` e mapa próprios;
-- event/transfer demux nunca aceitar evento de outro slot;
-- preservar o teclado como primeiro device no QEMU para manter o proof histórico;
-- adicionar prova real de mouse no segundo slot.
+1. enumerar múltiplas portas conectadas elegíveis;
+2. Enable Slot + Context + Address independentes por porta;
+3. configurar pelo menos keyboard + mouse simultâneos no mesmo xHC;
+4. cada device com Slot ID, epoch, endpoint/DCI, ring, descriptor state, `device_id + generation` e mapa próprios;
+5. event/transfer demux nunca aceitar evento de outro slot;
+6. preservar o teclado como primeiro device no QEMU para manter o proof histórico;
+7. adicionar prova real e independente do mouse no segundo slot.
 
-Não reintroduzir automaticamente os antigos commits experimentais de HID-4c.4. Eles servem apenas como referência de design.
+Não reintroduzir automaticamente os antigos commits experimentais HID-4c.4; eles servem somente como referência de design.
 
 ### HID-4d — hot-plug/recovery
 
-**⬜ PLANEJADO.**
-
-Detach físico, cancel de transfers, cleanup generation-safe, slot reuse com epoch novo, reenumeração bounded e recuperação de endpoint/controller.
+**⬜ PLANEJADO.** Detach físico, cancel de transfers, cleanup generation-safe, slot reuse com epoch novo, reenumeração bounded e recuperação de endpoint/controller.
 
 ---
 
@@ -233,9 +259,7 @@ AHCI / NVMe / futuros USB Mass Storage
 | STORAGE-10 Async I/O + recovery | ⬜ | requests, cancel, flush ordering, recovery |
 | STORAGE-11 Filesystems avançados | ⬜ | ZFS/importers somente depois do VFS/BakenFS maduros |
 
-### Política de filesystem
-
-BakenFS será o filesystem nativo/preferencial, mas não substituirá compatibilidade. FAT32 deve chegar a read/write completo; exFAT recebe prioridade para mídia removível; NTFS e ext começam em leitura segura; ISO/UDF em read-only; ZFS fica para etapa tardia.
+BakenFS será o filesystem nativo/preferencial, sem eliminar interoperabilidade: FAT32 read/write completo; exFAT prioritário para mídia removível; NTFS/ext inicialmente leitura segura; ISO/UDF read-only; ZFS tardio.
 
 ---
 
@@ -277,7 +301,7 @@ BakenFS será o filesystem nativo/preferencial, mas não substituirá compatibil
 6. unsupported = unresolved/fail-closed, nunca retorno inventado;
 7. nunca obter verde removendo proof, marker, integridade ou aumentando timeout sem causa comprovada;
 8. toda falha, correção e certificação relevante deve ser refletida neste roadmap;
-9. `KERNEL_HANDOFF.md` mantém o estado operacional de continuidade e deve acompanhar mudanças de baseline/fase;
+9. `KERNEL_HANDOFF.md` acompanha mudanças de baseline/fase e mantém o estado operacional;
 10. drivers de filesystem nunca bypassam VFS/BlockDevice para acessar AHCI/NVMe diretamente;
 11. escrita em filesystem externo só é habilitada após testes explícitos de integridade, flush e recovery;
-12. `HPinho/LangSotlas` é referência/toolchain separada; migração de recursos deve ser seletiva e nunca misturada sem necessidade a um checkpoint crítico de driver.
+12. `HPinho/LangSotlas` é toolchain separada; migração deve ser seletiva e não misturada a checkpoint crítico de driver.

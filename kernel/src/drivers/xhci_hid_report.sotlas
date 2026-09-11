@@ -1,8 +1,8 @@
 // Baken OS — HID-4c.3: polling HID Interrupt IN vinculado por Slot ID.
 //
-// Ring producer, cycle state, DMA report buffer, identidade lógica, mapa HID e
-// fallback Boot ficam separados por slot+epoch. O SET_CONFIGURATION permanece
-// no wrapper legado até o checkpoint dedicado seguinte.
+// Ring producer, cycle state, DMA report buffer, identidade lógica, mapa HID,
+// SET_CONFIGURATION e fallback Boot ficam coerentes por slot+epoch. Wrappers
+// legados apenas escolhem o slot ativo e delegam ao caminho _for(slot_id).
 
 module kernel::drivers::xhci_hid_report;
 
@@ -297,7 +297,8 @@ pub fn xhci_hid_report_is_ready_for(slot_id: u8) -> bool {
 pub fn xhci_hid_report_prepare_for_slot(slot_id: u8) -> bool {
     if !xhci_hid_context_is_ready_for(slot_id) ||
        !xhci_configure_endpoint_is_ready_for(slot_id) ||
-       !xhci_set_configuration_is_ready() ||
+       !xhci_set_configuration_is_ready_for(slot_id) ||
+       xhci_set_configuration_value_for(slot_id) != xhci_configuration_value_for(slot_id) ||
        !xhci_hid_descriptor_input_map_is_ready_for(slot_id) || !hid_input_events_is_ready() ||
        !input_event_queue_is_ready() || !xhci_hid_report_identity_matches_slot(slot_id) {
         return false;
@@ -350,9 +351,7 @@ pub fn xhci_hid_report_prepare_for_slot(slot_id: u8) -> bool {
 @system
 pub fn xhci_hid_report_prepare() -> bool {
     let slot_id = xhci_configure_endpoint_slot_id();
-    if slot_id == 0 || !xhci_hid_context_is_ready() || !xhci_set_configuration_is_ready() {
-        return false;
-    }
+    if slot_id == 0 { return false; }
     return xhci_hid_report_prepare_for_slot(slot_id);
 }
 

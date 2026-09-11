@@ -22,19 +22,22 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertNotIn("static mut XHCI_HID_REPORT_ENQUEUE_INDEX:", text)
         self.assertNotIn("static mut XHCI_HID_REPORT_PRODUCER_CYCLE:", text)
 
-    def test_report_path_requires_configured_endpoint_device_map_events_and_identity(self):
+    def test_report_path_requires_same_slot_configuration_endpoint_map_events_and_identity(self):
         text = HID.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_hid_report_prepare_for_slot", 1)[1]
+        body = body.split("pub fn xhci_hid_report_prepare()", 1)[0]
         for token in (
             "xhci_hid_context_is_ready_for(slot_id)",
             "xhci_configure_endpoint_is_ready_for(slot_id)",
-            "xhci_set_configuration_is_ready()",
+            "xhci_set_configuration_is_ready_for(slot_id)",
+            "xhci_set_configuration_value_for(slot_id) != xhci_configuration_value_for(slot_id)",
             "xhci_hid_descriptor_input_map_is_ready_for(slot_id)",
             "hid_input_events_is_ready()",
             "input_event_queue_is_ready()",
             "xhci_hid_report_identity_matches_slot(slot_id)",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("xhci_set_configuration_is_ready()", body)
         self.assertNotIn("hid_input_report_map_is_ready()", text)
 
     def test_transport_identity_must_match_slot_before_report(self):
@@ -125,8 +128,13 @@ class XhciHidReportTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
-    def test_legacy_wrappers_delegate_to_active_slot(self):
+    def test_legacy_wrappers_only_select_active_slot_and_delegate(self):
         text = HID.read_text(encoding="utf-8")
+        prepare = text.split("pub fn xhci_hid_report_prepare() -> bool", 1)[1]
+        prepare = prepare.split("pub fn xhci_hid_report_poll_slot_once", 1)[0]
+        self.assertIn("let slot_id = xhci_configure_endpoint_slot_id()", prepare)
+        self.assertIn("return xhci_hid_report_prepare_for_slot(slot_id)", prepare)
+        self.assertNotIn("xhci_set_configuration_is_ready()", prepare)
         self.assertIn("return xhci_hid_report_poll_slot_once(xhci_hid_report_active_slot_id())", text)
         self.assertIn("return xhci_hid_report_last_length_for(xhci_hid_report_active_slot_id())", text)
         self.assertIn("return xhci_hid_keyboard_key0_for(xhci_hid_report_active_slot_id())", text)
