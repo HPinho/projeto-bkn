@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails para queries HID/xHCI exact-epoch antes do teardown 4d.3b2."""
+"""Guardrails para queries e demux xHCI exact-epoch antes do teardown 4d.3b2."""
 
 from pathlib import Path
 import re
@@ -143,6 +143,69 @@ class XhciExactEpochPendingTests(unittest.TestCase):
         for body in (report_body, transfer_body):
             self.assertNotIn("ACTIVE_SLOT_ID", body)
             self.assertNotRegex(body, r"\b[a-zA-Z0-9_]+_active_slot_id\s*\(")
+
+    def test_demux_exact_match_uses_epoch_scoped_mailbox_only(self) -> None:
+        body = function_body(self.transfer, "xhci_transfer_pending_matches_for_epoch")
+        self.assertIn("xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)", body)
+        self.assertGreaterEqual(
+            body.count("xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)"), 2
+        )
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch", body)
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id == endpoint_id", body)
+        self.assertIn(
+            "XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer == completion_trb_physical",
+            body,
+        )
+        self.assertNotIn("xhci_transfer_pending_is_ready_for(slot_id)", body)
+        self.assertNotIn("xhci_transfer_clear_pending_index", body)
+
+    def test_demux_compatibility_match_delegates_after_resolving_current_epoch(self) -> None:
+        body = function_body(self.transfer, "xhci_transfer_pending_matches")
+        self.assertIn("xhci_transfer_pending_is_ready_for(slot_id)", body)
+        self.assertIn("let epoch = xhci_device_table_slot_epoch(slot_id)", body)
+        self.assertIn("xhci_transfer_pending_matches_for_epoch(", body)
+        self.assertNotIn("XHCI_TRANSFER_PENDING_EVENTS[", body)
+
+    def test_take_pending_cannot_follow_reused_slot_generation(self) -> None:
+        body = function_body(self.transfer, "xhci_transfer_take_pending")
+        exact = "xhci_transfer_pending_matches_for_epoch("
+        self.assertGreaterEqual(body.count(exact), 2)
+        self.assertNotIn("xhci_transfer_pending_matches(slot_id", body)
+        first_match = body.find(exact)
+        snapshot = body.find("XHCI_TRANSFER_PENDING_EVENTS[index].residual_length")
+        second_match = body.rfind(exact)
+        publish = body.find("XHCI_TRANSFER_RESULTS[index].valid = true")
+        self.assertLess(first_match, snapshot)
+        self.assertLess(snapshot, second_match)
+        self.assertLess(second_match, publish)
+
+    def test_waiter_keeps_captured_epoch_for_mailbox_and_rollover_guard(self) -> None:
+        body = function_body(self.transfer, "xhci_transfer_wait_completion")
+        self.assertIn("let epoch = xhci_device_table_slot_epoch(slot_id)", body)
+        self.assertIn("xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)", body)
+        self.assertIn("xhci_transfer_pending_matches_for_epoch(", body)
+        self.assertIn("xhci_device_table_slot_epoch(slot_id) != epoch", body)
+        self.assertNotIn("xhci_transfer_pending_is_ready_for(slot_id)", body)
+        self.assertNotIn("xhci_transfer_pending_matches(slot_id", body)
+
+    def test_event_ring_remains_single_global_consumer_and_routes_to_mailbox(self) -> None:
+        route = function_body(self.transfer, "xhci_transfer_route_next_event")
+        publish = function_body(self.transfer, "xhci_transfer_publish_pending_event")
+        self.assertIn("xhci_event_consumer_peek()", route)
+        self.assertIn("xhci_transfer_publish_pending_event(event)", route)
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].epoch = epoch", publish)
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id = endpoint_id", publish)
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer = trb_pointer", publish)
+        self.assertIn("xhci_event_consumer_consume()", publish)
+        self.assertNotRegex(self.transfer, r"xhci_event_consumer_(?:peek|consume)_for")
+
+    def test_slot_reuse_requires_future_drain_barrier_before_epoch_rollover(self) -> None:
+        publish = function_body(self.transfer, "xhci_transfer_publish_pending_event")
+        self.assertIn("let epoch = xhci_device_table_slot_epoch(slot_id)", publish)
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].epoch = epoch", publish)
+        self.assertIn("XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch", publish)
+        self.assertIn("HID-4d.5", self.transfer)
+        self.assertIn("drain/barrier", self.transfer)
 
 
 if __name__ == "__main__":
