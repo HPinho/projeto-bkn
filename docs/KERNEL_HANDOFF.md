@@ -8,8 +8,8 @@ Atualizado em 2026-09-11 (America/Fortaleza).
 - trilha: **Trilha B — HID/input de produção**
 - HID-4c multi-slot xHCI: **✅ concluído e certificado**
 - HID-4d hot-plug/recovery: **⏳ em desenvolvimento**
-- última baseline integralmente certificada: **demux/waiter exact-epoch — `5fa048986ab4cfb8313530e9945e513633ea944f`**
-- candidato funcional atual: **lifecycle pending checks exact-epoch — `1c8b81b3cd021d12e46a964f54024f661bc1c2b3`**
+- última baseline integralmente certificada: **lifecycle pending checks exact-epoch — `1c8b81b3cd021d12e46a964f54024f661bc1c2b3`**
+- próximo microcorte funcional: **cleanup lógico real de InputDevice/map/descriptors/report DMA, generation-safe e retry-safe**
 - macroetapa atual: **HID-4d.3b — teardown HID lógico generation-safe**
 - branch: **`main`**
 - Kernel Core: **congelado/invariant-preserving**
@@ -27,7 +27,34 @@ Não empilhar funcionalidade sobre candidato vermelho. Não enfraquecer markers,
 
 ---
 
-# Baseline certificada atual
+# Baseline certificada atual — lifecycle exact-epoch
+
+```text
+1c8b81b3cd021d12e46a964f54024f661bc1c2b3
+fix(xhci): bind HID lifecycle pending checks to epoch
+```
+
+Provas no mesmo SHA:
+
+- CI #1164 ✅
+- SMP #267 ✅
+- NVMe #364 ✅
+- HID Dual-device #23 ✅
+
+Escopo deliberadamente pequeno e já certificado:
+
+- `xhci_hid_lifecycle_quiescent_for(slot_id, epoch)` usa `xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)`;
+- a mesma função usa `xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)`;
+- `xhci_hid_lifecycle_stop_endpoint_for(slot_id, epoch)` captura `had_pending` pela API exact-epoch;
+- revalidações `DETACH_PENDING + epoch` antes/entre/depois permanecem como barreira TOCTOU;
+- `xhci_hid_report_drain_cancelled_for_slot(slot_id)` permanece temporariamente como compatibilidade slot-only, cercada por revalidação exata;
+- nenhum DMA, InputDevice, descriptor, ring, context ou Slot ID é liberado neste corte.
+
+Esse checkpoint autoriza iniciar o cleanup lógico real do 4d.3b, ainda sem Drop Endpoint, sem liberar HID Transfer Ring e sem `Disable Slot`.
+
+---
+
+# Baseline anterior — demux/waiter exact-epoch
 
 ```text
 5fa048986ab4cfb8313530e9945e513633ea944f
@@ -55,33 +82,6 @@ slot_id + epoch + endpoint_id + TRB physical pointer
 
 ---
 
-# Candidato atual — lifecycle exact-epoch
-
-```text
-1c8b81b3cd021d12e46a964f54024f661bc1c2b3
-fix(xhci): bind HID lifecycle pending checks to epoch
-```
-
-Gates em validação:
-
-- CI #1164 ⏳
-- SMP #267 ⏳
-- NVMe #364 ⏳
-- HID Dual-device #23 ⏳
-
-Escopo deliberadamente pequeno:
-
-- `xhci_hid_lifecycle_quiescent_for(slot_id, epoch)` usa `xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)`;
-- a mesma função usa `xhci_transfer_pending_is_ready_for_epoch(slot_id, epoch)`;
-- `xhci_hid_lifecycle_stop_endpoint_for(slot_id, epoch)` captura `had_pending` pela API exact-epoch;
-- revalidações `DETACH_PENDING + epoch` antes/entre/depois permanecem como barreira TOCTOU;
-- `xhci_hid_report_drain_cancelled_for_slot(slot_id)` permanece temporariamente como compatibilidade slot-only, cercada por revalidação exata;
-- nenhum DMA, InputDevice, descriptor, ring, context ou Slot ID é liberado neste corte.
-
-Se qualquer um dos quatro gates falhar, este checkpoint deve ser corrigido antes de iniciar o cleanup real do 4d.3b.
-
----
-
 # Progressão certificada do HID-4d.3b
 
 | Microcorte / hardening | Estado | Checkpoint / prova |
@@ -91,7 +91,7 @@ Se qualquer um dos quatro gates falhar, este checkpoint deve ser corrigido antes
 | report decode SMP-serializado contra detach | ✅ | `6eb10542e4ab024dda2c28ba25dfcb97fb83dbcb` — CI #1161 / SMP #264 / NVMe #361 / HID Dual #20 |
 | pending queries exact-epoch | ✅ | `b6b7efacfa41eac6a89400b83f409b18b6b72a38` — CI #1162 / SMP #265 / NVMe #362 / HID Dual #21 |
 | demux/waiter exact-epoch | ✅ | `5fa048986ab4cfb8313530e9945e513633ea944f` — CI #1163 / SMP #266 / NVMe #363 / HID Dual #22 |
-| lifecycle pending checks exact-epoch | ⏳ | `1c8b81b3cd021d12e46a964f54024f661bc1c2b3` — CI #1164 / SMP #267 / NVMe #364 / HID Dual #23 |
+| lifecycle pending checks exact-epoch | ✅ | `1c8b81b3cd021d12e46a964f54024f661bc1c2b3` — CI #1164 / SMP #267 / NVMe #364 / HID Dual #23 |
 
 A macroetapa **4d.3b ainda não está concluída**: falta o cleanup lógico real e retry-safe de InputDevice/map/bindings/descriptors/report DMA e mailbox/result lógico.
 
@@ -126,7 +126,7 @@ Esse checkpoint certifica HID-4d.3a:
 
 ## Motivo do microcorte
 
-O hot-unplug real precisa permitir teardown de dispositivos em qualquer ordem. Até a baseline HID-4d.3a, `dma_release()` devolve páginas com `pmm_free_pages_lifo()`, o que exige que o buffer seja a última alocação global registrada pelo PMM.
+O hot-unplug real precisa permitir teardown de dispositivos em qualquer ordem. Até a baseline HID-4d.3a, `dma_release()` devolvia páginas com `pmm_free_pages_lifo()`, o que exigia que o buffer fosse a última alocação global registrada pelo PMM.
 
 Isso é inadequado quando, por exemplo, dispositivo A foi enumerado antes de B e A é removido enquanto B continua ativo.
 
@@ -136,17 +136,17 @@ O PMM já possui a API correta para esse caso:
 pmm_free_pages(base, count)
 ```
 
-Ela é bitmap-backed, protegida pelo lock/IRQ do allocator, valida range/ownership físico, rejeita double-free e já possui self-test de liberação fora de ordem. Portanto **o PMM não deve ser redesenhado neste corte**.
+Ela é bitmap-backed, protegida pelo lock/IRQ do allocator, valida range/ownership físico, rejeita double-free e já possui self-test de liberação fora de ordem. Portanto **o PMM não foi redesenhado nesse corte**.
 
 ## Contrato do 4d.3b0
 
-Alterar somente o backend normal de:
+O backend normal de:
 
 ```text
 dma_release()
 ```
 
-de:
+foi alterado de:
 
 ```text
 pmm_free_pages_lifo((*buffer).physical_address, page_count)
@@ -158,7 +158,7 @@ para:
 pmm_free_pages((*buffer).physical_address, page_count)
 ```
 
-Preservar obrigatoriamente:
+Preservando:
 
 - `buffer != null`
 - `dma_buffer_cpu_owned()`
@@ -169,25 +169,7 @@ Preservar obrigatoriamente:
 - somente `DMA_OWNER_CPU` e `DMA_OWNER_COMPLETED` podem ser liberados
 - `DMA_OWNER_DEVICE` e `DMA_OWNER_SHARED` continuam rejeitados
 
-## Rollback LIFO continua válido
-
 Os usos de `pmm_free_pages_lifo()` dentro de `dma_alloc()` e `dma_alloc_for_device()` continuam permitidos quando são rollback imediato da própria alocação recém-feita, antes de qualquer nova alocação intercalar o lifetime.
-
-Não trocar esses call sites neste microcorte.
-
-## Guardrails do candidato
-
-`tests/test_dma_release.py` deve provar:
-
-- `dma_release()` usa `pmm_free_pages()`
-- `dma_release()` não contém `pmm_free_pages_lifo()`
-- ownership passa por `dma_buffer_cpu_owned()`
-- `DEVICE`/`SHARED` não são CPU-owned
-- invalidação ocorre somente após o PMM aceitar o free
-- rollbacks dos allocators continuam LIFO
-- a API/self-test de free arbitrário do PMM permanece presente
-
-`tests/test_dma_contract.py` também precisa deixar de exigir o call site LIFO obsoleto dentro de `dma_release()`.
 
 ---
 
@@ -312,4 +294,4 @@ post_cutover_prepare_first_usb_port
 4. inspecionar ownership/lifetime real antes de liberar DMA
 5. fazer um microcorte funcional por vez
 6. se qualquer gate falhar, corrigir o próprio checkpoint antes de avançar
-7. se `1c8b81b3...` ficar verde, registrar a certificação e avançar para **HID-4d.3b cleanup lógico real per-epoch**, ainda sem Drop Endpoint ou `Disable Slot`
+7. próxima implementação: **HID-4d.3b cleanup lógico real per-epoch**, começando por identidade/InputDevice/events/map retry-safe, ainda sem Drop Endpoint ou `Disable Slot`
