@@ -52,6 +52,23 @@ fn platform_hid_late_attach_emit_interleave_ready_marker() -> bool {
     return true;
 }
 
+// Marker diagnóstico temporário do HID-4c.4e. O caractere final identifica o
+// último estágio concluído sem alterar nenhuma condição de sucesso da prova.
+@system
+fn platform_hid_late_attach_emit_interleave_stage(stage: u8) -> bool {
+    // BAKEN:HID4E=<stage>\n
+    let prefix: [u8; 12] = [
+        66,65,75,69,78,58,72,73,68,52,69,61
+    ];
+    let mut index: usize = 0;
+    while index < 12 {
+        if !x86_serial_write_byte(prefix[index]) { return false; }
+        index += 1;
+    }
+    if !x86_serial_write_byte(stage) { return false; }
+    return x86_serial_write_byte(10);
+}
+
 // Ambos os TDs precisam estar publicados antes de qualquer wait. Os dois
 // route_next_event() consomem exatamente duas completions reais do Event Ring e
 // as depositam na mailbox indicada pelo Slot ID de cada Event TRB, independente
@@ -59,6 +76,7 @@ fn platform_hid_late_attach_emit_interleave_ready_marker() -> bool {
 @system
 fn platform_hid_late_attach_prove_interleaving(first_slot: u8,
                                                 second_slot: u8) -> bool {
+    if !platform_hid_late_attach_emit_interleave_stage(48) { return false; }
     if first_slot == 0 || second_slot == 0 || first_slot == second_slot ||
        !xhci_hid_report_is_ready_for(first_slot) ||
        !xhci_hid_report_is_ready_for(second_slot) ||
@@ -66,40 +84,51 @@ fn platform_hid_late_attach_prove_interleaving(first_slot: u8,
        xhci_hid_protocol_for(second_slot) != USB_HID_PROTOCOL_MOUSE {
         return false;
     }
+    if !platform_hid_late_attach_emit_interleave_stage(49) { return false; }
 
     let routed_before = xhci_transfer_routed_event_count();
 
     // Mouse primeiro, teclado depois: nenhuma suposição é feita sobre a ordem
     // de completion. O dispatcher usa o Slot ID que veio do próprio Event TRB.
     if !xhci_hid_report_submit_for_slot(second_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(50) { return false; }
     if !xhci_hid_report_submit_for_slot(first_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(51) { return false; }
     if !xhci_hid_report_transfer_pending_for(first_slot) ||
        !xhci_hid_report_transfer_pending_for(second_slot) {
         return false;
     }
+    if !platform_hid_late_attach_emit_interleave_stage(52) { return false; }
 
     if !xhci_transfer_route_next_event() { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(53) { return false; }
     if !xhci_transfer_route_next_event() { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(54) { return false; }
     if xhci_transfer_routed_event_count() < routed_before + 2 { return false; }
     if !xhci_transfer_pending_is_ready_for(first_slot) ||
        !xhci_transfer_pending_is_ready_for(second_slot) {
         return false;
     }
+    if !platform_hid_late_attach_emit_interleave_stage(55) { return false; }
 
     // A ordem de coleta é deliberadamente diferente da ordem de submit. Cada
     // completion só pode ser retirada pela combinação slot+endpoint+TRB física.
     if !xhci_hid_report_complete_for_slot(first_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(56) { return false; }
     if !xhci_hid_report_complete_for_slot(second_slot) { return false; }
+    if !platform_hid_late_attach_emit_interleave_stage(57) { return false; }
     if xhci_hid_report_transfer_pending_for(first_slot) ||
        xhci_hid_report_transfer_pending_for(second_slot) ||
        xhci_transfer_pending_is_ready_for(first_slot) ||
        xhci_transfer_pending_is_ready_for(second_slot) {
         return false;
     }
+    if !platform_hid_late_attach_emit_interleave_stage(65) { return false; }
     if xhci_hid_report_last_length_for(first_slot) < XHCI_HID_BOOT_KEYBOARD_LENGTH ||
        xhci_hid_report_last_length_for(second_slot) < XHCI_HID_BOOT_MOUSE_MIN_LENGTH {
         return false;
     }
+    if !platform_hid_late_attach_emit_interleave_stage(66) { return false; }
 
     if !platform_hid_late_attach_emit_interleave_ready_marker() { return false; }
     unsafe { PLATFORM_HID_INTERLEAVE_READY = true; }
