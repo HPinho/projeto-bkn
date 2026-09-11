@@ -17,7 +17,9 @@ class Hid3RuntimeContractTests(unittest.TestCase):
 
     def test_event_model_marker_is_after_hid2_map(self):
         text = XHCI_DESCRIPTOR.read_text(encoding="utf-8")
-        body = text.split("fn xhci_hid_descriptor_probe_internal() -> bool", 1)[1]
+        body = text.split(
+            "fn xhci_hid_descriptor_probe_internal_for_slot(slot_id: u8) -> bool", 1
+        )[1]
         body = body.split("pub fn xhci_hid_descriptor_emit_ready_marker()", 1)[0]
         self.assertLess(body.index("xhci_hid_input_map_emit_ready_marker()"),
                         body.index("xhci_hid_event_model_emit_ready_marker()"))
