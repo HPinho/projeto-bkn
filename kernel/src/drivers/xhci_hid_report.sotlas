@@ -1,9 +1,11 @@
-// Baken OS — HID-4c.4e: polling HID Interrupt IN por Slot ID com submit/complete separados.
+// Baken OS — HID-4c.4e/HID-4d.1: polling HID Interrupt IN por Slot ID.
 //
 // Ring producer, cycle state, DMA report buffer, identidade lógica, mapa HID,
 // SET_CONFIGURATION e fallback Boot ficam coerentes por slot+epoch. Cada slot
 // admite um TD HID outstanding; submit e complete separados permitem armar dois
 // devices antes de consumir o Event Ring sem alterar os wrappers legados.
+// HID-4d.1 bloqueia novos prepare/submit após DETACH_PENDING, mas mantém complete
+// disponível para drenar um TD que já estava publicado no epoch em quarentena.
 
 module kernel::drivers::xhci_hid_report;
 
@@ -302,7 +304,8 @@ pub fn xhci_hid_report_is_ready_for(slot_id: u8) -> bool {
 
 @system
 pub fn xhci_hid_report_prepare_for_slot(slot_id: u8) -> bool {
-    if !xhci_hid_context_is_ready_for(slot_id) ||
+    if xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_HID_READY ||
+       !xhci_hid_context_is_ready_for(slot_id) ||
        !xhci_configure_endpoint_is_ready_for(slot_id) ||
        !xhci_set_configuration_is_ready_for(slot_id) ||
        xhci_set_configuration_value_for(slot_id) != xhci_configuration_value_for(slot_id) ||
@@ -378,7 +381,8 @@ pub fn xhci_hid_report_transfer_pending_for(slot_id: u8) -> bool {
 
 @system
 pub fn xhci_hid_report_submit_for_slot(slot_id: u8) -> bool {
-    if !xhci_hid_report_is_ready_for(slot_id) ||
+    if xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_HID_READY ||
+       !xhci_hid_report_is_ready_for(slot_id) ||
        !xhci_hid_report_identity_matches_slot(slot_id) ||
        !xhci_hid_descriptor_input_map_is_ready_for(slot_id) ||
        xhci_hid_report_transfer_pending_for(slot_id) {
@@ -426,6 +430,8 @@ pub fn xhci_hid_report_submit_for_slot(slot_id: u8) -> bool {
 
 @system
 pub fn xhci_hid_report_complete_for_slot(slot_id: u8) -> bool {
+    // Deliberadamente não exige HID_READY: DETACH_PENDING ainda pode coletar o
+    // completion de um TD publicado antes da detecção física do detach.
     if !xhci_hid_report_is_ready_for(slot_id) ||
        !xhci_hid_report_identity_matches_slot(slot_id) ||
        !xhci_hid_descriptor_input_map_is_ready_for(slot_id) ||

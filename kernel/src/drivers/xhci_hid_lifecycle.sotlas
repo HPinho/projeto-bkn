@@ -1,0 +1,115 @@
+// Baken OS — HID-4d.1: detecção e quarentena de detach HID xHCI.
+//
+// Este estágio é deliberadamente não destrutivo. Ele revalida PORTSC por meio do
+// inventário read-only, marca somente HID_READY -> DETACH_PENDING no mesmo epoch
+// e bloqueia novos submits via estado da device table. TD/mailbox já outstanding
+// permanecem intactos para drain/cancel explícito no HID-4d.2.
+
+module kernel::drivers::xhci_hid_lifecycle;
+
+import kernel::drivers::xhci_port::*;
+import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_hid_report::*;
+import kernel::drivers::xhci_transfer::*;
+
+static mut XHCI_HID_LIFECYCLE_LAST_SCAN_OK: bool = false;
+static mut XHCI_HID_LIFECYCLE_DETACH_PENDING_COUNT: u16 = 0;
+
+@system
+pub fn xhci_hid_lifecycle_is_detach_pending_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    return xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING;
+}
+
+@system
+pub fn xhci_hid_lifecycle_mark_detached_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    let state = xhci_device_table_state(slot_id);
+    if state != XHCI_DEVICE_STATE_HID_READY &&
+       state != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    let port_id = xhci_device_table_port_id(slot_id);
+    if port_id == 0 { return false; }
+    let snapshot = xhci_port_snapshot(port_id);
+    if snapshot == (null as *const XhciPortSnapshot) { return false; }
+    unsafe {
+        if !(*snapshot).valid || (*snapshot).port_id != port_id || (*snapshot).connected {
+            return false;
+        }
+    }
+    return xhci_device_table_mark_detach_pending(slot_id, epoch);
+}
+
+@system
+pub fn xhci_hid_lifecycle_scan_detached() -> bool {
+    unsafe {
+        XHCI_HID_LIFECYCLE_LAST_SCAN_OK = false;
+        XHCI_HID_LIFECYCLE_DETACH_PENDING_COUNT = 0;
+    }
+    if xhci_port_scan() == 0 { return false; }
+
+    let mut pending_count: u16 = 0;
+    let mut index: usize = 1;
+    while index < XHCI_DEVICE_SLOT_CAPACITY {
+        let slot_id = index as u8;
+        if xhci_device_table_slot_is_valid(slot_id) {
+            let epoch = xhci_device_table_slot_epoch(slot_id);
+            let state = xhci_device_table_state(slot_id);
+            if epoch == 0 { return false; }
+            if state == XHCI_DEVICE_STATE_HID_READY ||
+               state == XHCI_DEVICE_STATE_DETACH_PENDING {
+                let port_id = xhci_device_table_port_id(slot_id);
+                if port_id == 0 { return false; }
+                let snapshot = xhci_port_snapshot(port_id);
+                if snapshot == (null as *const XhciPortSnapshot) { return false; }
+                unsafe {
+                    if !(*snapshot).valid || (*snapshot).port_id != port_id {
+                        return false;
+                    }
+                    if !(*snapshot).connected {
+                        if !xhci_hid_lifecycle_mark_detached_for(slot_id, epoch) {
+                            return false;
+                        }
+                        pending_count += 1;
+                    } else if state == XHCI_DEVICE_STATE_DETACH_PENDING {
+                        // Não reverte a quarentena se o sinal físico reaparecer
+                        // antes do drain/cleanup do epoch antigo.
+                        pending_count += 1;
+                    }
+                }
+            }
+        }
+        index += 1;
+    }
+
+    unsafe {
+        XHCI_HID_LIFECYCLE_DETACH_PENDING_COUNT = pending_count;
+        XHCI_HID_LIFECYCLE_LAST_SCAN_OK = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_hid_lifecycle_can_finalize_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
+    if xhci_hid_report_transfer_pending_for(slot_id) { return false; }
+    if xhci_transfer_pending_is_ready_for(slot_id) { return false; }
+    return true;
+}
+
+@system
+pub fn xhci_hid_lifecycle_last_scan_ok() -> bool {
+    unsafe { return XHCI_HID_LIFECYCLE_LAST_SCAN_OK; }
+}
+
+@system
+pub fn xhci_hid_lifecycle_detach_pending_count() -> u16 {
+    unsafe { return XHCI_HID_LIFECYCLE_DETACH_PENDING_COUNT; }
+}

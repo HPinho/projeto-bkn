@@ -1,9 +1,10 @@
-// Baken OS — HID-4c: registro bounded de devices xHCI por Slot ID.
+// Baken OS — HID-4c/HID-4d: registro bounded de devices xHCI por Slot ID.
 //
 // O xHC pode manter múltiplos slots ativos simultaneamente. Este módulo separa
 // identidade de transporte (slot/porta/tipo) do "device atual" usado pelos
 // wrappers legados e oferece storage fixed-capacity, sem heap, protegido por
 // spinlock. Slot ID 0 permanece inválido; índices 1..255 correspondem ao ID xHCI.
+// HID-4d.1 introduz DETACH_PENDING somente por transição dedicada generation-safe.
 
 module kernel::drivers::xhci_device_table;
 
@@ -17,6 +18,7 @@ pub const XHCI_DEVICE_STATE_CONTEXT_READY: u8 = 2;
 pub const XHCI_DEVICE_STATE_ADDRESSED: u8 = 3;
 pub const XHCI_DEVICE_STATE_HID_READY: u8 = 4;
 pub const XHCI_DEVICE_STATE_FAILED: u8 = 5;
+pub const XHCI_DEVICE_STATE_DETACH_PENDING: u8 = 6;
 
 pub struct XhciDeviceSlotRecord {
     pub valid: bool;
@@ -155,6 +157,8 @@ pub fn xhci_device_table_release(slot_id: u8, epoch: u32) -> bool {
 
 @system
 pub fn xhci_device_table_set_state(slot_id: u8, epoch: u32, state: u8) -> bool {
+    // DETACH_PENDING não entra por esta API genérica. A única transição pública
+    // para esse estado é xhci_device_table_mark_detach_pending().
     if !xhci_device_table_is_ready() || slot_id == 0 || epoch == 0 ||
        state < XHCI_DEVICE_STATE_ENABLED || state > XHCI_DEVICE_STATE_FAILED {
         return false;
@@ -168,6 +172,28 @@ pub fn xhci_device_table_set_state(slot_id: u8, epoch: u32, state: u8) -> bool {
             return false;
         }
         XHCI_DEVICE_SLOTS[index].state = state;
+        spinlock_unlock(&mut XHCI_DEVICE_TABLE_LOCK);
+    }
+    return true;
+}
+
+@system
+pub fn xhci_device_table_mark_detach_pending(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_device_table_is_ready() || slot_id == 0 || epoch == 0 { return false; }
+    let index = xhci_device_table_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY { return false; }
+    unsafe {
+        if !spinlock_lock(&mut XHCI_DEVICE_TABLE_LOCK) { return false; }
+        if !XHCI_DEVICE_SLOTS[index].valid || XHCI_DEVICE_SLOTS[index].epoch != epoch {
+            spinlock_unlock(&mut XHCI_DEVICE_TABLE_LOCK);
+            return false;
+        }
+        let state = XHCI_DEVICE_SLOTS[index].state;
+        if state != XHCI_DEVICE_STATE_HID_READY && state != XHCI_DEVICE_STATE_DETACH_PENDING {
+            spinlock_unlock(&mut XHCI_DEVICE_TABLE_LOCK);
+            return false;
+        }
+        XHCI_DEVICE_SLOTS[index].state = XHCI_DEVICE_STATE_DETACH_PENDING;
         spinlock_unlock(&mut XHCI_DEVICE_TABLE_LOCK);
     }
     return true;

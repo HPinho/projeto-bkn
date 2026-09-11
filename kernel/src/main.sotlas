@@ -74,6 +74,7 @@ import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_set_configuration::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_hid_enumeration::*;
+import kernel::drivers::xhci_hid_lifecycle::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
