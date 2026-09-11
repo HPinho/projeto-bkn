@@ -23,8 +23,8 @@ O **HID-4c — multi-slot xHCI está concluído e certificado**, incluindo enume
 O trabalho atual está em **HID-4d — hot-plug/recovery**:
 
 - **HID-4d.1 — detecção e quarentena de detach:** ✅ CERTIFICADO
-- **HID-4d.2a — coexistência Command Completion + Transfer Event:** ⏳ CANDIDATO ATUAL
-- HID-4d.2b — `Stop Endpoint` + drain de completion de parada: ⬜
+- **HID-4d.2a — coexistência Command Completion + Transfer Event:** ✅ CERTIFICADO
+- **HID-4d.2b — `Stop Endpoint` + drain terminal:** ⏳ CANDIDATO ATUAL
 - HID-4d.3 — teardown generation-safe de HID/transfer/config/context: ⬜
 - HID-4d.4 — `Disable Slot` + release + reuse com epoch novo: ⬜
 - HID-4d.5 — prova detach → reattach → reenumeração: ⬜
@@ -99,55 +99,69 @@ BAKEN:USB_HID_INTERLEAVE_READY
 
 **✅ CERTIFICADO.**
 
-Checkpoint:
-
-```text
-8473860f975d6e9faab50b85a65314c2f49dc931
-feat(xhci): quarantine detached HID slots
-```
-
-Provas no mesmo SHA:
+Checkpoint `8473860f975d6e9faab50b85a65314c2f49dc931` (`feat(xhci): quarantine detached HID slots`).
 
 - CI #1150 / `34606338435` ✅
 - SMP #253 / `34606338434` ✅
 - NVMe #350 / `34606338405` ✅
 - HID Dual-device #9 / `34606338389` ✅
 
-O corte introduziu `XHCI_DEVICE_STATE_DETACH_PENDING`, transição dedicada por `slot_id + epoch`, scan read-only de PORTSC e bloqueio de novos `prepare/submit`. Não executa teardown destrutivo, não libera Slot ID e permite drenar um TD já outstanding.
+O corte introduziu `XHCI_DEVICE_STATE_DETACH_PENDING`, transição dedicada por `slot_id + epoch`, scan read-only de PORTSC e bloqueio de novos `prepare/submit`.
 
 ### HID-4d.2a — Command/Transfer coexistence
 
+**✅ CERTIFICADO.**
+
+Checkpoint:
+
+```text
+d5d975dc396fb85fc3b3551a2969c9c9114c55b4
+feat(xhci): prepare safe HID endpoint cancellation
+```
+
+Provas no mesmo SHA:
+
+- CI #1152 / `34609196376` ✅
+- SMP #255 / `34609196371` ✅
+- NVMe #352 / `34609196531` ✅
+- HID Dual-device #11 / `34609196451` ✅
+
+Esse checkpoint permite que `xhci_command_wait_completion()` encontre um Transfer Event enquanto aguarda Command Completion e o encaminhe ao demux `xhci_transfer_route_next_event()`. O construtor puro `xhci_trb_stop_endpoint(slot_id, endpoint_id, cycle)` também está certificado, ainda sem emissão nesse checkpoint.
+
+### HID-4d.2b — Stop Endpoint + drain terminal
+
 **⏳ CANDIDATO ATUAL.**
 
-Objetivo: preparar cancel seguro antes de emitir `Stop Endpoint`.
-
-Problema identificado: `xhci_command_wait_completion()` anteriormente falhava quando um Transfer Event legítimo aparecia antes do Command Completion. Isso é incompatível com cancel de endpoint contendo TD outstanding.
-
-Contrato do candidato:
+Contrato do microcorte:
 
 ```text
-Command waiter
-→ Port Status Change: valida + consome + continua
-→ Transfer Event: delega para xhci_transfer_route_next_event()
-→ mailbox per-slot+epoch preserva completion
-→ Command Completion exato: valida pointer + success + consome
-→ qualquer outro Event TRB: fail-closed
+DETACH_PENDING + mesmo slot/epoch
+→ captura se havia TD HID outstanding
+→ Stop Endpoint(slot_id, HID DCI)
+→ Command Completion SUCCESS + Slot ID exato
+→ se havia TD: coleta Transfer Event exato do mesmo slot/DCI/TRB
+→ aceita somente SUCCESS em corrida normal ou completion 26/27/28 de Stop Endpoint
+→ limpa apenas transfer_pending/TRB/length do report state
+→ não parseia/publica input do TD cancelado
+→ exige mailbox vazia
+→ endpoint_stopped = true no mesmo epoch
 ```
 
-Também é adicionado o construtor puro:
+Completion Codes terminais usados pela especificação xHCI:
 
-```text
-xhci_trb_stop_endpoint(slot_id, endpoint_id, cycle)
-```
+- `26` — Stopped
+- `27` — Stopped - Length Invalid
+- `28` — Stopped - Short Packet
 
-Ele ainda **não é emitido neste microcorte**. Isso fica para HID-4d.2b após os quatro gates do candidato ficarem verdes.
+Qualquer outro erro permanece fail-closed.
+
+Este corte **não** executa `Disable Slot`, `input_device_detach`, release de identidade, limpeza de contexts/rings/descriptors nem reuse de Slot ID. `xhci_hid_lifecycle_can_finalize_for()` só abre o gate seguinte após `endpoint_stopped` e ausência de TD/mailbox pendentes.
 
 ### Próximos microcortes HID-4d
 
-1. **4d.2b — Stop Endpoint + drain:** emitir Stop Endpoint somente para `DETACH_PENDING`, preservar/rastrear Transfer Event e classificar completion de parada sem stale mailbox.
-2. **4d.3 — teardown per-epoch:** limpar report state, descriptor/map/InputDevice binding, configuration, endpoint, EP0/context e transfer state no mesmo epoch.
-3. **4d.4 — Disable Slot + release:** só depois do teardown completo; liberar record e permitir reuse com epoch novo.
-4. **4d.5 — runtime proof:** detach físico/simulado → cancel → teardown → reattach → reenumeração, sem estado stale.
+1. **4d.3 — teardown per-epoch:** limpar report/transfer/descriptor/map/InputDevice binding, configuration, endpoint, EP0/context no mesmo epoch.
+2. **4d.4 — Disable Slot + release:** só depois do teardown completo; liberar record e permitir reuse com epoch novo.
+3. **4d.5 — runtime proof:** detach → cancel → teardown → reattach → reenumeração, sem estado stale.
 
 ### Invariantes HID permanentes
 
@@ -155,7 +169,8 @@ Ele ainda **não é emitido neste microcorte**. Isso fica para HID-4d.2b após o
 - API `_for(slot_id)` só usa identidade/resultados do mesmo slot e epoch.
 - Slot ID reutilizado exige cleanup completo e epoch novo.
 - `DETACH_PENDING` bloqueia novos TDs, mas não apaga um TD já outstanding.
-- `Stop Endpoint` não pode ser usado antes de Command Completion e Transfer Event coexistirem com segurança.
+- Stop Endpoint só marca `endpoint_stopped` depois de Command Completion e drain terminal.
+- TD cancelado não pode virar evento de teclado/mouse.
 - `sendkey a`, `DUAL_READY` e `INTERLEAVE_READY` continuam obrigatórios nos respectivos proofs.
 - não ampliar timeout, remover marker ou enfraquecer teste para obter verde.
 - hardware, descriptors e events são input não confiável e devem falhar fechado.

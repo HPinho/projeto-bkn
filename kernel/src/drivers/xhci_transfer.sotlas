@@ -1,9 +1,9 @@
-// Baken OS — HID-4c.4e: demultiplexação bounded de Transfer Events por Slot ID.
+// Baken OS — HID-4c.4e/HID-4d.2b: demultiplexação bounded de Transfer Events.
 //
 // O Event Ring continua com consumidor global único. Events já consumidos são
 // preservados em uma mailbox por slot+epoch até o waiter dono daquele transfer
-// recolher o resultado. Assim um waiter nunca atribui ao teclado um completion
-// do mouse (ou vice-versa), nem perde o evento apenas por ter chegado primeiro.
+// recolher o resultado. HID-4d.2b reconhece apenas completions terminais válidas
+// produzidas por Stop Endpoint, sem transformar outros erros em sucesso.
 
 module kernel::drivers::xhci_transfer;
 
@@ -156,8 +156,6 @@ fn xhci_transfer_publish_pending_event(event: *const XhciTrb) -> bool {
     unsafe {
         if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
            XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch {
-            // Uma mailbox por slot é intencional: hoje só existe um TD HID/EP0
-            // outstanding por slot. Segundo completion sem coleta é overflow.
             return false;
         }
         if XHCI_TRANSFER_PENDING_EVENTS[index].valid {
@@ -205,9 +203,6 @@ fn xhci_transfer_take_pending(slot_id: u8,
     }
 }
 
-// Consome exatamente o próximo Transfer Event disponível e o roteia para a
-// mailbox do Slot ID carregado pelo próprio Event TRB. É usado tanto pelo waiter
-// quanto pelo proof 4c.4e que arma dois HIDs antes de coletar as completions.
 @system
 pub fn xhci_transfer_route_next_event() -> bool {
     if !xhci_start_is_ready() || !xhci_event_consumer_is_ready() { return false; }
@@ -267,8 +262,6 @@ pub fn xhci_transfer_wait_completion(slot_id: u8,
             let event_pointer = xhci_transfer_event_trb_pointer(event);
             if event_slot == slot_id &&
                (event_endpoint != endpoint_id || event_pointer != completion_trb_physical) {
-                // Mesmo slot com TD inesperado continua fail-closed. O demux só
-                // permite avançar sobre completions pertencentes a outro slot.
                 return false;
             }
             if !xhci_transfer_publish_pending_event(event) { return false; }
@@ -281,6 +274,26 @@ pub fn xhci_transfer_wait_completion(slot_id: u8,
         spins += 1;
     }
     return false;
+}
+
+// HID-4d.2b: Stop Endpoint pode terminar o TD com 26/27/28 em vez de SUCCESS.
+// O waiter normal continua estrito; somente este caminho de lifecycle aceita os
+// três Completion Codes terminais definidos pela xHCI, após endpoint/TRB exatos.
+@system
+pub fn xhci_transfer_wait_stopped_or_completed(slot_id: u8,
+                                                endpoint_id: u8,
+                                                completion_trb_physical: u64) -> bool {
+    if xhci_transfer_wait_completion(slot_id, endpoint_id, completion_trb_physical) {
+        return true;
+    }
+    if !xhci_transfer_result_is_valid_for(slot_id) ||
+       xhci_transfer_last_endpoint_id_for(slot_id) != endpoint_id {
+        return false;
+    }
+    let completion = xhci_transfer_last_completion_code_for(slot_id);
+    return completion == XHCI_COMPLETION_CODE_STOPPED ||
+           completion == XHCI_COMPLETION_CODE_STOPPED_LENGTH_INVALID ||
+           completion == XHCI_COMPLETION_CODE_STOPPED_SHORT_PACKET;
 }
 
 @system

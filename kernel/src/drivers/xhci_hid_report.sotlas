@@ -1,11 +1,11 @@
-// Baken OS — HID-4c.4e/HID-4d.1: polling HID Interrupt IN por Slot ID.
+// Baken OS — HID-4c.4e/HID-4d.2b: polling HID Interrupt IN por Slot ID.
 //
 // Ring producer, cycle state, DMA report buffer, identidade lógica, mapa HID,
 // SET_CONFIGURATION e fallback Boot ficam coerentes por slot+epoch. Cada slot
 // admite um TD HID outstanding; submit e complete separados permitem armar dois
 // devices antes de consumir o Event Ring sem alterar os wrappers legados.
-// HID-4d.1 bloqueia novos prepare/submit após DETACH_PENDING, mas mantém complete
-// disponível para drenar um TD que já estava publicado no epoch em quarentena.
+// HID-4d bloqueia novos prepare/submit após DETACH_PENDING; o drain de cancel
+// limpa apenas o TD parado e nunca publica um report de input cancelado.
 
 module kernel::drivers::xhci_hid_report;
 
@@ -430,8 +430,6 @@ pub fn xhci_hid_report_submit_for_slot(slot_id: u8) -> bool {
 
 @system
 pub fn xhci_hid_report_complete_for_slot(slot_id: u8) -> bool {
-    // Deliberadamente não exige HID_READY: DETACH_PENDING ainda pode coletar o
-    // completion de um TD publicado antes da detecção física do detach.
     if !xhci_hid_report_is_ready_for(slot_id) ||
        !xhci_hid_report_identity_matches_slot(slot_id) ||
        !xhci_hid_descriptor_input_map_is_ready_for(slot_id) ||
@@ -461,6 +459,36 @@ pub fn xhci_hid_report_complete_for_slot(slot_id: u8) -> bool {
         XHCI_HID_REPORT_ACTIVE_SLOT_ID = slot_id;
         return xhci_hid_report_parse_for_slot(slot_id, actual);
     }
+}
+
+// HID-4d.2b: coleta o Transfer Event terminal do TD que estava outstanding
+// quando o slot entrou em DETACH_PENDING. Não valida/parsa o buffer como input:
+// o evento representa cancel/drain de lifecycle, não um novo report do usuário.
+@system
+pub fn xhci_hid_report_drain_cancelled_for_slot(slot_id: u8) -> bool {
+    if xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING ||
+       !xhci_hid_report_is_ready_for(slot_id) ||
+       !xhci_hid_report_transfer_pending_for(slot_id) {
+        return false;
+    }
+    let state_index = xhci_hid_report_index(slot_id);
+    if state_index >= XHCI_HID_REPORT_SLOT_CAPACITY { return false; }
+    let dci = xhci_hid_context_dci_for(slot_id);
+    if dci <= 1 { return false; }
+
+    unsafe {
+        let physical = XHCI_HID_REPORT_STATES[state_index].pending_trb_physical;
+        if physical == 0 { return false; }
+        if !xhci_transfer_wait_stopped_or_completed(slot_id, dci, physical) {
+            return false;
+        }
+        XHCI_HID_REPORT_STATES[state_index].transfer_pending = false;
+        XHCI_HID_REPORT_STATES[state_index].pending_trb_physical = 0;
+        XHCI_HID_REPORT_STATES[state_index].pending_transfer_length = 0;
+        XHCI_HID_REPORT_STATES[state_index].last_length = 0;
+        XHCI_HID_REPORT_ACTIVE_SLOT_ID = slot_id;
+    }
+    return true;
 }
 
 @system
