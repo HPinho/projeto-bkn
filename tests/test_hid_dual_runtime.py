@@ -24,10 +24,12 @@ class HidDualRuntimeContractTests(unittest.TestCase):
 
     def test_dual_ready_marker_is_only_after_real_mouse_report(self):
         text = LATE.read_text(encoding="utf-8")
-        poll = text.index("xhci_hid_report_poll_slot_once(second_slot)")
-        length = text.index("xhci_hid_report_last_length_for(second_slot)")
-        marker = text.index("platform_hid_late_attach_emit_ready_marker()", poll)
-        publish = text.index("PLATFORM_HID_LATE_ATTACH_READY = true", marker)
+        body = text.split("pub fn platform_hid_late_attach_second_mouse() -> bool", 1)[1]
+        body = body.split("pub fn platform_hid_late_attach_is_ready()", 1)[0]
+        poll = body.index("xhci_hid_report_poll_slot_once(second_slot)")
+        length = body.index("xhci_hid_report_last_length_for(second_slot)")
+        marker = body.index("platform_hid_late_attach_emit_ready_marker()", poll)
+        publish = body.index("PLATFORM_HID_LATE_ATTACH_READY = true", marker)
         self.assertLess(poll, length)
         self.assertLess(length, marker)
         self.assertLess(marker, publish)
