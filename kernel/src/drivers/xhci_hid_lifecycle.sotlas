@@ -11,6 +11,8 @@
 
 module kernel::drivers::xhci_hid_lifecycle;
 
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
 import kernel::drivers::xhci_port::*;
 import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_hid_context::*;
@@ -44,11 +46,35 @@ static mut XHCI_HID_LIFECYCLE_STATES: [XhciHidLifecycleState; XHCI_HID_LIFECYCLE
 ];
 static mut XHCI_HID_LIFECYCLE_LAST_SCAN_OK: bool = false;
 static mut XHCI_HID_LIFECYCLE_DETACH_PENDING_COUNT: u16 = 0;
+static mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 
 @system
 fn xhci_hid_lifecycle_index(slot_id: u8) -> usize {
     if slot_id == 0 { return XHCI_HID_LIFECYCLE_SLOT_CAPACITY; }
     return slot_id as usize;
+}
+
+// Serializa a sequência que pode chegar a dma_release. O lock é global nesta
+// etapa porque teardown é raro e isso evita dois CPUs desmontarem o mesmo slot
+// simultaneamente. IRQ save/restore segue o padrão dos registries SMP-safe.
+@system
+fn xhci_hid_lifecycle_teardown_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn xhci_hid_lifecycle_teardown_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut XHCI_HID_LIFECYCLE_TEARDOWN_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
 }
 
 @system
@@ -266,45 +292,69 @@ pub fn xhci_hid_lifecycle_logical_teardown_started_for(slot_id: u8, epoch: u32) 
 }
 
 // HID-4d.3b: fecha a transacao logica somente depois de todos os sub-cleanups
-// generation-safe. Cada etapa e seguida de uma revalidacao exact-epoch antes de
-// permitir a seguinte. Os helpers sao idempotentes, portanto uma falha parcial
-// pode ser retomada sem tocar em uma generation nova.
+// generation-safe. O lock cobre toda a sequência que pode chegar a dma_release,
+// eliminando double-free entre CPUs. Cada etapa continua revalidando o epoch.
 @system
 pub fn xhci_hid_lifecycle_complete_logical_teardown_for(slot_id: u8, epoch: u32) -> bool {
-    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
     let index = xhci_hid_lifecycle_index(slot_id);
-    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY { return false; }
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY || epoch == 0 { return false; }
+
+    let flags = xhci_hid_lifecycle_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    let mut already_complete = false;
     unsafe {
-        if XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete { return true; }
-    }
-
-    if !xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch) { return false; }
-    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
-
-    if !xhci_hid_descriptor_teardown_dma_for_epoch(slot_id, epoch) { return false; }
-    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
-
-    if !xhci_hid_report_teardown_dma_for_epoch(slot_id, epoch) { return false; }
-    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) { return false; }
-
-    if !xhci_transfer_clear_slot_state_for_epoch(slot_id, epoch) { return false; }
-    if !xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) ||
-       !xhci_hid_lifecycle_quiescent_for(slot_id, epoch) {
-        return false;
-    }
-
-    unsafe {
-        if !XHCI_HID_LIFECYCLE_STATES[index].valid ||
-           XHCI_HID_LIFECYCLE_STATES[index].epoch != epoch ||
-           !XHCI_HID_LIFECYCLE_STATES[index].detach_detected ||
-           !XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped ||
-           !XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started {
-            return false;
+        if complete_ok {
+            already_complete = XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete;
         }
-        if XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete { return true; }
-        XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = true;
     }
-    return true;
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_descriptor_teardown_dma_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_report_teardown_dma_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        complete_ok = xhci_transfer_clear_slot_state_for_epoch(slot_id, epoch);
+    }
+    if complete_ok && !already_complete {
+        complete_ok = xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) &&
+                      xhci_hid_lifecycle_quiescent_for(slot_id, epoch);
+    }
+
+    if complete_ok && !already_complete {
+        unsafe {
+            if !XHCI_HID_LIFECYCLE_STATES[index].valid ||
+               XHCI_HID_LIFECYCLE_STATES[index].epoch != epoch ||
+               !XHCI_HID_LIFECYCLE_STATES[index].detach_detected ||
+               !XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped ||
+               !XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started {
+                complete_ok = false;
+            } else {
+                XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete = true;
+            }
+        }
+    }
+
+    xhci_hid_lifecycle_teardown_unlock_irq(flags);
+    return complete_ok;
 }
 
 @system
