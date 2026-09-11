@@ -1,8 +1,10 @@
-// Baken OS — HID-4b: tradução HID-2 per-device -> InputEvent.
+// Baken OS — HID-4b/HID-4d: tradução HID-2 per-device -> InputEvent.
 //
 // Continua transport-agnostic: não conhece xHCI, DMA, PCI ou ACPI. Cada device
 // ativo possui seu próprio field map HID-2 e estado anterior por Report ID.
 // Bind/unbind e processamento são generation-safe e serializados para lifecycle.
+// HID-4d mantém o lock de lifecycle durante toda leitura/decodificação do field
+// map, fechando a janela SMP em que detach poderia desmontar o mapa no 1º passe.
 
 module kernel::drivers::hid_input_events;
 
@@ -370,17 +372,38 @@ pub fn hid_input_events_process_report_for_device(device_id: u32,
                                                   report: *const u8,
                                                   length: usize) -> bool {
     if !hid_input_events_is_ready() || report == (null as *const u8) || length == 0 ||
-       !input_device_is_active(device_id, device_generation) ||
-       !hid_input_events_device_is_bound(device_id, device_generation) ||
-       !hid_input_device_map_validate(device_id, device_generation, report, length) {
+       !input_device_is_active(device_id, device_generation) {
         return false;
     }
-    let wire_id = hid_input_events_wire_report_id(
-        device_id, device_generation, report, length);
-    if wire_id == 0xFFFF { return false; }
-    let report_id = wire_id as u8;
     let device_slot = hid_input_events_device_slot(device_id);
     if device_slot >= HID_EVENT_DEVICE_CAPACITY { return false; }
+
+    // HID-4d: o mesmo lock usado por bind/unbind protege toda leitura do field
+    // map. Quando unbind retorna, nenhum decoder antigo ainda pode estar usando
+    // a generation removida; o lifecycle pode então purgar fila e desmontar mapa.
+    let state_flags = hid_input_events_lock_irq();
+    if state_flags == 0 { return false; }
+    unsafe {
+        if !HID_EVENT_READY || !HID_EVENT_DEVICE_ACTIVE[device_slot] ||
+           HID_EVENT_DEVICE_GENERATIONS[device_slot] != device_generation {
+            hid_input_events_unlock_irq(state_flags);
+            return false;
+        }
+    }
+    if !input_device_is_active(device_id, device_generation) ||
+       !hid_input_device_map_is_ready(device_id, device_generation) ||
+       !hid_input_device_map_validate(device_id, device_generation, report, length) {
+        hid_input_events_unlock_irq(state_flags);
+        return false;
+    }
+
+    let wire_id = hid_input_events_wire_report_id(
+        device_id, device_generation, report, length);
+    if wire_id == 0xFFFF {
+        hid_input_events_unlock_irq(state_flags);
+        return false;
+    }
+    let report_id = wire_id as u8;
 
     let mut keyboard_current: [u32; HID_EVENT_KEYBOARD_WORDS] = [0; HID_EVENT_KEYBOARD_WORDS];
     let mut keyboard_seen = false;
@@ -392,11 +415,17 @@ pub fn hid_input_events_process_report_for_device(device_id: u32,
     let mut index: usize = 0;
     while index < count {
         let field = hid_input_device_map_field(device_id, device_generation, index);
-        if !field.valid { return false; }
+        if !field.valid {
+            hid_input_events_unlock_irq(state_flags);
+            return false;
+        }
         if field.report_id == report_id {
             let decoded = hid_input_device_map_decode_field(
                 device_id, device_generation, report, length, index);
-            if !decoded.valid { return false; }
+            if !decoded.valid {
+                hid_input_events_unlock_irq(state_flags);
+                return false;
+            }
             if !field.is_constant {
                 if (field.usage_valid && field.usage_page == HID_EVENT_KEYBOARD_USAGE_PAGE) ||
                    (field.array_usage_valid && field.array_usage_page == HID_EVENT_KEYBOARD_USAGE_PAGE) {
@@ -405,13 +434,17 @@ pub fn hid_input_events_process_report_for_device(device_id: u32,
                        decoded.usage_page == HID_EVENT_KEYBOARD_USAGE_PAGE && decoded.usage != 0 {
                         let pressed = if field.is_variable { decoded.numeric_value != 0 } else { true };
                         if pressed && !hid_input_events_set_keyboard_usage(&keyboard_current[0], decoded.usage) {
+                            hid_input_events_unlock_irq(state_flags);
                             return false;
                         }
                     }
                 }
                 if field.usage_valid && field.usage_page == HID_EVENT_BUTTON_USAGE_PAGE {
                     button_seen = true;
-                    if field.usage == 0 || field.usage > HID_EVENT_MAX_BUTTONS { return false; }
+                    if field.usage == 0 || field.usage > HID_EVENT_MAX_BUTTONS {
+                        hid_input_events_unlock_irq(state_flags);
+                        return false;
+                    }
                     if !decoded.null_value && decoded.numeric_value != 0 {
                         button_current |= (1 as u32) << (field.usage - 1);
                     }
@@ -419,22 +452,6 @@ pub fn hid_input_events_process_report_for_device(device_id: u32,
             }
         }
         index += 1;
-    }
-
-    // Lifecycle/state edge detection é atômico em relação a bind/unbind.
-    let state_flags = hid_input_events_lock_irq();
-    if state_flags == 0 { return false; }
-    unsafe {
-        if !HID_EVENT_READY || !HID_EVENT_DEVICE_ACTIVE[device_slot] ||
-           HID_EVENT_DEVICE_GENERATIONS[device_slot] != device_generation {
-            hid_input_events_unlock_irq(state_flags);
-            return false;
-        }
-    }
-    if !input_device_is_active(device_id, device_generation) ||
-       !hid_input_device_map_is_ready(device_id, device_generation) {
-        hid_input_events_unlock_irq(state_flags);
-        return false;
     }
 
     // Segundo passe: deltas relativos são eventos, não estado persistente.
