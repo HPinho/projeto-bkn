@@ -293,7 +293,8 @@ pub fn xhci_hid_lifecycle_logical_teardown_started_for(slot_id: u8, epoch: u32) 
 
 // HID-4d.3b: fecha a transacao logica somente depois de todos os sub-cleanups
 // generation-safe. O lock cobre toda a sequência que pode chegar a dma_release,
-// eliminando double-free entre CPUs. Cada etapa continua revalidando o epoch.
+// eliminando double-free entre CPUs. Antes de qualquer cleanup, o preflight de
+// transfer rejeita mailbox ainda válida e qualquer resultado de epoch estranho.
 @system
 pub fn xhci_hid_lifecycle_complete_logical_teardown_for(slot_id: u8, epoch: u32) -> bool {
     let index = xhci_hid_lifecycle_index(slot_id);
@@ -310,6 +311,9 @@ pub fn xhci_hid_lifecycle_complete_logical_teardown_for(slot_id: u8, epoch: u32)
         }
     }
 
+    if complete_ok && !already_complete {
+        complete_ok = xhci_transfer_teardown_state_safe_for_epoch(slot_id, epoch);
+    }
     if complete_ok && !already_complete {
         complete_ok = xhci_hid_descriptor_teardown_input_device_for_epoch(slot_id, epoch);
     }

@@ -115,6 +115,25 @@ fn xhci_transfer_teardown_epoch_matches(slot_id: u8, epoch: u32) -> bool {
     return true;
 }
 
+// Preflight side-effect-free do teardown lógico. Qualquer mailbox válida ainda
+// representa estado não consumido e bloqueia a transação. Um resultado terminal
+// do mesmo epoch é permitido, mas resultado válido de outro epoch é corrupção de
+// geração enquanto Slot ID físico não pode ser reutilizado antes de HID-4d.5.
+@system
+pub fn xhci_transfer_teardown_state_safe_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_transfer_teardown_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid { return false; }
+        if XHCI_TRANSFER_RESULTS[index].valid &&
+           XHCI_TRANSFER_RESULTS[index].epoch != epoch {
+            return false;
+        }
+    }
+    return xhci_transfer_teardown_epoch_matches(slot_id, epoch);
+}
+
 // Limpa mailbox/result lógico do slot+epoch sem consumir Event Ring e sem tocar
 // no Transfer Ring físico. Qualquer mailbox ainda válida bloqueia o teardown:
 // same-epoch significa completion ainda não drenada; foreign-epoch é violação de
@@ -209,7 +228,7 @@ pub fn xhci_transfer_pending_is_ready_for(slot_id: u8) -> bool {
 
 // Exact demux identity for a waiter that already captured the slot epoch.
 // The mailbox is consulted without side effects and the device-table epoch is
-// revalidated by xhci_transfer_pending_is_ready_for_epoch before and after read.
+// revalidated by xhci_transfer_pending_is_ready_for_epoch before e depois read.
 @system
 pub fn xhci_transfer_pending_matches_for_epoch(slot_id: u8,
                                                epoch: u32,
