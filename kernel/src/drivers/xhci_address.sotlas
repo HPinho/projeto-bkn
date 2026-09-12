@@ -57,11 +57,7 @@ pub fn xhci_address_slot(slot_id: u8) -> bool {
 
     let command = xhci_trb_address_device(input_physical, slot_id, false,
         xhci_command_producer_cycle());
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 || !xhci_command_wait_completion(command_physical) ||
-       xhci_command_last_slot_id() != slot_id {
-        return false;
-    }
+    if !xhci_command_execute(command, slot_id) { return false; }
 
     if x86_read_cr3_raw() == 0 { return false; }
     let slot_dw3 = xhci_address_read_device_slot_dw3(slot_id);
