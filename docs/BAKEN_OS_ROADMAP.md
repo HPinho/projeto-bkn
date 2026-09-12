@@ -398,3 +398,122 @@ slot_id + epoch exatos
 - rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
 
 Esses débitos permanecem separados de Drop Endpoint para não misturar ownership/lifetime de cortes diferentes.
+
+---
+
+# Atualização de continuidade — HID-4d.3c avançado / 4d.4 refinado
+
+> Seção append-only e autoritativa em **2026-09-12 (America/Fortaleza)**. Ela substitui apenas o **estado corrente** das seções históricas acima; nenhum checkpoint ou decisão anterior foi removido.
+
+## HID-4d.3c1 — Drop Endpoint físico
+
+**✅ CERTIFICADO** no checkpoint final:
+
+```text
+31e196a88cddf79b86e276a1b370f57f5e6e7cdb
+fix(xhci): keep Drop Endpoint below HID lifecycle
+```
+
+Provas no mesmo SHA:
+
+- CI #1179 ✅
+- SMP #282 ✅
+- NVMe #379 ✅
+- HID Dual-device #38 ✅
+
+O candidato intermediário `146e3e8d5db55d0b18e7198ce164f3db1ab4e056` **não é baseline**: ele introduziu a dependência circular `xhci_configure_endpoint → xhci_hid_lifecycle → xhci_hid_report → xhci_configure_endpoint` e foi substituído por `31e196...`.
+
+A arquitetura certificada mantém `xhci_configure_endpoint` como primitiva física de baixo nível. Ela não importa lifecycle; exige `Stopped`, programa Drop Context, executa Configure Endpoint e só publica `drop_complete` depois de observar o Output Endpoint Context como `Disabled`. O gate `logical_teardown_complete → 3c1` pertence à camada orquestradora superior.
+
+## HID-4d.3c2 — release do HID Transfer Ring
+
+**✅ CERTIFICADO** em:
+
+```text
+89a132d8885b0e11b422d0b64c4daf07b852e7a2
+feat(xhci): release dropped HID transfer rings safely
+```
+
+Provas no mesmo SHA:
+
+- CI #1180 ✅
+- SMP #283 ✅
+- NVMe #380 ✅
+- HID Dual-device #39 ✅
+
+Contrato certificado:
+
+```text
+logical_teardown_complete
+→ drop_complete + Output Endpoint Context Disabled
+→ ring SHARED ou CPU-owned de retry anterior
+→ dma_unshare_from_device se necessário
+→ exigir CPU-owned
+→ dma_release
+→ ready=false
+→ ring inválido
+→ ring_physical=0
+→ tombstone exact-epoch
+```
+
+O `DmaBuffer` real do Transfer Ring é propriedade de `xhci_hid_context`; `XhciRing` é apenas uma view e não existe segunda alocação escondida. O mesmo epoch não pode recriar o ring liberado antes da fronteira de reuse.
+
+## HID-4d.3c3 — orquestração/publicação
+
+**⏳ EM VALIDAÇÃO** no candidato funcional:
+
+```text
+2486600dab290d86cb48645d0fc50535565f5376
+feat(xhci): orchestrate HID endpoint teardown
+```
+
+Gates disparados para o SHA exato:
+
+- CI #1181 ⏳
+- SMP #284 ⏳
+- NVMe #381 ⏳
+- HID Dual-device #40 ⏳
+
+O novo módulo superior `xhci_hid_teardown.sotlas` preserva o grafo acíclico e orquestra de forma retry-safe:
+
+```text
+slot_id + epoch + DETACH_PENDING
+→ logical_teardown_complete
+→ 3c1 drop_complete / Disabled
+→ 3c2 Transfer Ring release_complete
+→ revalidar todas as provas
+→ publicar endpoint_teardown_complete
+```
+
+O lock de publicação de 3c3 não atravessa Configure Endpoint nem `dma_release`, evitando lock recursivo com Command Ring/lifecycle. 3c3 não executa `Disable Slot`, não toca DCBAA, não libera Device/Input Context/EP0 e não libera o registro da device table.
+
+## HID-4d.4 — plano refinado após auditoria de ownership
+
+A auditoria revelou que o plano histórico “liberar Device Context + Input Context + EP0 Ring separadamente” não representa o layout real: os três pertencem à **mesma arena DMA de 3 páginas** em `xhci_context`. Portanto haverá **um único free da arena**, somente após `Disable Slot` confirmado e DCBAA zerado.
+
+Também permanecem vivos depois de 3c os buffers persistentes do **Device Descriptor completo** e do **Configuration Descriptor completo**, ambos `DmaBuffer` de 4 KiB por slot. Eles precisam ser liberados antes da arena para que 4d.4 não deixe leaks físicos.
+
+A execução de 4d.4 fica dividida em microcortes certificados:
+
+1. **4d.4a1 — enumeration DMA teardown:** Device Descriptor completo + Configuration Descriptor completo, exact-epoch e retry-safe, com `SHARED → unshare → CPU-owned → dma_release`.
+2. **4d.4a2 — per-slot logical quiesce:** limpar readiness/tombstones operacionais de `SET_CONFIGURATION`, `Evaluate Context`, `EP0` e `Address Device` para o mesmo epoch antes de invalidar a arena que essas camadas consultam.
+3. **4d.4b — Disable Slot + context arena:** emitir `Disable Slot`, validar Command Completion do mesmo Slot ID, zerar `DCBAA[slot]`, unshare/free **uma única vez** a arena de 3 páginas e publicar context teardown complete.
+4. **4d.4c — registry finalization:** somente depois das provas anteriores liberar o record da device table via `xhci_device_table_release(slot_id, epoch)`, preservando no orquestrador um tombstone suficiente para a prova de 4d.5.
+
+Primitivas já existentes e reutilizadas:
+
+- `xhci_trb_disable_slot(slot_id, cycle)` já existe;
+- `xhci_device_table_release(slot_id, epoch)` já é exact-epoch e protegido por lock;
+- nenhum novo PMM free direto será introduzido; todo lifetime continua passando pela API DMA.
+
+## Fronteiras seguintes
+
+- **4d.5 — Event Ring drain/barrier antes de reuse:** continua obrigatório porque Transfer Event TRB não carrega software epoch. O barrier deve usar o consumidor global único já existente; nenhum segundo consumidor do Event Ring será criado. Nenhum novo `Enable Slot` pode autorizar reuse físico até essa prova.
+- **4d.6 — integração runtime/hotplug stress:** `detach → stop/drain → 3b → 3c → 4d.4 → 4d.5 → reconnect`, múltiplos ciclos keyboard/mouse, sem leaks, stale completion ou cross-generation teardown.
+
+### Débitos de robustez ainda obrigatórios antes de sair da Trilha B
+
+- rollback de DMA em falhas intermediárias de `xhci_hid_context_prepare_for_slot()`;
+- rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
+
+Esses débitos continuam separados dos microcortes de teardown para não misturar ownership de prepare/rollback com ownership de hot-unplug.
