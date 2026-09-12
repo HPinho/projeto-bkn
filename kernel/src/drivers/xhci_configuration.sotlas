@@ -1,8 +1,9 @@
-// Baken OS — HID-4c.3/HID-4d.3a: Configuration Descriptor por Slot ID.
+// Baken OS — HID-4c.3/HID-4d.4a1: Configuration Descriptor por Slot ID.
 //
 // O header de 9 bytes usa DMA temporário apenas para descobrir wTotalLength e
-// bConfigurationValue. HID-4d.3a devolve esse buffer ao PMM após o parse para
-// manter a pilha de alocações reversível durante o teardown generation-safe.
+// bConfigurationValue. HID-4d.3a devolve esse buffer ao PMM após o parse.
+// HID-4d.4a1 adiciona teardown exact-epoch do Configuration Descriptor completo,
+// mantendo um tombstone que impede recriação do DMA no mesmo epoch.
 
 module kernel::drivers::xhci_configuration;
 
@@ -83,6 +84,10 @@ static mut XHCI_CONFIGURATION_STATES: [XhciConfigurationState; XHCI_CONFIGURATIO
     };
     XHCI_CONFIGURATION_SLOT_CAPACITY
 ];
+static mut XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS:
+    [u32; XHCI_CONFIGURATION_SLOT_CAPACITY] = [0; XHCI_CONFIGURATION_SLOT_CAPACITY];
+static mut XHCI_CONFIGURATION_RELEASED_EPOCHS:
+    [u32; XHCI_CONFIGURATION_SLOT_CAPACITY] = [0; XHCI_CONFIGURATION_SLOT_CAPACITY];
 
 @system
 fn xhci_configuration_index(slot_id: u8) -> usize {
@@ -112,6 +117,8 @@ fn xhci_configuration_reset_state(slot_id: u8, epoch: u32) -> bool {
         XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
         XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
         XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+        XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] = 0;
+        XHCI_CONFIGURATION_RELEASED_EPOCHS[index] = 0;
     }
     return true;
 }
@@ -133,6 +140,9 @@ fn xhci_configuration_prepare_state(slot_id: u8) -> bool {
         if XHCI_CONFIGURATION_STATES[index].epoch != epoch {
             return xhci_configuration_reset_state(slot_id, epoch);
         }
+        if XHCI_CONFIGURATION_RELEASED_EPOCHS[index] == epoch {
+            return false;
+        }
     }
     return true;
 }
@@ -148,6 +158,18 @@ fn xhci_configuration_state_is_current(slot_id: u8) -> bool {
     unsafe {
         return epoch != 0 && XHCI_CONFIGURATION_STATES[index].epoch == epoch;
     }
+}
+
+@system
+fn xhci_configuration_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_CONFIGURATION_STATES[index].epoch == epoch; }
 }
 
 @system
@@ -660,4 +682,117 @@ pub fn xhci_hid_report_descriptor_length_for(slot_id: u8) -> u16 {
 @system
 pub fn xhci_hid_report_descriptor_length() -> u16 {
     return xhci_hid_report_descriptor_length_for(xhci_address_slot_id());
+}
+
+// HID-4d.4a1: o Configuration Descriptor completo é o owner mais alto dos dois
+// buffers persistentes de enumeração e deve ser liberado antes do Device
+// Descriptor. O helper permanece exact-epoch, retry-safe e não atravessa 4d.4b.
+@system
+pub fn xhci_configuration_release_persistent_for_epoch(slot_id: u8,
+                                                        epoch: u32) -> bool {
+    if !xhci_configuration_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    if xhci_configuration_persistent_release_complete_for(slot_id, epoch) {
+        return true;
+    }
+
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid {
+            XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] = epoch;
+        } else if XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] != epoch {
+            return false;
+        }
+    }
+
+    let mut shared = false;
+    let mut cpu_owned = false;
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid {
+            shared = dma_buffer_shared(&XHCI_CONFIGURATION_STATES[index].buffer);
+            cpu_owned = dma_buffer_cpu_owned(&XHCI_CONFIGURATION_STATES[index].buffer);
+        }
+    }
+    if shared {
+        unsafe {
+            if !dma_unshare_from_device(&mut XHCI_CONFIGURATION_STATES[index].buffer) {
+                return false;
+            }
+        }
+        if !xhci_configuration_epoch_matches(slot_id, epoch) { return false; }
+        unsafe {
+            cpu_owned = dma_buffer_cpu_owned(&XHCI_CONFIGURATION_STATES[index].buffer);
+        }
+    }
+
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid {
+            if !cpu_owned ||
+               !dma_buffer_cpu_owned(&XHCI_CONFIGURATION_STATES[index].buffer) {
+                return false;
+            }
+        }
+    }
+    if !xhci_configuration_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid &&
+           !dma_release(&mut XHCI_CONFIGURATION_STATES[index].buffer) {
+            return false;
+        }
+    }
+    if !xhci_configuration_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        if XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] != epoch ||
+           XHCI_CONFIGURATION_STATES[index].buffer.valid {
+            return false;
+        }
+        XHCI_CONFIGURATION_STATES[index].header_ready = false;
+        XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].header_value = 0;
+        XHCI_CONFIGURATION_STATES[index].full_ready = false;
+        XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].full_value = 0;
+        XHCI_CONFIGURATION_STATES[index].ready = false;
+        XHCI_CONFIGURATION_STATES[index].value = 0;
+        XHCI_CONFIGURATION_STATES[index].total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_interface_number = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_protocol = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
+        XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+        XHCI_CONFIGURATION_RELEASED_EPOCHS[index] = epoch;
+    }
+    return xhci_configuration_persistent_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_configuration_persistent_release_complete_for(slot_id: u8,
+                                                           epoch: u32) -> bool {
+    if !xhci_configuration_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] == epoch &&
+               XHCI_CONFIGURATION_RELEASED_EPOCHS[index] == epoch &&
+               !XHCI_CONFIGURATION_STATES[index].header_ready &&
+               XHCI_CONFIGURATION_STATES[index].header_total_length == 0 &&
+               XHCI_CONFIGURATION_STATES[index].header_value == 0 &&
+               !XHCI_CONFIGURATION_STATES[index].full_ready &&
+               XHCI_CONFIGURATION_STATES[index].full_total_length == 0 &&
+               XHCI_CONFIGURATION_STATES[index].full_value == 0 &&
+               !XHCI_CONFIGURATION_STATES[index].ready &&
+               XHCI_CONFIGURATION_STATES[index].value == 0 &&
+               XHCI_CONFIGURATION_STATES[index].total_length == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_interface_number == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_protocol == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_endpoint_address == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length == 0 &&
+               !XHCI_CONFIGURATION_STATES[index].buffer.valid;
+    }
 }

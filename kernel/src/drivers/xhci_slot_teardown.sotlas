@@ -1,0 +1,99 @@
+// Baken OS — HID-4d.4a1: teardown do DMA persistente de enumeracao xHCI.
+//
+// Esta camada fica acima dos owners de Device/Configuration Descriptor. O
+// endpoint HID precisa estar fisicamente desmontado por 3c3 antes de qualquer
+// buffer persistente de enumeracao ser liberado. A ordem e deliberadamente a
+// inversa da dependencia: Configuration Descriptor -> Device Descriptor.
+//
+// Disable Slot, DCBAA, arena Device/Input/EP0, estados Address/EP0/Evaluate/
+// SET_CONFIGURATION e reuse fisico de Slot ID ficam fora deste microcorte.
+
+module kernel::drivers::xhci_slot_teardown;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_descriptor::*;
+import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_hid_teardown::*;
+
+static mut XHCI_SLOT_ENUMERATION_DMA_TEARDOWN_LOCK: SpinLock =
+    SpinLock { state: SPINLOCK_UNLOCKED };
+
+@system
+fn xhci_slot_teardown_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut XHCI_SLOT_ENUMERATION_DMA_TEARDOWN_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn xhci_slot_teardown_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut XHCI_SLOT_ENUMERATION_DMA_TEARDOWN_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn xhci_slot_teardown_enumeration_epoch_ready(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    return xhci_hid_teardown_endpoint_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_slot_teardown_enumeration_dma_complete_for(slot_id: u8,
+                                                       epoch: u32) -> bool {
+    if !xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) { return false; }
+    return xhci_configuration_persistent_release_complete_for(slot_id, epoch) &&
+        xhci_device_descriptor_persistent_release_complete_for(slot_id, epoch);
+}
+
+// Retry-safe e monotonic: cada owner consegue retomar depois de unshare e usa
+// release_started_epoch para distinguir um buffer fisicamente liberado de um
+// estado que nunca possuiu DMA persistente. O lock cobre a dupla de owners para
+// impedir CPUs concorrentes de intercalarem a ordem Configuration -> Device.
+@system
+pub fn xhci_slot_teardown_release_enumeration_dma_for(slot_id: u8,
+                                                      epoch: u32) -> bool {
+    if !xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) { return false; }
+    if xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) { return true; }
+
+    let flags = xhci_slot_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut teardown_ok = xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch);
+
+    if teardown_ok &&
+       !xhci_configuration_persistent_release_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_configuration_release_persistent_for_epoch(slot_id, epoch);
+    }
+
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) &&
+            xhci_configuration_persistent_release_complete_for(slot_id, epoch);
+    }
+
+    if teardown_ok &&
+       !xhci_device_descriptor_persistent_release_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_device_descriptor_release_persistent_for_epoch(slot_id, epoch);
+    }
+
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) &&
+            xhci_configuration_persistent_release_complete_for(slot_id, epoch) &&
+            xhci_device_descriptor_persistent_release_complete_for(slot_id, epoch);
+    }
+
+    xhci_slot_teardown_unlock_irq(flags);
+    return teardown_ok;
+}

@@ -76,6 +76,7 @@ import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_hid_enumeration::*;
 import kernel::drivers::xhci_hid_lifecycle::*;
 import kernel::drivers::xhci_hid_teardown::*;
+import kernel::drivers::xhci_slot_teardown::*;
 import kernel::arch::x86_64::gdt::*;
 import kernel::arch::x86_64::tss::*;
 import kernel::arch::x86_64::idt::*;
