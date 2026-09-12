@@ -112,30 +112,45 @@ class XhciCommandTransactionTests(unittest.TestCase):
             r"(?m)^pub\s+fn\s+xhci_command_wait_completion\s*\(",
         )
 
-    def test_transaction_lock_covers_submit_wait_and_slot_capture(self):
+    def test_transaction_is_irq_and_preemption_safe(self):
         ordered_positions(
             self.capture,
+            "x86_irq_save_disable()",
             "spinlock_lock(&mut XHCI_COMMAND_TRANSACTION_LOCK)",
             "xhci_command_submit(command)",
             "xhci_command_wait_completion(command_physical)",
             "completed_slot_id = XHCI_COMMAND_LAST_SLOT_ID",
             "spinlock_unlock(&mut XHCI_COMMAND_TRANSACTION_LOCK)",
+            "x86_irq_restore(flags)",
             "return completed_slot_id;",
         )
+        failed_lock = self.capture.find("if !locked")
+        restore_after_failure = self.capture.find("x86_irq_restore(flags)", failed_lock)
+        first_submit = self.capture.find("xhci_command_submit(command)")
+        self.assertGreaterEqual(failed_lock, 0)
+        self.assertGreater(restore_after_failure, failed_lock)
+        self.assertLess(restore_after_failure, first_submit)
 
     def test_no_early_return_after_successful_lock_acquisition(self):
-        acquired = self.capture.find("if !locked { return 0; }")
+        failure_return = self.capture.find("return 0;", self.capture.find("if !locked"))
+        submit = self.capture.find("xhci_command_submit(command)")
         unlock = self.capture.rfind(
             "spinlock_unlock(&mut XHCI_COMMAND_TRANSACTION_LOCK)"
         )
-        self.assertGreaterEqual(acquired, 0)
-        self.assertGreater(unlock, acquired)
-        critical = self.capture[acquired + len("if !locked { return 0; }"):unlock]
+        self.assertGreaterEqual(failure_return, 0)
+        self.assertGreater(submit, failure_return)
+        self.assertGreater(unlock, submit)
+        critical = self.capture[submit:unlock]
         self.assertNotRegex(critical, r"\breturn\b")
 
-    def test_polling_transaction_does_not_force_irqs_off(self):
-        self.assertNotIn("x86_irq_save_disable", self.capture)
-        self.assertNotIn("x86_irq_restore", self.capture)
+    def test_irq_restore_happens_only_after_unlock_on_success(self):
+        unlock = self.capture.rfind(
+            "spinlock_unlock(&mut XHCI_COMMAND_TRANSACTION_LOCK)"
+        )
+        restore = self.capture.rfind("x86_irq_restore(flags)")
+        final_return = self.capture.rfind("return completed_slot_id;")
+        self.assertGreater(restore, unlock)
+        self.assertGreater(final_return, restore)
 
     def test_expected_slot_wrapper_matches_captured_completion(self):
         self.assertIn("if expected_slot_id == 0 { return false; }", self.execute)
