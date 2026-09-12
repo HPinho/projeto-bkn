@@ -1,12 +1,9 @@
-// Baken OS — HID-4d.4a1: teardown do DMA persistente de enumeracao xHCI.
+// Baken OS — HID-4d.4a1/4a2: teardown per-slot antes de Disable Slot.
 //
-// Esta camada fica acima dos owners de Device/Configuration Descriptor. O
-// endpoint HID precisa estar fisicamente desmontado por 3c3 antes de qualquer
-// buffer persistente de enumeracao ser liberado. A ordem e deliberadamente a
-// inversa da dependencia: Configuration Descriptor -> Device Descriptor.
-//
-// Disable Slot, DCBAA, arena Device/Input/EP0, estados Address/EP0/Evaluate/
-// SET_CONFIGURATION e reuse fisico de Slot ID ficam fora deste microcorte.
+// 4a1 libera os owners DMA persistentes de enumeração somente depois do 3c3.
+// 4a2 quiesce o estado lógico de SET_CONFIGURATION, Evaluate Context, EP0 e
+// Address Device, nessa ordem, mantendo a arena física e a device table vivas.
+// A device table fica DETACH_PENDING até o barrier do Event Ring em HID-4d.5.
 
 module kernel::drivers::xhci_slot_teardown;
 
@@ -15,6 +12,10 @@ import kernel::sync::spinlock::*;
 import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_descriptor::*;
 import kernel::drivers::xhci_configuration::*;
+import kernel::drivers::xhci_set_configuration::*;
+import kernel::drivers::xhci_evaluate_context::*;
+import kernel::drivers::xhci_ep0::*;
+import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_hid_teardown::*;
 
 static mut XHCI_SLOT_ENUMERATION_DMA_TEARDOWN_LOCK: SpinLock =
@@ -92,6 +93,68 @@ pub fn xhci_slot_teardown_release_enumeration_dma_for(slot_id: u8,
         teardown_ok = xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) &&
             xhci_configuration_persistent_release_complete_for(slot_id, epoch) &&
             xhci_device_descriptor_persistent_release_complete_for(slot_id, epoch);
+    }
+
+    xhci_slot_teardown_unlock_irq(flags);
+    return teardown_ok;
+}
+
+@system
+pub fn xhci_slot_teardown_logical_state_complete_for(slot_id: u8,
+                                                      epoch: u32) -> bool {
+    if !xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) { return false; }
+    return xhci_set_configuration_quiesce_complete_for(slot_id, epoch) &&
+        xhci_evaluate_context_quiesce_complete_for(slot_id, epoch) &&
+        xhci_ep0_quiesce_complete_for(slot_id, epoch) &&
+        xhci_address_quiesce_complete_for(slot_id, epoch);
+}
+
+// HID-4d.4a2: limpa somente registries lógicos. Como DETACH_PENDING permanece
+// publicado na device table até 4d.5, os caminhos operacionais desses módulos
+// falham fechado durante toda a janela anterior ao reuse físico do Slot ID.
+@system
+pub fn xhci_slot_teardown_quiesce_logical_state_for(slot_id: u8,
+                                                     epoch: u32) -> bool {
+    if !xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) { return false; }
+    if xhci_slot_teardown_logical_state_complete_for(slot_id, epoch) { return true; }
+
+    let flags = xhci_slot_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut teardown_ok = xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch);
+
+    if teardown_ok && !xhci_set_configuration_quiesce_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_set_configuration_quiesce_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) &&
+            xhci_set_configuration_quiesce_complete_for(slot_id, epoch);
+    }
+
+    if teardown_ok && !xhci_evaluate_context_quiesce_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_evaluate_context_quiesce_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) &&
+            xhci_set_configuration_quiesce_complete_for(slot_id, epoch) &&
+            xhci_evaluate_context_quiesce_complete_for(slot_id, epoch);
+    }
+
+    if teardown_ok && !xhci_ep0_quiesce_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_ep0_quiesce_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) &&
+            xhci_set_configuration_quiesce_complete_for(slot_id, epoch) &&
+            xhci_evaluate_context_quiesce_complete_for(slot_id, epoch) &&
+            xhci_ep0_quiesce_complete_for(slot_id, epoch);
+    }
+
+    if teardown_ok && !xhci_address_quiesce_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_address_quiesce_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_logical_state_complete_for(slot_id, epoch);
     }
 
     xhci_slot_teardown_unlock_irq(flags);

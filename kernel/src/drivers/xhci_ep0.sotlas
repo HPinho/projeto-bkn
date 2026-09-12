@@ -1,9 +1,9 @@
-// Baken OS — HID-4c.3: produtor stateful do EP0 Transfer Ring por Slot ID.
+// Baken OS — HID-4c.3/HID-4d.4a2: produtor stateful do EP0 Transfer Ring por Slot ID.
 //
 // Cada slot endereçado mantém enqueue index, Producer Cycle State e correlação
-// do último Status TRB separados por epoch. O Event Ring continua tendo um único
-// consumidor global, mas todo Control TD é atribuído explicitamente ao slot que
-// possui o EP0 ring. Wrappers legados preservam o bring-up do primeiro device.
+// do último Status TRB separados por epoch. O Event Ring continua com consumidor
+// global único. HID-4d.4a2 bloqueia EP0 em DETACH_PENDING e desmonta apenas o
+// estado lógico; o ring físico permanece dentro da arena até HID-4d.4b.
 
 module kernel::drivers::xhci_ep0;
 
@@ -45,6 +45,18 @@ static mut XHCI_EP0_ACTIVE_SLOT_ID: u8 = 0;
 fn xhci_ep0_index(slot_id: u8) -> usize {
     if slot_id == 0 { return XHCI_EP0_SLOT_CAPACITY; }
     return slot_id as usize;
+}
+
+@system
+fn xhci_ep0_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_ep0_index(slot_id);
+    if index >= XHCI_EP0_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_EP0_STATES[index].epoch == epoch; }
 }
 
 @system
@@ -140,6 +152,7 @@ pub fn xhci_ep0_prepare_for_slot(slot_id: u8) -> bool {
     let state_index = xhci_ep0_index(slot_id);
     if state_index >= XHCI_EP0_SLOT_CAPACITY ||
        !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING ||
        !xhci_address_is_ready_for(slot_id) ||
        !xhci_context_is_ready_for(slot_id) {
         return false;
@@ -210,13 +223,47 @@ pub fn xhci_ep0_submit_control_td(setup: XhciTrb,
 @system
 pub fn xhci_ep0_is_ready_for(slot_id: u8) -> bool {
     let state_index = xhci_ep0_index(slot_id);
-    if state_index >= XHCI_EP0_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
+    if state_index >= XHCI_EP0_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
     unsafe {
         return epoch != 0 && XHCI_EP0_STATES[state_index].ready &&
                XHCI_EP0_STATES[state_index].epoch == epoch;
+    }
+}
+
+@system
+pub fn xhci_ep0_quiesce_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_ep0_epoch_matches_detach(slot_id, epoch) { return false; }
+    let state_index = xhci_ep0_index(slot_id);
+    if state_index >= XHCI_EP0_SLOT_CAPACITY { return false; }
+    if xhci_ep0_quiesce_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        XHCI_EP0_STATES[state_index].ready = false;
+        XHCI_EP0_STATES[state_index].enqueue_index = 0;
+        XHCI_EP0_STATES[state_index].producer_cycle = true;
+        XHCI_EP0_STATES[state_index].last_status_trb_physical = 0;
+        if XHCI_EP0_ACTIVE_SLOT_ID == slot_id {
+            XHCI_EP0_ACTIVE_SLOT_ID = 0;
+        }
+    }
+    return xhci_ep0_quiesce_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_ep0_quiesce_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_ep0_epoch_matches_detach(slot_id, epoch) { return false; }
+    let state_index = xhci_ep0_index(slot_id);
+    if state_index >= XHCI_EP0_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_EP0_STATES[state_index].ready &&
+               XHCI_EP0_STATES[state_index].enqueue_index == 0 &&
+               XHCI_EP0_STATES[state_index].producer_cycle &&
+               XHCI_EP0_STATES[state_index].last_status_trb_physical == 0 &&
+               XHCI_EP0_ACTIVE_SLOT_ID != slot_id;
     }
 }
 

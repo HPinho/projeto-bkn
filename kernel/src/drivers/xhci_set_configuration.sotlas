@@ -1,8 +1,8 @@
-// Baken OS — HID-4c.3: SET_CONFIGURATION USB por Slot ID + epoch.
+// Baken OS — HID-4c.3/HID-4d.4a2: SET_CONFIGURATION USB por Slot ID + epoch.
 //
-// Cada Slot ID mantém confirmação e configuration value próprios. O caminho
-// legado do primeiro HID continua como wrapper sobre o slot ativo do Configure
-// Endpoint, mas toda a operação real usa APIs _for(slot_id) de ponta a ponta.
+// Cada Slot ID mantém confirmação e configuration value próprios. Em 4d.4a2,
+// DETACH_PENDING fecha o caminho operacional e o estado lógico pode ser
+// quiescido somente pelo slot+epoch exato, sem tocar no EP0 físico ou contexts.
 
 module kernel::drivers::xhci_set_configuration;
 
@@ -45,7 +45,8 @@ fn xhci_set_configuration_index(slot_id: u8) -> usize {
 fn xhci_set_configuration_prepare_state(slot_id: u8) -> bool {
     let index = xhci_set_configuration_index(slot_id);
     if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY ||
-       !xhci_device_table_slot_is_valid(slot_id) {
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
@@ -61,10 +62,23 @@ fn xhci_set_configuration_prepare_state(slot_id: u8) -> bool {
 }
 
 @system
+fn xhci_set_configuration_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_set_configuration_index(slot_id);
+    if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_SET_CONFIGURATION_STATES[index].epoch == epoch; }
+}
+
+@system
 pub fn xhci_set_configuration_is_ready_for(slot_id: u8) -> bool {
     let index = xhci_set_configuration_index(slot_id);
     if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY ||
-       !xhci_device_table_slot_is_valid(slot_id) {
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
@@ -79,6 +93,7 @@ pub fn xhci_set_configuration_is_ready_for(slot_id: u8) -> bool {
 @system
 pub fn xhci_set_configuration_for_slot(slot_id: u8) -> bool {
     if !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING ||
        !xhci_address_is_ready_for(slot_id) ||
        !xhci_configuration_is_ready_for(slot_id) ||
        !xhci_configure_endpoint_is_ready_for(slot_id) ||
@@ -147,6 +162,35 @@ pub fn xhci_set_configuration_for_slot(slot_id: u8) -> bool {
         XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID = slot_id;
     }
     return true;
+}
+
+@system
+pub fn xhci_set_configuration_quiesce_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_set_configuration_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_set_configuration_index(slot_id);
+    if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY { return false; }
+    if xhci_set_configuration_quiesce_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        XHCI_SET_CONFIGURATION_STATES[index].ready = false;
+        XHCI_SET_CONFIGURATION_STATES[index].value = 0;
+        if XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID == slot_id {
+            XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID = 0;
+        }
+    }
+    return xhci_set_configuration_quiesce_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_set_configuration_quiesce_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_set_configuration_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_set_configuration_index(slot_id);
+    if index >= XHCI_SET_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_SET_CONFIGURATION_STATES[index].ready &&
+               XHCI_SET_CONFIGURATION_STATES[index].value == 0 &&
+               XHCI_SET_CONFIGURATION_ACTIVE_SLOT_ID != slot_id;
+    }
 }
 
 @system

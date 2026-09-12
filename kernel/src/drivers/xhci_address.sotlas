@@ -1,8 +1,9 @@
-// Baken OS — HID-4c: Address Device por Slot ID.
+// Baken OS — HID-4c/HID-4d.4a2: Address Device por Slot ID.
 //
-// Cada slot usa seu Input/Device Context próprio. O wrapper first_slot mantém o
-// bring-up atual, enquanto address_slot permite endereçar múltiplos devices sem
-// sobrescrever estado global do transporte.
+// Cada slot usa seu Input/Device Context próprio. HID-4d.4a2 fecha os caminhos
+// operacionais assim que a device table entra em DETACH_PENDING e permite
+// zerar o estado lógico somente para o slot+epoch exato. A entrada da device
+// table permanece viva até o barrier de HID-4d.5.
 
 module kernel::drivers::xhci_address;
 
@@ -44,9 +45,22 @@ fn xhci_address_read_device_slot_dw3(slot_id: u8) -> u32 {
 }
 
 @system
+fn xhci_address_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_ADDRESS_EPOCHS[index] == epoch; }
+}
+
+@system
 pub fn xhci_address_slot(slot_id: u8) -> bool {
     if !xhci_context_is_ready_for(slot_id) || !xhci_command_is_ready() ||
-       !xhci_device_table_slot_is_valid(slot_id) {
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let index = xhci_address_index(slot_id);
@@ -92,7 +106,8 @@ pub fn xhci_address_first_slot() -> bool {
 @system
 pub fn xhci_address_is_ready_for(slot_id: u8) -> bool {
     let index = xhci_address_index(slot_id);
-    if index >= XHCI_ADDRESS_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
@@ -100,6 +115,36 @@ pub fn xhci_address_is_ready_for(slot_id: u8) -> bool {
         return epoch != 0 && XHCI_ADDRESS_READY_SLOTS[index] &&
                XHCI_ADDRESS_EPOCHS[index] == epoch &&
                XHCI_ADDRESS_DEVICE_ADDRESSES[index] != 0;
+    }
+}
+
+@system
+pub fn xhci_address_quiesce_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_address_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY { return false; }
+    if xhci_address_quiesce_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        XHCI_ADDRESS_READY_SLOTS[index] = false;
+        XHCI_ADDRESS_DEVICE_ADDRESSES[index] = 0;
+        if XHCI_ADDRESS_SLOT_ID == slot_id {
+            XHCI_ADDRESS_READY = false;
+            XHCI_ADDRESS_SLOT_ID = 0;
+        }
+    }
+    return xhci_address_quiesce_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_address_quiesce_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_address_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_ADDRESS_READY_SLOTS[index] &&
+               XHCI_ADDRESS_DEVICE_ADDRESSES[index] == 0 &&
+               XHCI_ADDRESS_SLOT_ID != slot_id;
     }
 }
 

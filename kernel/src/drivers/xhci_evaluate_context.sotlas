@@ -1,8 +1,8 @@
-// Baken OS — HID-4c.3: atualização explícita do EP0 via Evaluate Context por Slot ID.
+// Baken OS — HID-4c.3/HID-4d.4a2: atualização explícita do EP0 via Evaluate Context por Slot ID.
 //
-// O estado persistente desta etapa é isolado por slot+epoch. Os wrappers sem
-// argumento preservam o bring-up single-device já certificado, mas toda a
-// operação real usa o Input Context, EP0 e Device Descriptor do mesmo Slot ID.
+// O estado persistente desta etapa é isolado por slot+epoch. HID-4d.4a2 fecha
+// qualquer novo Evaluate Context em DETACH_PENDING e permite quiesce lógico do
+// mesmo epoch sem liberar Input/Device Context ou EP0 Ring.
 
 module kernel::drivers::xhci_evaluate_context;
 
@@ -48,6 +48,18 @@ fn xhci_evaluate_context_reset_slot(slot_id: u8, epoch: u32) -> bool {
     return true;
 }
 
+@system
+fn xhci_evaluate_context_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_evaluate_context_index(slot_id);
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_EVALUATE_CONTEXT_EPOCHS[index] == epoch; }
+}
+
 // USB 2.x codifica bMaxPacketSize0 diretamente. SuperSpeed usa o expoente;
 // para EP0 o valor válido observado no Device Descriptor é 9 => 512 bytes.
 @system
@@ -62,6 +74,7 @@ pub fn xhci_descriptor_ep0_max_packet_bytes(raw: u8) -> u16 {
 pub fn xhci_evaluate_ep0_max_packet_for_slot(slot_id: u8, max_packet: u16) -> bool {
     if !xhci_evaluate_context_valid_ep0_max_packet(max_packet) ||
        !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING ||
        !xhci_address_is_ready_for(slot_id) ||
        !xhci_context_is_ready_for(slot_id) ||
        !xhci_command_is_ready() {
@@ -105,7 +118,8 @@ pub fn xhci_evaluate_ep0_max_packet_for_slot(slot_id: u8, max_packet: u16) -> bo
     if !xhci_command_execute(command, slot_id) { return false; }
 
     if !xhci_device_table_slot_is_valid(slot_id) ||
-       xhci_device_table_slot_epoch(slot_id) != epoch {
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     unsafe { XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKETS[index] = max_packet; }
@@ -122,6 +136,7 @@ pub fn xhci_evaluate_ep0_max_packet(max_packet: u16) -> bool {
 @system
 pub fn xhci_reconcile_ep0_from_descriptor_probe_for_slot(slot_id: u8) -> bool {
     if !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING ||
        !xhci_device_descriptor_probe_is_ready_for(slot_id) ||
        !xhci_context_is_ready_for(slot_id) {
         return false;
@@ -155,9 +170,35 @@ pub fn xhci_reconcile_ep0_from_descriptor_probe() -> bool {
 }
 
 @system
+pub fn xhci_evaluate_context_quiesce_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_evaluate_context_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_evaluate_context_index(slot_id);
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY { return false; }
+    if xhci_evaluate_context_quiesce_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKETS[index] = 0;
+        XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED_SLOTS[index] = false;
+    }
+    return xhci_evaluate_context_quiesce_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_evaluate_context_quiesce_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_evaluate_context_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_evaluate_context_index(slot_id);
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKETS[index] == 0 &&
+               !XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED_SLOTS[index];
+    }
+}
+
+@system
 pub fn xhci_evaluate_context_last_ep0_max_packet_for_slot(slot_id: u8) -> u16 {
     let index = xhci_evaluate_context_index(slot_id);
-    if index >= XHCI_EVALUATE_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return 0;
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
@@ -177,7 +218,8 @@ pub fn xhci_evaluate_context_last_ep0_max_packet() -> u16 {
 @system
 pub fn xhci_evaluate_context_command_submitted_for_slot(slot_id: u8) -> bool {
     let index = xhci_evaluate_context_index(slot_id);
-    if index >= XHCI_EVALUATE_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
