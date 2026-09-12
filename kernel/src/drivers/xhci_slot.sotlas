@@ -1,8 +1,9 @@
-// Baken OS — HID-4c: Enable Slot xHCI com registro bounded por Slot ID.
+// Baken OS — HID-4c/HID-4d.4b: Enable Slot xHCI com registro bounded por Slot ID.
 //
-// O Command Ring continua sendo o produtor serializado do controller, mas cada
-// completion de Enable Slot e publicada em xhci_device_table. A API legada do
-// "primeiro slot" permanece como wrapper para preservar o bring-up certificado.
+// O Command Ring continua sendo o produtor serializado do controller. Em 4d.4b,
+// uma entrada DETACH_PENDING permanece válida na device table para preservar
+// slot+epoch até o barrier 4d.5, mas deixa de ser selecionável/operacional.
+// Enable Slot participa de um reuse guard global para não correr com Disable Slot.
 
 module kernel::drivers::xhci_slot;
 
@@ -10,6 +11,7 @@ import kernel::drivers::xhci_controller::*;
 import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_port_stage::*;
 import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_slot_reuse_guard::*;
 import kernel::drivers::xhci_trb::*;
 
 static mut XHCI_SLOT_READY: bool = false;
@@ -18,19 +20,38 @@ static mut XHCI_SLOT_PORT_ID: u8 = 0;
 static mut XHCI_SLOT_TYPE: u8 = 0;
 
 @system
+fn xhci_slot_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
+    return slot_id != 0 && epoch != 0 &&
+        xhci_device_table_slot_is_valid(slot_id) &&
+        xhci_device_table_slot_epoch(slot_id) == epoch &&
+        xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING;
+}
+
+@system
 pub fn xhci_slot_enable_port(port_id: u8, slot_type: u8) -> u8 {
     if port_id == 0 || !xhci_command_is_ready() || !xhci_device_table_initialize() {
         return 0;
     }
-    if xhci_device_table_find_slot_for_port(port_id) != 0 { return 0; }
 
-    let command = xhci_trb_enable_slot(slot_type, xhci_command_producer_cycle());
-    let slot_id = xhci_command_execute_capture_slot(command);
-    let max_slots = xhci_controller_max_slots();
-    if slot_id == 0 || max_slots == 0 || slot_id > max_slots { return 0; }
-    if !xhci_device_table_reserve(slot_id, port_id, slot_type) { return 0; }
-    if !xhci_device_table_set_active(slot_id) { return 0; }
-    return slot_id;
+    // begin_enable é publicado antes de consultar/emitir o comando. 4d.4b só
+    // consegue bloquear reuse quando este contador volta a zero; depois do
+    // bloqueio, novos begins falham até o barrier 4d.5 liberar o guard.
+    if !xhci_slot_reuse_guard_begin_enable() { return 0; }
+
+    let mut result: u8 = 0;
+    if xhci_device_table_find_slot_for_port(port_id) == 0 {
+        let command = xhci_trb_enable_slot(slot_type, xhci_command_producer_cycle());
+        let slot_id = xhci_command_execute_capture_slot(command);
+        let max_slots = xhci_controller_max_slots();
+        if slot_id != 0 && max_slots != 0 && slot_id <= max_slots &&
+           xhci_device_table_reserve(slot_id, port_id, slot_type) &&
+           xhci_device_table_set_active(slot_id) {
+            result = slot_id;
+        }
+    }
+
+    if !xhci_slot_reuse_guard_end_enable() { return 0; }
+    return result;
 }
 
 @system
@@ -61,7 +82,7 @@ pub fn xhci_slot_enable_first_port() -> bool {
 
 @system
 pub fn xhci_slot_select(slot_id: u8) -> bool {
-    if !xhci_device_table_slot_is_valid(slot_id) || !xhci_device_table_set_active(slot_id) {
+    if !xhci_slot_is_ready_for(slot_id) || !xhci_device_table_set_active(slot_id) {
         return false;
     }
     unsafe {
@@ -73,27 +94,57 @@ pub fn xhci_slot_select(slot_id: u8) -> bool {
     }
 }
 
+// HID-4d.4b: limpa apenas o alias legado do slot fisicamente desabilitado. A
+// device table deliberadamente NÃO é liberada aqui; ela retém slot+epoch até
+// que 4d.5 prove o Event Ring barrier e autorize reuse.
+@system
+pub fn xhci_slot_quiesce_disabled_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_slot_epoch_matches_detach(slot_id, epoch) { return false; }
+    if xhci_slot_disabled_alias_quiesce_complete_for(slot_id, epoch) { return true; }
+    unsafe {
+        if XHCI_SLOT_ID == slot_id {
+            XHCI_SLOT_READY = false;
+            XHCI_SLOT_ID = 0;
+            XHCI_SLOT_PORT_ID = 0;
+            XHCI_SLOT_TYPE = 0;
+        }
+    }
+    return xhci_slot_disabled_alias_quiesce_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_slot_disabled_alias_quiesce_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_slot_epoch_matches_detach(slot_id, epoch) { return false; }
+    unsafe {
+        return XHCI_SLOT_ID != slot_id &&
+               (!XHCI_SLOT_READY || XHCI_SLOT_ID != slot_id);
+    }
+}
+
 @system
 pub fn xhci_slot_is_ready() -> bool {
     unsafe {
         return XHCI_SLOT_READY && XHCI_SLOT_ID != 0 &&
-               xhci_device_table_slot_is_valid(XHCI_SLOT_ID);
+               xhci_slot_is_ready_for(XHCI_SLOT_ID);
     }
 }
 
 @system
 pub fn xhci_slot_is_ready_for(slot_id: u8) -> bool {
-    return xhci_device_table_slot_is_valid(slot_id);
+    return slot_id != 0 && xhci_device_table_slot_is_valid(slot_id) &&
+        xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING;
 }
 
 @system
 pub fn xhci_slot_id() -> u8 {
     unsafe {
-        if XHCI_SLOT_ID != 0 && xhci_device_table_slot_is_valid(XHCI_SLOT_ID) {
+        if XHCI_SLOT_ID != 0 && xhci_slot_is_ready_for(XHCI_SLOT_ID) {
             return XHCI_SLOT_ID;
         }
     }
-    return xhci_device_table_active_slot_id();
+    let active = xhci_device_table_active_slot_id();
+    if xhci_slot_is_ready_for(active) { return active; }
+    return 0;
 }
 
 @system

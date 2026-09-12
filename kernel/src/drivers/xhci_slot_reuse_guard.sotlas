@@ -1,0 +1,99 @@
+// Baken OS — HID-4d.4b/4d.5: guard SMP-safe contra reuse prematuro de Slot ID.
+//
+// Enable Slot é uma operação global do xHC: o controller escolhe o Slot ID e
+// pode reutilizar um ID imediatamente após Disable Slot. Este guard separa
+// "Enable Slot em voo" de "teardown aguardando Event Ring barrier".
+//
+// 4d.4b publica o bloqueio antes de Disable Slot somente quando não existe
+// Enable in-flight. 4d.5 será a única camada autorizada a retirar esse bloqueio
+// depois do barrier e da finalização do registry.
+
+module kernel::drivers::xhci_slot_reuse_guard;
+
+import kernel::sync::spinlock::*;
+import kernel::drivers::xhci_device_table::*;
+
+static mut XHCI_SLOT_REUSE_GUARD_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut XHCI_SLOT_REUSE_BLOCKED_EPOCHS: [u32; XHCI_DEVICE_SLOT_CAPACITY] =
+    [0; XHCI_DEVICE_SLOT_CAPACITY];
+static mut XHCI_SLOT_REUSE_BLOCKED_COUNT: u16 = 0;
+static mut XHCI_SLOT_REUSE_ENABLE_INFLIGHT: u16 = 0;
+
+@system
+fn xhci_slot_reuse_guard_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_DEVICE_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
+
+@system
+pub fn xhci_slot_reuse_guard_begin_enable() -> bool {
+    unsafe {
+        if !spinlock_lock(&mut XHCI_SLOT_REUSE_GUARD_LOCK) { return false; }
+        if XHCI_SLOT_REUSE_BLOCKED_COUNT != 0 ||
+           XHCI_SLOT_REUSE_ENABLE_INFLIGHT == 0xFFFF {
+            spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+            return false;
+        }
+        XHCI_SLOT_REUSE_ENABLE_INFLIGHT += 1;
+        spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_reuse_guard_end_enable() -> bool {
+    unsafe {
+        if !spinlock_lock(&mut XHCI_SLOT_REUSE_GUARD_LOCK) { return false; }
+        if XHCI_SLOT_REUSE_ENABLE_INFLIGHT == 0 {
+            spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+            return false;
+        }
+        XHCI_SLOT_REUSE_ENABLE_INFLIGHT -= 1;
+        spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_reuse_guard_block_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_guard_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+
+    unsafe {
+        if !spinlock_lock(&mut XHCI_SLOT_REUSE_GUARD_LOCK) { return false; }
+        if XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] == epoch {
+            spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+            return true;
+        }
+        if XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] != 0 ||
+           XHCI_SLOT_REUSE_ENABLE_INFLIGHT != 0 ||
+           XHCI_SLOT_REUSE_BLOCKED_COUNT == 0xFFFF {
+            spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+            return false;
+        }
+        XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] = epoch;
+        XHCI_SLOT_REUSE_BLOCKED_COUNT += 1;
+        spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_reuse_guard_blocked_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_guard_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        return XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] == epoch &&
+               XHCI_SLOT_REUSE_BLOCKED_COUNT != 0;
+    }
+}
+
+@system
+pub fn xhci_slot_reuse_guard_any_blocked() -> bool {
+    unsafe { return XHCI_SLOT_REUSE_BLOCKED_COUNT != 0; }
+}
+
+@system
+pub fn xhci_slot_reuse_guard_enable_inflight() -> u16 {
+    unsafe { return XHCI_SLOT_REUSE_ENABLE_INFLIGHT; }
+}

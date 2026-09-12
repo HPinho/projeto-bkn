@@ -1,8 +1,9 @@
-// Baken OS — HID-4c: Device/Input/EP0 context por Slot ID xHCI.
+// Baken OS — HID-4c/HID-4d.4b: Device/Input/EP0 context por Slot ID xHCI.
 //
-// Cada slot recebe arena DMA própria (Device Context, Input Context e EP0 ring).
-// O wrapper legado prepara o slot atualmente selecionado; APIs _for_slot não
-// dependem de singleton e são a base para enumeração de múltiplos devices.
+// Cada slot recebe uma única arena DMA de três páginas: Device Context, Input
+// Context e EP0 Transfer Ring. HID-4d.4b libera essa arena exatamente uma vez,
+// somente depois de Disable Slot confirmado pela camada superior. A entrada da
+// device table e o epoch permanecem vivos até o Event Ring barrier de 4d.5.
 
 module kernel::drivers::xhci_context;
 
@@ -25,6 +26,7 @@ pub const XHCI_EP0_RING_PAGE: u64 = 2;
 pub const XHCI_EP0_RING_TRBS: u32 = 256;
 pub const XHCI_HCCPARAMS1_CSZ: u32 = 1 << 2;
 pub const XHCI_CONTEXT_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
+pub const XHCI_CONTEXT_DCBAA_INVALID: u64 = 0xFFFFFFFFFFFFFFFF;
 
 pub const XHCI_INPUT_CONTROL_ADD_SLOT: u32 = 1 << 0;
 pub const XHCI_INPUT_CONTROL_ADD_EP0: u32 = 1 << 1;
@@ -70,6 +72,10 @@ static mut XHCI_CONTEXTS: [XhciSlotContextRecord; XHCI_CONTEXT_SLOT_CAPACITY] = 
     };
     XHCI_CONTEXT_SLOT_CAPACITY
 ];
+static mut XHCI_CONTEXT_RELEASE_STARTED_EPOCHS: [u32; XHCI_CONTEXT_SLOT_CAPACITY] =
+    [0; XHCI_CONTEXT_SLOT_CAPACITY];
+static mut XHCI_CONTEXT_RELEASED_EPOCHS: [u32; XHCI_CONTEXT_SLOT_CAPACITY] =
+    [0; XHCI_CONTEXT_SLOT_CAPACITY];
 static mut XHCI_CONTEXT_READY: bool = false;
 static mut XHCI_CONTEXT_SLOT_ID: u8 = 0;
 
@@ -77,6 +83,18 @@ static mut XHCI_CONTEXT_SLOT_ID: u8 = 0;
 fn xhci_context_index(slot_id: u8) -> usize {
     if slot_id == 0 { return XHCI_CONTEXT_SLOT_CAPACITY; }
     return slot_id as usize;
+}
+
+@system
+fn xhci_context_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_context_index(slot_id);
+    if index >= XHCI_CONTEXT_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    unsafe { return XHCI_CONTEXTS[index].epoch == epoch; }
 }
 
 @system
@@ -144,6 +162,19 @@ fn xhci_context_write64(base: *mut u8, byte_offset: u64, value: u64) -> bool {
 }
 
 @system
+fn xhci_context_dcbaa_slot_value(slot_id: u8) -> u64 {
+    if slot_id == 0 { return XHCI_CONTEXT_DCBAA_INVALID; }
+    let dcbaa_physical = xhci_runtime_dcbaa_physical();
+    if dcbaa_physical == 0 { return XHCI_CONTEXT_DCBAA_INVALID; }
+    let dcbaa_virtual = direct_map_virtual_address(dcbaa_physical);
+    if dcbaa_virtual == 0 || x86_read_cr3_raw() == 0 {
+        return XHCI_CONTEXT_DCBAA_INVALID;
+    }
+    let offset = (slot_id as u64) * 8;
+    unsafe { return *((dcbaa_virtual + offset) as *const u64); }
+}
+
+@system
 fn xhci_context_write_dcbaa_slot(slot_id: u8, device_physical: u64) -> bool {
     if slot_id == 0 || device_physical == 0 || (device_physical & 0x3F) != 0 { return false; }
     let dcbaa_physical = xhci_runtime_dcbaa_physical();
@@ -152,13 +183,36 @@ fn xhci_context_write_dcbaa_slot(slot_id: u8, device_physical: u64) -> bool {
     if dcbaa_virtual == 0 { return false; }
     let offset = (slot_id as u64) * 8;
     unsafe { *((dcbaa_virtual + offset) as *mut u64) = device_physical; }
-    return x86_read_cr3_raw() != 0;
+    if x86_read_cr3_raw() == 0 { return false; }
+    let observed = xhci_context_dcbaa_slot_value(slot_id);
+    return observed != XHCI_CONTEXT_DCBAA_INVALID && observed == device_physical;
+}
+
+@system
+pub fn xhci_context_clear_dcbaa_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_context_epoch_matches_detach(slot_id, epoch) { return false; }
+    let observed = xhci_context_dcbaa_slot_value(slot_id);
+    if observed == XHCI_CONTEXT_DCBAA_INVALID { return false; }
+    if observed == 0 { return true; }
+
+    let dcbaa_physical = xhci_runtime_dcbaa_physical();
+    if dcbaa_physical == 0 { return false; }
+    let dcbaa_virtual = direct_map_virtual_address(dcbaa_physical);
+    if dcbaa_virtual == 0 { return false; }
+    let offset = (slot_id as u64) * 8;
+    unsafe { *((dcbaa_virtual + offset) as *mut u64) = 0; }
+    if x86_read_cr3_raw() == 0 || !xhci_context_epoch_matches_detach(slot_id, epoch) {
+        return false;
+    }
+    let cleared = xhci_context_dcbaa_slot_value(slot_id);
+    return cleared != XHCI_CONTEXT_DCBAA_INVALID && cleared == 0;
 }
 
 @system
 pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
     if !xhci_controller_is_ready() || !xhci_runtime_is_ready() ||
-       !xhci_device_table_slot_is_valid(slot_id) {
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
         return false;
     }
     let index = xhci_context_index(slot_id);
@@ -169,6 +223,13 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
     unsafe {
         if XHCI_CONTEXTS[index].ready && XHCI_CONTEXTS[index].epoch == epoch { return true; }
         if XHCI_CONTEXTS[index].ready { return false; }
+        if XHCI_CONTEXTS[index].epoch != epoch {
+            XHCI_CONTEXT_RELEASE_STARTED_EPOCHS[index] = 0;
+            XHCI_CONTEXT_RELEASED_EPOCHS[index] = 0;
+        } else if XHCI_CONTEXT_RELEASE_STARTED_EPOCHS[index] == epoch ||
+                  XHCI_CONTEXT_RELEASED_EPOCHS[index] == epoch {
+            return false;
+        }
     }
 
     let snapshot = xhci_port_snapshot(port_id);
@@ -261,6 +322,105 @@ pub fn xhci_context_is_ready_for(slot_id: u8) -> bool {
     }
     let epoch = xhci_device_table_slot_epoch(slot_id);
     unsafe { return XHCI_CONTEXTS[index].ready && XHCI_CONTEXTS[index].epoch == epoch; }
+}
+
+@system
+pub fn xhci_context_release_arena_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_context_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_context_index(slot_id);
+    if index >= XHCI_CONTEXT_SLOT_CAPACITY { return false; }
+    if xhci_context_teardown_complete_for(slot_id, epoch) { return true; }
+
+    let dcbaa_before = xhci_context_dcbaa_slot_value(slot_id);
+    if dcbaa_before == XHCI_CONTEXT_DCBAA_INVALID || dcbaa_before != 0 { return false; }
+
+    unsafe {
+        if XHCI_CONTEXTS[index].arena.valid {
+            XHCI_CONTEXT_RELEASE_STARTED_EPOCHS[index] = epoch;
+        } else if XHCI_CONTEXT_RELEASE_STARTED_EPOCHS[index] != epoch {
+            return false;
+        }
+    }
+
+    let mut shared = false;
+    let mut cpu_owned = false;
+    unsafe {
+        if XHCI_CONTEXTS[index].arena.valid {
+            shared = dma_buffer_shared(&XHCI_CONTEXTS[index].arena);
+            cpu_owned = dma_buffer_cpu_owned(&XHCI_CONTEXTS[index].arena);
+        }
+    }
+    if shared {
+        unsafe {
+            if !dma_unshare_from_device(&mut XHCI_CONTEXTS[index].arena) {
+                return false;
+            }
+        }
+        if !xhci_context_epoch_matches_detach(slot_id, epoch) { return false; }
+        unsafe { cpu_owned = dma_buffer_cpu_owned(&XHCI_CONTEXTS[index].arena); }
+    }
+
+    unsafe {
+        if XHCI_CONTEXTS[index].arena.valid {
+            if !cpu_owned || !dma_buffer_cpu_owned(&XHCI_CONTEXTS[index].arena) {
+                return false;
+            }
+        }
+    }
+    let dcbaa_recheck = xhci_context_dcbaa_slot_value(slot_id);
+    if !xhci_context_epoch_matches_detach(slot_id, epoch) ||
+       dcbaa_recheck == XHCI_CONTEXT_DCBAA_INVALID || dcbaa_recheck != 0 {
+        return false;
+    }
+
+    unsafe {
+        if XHCI_CONTEXTS[index].arena.valid &&
+           !dma_release(&mut XHCI_CONTEXTS[index].arena) {
+            return false;
+        }
+    }
+    if !xhci_context_epoch_matches_detach(slot_id, epoch) { return false; }
+
+    unsafe {
+        if XHCI_CONTEXT_RELEASE_STARTED_EPOCHS[index] != epoch ||
+           XHCI_CONTEXTS[index].arena.valid {
+            return false;
+        }
+        XHCI_CONTEXTS[index].ready = false;
+        XHCI_CONTEXTS[index].context_size = 0;
+        XHCI_CONTEXTS[index].arena = dma_invalid_buffer();
+        XHCI_CONTEXTS[index].device_physical = 0;
+        XHCI_CONTEXTS[index].input_physical = 0;
+        XHCI_CONTEXTS[index].ep0_ring_physical = 0;
+        XHCI_CONTEXTS[index].ep0_max_packet = 0;
+        XHCI_CONTEXT_RELEASED_EPOCHS[index] = epoch;
+        if XHCI_CONTEXT_SLOT_ID == slot_id {
+            XHCI_CONTEXT_READY = false;
+            XHCI_CONTEXT_SLOT_ID = 0;
+        }
+    }
+    return xhci_context_teardown_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_context_teardown_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_context_epoch_matches_detach(slot_id, epoch) { return false; }
+    let index = xhci_context_index(slot_id);
+    if index >= XHCI_CONTEXT_SLOT_CAPACITY { return false; }
+    let dcbaa_value = xhci_context_dcbaa_slot_value(slot_id);
+    if dcbaa_value == XHCI_CONTEXT_DCBAA_INVALID || dcbaa_value != 0 { return false; }
+    unsafe {
+        return XHCI_CONTEXT_RELEASE_STARTED_EPOCHS[index] == epoch &&
+               XHCI_CONTEXT_RELEASED_EPOCHS[index] == epoch &&
+               !XHCI_CONTEXTS[index].ready &&
+               XHCI_CONTEXTS[index].context_size == 0 &&
+               !XHCI_CONTEXTS[index].arena.valid &&
+               XHCI_CONTEXTS[index].device_physical == 0 &&
+               XHCI_CONTEXTS[index].input_physical == 0 &&
+               XHCI_CONTEXTS[index].ep0_ring_physical == 0 &&
+               XHCI_CONTEXTS[index].ep0_max_packet == 0 &&
+               XHCI_CONTEXT_SLOT_ID != slot_id;
+    }
 }
 
 @system

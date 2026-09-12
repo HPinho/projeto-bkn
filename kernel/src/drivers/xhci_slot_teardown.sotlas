@@ -1,9 +1,13 @@
-// Baken OS — HID-4d.4a1/4a2: teardown per-slot antes de Disable Slot.
+// Baken OS — HID-4d.4a1/4a2/4b: teardown per-slot xHCI antes da finalizacao de reuse.
 //
-// 4a1 libera os owners DMA persistentes de enumeração somente depois do 3c3.
-// 4a2 quiesce o estado lógico de SET_CONFIGURATION, Evaluate Context, EP0 e
-// Address Device, nessa ordem, mantendo a arena física e a device table vivas.
-// A device table fica DETACH_PENDING até o barrier do Event Ring em HID-4d.5.
+// 4a1 libera DMA persistente de enumeracao depois do 3c3. 4a2 quiesce os
+// registries logicos SET_CONFIGURATION/Evaluate/EP0/Address. 4b captura essa
+// prova enquanto Device/Input Context ainda existem, bloqueia reuse de Slot ID,
+// revalida transfer state, emite Disable Slot uma unica vez, zera DCBAA e libera
+// a arena unica Device/Input/EP0.
+//
+// A device table permanece valida em DETACH_PENDING e o reuse guard permanece
+// bloqueado ate HID-4d.5 finalizar registry/reuse.
 
 module kernel::drivers::xhci_slot_teardown;
 
@@ -17,9 +21,42 @@ import kernel::drivers::xhci_evaluate_context::*;
 import kernel::drivers::xhci_ep0::*;
 import kernel::drivers::xhci_address::*;
 import kernel::drivers::xhci_hid_teardown::*;
+import kernel::drivers::xhci_context::*;
+import kernel::drivers::xhci_slot::*;
+import kernel::drivers::xhci_slot_reuse_guard::*;
+import kernel::drivers::xhci_transfer::*;
+import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_trb::*;
+
+pub struct XhciSlotPhysicalTeardownState {
+    pub valid: bool;
+    pub epoch: u32;
+    pub preconditions_captured: bool;
+    pub disable_attempted: bool;
+    pub disable_complete: bool;
+    pub context_complete: bool;
+}
+
+static mut XHCI_SLOT_PHYSICAL_TEARDOWN_STATES: [XhciSlotPhysicalTeardownState; XHCI_DEVICE_SLOT_CAPACITY] = [
+    XhciSlotPhysicalTeardownState {
+        valid: false,
+        epoch: 0,
+        preconditions_captured: false,
+        disable_attempted: false,
+        disable_complete: false,
+        context_complete: false
+    };
+    XHCI_DEVICE_SLOT_CAPACITY
+];
 
 static mut XHCI_SLOT_ENUMERATION_DMA_TEARDOWN_LOCK: SpinLock =
     SpinLock { state: SPINLOCK_UNLOCKED };
+
+@system
+fn xhci_slot_teardown_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_DEVICE_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
 
 @system
 fn xhci_slot_teardown_lock_irq() -> u64 {
@@ -59,10 +96,6 @@ pub fn xhci_slot_teardown_enumeration_dma_complete_for(slot_id: u8,
         xhci_device_descriptor_persistent_release_complete_for(slot_id, epoch);
 }
 
-// Retry-safe e monotonic: cada owner consegue retomar depois de unshare e usa
-// release_started_epoch para distinguir um buffer fisicamente liberado de um
-// estado que nunca possuiu DMA persistente. O lock cobre a dupla de owners para
-// impedir CPUs concorrentes de intercalarem a ordem Configuration -> Device.
 @system
 pub fn xhci_slot_teardown_release_enumeration_dma_for(slot_id: u8,
                                                       epoch: u32) -> bool {
@@ -78,17 +111,14 @@ pub fn xhci_slot_teardown_release_enumeration_dma_for(slot_id: u8,
        !xhci_configuration_persistent_release_complete_for(slot_id, epoch) {
         teardown_ok = xhci_configuration_release_persistent_for_epoch(slot_id, epoch);
     }
-
     if teardown_ok {
         teardown_ok = xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) &&
             xhci_configuration_persistent_release_complete_for(slot_id, epoch);
     }
-
     if teardown_ok &&
        !xhci_device_descriptor_persistent_release_complete_for(slot_id, epoch) {
         teardown_ok = xhci_device_descriptor_release_persistent_for_epoch(slot_id, epoch);
     }
-
     if teardown_ok {
         teardown_ok = xhci_slot_teardown_enumeration_epoch_ready(slot_id, epoch) &&
             xhci_configuration_persistent_release_complete_for(slot_id, epoch) &&
@@ -109,9 +139,6 @@ pub fn xhci_slot_teardown_logical_state_complete_for(slot_id: u8,
         xhci_address_quiesce_complete_for(slot_id, epoch);
 }
 
-// HID-4d.4a2: limpa somente registries lógicos. Como DETACH_PENDING permanece
-// publicado na device table até 4d.5, os caminhos operacionais desses módulos
-// falham fechado durante toda a janela anterior ao reuse físico do Slot ID.
 @system
 pub fn xhci_slot_teardown_quiesce_logical_state_for(slot_id: u8,
                                                      epoch: u32) -> bool {
@@ -130,7 +157,6 @@ pub fn xhci_slot_teardown_quiesce_logical_state_for(slot_id: u8,
         teardown_ok = xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) &&
             xhci_set_configuration_quiesce_complete_for(slot_id, epoch);
     }
-
     if teardown_ok && !xhci_evaluate_context_quiesce_complete_for(slot_id, epoch) {
         teardown_ok = xhci_evaluate_context_quiesce_for_epoch(slot_id, epoch);
     }
@@ -139,7 +165,6 @@ pub fn xhci_slot_teardown_quiesce_logical_state_for(slot_id: u8,
             xhci_set_configuration_quiesce_complete_for(slot_id, epoch) &&
             xhci_evaluate_context_quiesce_complete_for(slot_id, epoch);
     }
-
     if teardown_ok && !xhci_ep0_quiesce_complete_for(slot_id, epoch) {
         teardown_ok = xhci_ep0_quiesce_for_epoch(slot_id, epoch);
     }
@@ -149,7 +174,6 @@ pub fn xhci_slot_teardown_quiesce_logical_state_for(slot_id: u8,
             xhci_evaluate_context_quiesce_complete_for(slot_id, epoch) &&
             xhci_ep0_quiesce_complete_for(slot_id, epoch);
     }
-
     if teardown_ok && !xhci_address_quiesce_complete_for(slot_id, epoch) {
         teardown_ok = xhci_address_quiesce_for_epoch(slot_id, epoch);
     }
@@ -159,4 +183,174 @@ pub fn xhci_slot_teardown_quiesce_logical_state_for(slot_id: u8,
 
     xhci_slot_teardown_unlock_irq(flags);
     return teardown_ok;
+}
+
+@system
+fn xhci_slot_teardown_physical_epoch_ready(slot_id: u8, epoch: u32) -> bool {
+    return slot_id != 0 && epoch != 0 &&
+        xhci_device_table_slot_is_valid(slot_id) &&
+        xhci_device_table_slot_epoch(slot_id) == epoch &&
+        xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING;
+}
+
+@system
+fn xhci_slot_teardown_capture_physical_preconditions_for(slot_id: u8,
+                                                         epoch: u32) -> bool {
+    if !xhci_slot_teardown_physical_epoch_ready(slot_id, epoch) { return false; }
+    let index = xhci_slot_teardown_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        if XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].valid &&
+           XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].epoch == epoch {
+            return XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].preconditions_captured;
+        }
+        if XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].valid &&
+           XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].epoch != epoch &&
+           !XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].context_complete {
+            return false;
+        }
+    }
+
+    if !xhci_slot_teardown_logical_state_complete_for(slot_id, epoch) { return false; }
+    if !xhci_transfer_teardown_state_safe_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_slot_teardown_physical_epoch_ready(slot_id, epoch) { return false; }
+
+    unsafe {
+        XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index] = XhciSlotPhysicalTeardownState {
+            valid: true,
+            epoch: epoch,
+            preconditions_captured: true,
+            disable_attempted: false,
+            disable_complete: false,
+            context_complete: false
+        };
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_teardown_disable_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_slot_teardown_physical_epoch_ready(slot_id, epoch) ||
+       !xhci_slot_reuse_guard_blocked_for(slot_id, epoch) {
+        return false;
+    }
+    let index = xhci_slot_teardown_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].valid &&
+               XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].epoch == epoch &&
+               XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].preconditions_captured &&
+               XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_attempted &&
+               XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_complete;
+    }
+}
+
+@system
+pub fn xhci_slot_teardown_physical_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_slot_teardown_physical_epoch_ready(slot_id, epoch) ||
+       !xhci_slot_reuse_guard_blocked_for(slot_id, epoch) {
+        return false;
+    }
+    let index = xhci_slot_teardown_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY { return false; }
+
+    let mut state_complete = false;
+    unsafe {
+        state_complete = XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].valid &&
+            XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].epoch == epoch &&
+            XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].preconditions_captured &&
+            XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_attempted &&
+            XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_complete &&
+            XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].context_complete;
+    }
+    if !state_complete { return false; }
+
+    return xhci_slot_disabled_alias_quiesce_complete_for(slot_id, epoch) &&
+        xhci_context_teardown_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_slot_teardown_disable_and_release_context_for(slot_id: u8,
+                                                          epoch: u32) -> bool {
+    if !xhci_slot_teardown_physical_epoch_ready(slot_id, epoch) { return false; }
+    if xhci_slot_teardown_physical_complete_for(slot_id, epoch) { return true; }
+
+    let flags = xhci_slot_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut teardown_ok = xhci_slot_teardown_capture_physical_preconditions_for(slot_id, epoch);
+    let index = xhci_slot_teardown_index(slot_id);
+
+    if teardown_ok {
+        teardown_ok = xhci_slot_reuse_guard_block_for(slot_id, epoch) &&
+            xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_transfer_teardown_state_safe_for_epoch(slot_id, epoch) &&
+            xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+    }
+
+    if teardown_ok && !xhci_slot_teardown_disable_complete_for(slot_id, epoch) {
+        let mut attempted = false;
+        unsafe {
+            attempted = XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_attempted;
+            if !attempted {
+                XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_attempted = true;
+            }
+        }
+        if attempted {
+            teardown_ok = false;
+        } else {
+            let command = xhci_trb_disable_slot(slot_id, xhci_command_producer_cycle());
+            if !xhci_command_execute(command, slot_id) {
+                teardown_ok = false;
+            } else if !xhci_slot_teardown_physical_epoch_ready(slot_id, epoch) ||
+                      !xhci_slot_reuse_guard_blocked_for(slot_id, epoch) {
+                teardown_ok = false;
+            } else {
+                unsafe {
+                    XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_complete = true;
+                }
+            }
+        }
+    }
+
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_disable_complete_for(slot_id, epoch);
+    }
+    if teardown_ok && !xhci_slot_disabled_alias_quiesce_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_slot_quiesce_disabled_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_slot_teardown_disable_complete_for(slot_id, epoch) &&
+            xhci_slot_disabled_alias_quiesce_complete_for(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_context_clear_dcbaa_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok && !xhci_context_teardown_complete_for(slot_id, epoch) {
+        teardown_ok = xhci_context_release_arena_for_epoch(slot_id, epoch);
+    }
+    if teardown_ok {
+        teardown_ok = xhci_context_teardown_complete_for(slot_id, epoch) &&
+            xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+    }
+
+    if teardown_ok {
+        unsafe {
+            if !XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].valid ||
+               XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].epoch != epoch ||
+               !XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].preconditions_captured ||
+               !XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].disable_complete {
+                teardown_ok = false;
+            } else {
+                XHCI_SLOT_PHYSICAL_TEARDOWN_STATES[index].context_complete = true;
+            }
+        }
+    }
+
+    xhci_slot_teardown_unlock_irq(flags);
+    if !teardown_ok { return false; }
+    return xhci_slot_teardown_physical_complete_for(slot_id, epoch);
 }
