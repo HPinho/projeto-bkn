@@ -1,8 +1,8 @@
-// Baken OS — HID-4c/HID-4d.4b: Enable Slot xHCI com registro bounded por Slot ID.
+// Baken OS — HID-4c/HID-4d.5: Enable Slot xHCI com registro bounded por Slot ID.
 //
 // O Command Ring continua sendo o produtor serializado do controller. Em 4d.4b,
 // uma entrada DETACH_PENDING permanece válida na device table para preservar
-// slot+epoch até o barrier 4d.5, mas deixa de ser selecionável/operacional.
+// slot+epoch até a finalização 4d.5, mas deixa de ser selecionável/operacional.
 // Enable Slot participa de um reuse guard global para não correr com Disable Slot.
 
 module kernel::drivers::xhci_slot;
@@ -35,7 +35,7 @@ pub fn xhci_slot_enable_port(port_id: u8, slot_type: u8) -> u8 {
 
     // begin_enable é publicado antes de consultar/emitir o comando. 4d.4b só
     // consegue bloquear reuse quando este contador volta a zero; depois do
-    // bloqueio, novos begins falham até o barrier 4d.5 liberar o guard.
+    // bloqueio, novos begins falham até 4d.5 liberar o guard com tombstone exato.
     if !xhci_slot_reuse_guard_begin_enable() { return 0; }
 
     let mut result: u8 = 0;
@@ -100,7 +100,7 @@ pub fn xhci_slot_select(slot_id: u8) -> bool {
 
 // HID-4d.4b: limpa apenas o alias legado do slot fisicamente desabilitado. A
 // device table deliberadamente NÃO é liberada aqui; ela retém slot+epoch até
-// que 4d.5 prove o Event Ring barrier e autorize reuse.
+// 4d.5 capturar a prova física e finalizar o reuse.
 @system
 pub fn xhci_slot_quiesce_disabled_for_epoch(slot_id: u8, epoch: u32) -> bool {
     if !xhci_slot_epoch_matches_detach(slot_id, epoch) { return false; }
@@ -135,8 +135,10 @@ pub fn xhci_slot_is_ready() -> bool {
 
 @system
 pub fn xhci_slot_is_ready_for(slot_id: u8) -> bool {
-    return slot_id != 0 && xhci_device_table_slot_is_valid(slot_id) &&
-        xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING;
+    if slot_id == 0 || !xhci_device_table_slot_is_valid(slot_id) { return false; }
+    let state = xhci_device_table_state(slot_id);
+    return state != XHCI_DEVICE_STATE_FAILED &&
+           state != XHCI_DEVICE_STATE_DETACH_PENDING;
 }
 
 @system

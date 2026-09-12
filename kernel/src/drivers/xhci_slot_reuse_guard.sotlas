@@ -1,12 +1,12 @@
 // Baken OS — HID-4d.4b/4d.5: guard SMP-safe contra reuse prematuro de Slot ID.
 //
-// Enable Slot é uma operação global do xHC: o controller escolhe o Slot ID e
-// pode reutilizar um ID imediatamente após Disable Slot. Este guard separa
-// "Enable Slot em voo" de "teardown aguardando Event Ring barrier".
+// Enable Slot e uma operacao global do xHC: o controller escolhe o Slot ID e
+// pode reutilizar um ID imediatamente apos Disable Slot. Este guard separa
+// "Enable Slot em voo" de "teardown aguardando finalizacao de registry/reuse".
 //
-// 4d.4b publica o bloqueio antes de Disable Slot somente quando não existe
-// Enable in-flight. 4d.5 será a única camada autorizada a retirar esse bloqueio
-// depois do barrier e da finalização do registry.
+// 4d.4b publica o bloqueio antes de Disable Slot somente quando nao existe
+// Enable in-flight. 4d.5 e a unica camada superior autorizada a retirar esse
+// bloqueio depois de 4b completo e device-table release do epoch antigo.
 
 module kernel::drivers::xhci_slot_reuse_guard;
 
@@ -15,6 +15,8 @@ import kernel::drivers::xhci_device_table::*;
 
 static mut XHCI_SLOT_REUSE_GUARD_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 static mut XHCI_SLOT_REUSE_BLOCKED_EPOCHS: [u32; XHCI_DEVICE_SLOT_CAPACITY] =
+    [0; XHCI_DEVICE_SLOT_CAPACITY];
+static mut XHCI_SLOT_REUSE_RELEASED_EPOCHS: [u32; XHCI_DEVICE_SLOT_CAPACITY] =
     [0; XHCI_DEVICE_SLOT_CAPACITY];
 static mut XHCI_SLOT_REUSE_BLOCKED_COUNT: u16 = 0;
 static mut XHCI_SLOT_REUSE_ENABLE_INFLIGHT: u16 = 0;
@@ -85,6 +87,45 @@ pub fn xhci_slot_reuse_guard_blocked_for(slot_id: u8, epoch: u32) -> bool {
     unsafe {
         return XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] == epoch &&
                XHCI_SLOT_REUSE_BLOCKED_COUNT != 0;
+    }
+}
+
+// HID-4d.5 low-level release. O caller superior deve ter provado 4b completo e
+// liberado a entrada antiga da device table antes desta chamada. O tombstone de
+// RELEASED_EPOCHS permite concluir retry mesmo depois que o registry antigo nao
+// existe mais; nova geracao usa epoch diferente e nao pode liberar este bloqueio.
+@system
+pub fn xhci_slot_reuse_guard_release_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_guard_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+
+    unsafe {
+        if !spinlock_lock(&mut XHCI_SLOT_REUSE_GUARD_LOCK) { return false; }
+        if XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] == 0 &&
+           XHCI_SLOT_REUSE_RELEASED_EPOCHS[index] == epoch {
+            spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+            return true;
+        }
+        if XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] != epoch ||
+           XHCI_SLOT_REUSE_BLOCKED_COUNT == 0 {
+            spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+            return false;
+        }
+        XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] = 0;
+        XHCI_SLOT_REUSE_RELEASED_EPOCHS[index] = epoch;
+        XHCI_SLOT_REUSE_BLOCKED_COUNT -= 1;
+        spinlock_unlock(&mut XHCI_SLOT_REUSE_GUARD_LOCK);
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_reuse_guard_release_complete_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_guard_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        return XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] != epoch &&
+               XHCI_SLOT_REUSE_RELEASED_EPOCHS[index] == epoch;
     }
 }
 

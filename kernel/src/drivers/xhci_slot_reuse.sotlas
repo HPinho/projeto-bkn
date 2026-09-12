@@ -1,0 +1,214 @@
+// Baken OS — HID-4d.5: finalizacao generation-safe de registry + Slot ID reuse.
+//
+// O drain terminal de 4d.2b recebe o Transfer Event outstanding antes de
+// Disable Slot. HID-4d.4b entao prova transfer-safe, bloqueia Enable Slot,
+// recebe a Command Completion exata de Disable Slot, zera DCBAA e libera a
+// arena de contexts. Esta camada NAO cria segundo Event Ring consumer.
+//
+// Ordem final: capturar prova 4b -> device_table_release(old epoch) -> liberar
+// reuse guard. O guard e sempre o ultimo recurso: enquanto o registry antigo e
+// removido, nenhum Enable Slot novo pode correr com a finalizacao.
+
+module kernel::drivers::xhci_slot_reuse;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_slot_teardown::*;
+import kernel::drivers::xhci_slot_reuse_guard::*;
+import kernel::drivers::xhci_transfer::*;
+
+pub struct XhciSlotReuseState {
+    pub valid: bool;
+    pub epoch: u32;
+    pub preconditions_captured: bool;
+    pub registry_released: bool;
+    pub guard_released: bool;
+    pub complete: bool;
+}
+
+static mut XHCI_SLOT_REUSE_STATES: [XhciSlotReuseState; XHCI_DEVICE_SLOT_CAPACITY] = [
+    XhciSlotReuseState {
+        valid: false,
+        epoch: 0,
+        preconditions_captured: false,
+        registry_released: false,
+        guard_released: false,
+        complete: false
+    };
+    XHCI_DEVICE_SLOT_CAPACITY
+];
+static mut XHCI_SLOT_REUSE_FINALIZE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+
+@system
+fn xhci_slot_reuse_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_DEVICE_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
+
+@system
+fn xhci_slot_reuse_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut XHCI_SLOT_REUSE_FINALIZE_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn xhci_slot_reuse_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut XHCI_SLOT_REUSE_FINALIZE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn xhci_slot_reuse_preconditions_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING ||
+       !xhci_slot_reuse_guard_blocked_for(slot_id, epoch) {
+        return false;
+    }
+    if !xhci_slot_teardown_physical_complete_for(slot_id, epoch) { return false; }
+    if !xhci_transfer_teardown_state_safe_for_epoch(slot_id, epoch) { return false; }
+    return xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+}
+
+@system
+fn xhci_slot_reuse_capture_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+
+    unsafe {
+        if XHCI_SLOT_REUSE_STATES[index].valid &&
+           XHCI_SLOT_REUSE_STATES[index].epoch == epoch {
+            return XHCI_SLOT_REUSE_STATES[index].preconditions_captured;
+        }
+        if XHCI_SLOT_REUSE_STATES[index].valid &&
+           XHCI_SLOT_REUSE_STATES[index].epoch != epoch &&
+           !XHCI_SLOT_REUSE_STATES[index].complete {
+            return false;
+        }
+    }
+
+    if !xhci_slot_reuse_preconditions_for(slot_id, epoch) { return false; }
+    unsafe {
+        XHCI_SLOT_REUSE_STATES[index] = XhciSlotReuseState {
+            valid: true,
+            epoch: epoch,
+            preconditions_captured: true,
+            registry_released: false,
+            guard_released: false,
+            complete: false
+        };
+    }
+    return true;
+}
+
+@system
+pub fn xhci_slot_reuse_registry_released_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        return XHCI_SLOT_REUSE_STATES[index].valid &&
+               XHCI_SLOT_REUSE_STATES[index].epoch == epoch &&
+               XHCI_SLOT_REUSE_STATES[index].preconditions_captured &&
+               XHCI_SLOT_REUSE_STATES[index].registry_released;
+    }
+}
+
+@system
+pub fn xhci_slot_reuse_complete_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_slot_reuse_index(slot_id);
+    if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        return XHCI_SLOT_REUSE_STATES[index].valid &&
+               XHCI_SLOT_REUSE_STATES[index].epoch == epoch &&
+               XHCI_SLOT_REUSE_STATES[index].preconditions_captured &&
+               XHCI_SLOT_REUSE_STATES[index].registry_released &&
+               XHCI_SLOT_REUSE_STATES[index].guard_released &&
+               XHCI_SLOT_REUSE_STATES[index].complete;
+    }
+}
+
+@system
+pub fn xhci_slot_reuse_finalize_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 { return false; }
+    if xhci_slot_reuse_complete_for(slot_id, epoch) { return true; }
+
+    let flags = xhci_slot_reuse_lock_irq();
+    if flags == 0 { return false; }
+
+    let index = xhci_slot_reuse_index(slot_id);
+    let mut finalize_ok = index < XHCI_DEVICE_SLOT_CAPACITY;
+    if finalize_ok {
+        finalize_ok = xhci_slot_reuse_capture_for(slot_id, epoch);
+    }
+
+    let mut registry_released = false;
+    unsafe {
+        if finalize_ok {
+            registry_released = XHCI_SLOT_REUSE_STATES[index].registry_released;
+        }
+    }
+
+    if finalize_ok && !registry_released {
+        finalize_ok = xhci_slot_reuse_preconditions_for(slot_id, epoch) &&
+            xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+        if finalize_ok {
+            finalize_ok = xhci_device_table_release(slot_id, epoch);
+        }
+        if finalize_ok {
+            finalize_ok = !xhci_device_table_slot_is_valid(slot_id) &&
+                xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+        }
+        if finalize_ok {
+            unsafe { XHCI_SLOT_REUSE_STATES[index].registry_released = true; }
+        }
+    }
+
+    let mut guard_released = false;
+    unsafe {
+        if finalize_ok {
+            guard_released = XHCI_SLOT_REUSE_STATES[index].guard_released;
+        }
+    }
+
+    if finalize_ok && !guard_released {
+        if xhci_device_table_slot_is_valid(slot_id) {
+            finalize_ok = false;
+        }
+        if finalize_ok {
+            finalize_ok = xhci_slot_reuse_guard_release_for(slot_id, epoch);
+        }
+        if finalize_ok {
+            finalize_ok = xhci_slot_reuse_guard_release_complete_for(slot_id, epoch);
+        }
+        if finalize_ok {
+            unsafe { XHCI_SLOT_REUSE_STATES[index].guard_released = true; }
+        }
+    }
+
+    if finalize_ok {
+        unsafe {
+            if !XHCI_SLOT_REUSE_STATES[index].valid ||
+               XHCI_SLOT_REUSE_STATES[index].epoch != epoch ||
+               !XHCI_SLOT_REUSE_STATES[index].preconditions_captured ||
+               !XHCI_SLOT_REUSE_STATES[index].registry_released ||
+               !XHCI_SLOT_REUSE_STATES[index].guard_released {
+                finalize_ok = false;
+            } else {
+                XHCI_SLOT_REUSE_STATES[index].complete = true;
+            }
+        }
+    }
+
+    xhci_slot_reuse_unlock_irq(flags);
+    if !finalize_ok { return false; }
+    return xhci_slot_reuse_complete_for(slot_id, epoch);
+}

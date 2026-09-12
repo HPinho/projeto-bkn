@@ -143,7 +143,10 @@ pub fn xhci_device_table_release(slot_id: u8, epoch: u32) -> bool {
             XHCI_DEVICE_ACTIVE_SLOT_ID = XHCI_DEVICE_SLOT_INVALID;
             let mut scan: usize = 1;
             while scan < XHCI_DEVICE_SLOT_CAPACITY {
-                if XHCI_DEVICE_SLOTS[scan].valid {
+                let candidate = &XHCI_DEVICE_SLOTS[scan];
+                if candidate.valid &&
+                   candidate.state != XHCI_DEVICE_STATE_FAILED &&
+                   candidate.state != XHCI_DEVICE_STATE_DETACH_PENDING {
                     XHCI_DEVICE_ACTIVE_SLOT_ID = scan as u8;
                     break;
                 }
@@ -205,7 +208,12 @@ pub fn xhci_device_table_set_active(slot_id: u8) -> bool {
     let index = xhci_device_table_index(slot_id);
     if index >= XHCI_DEVICE_SLOT_CAPACITY { return false; }
     unsafe {
-        if !XHCI_DEVICE_SLOTS[index].valid { return false; }
+        let record = &XHCI_DEVICE_SLOTS[index];
+        if !record.valid ||
+           record.state == XHCI_DEVICE_STATE_FAILED ||
+           record.state == XHCI_DEVICE_STATE_DETACH_PENDING {
+            return false;
+        }
         XHCI_DEVICE_ACTIVE_SLOT_ID = slot_id;
     }
     return true;
