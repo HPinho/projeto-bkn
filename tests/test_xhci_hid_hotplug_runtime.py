@@ -33,6 +33,7 @@ class XhciHidHotplugRuntimeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.hotplug = HOTPLUG.read_text(encoding="utf-8")
+        cls.hotplug_code = re.sub(r"//[^\n]*", "", cls.hotplug)
         cls.runtime = RUNTIME.read_text(encoding="utf-8")
         cls.workflow = WORKFLOW.read_text(encoding="utf-8")
         cls.progress = function_body(
@@ -157,7 +158,7 @@ class XhciHidHotplugRuntimeTests(unittest.TestCase):
             "import kernel::memory::dma::*;",
         )
         for token in forbidden:
-            self.assertNotIn(token, self.hotplug)
+            self.assertNotIn(token, self.hotplug_code)
 
     def test_runtime_markers_cover_service_detach_and_reconnect(self):
         for marker in (
