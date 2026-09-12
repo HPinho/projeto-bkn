@@ -89,10 +89,7 @@ pub fn xhci_configure_hid_endpoint_for_slot(slot_id: u8) -> bool {
         false,
         xhci_command_producer_cycle()
     );
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 { return false; }
-    if !xhci_command_wait_completion(command_physical) { return false; }
-    if xhci_command_last_slot_id() != slot_id { return false; }
+    if !xhci_command_execute(command, slot_id) { return false; }
 
     if x86_read_cr3_raw() == 0 { return false; }
     let dw0 = xhci_configure_endpoint_output_dw0(slot_id, dci);

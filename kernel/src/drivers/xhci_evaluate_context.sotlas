@@ -101,11 +101,8 @@ pub fn xhci_evaluate_ep0_max_packet_for_slot(slot_id: u8, max_packet: u16) -> bo
         slot_id,
         xhci_command_producer_cycle()
     );
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 { return false; }
     unsafe { XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED_SLOTS[index] = true; }
-    if !xhci_command_wait_completion(command_physical) { return false; }
-    if xhci_command_last_slot_id() != slot_id { return false; }
+    if !xhci_command_execute(command, slot_id) { return false; }
 
     if !xhci_device_table_slot_is_valid(slot_id) ||
        xhci_device_table_slot_epoch(slot_id) != epoch {

@@ -6,10 +6,15 @@
 // consumidor único kernel::drivers::xhci_event_consumer. HID-4d.2a permite que
 // Transfer Events legítimos sejam roteados para a mailbox owner enquanto um
 // Command Completion é aguardado, sem perder nem atribuir completion errada.
+//
+// O Command Ring é global ao controller. Toda transação submit -> completion ->
+// captura do Slot ID é serializada por um lock próprio. O polling permanece com
+// IRQs habilitadas: esta API é de contexto de thread/bring-up, nunca de IRQ.
 
 module kernel::drivers::xhci_command;
 
 import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::active_page_tables::*;
 import kernel::drivers::xhci_controller::*;
@@ -29,6 +34,7 @@ static mut XHCI_COMMAND_READY: bool = false;
 static mut XHCI_COMMAND_ENQUEUE_INDEX: u32 = XHCI_COMMAND_FIRST_FREE_INDEX;
 static mut XHCI_COMMAND_PRODUCER_CYCLE: bool = true;
 static mut XHCI_COMMAND_LAST_SLOT_ID: u8 = 0;
+static mut XHCI_COMMAND_TRANSACTION_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 
 @system
 fn xhci_command_page_base(address: u64) -> u64 {
@@ -116,8 +122,10 @@ pub fn xhci_command_prepare_after_noop() -> bool {
     return true;
 }
 
+// Primitiva privada. O caller público mantém XHCI_COMMAND_TRANSACTION_LOCK
+// durante submit, wait e captura da completion correspondente.
 @system
-pub fn xhci_command_submit(command: XhciTrb) -> u64 {
+fn xhci_command_submit(command: XhciTrb) -> u64 {
     unsafe { XHCI_COMMAND_LAST_SLOT_ID = 0; }
     if !xhci_command_is_ready() { return 0; }
     unsafe {
@@ -143,8 +151,11 @@ pub fn xhci_command_submit(command: XhciTrb) -> u64 {
     }
 }
 
+// Primitiva privada do mesmo transaction lock. O Event Ring continua com um
+// único consumidor e eventos assíncronos permitidos são roteados exatamente uma
+// vez antes de prosseguir até a Command Completion dona de command_physical.
 @system
-pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
+fn xhci_command_wait_completion(command_physical: u64) -> bool {
     if !xhci_command_is_ready() || command_physical == 0 { return false; }
     let operational = xhci_controller_operational_base();
     if operational == 0 || !xhci_event_consumer_is_ready() { return false; }
@@ -158,7 +169,6 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
         if event != (null as *const XhciTrb) {
             let event_type = xhci_event_type(event);
 
-            // Port Status Change é assíncrono e não pertence a um waiter de I/O.
             if event_type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT {
                 if xhci_port_status_change_port_id(event) == 0 { return false; }
                 if !xhci_event_consumer_consume() { return false; }
@@ -166,18 +176,12 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
                 continue;
             }
 
-            // HID-4d.2a: um TD pode completar enquanto um comando de lifecycle
-            // está outstanding. O Command Ring não consome o Transfer Event por
-            // conta própria; delega ao demux per-slot+epoch, que preserva o evento
-            // na mailbox owner e avança o Event Ring exatamente uma vez.
             if event_type == XHCI_TRB_TYPE_TRANSFER_EVENT {
                 if !xhci_transfer_route_next_event() { return false; }
                 spins += 1;
                 continue;
             }
 
-            // Tipos não reconhecidos continuam fail-closed. Somente PSC e
-            // Transfer Event podem ser atravessados enquanto aguardamos comando.
             if event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT {
                 return false;
             }
@@ -195,6 +199,37 @@ pub fn xhci_command_wait_completion(command_physical: u64) -> bool {
         spins += 1;
     }
     return false;
+}
+
+// Executa uma transação completa no Command Ring global e devolve o Slot ID da
+// própria Command Completion. A captura acontece ainda sob o lock, portanto um
+// comando seguinte nunca pode sobrescrever LAST_SLOT_ID antes desta leitura.
+// Não desabilita IRQs durante polling; não deve ser chamado de contexto de IRQ.
+@system
+pub fn xhci_command_execute_capture_slot(command: XhciTrb) -> u8 {
+    if !xhci_command_is_ready() { return 0; }
+    let mut locked = false;
+    unsafe { locked = spinlock_lock(&mut XHCI_COMMAND_TRANSACTION_LOCK); }
+    if !locked { return 0; }
+
+    let mut completed_slot_id: u8 = 0;
+    let command_physical = xhci_command_submit(command);
+    if command_physical != 0 && xhci_command_wait_completion(command_physical) {
+        unsafe { completed_slot_id = XHCI_COMMAND_LAST_SLOT_ID; }
+    }
+
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut XHCI_COMMAND_TRANSACTION_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    return completed_slot_id;
+}
+
+// Comandos dirigidos a um Slot ID usam este wrapper: além da serialização, a
+// completion precisa pertencer exatamente ao slot esperado.
+@system
+pub fn xhci_command_execute(command: XhciTrb, expected_slot_id: u8) -> bool {
+    if expected_slot_id == 0 { return false; }
+    return xhci_command_execute_capture_slot(command) == expected_slot_id;
 }
 
 @system
@@ -216,6 +251,8 @@ pub fn xhci_command_event_consumer_cycle() -> bool {
     return xhci_event_consumer_cycle();
 }
 
+// Mantido somente para diagnóstico/compatibilidade. Drivers não devem usar este
+// valor global para correlacionar transações; use xhci_command_execute*().
 @system
 pub fn xhci_command_last_slot_id() -> u8 { unsafe { return XHCI_COMMAND_LAST_SLOT_ID; }
 }
