@@ -8,8 +8,10 @@
 // Command Completion é aguardado, sem perder nem atribuir completion errada.
 //
 // O Command Ring é global ao controller. Toda transação submit -> completion ->
-// captura do Slot ID é serializada por um lock próprio. O polling permanece com
-// IRQs habilitadas: esta API é de contexto de thread/bring-up, nunca de IRQ.
+// captura do Slot ID é serializada por um lock próprio. IRQ save/disable cobre
+// o lock para impedir preempção do owner pelo timer enquanto outro contexto no
+// mesmo CPU poderia tentar o mesmo spinlock. As completions continuam sendo
+// observadas por polling do Event Ring, portanto a transação não depende de IRQ.
 
 module kernel::drivers::xhci_command;
 
@@ -204,13 +206,17 @@ fn xhci_command_wait_completion(command_physical: u64) -> bool {
 // Executa uma transação completa no Command Ring global e devolve o Slot ID da
 // própria Command Completion. A captura acontece ainda sob o lock, portanto um
 // comando seguinte nunca pode sobrescrever LAST_SLOT_ID antes desta leitura.
-// Não desabilita IRQs durante polling; não deve ser chamado de contexto de IRQ.
+// IRQ save/restore protege também contra preempção pelo timer no mesmo CPU.
 @system
 pub fn xhci_command_execute_capture_slot(command: XhciTrb) -> u8 {
     if !xhci_command_is_ready() { return 0; }
+    let flags = x86_irq_save_disable();
     let mut locked = false;
     unsafe { locked = spinlock_lock(&mut XHCI_COMMAND_TRANSACTION_LOCK); }
-    if !locked { return 0; }
+    if !locked {
+        x86_irq_restore(flags);
+        return 0;
+    }
 
     let mut completed_slot_id: u8 = 0;
     let command_physical = xhci_command_submit(command);
@@ -221,6 +227,7 @@ pub fn xhci_command_execute_capture_slot(command: XhciTrb) -> u8 {
     let mut released = false;
     unsafe { released = spinlock_unlock(&mut XHCI_COMMAND_TRANSACTION_LOCK); }
     if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
     return completed_slot_id;
 }
 
