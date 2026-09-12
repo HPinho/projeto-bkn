@@ -5,6 +5,11 @@
 // os bytes foram validados. HID-4d.4a1 adiciona teardown exact-epoch do buffer
 // persistente do Device Descriptor, com tombstone que bloqueia recriação no
 // mesmo epoch depois do free.
+//
+// Hardened recovery: depois que um buffer foi publicado num TD de EP0, um
+// submit/wait ambíguo nunca libera as páginas. O owner fica preso ao slot+epoch
+// e só pode ser devolvido após uma fronteira física comprovada (completion
+// terminal normal ou Disable Slot confirmado no recovery de FAILED).
 
 module kernel::drivers::xhci_descriptor;
 
@@ -93,6 +98,9 @@ fn xhci_descriptor_prepare_state(slot_id: u8) -> bool {
     if epoch == 0 { return false; }
     unsafe {
         if XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch != epoch {
+            // Slot ID não pode avançar para outro epoch carregando owner DMA
+            // antigo. Se isso ocorrer, falha fechado e preserva a referência.
+            if XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid { return false; }
             XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch = epoch;
             XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_ready = false;
             XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = 0;
@@ -108,7 +116,8 @@ fn xhci_descriptor_prepare_state(slot_id: u8) -> bool {
             XHCI_DEVICE_DESCRIPTOR_RELEASE_STARTED_EPOCHS[index] = 0;
             XHCI_DEVICE_DESCRIPTOR_RELEASED_EPOCHS[index] = 0;
         } else if XHCI_DEVICE_DESCRIPTOR_RELEASED_EPOCHS[index] == epoch {
-            // Depois de 4d.4a1 o mesmo slot+epoch não pode reenumerar DMA.
+            // Depois de 4d.4a1/recovery FAILED o mesmo slot+epoch não pode
+            // reenumerar DMA. Um epoch novo só nasce depois do reuse físico.
             return false;
         }
     }
@@ -140,6 +149,17 @@ fn xhci_descriptor_epoch_matches(slot_id: u8, epoch: u32) -> bool {
 }
 
 @system
+fn xhci_descriptor_current_buffer_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_descriptor_index(slot_id);
+    if index >= XHCI_DESCRIPTOR_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    unsafe { return XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch == epoch; }
+}
+
+@system
 fn xhci_descriptor_zero(buffer: *mut u8, size: u64) -> bool {
     if buffer == (null as *mut u8) || size == 0 { return false; }
     unsafe {
@@ -153,6 +173,7 @@ fn xhci_descriptor_zero(buffer: *mut u8, size: u64) -> bool {
     return true;
 }
 
+// Somente para candidatos ainda não publicados no estado per-slot/EP0.
 @system
 fn xhci_descriptor_release_temporary(buffer: *mut DmaBuffer) -> bool {
     if buffer == (null as *mut DmaBuffer) { return false; }
@@ -164,6 +185,63 @@ fn xhci_descriptor_release_temporary(buffer: *mut DmaBuffer) -> bool {
     }
     if !dma_buffer_cpu_owned(buffer as *const DmaBuffer) { return false; }
     return dma_release(buffer);
+}
+
+// Owner canônico depois da publicação no estado per-slot. O caller é obrigado
+// a provar uma fronteira terminal antes de invocar este helper: completion de TD
+// já consumida ou Disable Slot confirmado. O helper não tenta inferir quiescência.
+@system
+fn xhci_descriptor_release_current_buffer_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_descriptor_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_descriptor_index(slot_id);
+    if index >= XHCI_DESCRIPTOR_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        if !XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid { return true; }
+    }
+
+    let mut shared = false;
+    unsafe { shared = dma_buffer_shared(&XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer); }
+    if shared {
+        unsafe {
+            if !dma_unshare_from_device(&mut XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer) {
+                return false;
+            }
+        }
+        if !xhci_descriptor_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    }
+
+    unsafe {
+        if !dma_buffer_cpu_owned(&XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer) {
+            return false;
+        }
+    }
+    if !xhci_descriptor_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        if !dma_release(&mut XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer) {
+            return false;
+        }
+    }
+    if !xhci_descriptor_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    unsafe { return !XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid; }
+}
+
+@system
+fn xhci_descriptor_publish_candidate_buffer(slot_id: u8,
+                                            epoch: u32,
+                                            buffer: DmaBuffer) -> bool {
+    if !xhci_descriptor_current_buffer_epoch_matches(slot_id, epoch) ||
+       !buffer.valid || !dma_buffer_shared(&buffer) {
+        return false;
+    }
+    let index = xhci_descriptor_index(slot_id);
+    if index >= XHCI_DESCRIPTOR_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid { return false; }
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer;
+    }
+    return xhci_descriptor_current_buffer_epoch_matches(slot_id, epoch);
 }
 
 @system
@@ -179,13 +257,17 @@ fn xhci_descriptor_read16(base: *const u8, offset: u64) -> u16 {
     return lo | (hi << 8);
 }
 
-// GET_DESCRIPTOR(Device) curto para um slot específico. O buffer, o EP0 e o
-// resultado de transferência pertencem ao mesmo slot+epoch do início ao fim.
+// GET_DESCRIPTOR(Device) curto para um slot específico. O buffer é publicado
+// no owner per-slot antes do EP0 submit. Se submit/wait ficar ambíguo, o owner
+// permanece em quarentena para recovery depois de Disable Slot.
 @system
 pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8) -> bool {
     if !xhci_descriptor_prepare_state(slot_id) { return false; }
     let index = xhci_descriptor_index(slot_id);
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
     unsafe {
+        if XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid { return false; }
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_ready = false;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = 0;
     }
@@ -193,9 +275,19 @@ pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8) -> bool {
     let mut buffer = dma_alloc(XHCI_DESCRIPTOR_DMA_SIZE, XHCI_DESCRIPTOR_DMA_SIZE);
     if !dma_buffer_cpu_owned(&buffer) { return false; }
     if !xhci_descriptor_zero(buffer.virtual_address, USB_DEVICE_DESCRIPTOR_PROBE_LENGTH as u64) {
+        xhci_descriptor_release_temporary(&mut buffer);
         return false;
     }
-    if !dma_share_with_device(&mut buffer) { return false; }
+    if !dma_share_with_device(&mut buffer) {
+        xhci_descriptor_release_temporary(&mut buffer);
+        return false;
+    }
+    let buffer_physical = buffer.physical_address;
+    let buffer_virtual = buffer.virtual_address;
+    if !xhci_descriptor_publish_candidate_buffer(slot_id, epoch, buffer) {
+        xhci_descriptor_release_temporary(&mut buffer);
+        return false;
+    }
 
     let setup = xhci_trb_setup_stage(
         USB_REQUEST_TYPE_DEVICE_TO_HOST_STANDARD_DEVICE,
@@ -207,7 +299,7 @@ pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8) -> bool {
         xhci_ep0_producer_cycle_for(slot_id)
     );
     let data = xhci_trb_data_stage(
-        buffer.physical_address,
+        buffer_physical,
         USB_DEVICE_DESCRIPTOR_PROBE_LENGTH as u32,
         0,
         true,
@@ -219,23 +311,28 @@ pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8) -> bool {
     let status_physical = xhci_ep0_submit_control_td_for_slot(slot_id, setup, data, status, true);
     if status_physical == 0 { return false; }
     if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
-    if xhci_transfer_last_residual_length_for(slot_id) != 0 { return false; }
+    if xhci_transfer_last_residual_length_for(slot_id) != 0 {
+        xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch);
+        return false;
+    }
 
-    let base = buffer.virtual_address as *const u8;
+    let base = buffer_virtual as *const u8;
     let length = xhci_descriptor_read8(base, 0);
     let descriptor_type = xhci_descriptor_read8(base, 1);
     let max_packet0 = xhci_descriptor_read8(base, 7);
     if length != (USB_DEVICE_DESCRIPTOR_LENGTH as u8) ||
        descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE || max_packet0 == 0 {
-        xhci_descriptor_release_temporary(&mut buffer);
+        xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch);
         return false;
     }
 
     if !xhci_descriptor_state_is_current(slot_id) {
-        xhci_descriptor_release_temporary(&mut buffer);
+        // O epoch mudou depois de completion terminal. O exact-epoch helper
+        // falha fechado se o Slot ID já pertence a outra geração.
+        xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch);
         return false;
     }
-    if !xhci_descriptor_release_temporary(&mut buffer) { return false; }
+    if !xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch) { return false; }
     unsafe {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = max_packet0;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_ready = true;
@@ -276,13 +373,16 @@ pub fn xhci_device_descriptor_probe_max_packet0() -> u8 {
     return xhci_device_descriptor_probe_max_packet0_for(xhci_address_slot_id());
 }
 
-// Leitura completa do Device Descriptor para um slot específico, após o EP0
-// ter sido reconciliado com o bMaxPacketSize0 descoberto no probe curto.
+// Leitura completa do Device Descriptor. Como no probe curto, o buffer torna-se
+// owner do slot antes do submit. Em sucesso ele continua persistente até 4d.4a1.
 @system
 pub fn xhci_get_device_descriptor_for_slot(slot_id: u8) -> bool {
     if !xhci_descriptor_prepare_state(slot_id) { return false; }
     let index = xhci_descriptor_index(slot_id);
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
     unsafe {
+        if XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid { return false; }
         XHCI_DEVICE_DESCRIPTOR_STATES[index].ready = false;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].usb_version = 0;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].vendor_id = 0;
@@ -291,15 +391,24 @@ pub fn xhci_get_device_descriptor_for_slot(slot_id: u8) -> bool {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].device_subclass = 0;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].device_protocol = 0;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].max_packet0 = 0;
-        XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = dma_invalid_buffer();
     }
 
     let mut buffer = dma_alloc(XHCI_DESCRIPTOR_DMA_SIZE, XHCI_DESCRIPTOR_DMA_SIZE);
     if !dma_buffer_cpu_owned(&buffer) { return false; }
     if !xhci_descriptor_zero(buffer.virtual_address, USB_DEVICE_DESCRIPTOR_LENGTH as u64) {
+        xhci_descriptor_release_temporary(&mut buffer);
         return false;
     }
-    if !dma_share_with_device(&mut buffer) { return false; }
+    if !dma_share_with_device(&mut buffer) {
+        xhci_descriptor_release_temporary(&mut buffer);
+        return false;
+    }
+    let buffer_physical = buffer.physical_address;
+    let buffer_virtual = buffer.virtual_address;
+    if !xhci_descriptor_publish_candidate_buffer(slot_id, epoch, buffer) {
+        xhci_descriptor_release_temporary(&mut buffer);
+        return false;
+    }
 
     let setup = xhci_trb_setup_stage(
         USB_REQUEST_TYPE_DEVICE_TO_HOST_STANDARD_DEVICE,
@@ -311,7 +420,7 @@ pub fn xhci_get_device_descriptor_for_slot(slot_id: u8) -> bool {
         xhci_ep0_producer_cycle_for(slot_id)
     );
     let data = xhci_trb_data_stage(
-        buffer.physical_address,
+        buffer_physical,
         USB_DEVICE_DESCRIPTOR_LENGTH as u32,
         0,
         true,
@@ -323,15 +432,24 @@ pub fn xhci_get_device_descriptor_for_slot(slot_id: u8) -> bool {
     let status_physical = xhci_ep0_submit_control_td_for_slot(slot_id, setup, data, status, true);
     if status_physical == 0 { return false; }
     if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
-    if xhci_transfer_last_residual_length_for(slot_id) != 0 { return false; }
+    if xhci_transfer_last_residual_length_for(slot_id) != 0 {
+        xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch);
+        return false;
+    }
 
-    let base = buffer.virtual_address as *const u8;
+    let base = buffer_virtual as *const u8;
     let length = xhci_descriptor_read8(base, 0);
     let descriptor_type = xhci_descriptor_read8(base, 1);
     if length != (USB_DEVICE_DESCRIPTOR_LENGTH as u8) ||
-       descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE { return false; }
+       descriptor_type != USB_DESCRIPTOR_TYPE_DEVICE {
+        xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch);
+        return false;
+    }
 
-    if !xhci_descriptor_state_is_current(slot_id) { return false; }
+    if !xhci_descriptor_state_is_current(slot_id) {
+        xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch);
+        return false;
+    }
     unsafe {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].usb_version = xhci_descriptor_read16(base, 2);
         XHCI_DEVICE_DESCRIPTOR_STATES[index].device_class = xhci_descriptor_read8(base, 4);
@@ -340,7 +458,6 @@ pub fn xhci_get_device_descriptor_for_slot(slot_id: u8) -> bool {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].max_packet0 = xhci_descriptor_read8(base, 7);
         XHCI_DEVICE_DESCRIPTOR_STATES[index].vendor_id = xhci_descriptor_read16(base, 8);
         XHCI_DEVICE_DESCRIPTOR_STATES[index].product_id = xhci_descriptor_read16(base, 10);
-        XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer;
         XHCI_DEVICE_DESCRIPTOR_STATES[index].ready = true;
     }
     return true;
@@ -406,6 +523,56 @@ pub fn xhci_device_protocol_for(slot_id: u8) -> u8 {
 pub fn xhci_device_max_packet0_for(slot_id: u8) -> u8 {
     if !xhci_device_descriptor_is_ready_for(slot_id) { return 0; }
     unsafe { return XHCI_DEVICE_DESCRIPTOR_STATES[xhci_descriptor_index(slot_id)].max_packet0; }
+}
+
+// Recovery incremental de enumeração parcial. A única caller válida chega aqui
+// depois de marcar FAILED e receber Command Completion de Disable Slot. Assim,
+// qualquer TD EP0 ambíguo deixou de ser hardware-visible antes de unshare/free.
+@system
+pub fn xhci_device_descriptor_release_failed_for_epoch(slot_id: u8,
+                                                       epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    let index = xhci_descriptor_index(slot_id);
+    if index >= XHCI_DESCRIPTOR_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        if XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch != epoch {
+            if XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid { return false; }
+            XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch = epoch;
+        }
+        XHCI_DEVICE_DESCRIPTOR_RELEASE_STARTED_EPOCHS[index] = epoch;
+    }
+
+    if !xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+
+    unsafe {
+        if XHCI_DEVICE_DESCRIPTOR_STATES[index].epoch != epoch ||
+           XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer.valid {
+            return false;
+        }
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_ready = false;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].ready = false;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].usb_version = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].vendor_id = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].product_id = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].device_class = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].device_subclass = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].device_protocol = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].max_packet0 = 0;
+        XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = dma_invalid_buffer();
+        XHCI_DEVICE_DESCRIPTOR_RELEASED_EPOCHS[index] = epoch;
+    }
+    return true;
 }
 
 // HID-4d.4a1: lifetime do Device Descriptor persistente. A camada superior

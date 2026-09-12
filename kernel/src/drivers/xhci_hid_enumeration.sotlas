@@ -3,8 +3,9 @@
 // Este módulo compõe apenas APIs per-slot já certificadas. O caminho legado do
 // primeiro teclado permanece em post_cutover.sotlas e não chama este orquestrador.
 // Em falha após Enable Slot, o slot é desabilitado no hardware e fica localmente
-// em FAILED/quarentena; o reuso só será permitido em HID-4d após cleanup explícito
-// de todos os estados per-slot/epoch.
+// em FAILED/quarentena. O recovery de owners é incremental e generation-safe:
+// cada recurso só é devolvido depois de uma fronteira física que prove ausência
+// de consumo pelo xHC; Slot ID continua reservado até todo o cleanup estar fechado.
 
 module kernel::drivers::xhci_hid_enumeration;
 
@@ -46,10 +47,12 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     let command = xhci_trb_disable_slot(slot_id, xhci_command_producer_cycle());
     if !xhci_command_execute(command, slot_id) { return false; }
 
-    // Não chama xhci_device_table_release(): xhci_context e outros módulos ainda
-    // não possuem teardown completo de estado antigo. Manter FAILED impede que
-    // um Slot ID seja reutilizado sobre estado stale antes do HID-4d.
-    return identity_released;
+    // A Command Completion de Disable Slot é a fronteira física que torna seguro
+    // liberar um Device Descriptor que possa ter ficado preso em TD EP0 ambíguo.
+    // Outros owners continuam em FAILED e serão fechados em microcortes próprios;
+    // por isso a device table/Slot ID deliberadamente permanecem reservados.
+    let descriptor_released = xhci_device_descriptor_release_failed_for_epoch(slot_id, epoch);
+    return identity_released && descriptor_released;
 }
 
 @system
@@ -172,7 +175,7 @@ pub fn xhci_hid_enumerate_port(port_id: u8) -> u8 {
 
 // Procura a próxima porta conectada sem Slot ID e tenta enumerá-la uma vez.
 // Não pula silenciosamente uma porta nova que falhou: falha fechado e deixa o
-// slot, se criado, em quarentena FAILED para investigação/recovery posterior.
+// slot, se criado, em quarentena FAILED até todos os owners do epoch serem limpos.
 @system
 pub fn xhci_hid_enumerate_next_connected(after_port_id: u8) -> u8 {
     if xhci_port_scan() == 0 { return 0; }
