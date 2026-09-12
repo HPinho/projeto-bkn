@@ -43,9 +43,13 @@ pub fn xhci_slot_enable_port(port_id: u8, slot_type: u8) -> u8 {
         let command = xhci_trb_enable_slot(slot_type, xhci_command_producer_cycle());
         let slot_id = xhci_command_execute_capture_slot(command);
         let max_slots = xhci_controller_max_slots();
-        if slot_id != 0 && max_slots != 0 && slot_id <= max_slots &&
-           xhci_device_table_reserve(slot_id, port_id, slot_type) &&
-           xhci_device_table_set_active(slot_id) {
+
+        // Preserve the historical explicit range guard while keeping the
+        // reuse-guard transaction balanced on every post-begin path.
+        if slot_id == 0 || max_slots == 0 || slot_id > max_slots {
+            result = 0;
+        } else if xhci_device_table_reserve(slot_id, port_id, slot_type) &&
+                  xhci_device_table_set_active(slot_id) {
             result = slot_id;
         }
     }
