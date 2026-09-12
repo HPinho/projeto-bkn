@@ -19,23 +19,41 @@ class XhciDmaLifetimeTests(unittest.TestCase):
 
     def test_device_probe_releases_temporary_dma_after_completed_parse(self):
         text = DESCRIPTOR.read_text(encoding="utf-8")
-        helper = text.split("fn xhci_descriptor_release_temporary", 1)[1]
-        helper = helper.split("fn xhci_descriptor_read8", 1)[0]
-        self.assertIn("dma_buffer_shared(buffer as *const DmaBuffer)", helper)
-        self.assertIn("dma_unshare_from_device(buffer)", helper)
-        self.assertIn("dma_buffer_cpu_owned(buffer as *const DmaBuffer)", helper)
-        self.assertIn("dma_release(buffer)", helper)
+        helper = text.split("fn xhci_descriptor_release_current_buffer_for_epoch", 1)[1]
+        helper = helper.split("fn xhci_descriptor_publish_candidate_buffer", 1)[0]
+        self.assertIn("dma_buffer_shared(&XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer)", helper)
+        self.assertIn(
+            "dma_unshare_from_device(&mut XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer)",
+            helper,
+        )
+        self.assertIn(
+            "dma_buffer_cpu_owned(&XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer)", helper
+        )
+        self.assertIn("dma_release(&mut XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer)", helper)
 
         body = text.split("pub fn xhci_probe_device_descriptor_8_for_slot", 1)[1]
         body = body.split("pub fn xhci_probe_first_device_descriptor_8", 1)[0]
-        wait = body.index("xhci_transfer_wait_ep0_completion")
-        parse = body.index("let max_packet0")
-        release = body.index("xhci_descriptor_release_temporary(&mut buffer)", parse)
-        publish = body.index("probe_ready = true")
+        publish_owner = body.index("xhci_descriptor_publish_candidate_buffer(slot_id, epoch, buffer)")
+        submit = body.index("xhci_ep0_submit_control_td_for_slot", publish_owner)
+        wait = body.index("xhci_transfer_wait_ep0_completion", submit)
+        parse = body.index("let max_packet0", wait)
+        release = body.index(
+            "xhci_descriptor_release_current_buffer_for_epoch(slot_id, epoch)", parse
+        )
+        publish = body.index("probe_ready = true", release)
+        self.assertLess(publish_owner, submit)
+        self.assertLess(submit, wait)
         self.assertLess(wait, parse)
         self.assertLess(parse, release)
         self.assertLess(release, publish)
-        self.assertNotIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer", body)
+
+        # Submit/wait ambíguos mantêm o owner em quarentena; não pode haver free
+        # entre esses retornos e a primeira prova terminal de residual/parse.
+        submit_failure = body.index("if status_physical == 0")
+        wait_failure = body.index("if !xhci_transfer_wait_ep0_completion", submit_failure)
+        residual = body.index("xhci_transfer_last_residual_length_for", wait_failure)
+        self.assertNotIn("release_current_buffer", body[submit_failure:wait_failure])
+        self.assertNotIn("release_current_buffer", body[wait_failure:residual])
 
     def test_configuration_header_releases_temporary_dma_before_publish(self):
         text = CONFIGURATION.read_text(encoding="utf-8")
@@ -56,10 +74,20 @@ class XhciDmaLifetimeTests(unittest.TestCase):
 
     def test_persistent_full_descriptor_and_configuration_remain_owned_by_state(self):
         descriptor = DESCRIPTOR.read_text(encoding="utf-8")
+        publish_helper = descriptor.split("fn xhci_descriptor_publish_candidate_buffer", 1)[1]
+        publish_helper = publish_helper.split("fn xhci_descriptor_read8", 1)[0]
+        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer", publish_helper)
+
         full_device = descriptor.split("pub fn xhci_get_device_descriptor_for_slot", 1)[1]
         full_device = full_device.split("pub fn xhci_get_first_device_descriptor", 1)[0]
-        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer", full_device)
-        self.assertNotIn("xhci_descriptor_release_temporary(&mut buffer)", full_device)
+        owner_publish = full_device.index(
+            "xhci_descriptor_publish_candidate_buffer(slot_id, epoch, buffer)"
+        )
+        submit = full_device.index("xhci_ep0_submit_control_td_for_slot", owner_publish)
+        ready = full_device.index("XHCI_DEVICE_DESCRIPTOR_STATES[index].ready = true", submit)
+        self.assertLess(owner_publish, submit)
+        self.assertLess(submit, ready)
+        self.assertNotIn("release_current_buffer", full_device[ready:])
 
         configuration = CONFIGURATION.read_text(encoding="utf-8")
         full_config = configuration.split("pub fn xhci_read_configuration_full_for_slot", 1)[1]

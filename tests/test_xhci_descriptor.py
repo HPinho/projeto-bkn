@@ -63,13 +63,23 @@ class XhciDescriptorTests(unittest.TestCase):
 
     def test_full_descriptor_uses_same_slot_ep0_and_transfer_result(self):
         text = DESC.read_text(encoding="utf-8")
+        publish_helper = text.split("fn xhci_descriptor_publish_candidate_buffer", 1)[1]
+        publish_helper = publish_helper.split("fn xhci_descriptor_read8", 1)[0]
+        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer", publish_helper)
+
         body = text.split("pub fn xhci_get_device_descriptor_for_slot(slot_id: u8)", 1)[1]
         body = body.split("pub fn xhci_get_first_device_descriptor()", 1)[0]
         self.assertIn("xhci_ep0_producer_cycle_for(slot_id)", body)
         self.assertIn("xhci_ep0_submit_control_td_for_slot(slot_id", body)
         self.assertIn("xhci_transfer_wait_ep0_completion(slot_id", body)
         self.assertIn("xhci_transfer_last_residual_length_for(slot_id)", body)
-        self.assertIn("XHCI_DEVICE_DESCRIPTOR_STATES[index].buffer = buffer", body)
+        self.assertIn("xhci_descriptor_publish_candidate_buffer(slot_id, epoch, buffer)", body)
+
+        publish = body.index("xhci_descriptor_publish_candidate_buffer(slot_id, epoch, buffer)")
+        submit = body.index("xhci_ep0_submit_control_td_for_slot(slot_id", publish)
+        ready = body.index("XHCI_DEVICE_DESCRIPTOR_STATES[index].ready = true", submit)
+        self.assertLess(publish, submit)
+        self.assertLess(submit, ready)
 
     def test_descriptor_exposes_per_slot_core_fields_and_legacy_wrappers(self):
         text = DESC.read_text(encoding="utf-8")
