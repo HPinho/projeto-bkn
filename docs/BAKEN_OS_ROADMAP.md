@@ -352,3 +352,49 @@ Fundação presente: `AHCI/NVMe → BlockDevice → GPT/MBR → FAT32 base`.
 8. Certificações entram neste roadmap com SHA e runs exatos.
 9. Storage não bypassa BlockDevice/VFS.
 10. `HPinho/LangSotlas` permanece toolchain separada; migração ampla não entra em checkpoint crítico de driver.
+
+---
+
+# Atualização de continuidade — HID-4d.3b encerrado / HID-4d.3c1 em validação
+
+> Esta seção é append-only e **substitui, como estado corrente, as indicações históricas acima que ainda apontam descriptor/report DMA como próximos cortes**. O conteúdo anterior foi preservado para manter o histórico de decisões e certificações.
+
+## Checkpoints posteriores ao snapshot histórico
+
+- **HID-4d.3b — teardown HID lógico generation-safe:** ✅ **CERTIFICADO** em `e9fbdee39fd791351d0b04fc81cbe787b1c37413` — CI #1173 / SMP #276 / NVMe #373 / HID Dual #32.
+- O fechamento 3b inclui `InputDevice/events/map → descriptor DMA → report DMA → mailbox/result lógico`, preflight side-effect-free sob o teardown lock e bloqueio fail-closed de mailbox válida ou resultado foreign-epoch antes de qualquer cleanup.
+- O 3b **não** libera HID Transfer Ring, Device/Input Context, EP0 Ring nem Slot ID.
+- **Command Ring SMP/preemption-safe:** ✅ **CERTIFICADO** em `8300215380d2b15f95705531f884be2a37047353` — CI #1175 / SMP #278 / NVMe #375 / HID Dual #34. A transação global é `IRQ save/disable → spinlock → submit → completion → captura Slot ID → unlock → IRQ restore`.
+- O candidato intermediário `75a9a0cf74aad60bb71d8385804022b3dfc8b384` não é baseline: falhou CI/SMP e foi substituído por `830021...`.
+
+## Fronteira atual de HID-4d.3c
+
+- **4d.3c1 — Drop Endpoint + Output Endpoint Context `Disabled`:** ⏳ **EM VALIDAÇÃO**. Candidato funcional `146e3e8d5db55d0b18e7198ce164f3db1ab4e056`.
+- **4d.3c2 — Transfer Ring release:** ⬜ somente após 3c1 certificado; sequência obrigatória `SHARED → dma_unshare_from_device → CPU-owned → dma_release`.
+- **4d.3c3 — orquestração/publicação de endpoint teardown:** ⬜ depois de 3c2.
+- **4d.4 — Disable Slot + contexts/device-table:** ⬜.
+- **4d.5 — drain/barrier explícito antes de reuso físico de Slot ID:** ⬜.
+- **4d.6 — integração no runtime `post_cutover` + detach/reconnect/hotplug stress:** ⬜; HID-4d não pode ser declarado encerrado antes desta prova.
+
+### Contrato de 4d.3c1
+
+```text
+slot_id + epoch exatos
+→ logical_teardown_complete
+→ Output Endpoint Context == Stopped
+→ Input Control Context: Drop[Dci]=1, Add[Slot]=1
+→ Slot Context Context Entries volta para EP0
+→ Configure Endpoint Command (não Deconfigure-all)
+→ Command Completion do mesmo Slot ID
+→ Output Endpoint Context == Disabled
+→ publicar drop_complete
+```
+
+`Disabled == 0`, portanto falha de acesso ao Output Context não pode ser confundida com sucesso; o helper usa um estado inválido separado (`0xFF`). Falhas antes da Command Completion restauram o Input Context. Depois de uma Command Completion bem-sucedida, uma prova física inconsistente falha fechado sem reescrever o contexto que o controller já pode ter consumido.
+
+### Débitos de robustez antes de sair da Trilha B
+
+- rollback de DMA em falhas intermediárias de `xhci_hid_context_prepare_for_slot()`;
+- rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
+
+Esses débitos permanecem separados de Drop Endpoint para não misturar ownership/lifetime de cortes diferentes.
