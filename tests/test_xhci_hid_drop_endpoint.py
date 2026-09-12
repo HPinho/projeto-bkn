@@ -43,18 +43,25 @@ class XhciHidDropEndpointTests(unittest.TestCase):
         self.assertIn("return XHCI_ENDPOINT_STATE_INVALID", state)
         self.assertIn("dw0 & XHCI_ENDPOINT_STATE_MASK", state)
 
-    def test_drop_is_exact_epoch_and_requires_logical_teardown(self):
-        self.assertIn("xhci_device_table_slot_epoch(slot_id) != epoch", self.drop)
+    def test_drop_is_exact_epoch_and_exact_configured_dci(self):
         self.assertGreaterEqual(
-            self.drop.count("xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch)"),
+            self.drop.count("xhci_device_table_slot_epoch(slot_id) != epoch"),
             3,
         )
         self.assertIn("XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] != epoch", self.drop)
         self.assertIn("XHCI_CONFIGURE_ENDPOINT_DCIS[index] != dci", self.drop)
 
-    def test_endpoint_must_be_physically_stopped_before_drop(self):
+    def test_low_level_drop_does_not_import_upward_lifecycle_layer(self):
+        self.assertNotIn("import kernel::drivers::xhci_hid_lifecycle", self.text)
+        self.assertNotIn("xhci_hid_lifecycle_logical_teardown_complete_for", self.drop)
+        self.assertIn("caller deve provar", self.text.lower())
+        self.assertIn("logical_teardown_complete", self.text)
+
+    def test_endpoint_must_be_physically_stopped_before_input_mutation_and_drop(self):
         stopped = self.drop.index("XHCI_ENDPOINT_STATE_STOPPED")
+        mutation = self.drop.index("drop_flags_offset, drop_flag")
         command = self.drop.index("xhci_trb_configure_endpoint")
+        self.assertLess(stopped, mutation)
         self.assertLess(stopped, command)
 
     def test_input_context_uses_drop_dci_and_only_adds_slot_context(self):
@@ -75,10 +82,17 @@ class XhciHidDropEndpointTests(unittest.TestCase):
     def test_precompletion_failures_restore_input_context(self):
         execute = self.drop.index("if !xhci_command_execute(command, slot_id)")
         before = self.drop[:execute]
-        failure = self.drop[execute:self.drop.index("if xhci_device_table_slot_epoch", execute)]
+        failure_end = self.drop.index("if xhci_device_table_slot_epoch", execute)
+        failure = self.drop[execute:failure_end]
         for token in ("old_drop_flags", "old_add_flags", "old_slot_dw0"):
             self.assertIn(token, before)
             self.assertIn(token, failure)
+
+    def test_epoch_is_revalidated_after_input_mutation_and_after_command(self):
+        execute = self.drop.index("if !xhci_command_execute(command, slot_id)")
+        checks = [m.start() for m in re.finditer("xhci_device_table_slot_epoch\(slot_id\) != epoch", self.drop)]
+        self.assertTrue(any(pos < execute for pos in checks))
+        self.assertTrue(any(pos > execute for pos in checks))
 
     def test_success_requires_output_endpoint_disabled_before_publication(self):
         execute = self.drop.index("if !xhci_command_execute(command, slot_id)")

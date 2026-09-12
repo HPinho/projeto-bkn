@@ -4,11 +4,13 @@
 // legado mantém o bring-up do primeiro device, enquanto APIs _for_slot permitem
 // configurar múltiplos endpoints sem sobrescrever o estado de transporte.
 //
-// HID-4d.3c1 executa somente o teardown físico do Endpoint Context: depois do
-// teardown lógico generation-safe e do Stop Endpoint, programa Drop Context no
-// Input Context, envia Configure Endpoint e só publica conclusão quando o Output
-// Endpoint Context do mesmo DCI estiver realmente Disabled. O Transfer Ring,
-// Device/Input Context, EP0 ring e Slot ID permanecem intocados neste corte.
+// HID-4d.3c1 executa somente a primitiva física de teardown do Endpoint Context.
+// O caller/orquestrador deve provar o teardown lógico do mesmo epoch antes desta
+// chamada; este módulo permanece deliberadamente abaixo do lifecycle para manter
+// o grafo Sotlas acíclico. A primitiva exige Stop Endpoint já confirmado, programa
+// Drop Context no Input Context, envia Configure Endpoint e só publica conclusão
+// quando o Output Endpoint Context do mesmo DCI estiver realmente Disabled.
+// O Transfer Ring, Device/Input Context, EP0 ring e Slot ID permanecem intocados.
 
 module kernel::drivers::xhci_configure_endpoint;
 
@@ -18,7 +20,6 @@ import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_context::*;
 import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_hid_context::*;
-import kernel::drivers::xhci_hid_lifecycle::*;
 import kernel::drivers::xhci_trb::*;
 
 pub const XHCI_ENDPOINT_STATE_MASK: u32 = 0x7;
@@ -142,19 +143,23 @@ pub fn xhci_configure_hid_endpoint_for_slot(slot_id: u8) -> bool {
     return true;
 }
 
-// HID-4d.3c1: remove somente o HID Endpoint Context do xHC. A chamada exige
-// que o teardown lógico do mesmo epoch esteja concluído e prova o estado físico
-// Stopped antes de emitir Configure Endpoint com Drop Context. Se o comando
-// falhar, o Input Context é restaurado. Se o comando concluir mas a prova do
-// Output Context falhar, o estado de teardown permanece fail-closed e não é
-// reescrito para uma configuração potencialmente já consumida pelo controller.
+// HID-4d.3c1: primitiva física de Drop Endpoint. O caller deve provar
+// logical_teardown_complete para o mesmo slot_id + epoch antes de entrar aqui.
+// Este módulo não importa xhci_hid_lifecycle: lifecycle já depende, via report,
+// desta camada de Configure Endpoint. A separação evita dependência circular e
+// deixa a ordem 3b -> 3c1 para o orquestrador de 3c3.
+//
+// A primitiva ainda falha fechado por hardware: exige endpoint Stopped, revalida
+// o epoch antes/depois do comando e só publica drop_complete após observar o
+// Output Endpoint Context como Disabled. Falhas anteriores à Command Completion
+// restauram o Input Context; após completion, uma prova física inconsistente não
+// reescreve estado potencialmente já consumido pelo controller.
 @system
 pub fn xhci_configure_endpoint_drop_hid_for_slot(slot_id: u8, epoch: u32) -> bool {
     if slot_id == 0 || epoch == 0 || !xhci_command_is_ready() ||
        !xhci_context_is_ready_for(slot_id) || !xhci_hid_context_is_ready_for(slot_id) ||
        !xhci_device_table_slot_is_valid(slot_id) ||
-       xhci_device_table_slot_epoch(slot_id) != epoch ||
-       !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
+       xhci_device_table_slot_epoch(slot_id) != epoch {
         return false;
     }
 
@@ -178,9 +183,6 @@ pub fn xhci_configure_endpoint_drop_hid_for_slot(slot_id: u8, epoch: u32) -> boo
     }
 
     if xhci_configure_endpoint_output_state(slot_id, dci) != XHCI_ENDPOINT_STATE_STOPPED {
-        return false;
-    }
-    if !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
         return false;
     }
 
@@ -213,8 +215,7 @@ pub fn xhci_configure_endpoint_drop_hid_for_slot(slot_id: u8, epoch: u32) -> boo
         return false;
     }
 
-    if !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) ||
-       xhci_device_table_slot_epoch(slot_id) != epoch {
+    if xhci_device_table_slot_epoch(slot_id) != epoch {
         xhci_configure_endpoint_input_write32(input_virtual, drop_flags_offset, old_drop_flags);
         xhci_configure_endpoint_input_write32(input_virtual, add_flags_offset, old_add_flags);
         xhci_configure_endpoint_input_write32(input_virtual, slot_context_offset, old_slot_dw0);
@@ -234,10 +235,7 @@ pub fn xhci_configure_endpoint_drop_hid_for_slot(slot_id: u8, epoch: u32) -> boo
         return false;
     }
 
-    if xhci_device_table_slot_epoch(slot_id) != epoch ||
-       !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
-        return false;
-    }
+    if xhci_device_table_slot_epoch(slot_id) != epoch { return false; }
     if xhci_configure_endpoint_output_state(slot_id, dci) != XHCI_ENDPOINT_STATE_DISABLED {
         return false;
     }
