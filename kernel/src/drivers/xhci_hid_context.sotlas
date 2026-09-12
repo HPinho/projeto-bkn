@@ -93,6 +93,18 @@ fn xhci_hid_context_write64(base: *mut u8, offset: u64, value: u64) -> bool {
 }
 
 @system
+fn xhci_hid_context_read32(base: *mut u8, offset: u64) -> u32 {
+    if base == (null as *mut u8) { return 0; }
+    unsafe { return *(((base as usize) + (offset as usize)) as *const u32); }
+}
+
+@system
+fn xhci_hid_context_read64(base: *mut u8, offset: u64) -> u64 {
+    if base == (null as *mut u8) { return 0; }
+    unsafe { return *(((base as usize) + (offset as usize)) as *const u64); }
+}
+
+@system
 fn xhci_hid_context_zero(base: *mut u8, size: u64) -> bool {
     if base == (null as *mut u8) || size == 0 { return false; }
     unsafe {
@@ -103,6 +115,63 @@ fn xhci_hid_context_zero(base: *mut u8, size: u64) -> bool {
         }
     }
     return true;
+}
+
+// Rollback de prepare: este buffer ainda não foi publicado em XHCI_HID_CONTEXTS
+// nem entregue ao controller. Só um owner CPU pode ser liberado aqui; qualquer
+// estado diferente falha fechado em vez de arriscar free de DMA ainda visível.
+@system
+fn xhci_hid_context_release_unpublished_ring(buffer: DmaBuffer) -> bool {
+    let mut rollback = buffer;
+    if !rollback.valid { return true; }
+    if !dma_buffer_cpu_owned(&rollback) { return false; }
+    return dma_release(&mut rollback);
+}
+
+@system
+fn xhci_hid_context_restore_input_snapshot(input: *mut u8,
+                                            drop_flags: u32,
+                                            add_flags: u32,
+                                            slot_offset: u64,
+                                            slot_dw0: u32,
+                                            endpoint_offset: u64,
+                                            ep_dw0: u32,
+                                            ep_dw1: u32,
+                                            ep_dequeue: u64,
+                                            ep_dw4: u32) -> bool {
+    if !xhci_hid_context_write32(input, 0, drop_flags) { return false; }
+    if !xhci_hid_context_write32(input, 4, add_flags) { return false; }
+    if !xhci_hid_context_write32(input, slot_offset, slot_dw0) { return false; }
+    if !xhci_hid_context_write32(input, endpoint_offset, ep_dw0) { return false; }
+    if !xhci_hid_context_write32(input, endpoint_offset + 4, ep_dw1) { return false; }
+    if !xhci_hid_context_write64(input, endpoint_offset + 8, ep_dequeue) { return false; }
+    if !xhci_hid_context_write32(input, endpoint_offset + 16, ep_dw4) { return false; }
+    return true;
+}
+
+@system
+fn xhci_hid_context_rollback_prepare(input: *mut u8,
+                                     drop_flags: u32,
+                                     add_flags: u32,
+                                     slot_offset: u64,
+                                     slot_dw0: u32,
+                                     endpoint_offset: u64,
+                                     ep_dw0: u32,
+                                     ep_dw1: u32,
+                                     ep_dequeue: u64,
+                                     ep_dw4: u32,
+                                     ring_buffer: DmaBuffer) -> bool {
+    // Restaura primeiro: mesmo sem Configure Endpoint, nunca deixamos no Input
+    // Context um dequeue pointer para páginas que serão devolvidas ao PMM.
+    if !xhci_hid_context_restore_input_snapshot(
+        input, drop_flags, add_flags, slot_offset, slot_dw0, endpoint_offset,
+        ep_dw0, ep_dw1, ep_dequeue, ep_dw4
+    ) {
+        // Leak fail-closed é preferível a liberar páginas ainda referenciadas
+        // por um contexto que não conseguimos restaurar.
+        return false;
+    }
+    return xhci_hid_context_release_unpublished_ring(ring_buffer);
 }
 
 @system
@@ -219,40 +288,61 @@ pub fn xhci_hid_context_prepare_for_slot(slot_id: u8,
     if (context_size != 32 && context_size != 64) || input_physical == 0 || input_virtual == 0 {
         return false;
     }
+    if x86_read_cr3_raw() == 0 { return false; }
     let input = unsafe { input_virtual as *mut u8 };
 
+    let drop_flags_offset: u64 = 0;
+    let add_flags_offset: u64 = 4;
+    let slot_offset = context_size as u64;
+    let endpoint_offset = ((dci as u64) + 1) * (context_size as u64);
+    let old_drop_flags = xhci_hid_context_read32(input, drop_flags_offset);
+    let old_add_flags = xhci_hid_context_read32(input, add_flags_offset);
+    let old_slot_dw0 = xhci_hid_context_read32(input, slot_offset);
+    let old_ep_dw0 = xhci_hid_context_read32(input, endpoint_offset);
+    let old_ep_dw1 = xhci_hid_context_read32(input, endpoint_offset + 4);
+    let old_ep_dequeue = xhci_hid_context_read64(input, endpoint_offset + 8);
+    let old_ep_dw4 = xhci_hid_context_read32(input, endpoint_offset + 16);
+
     let mut ring_buffer = dma_alloc(XHCI_HID_RING_SIZE, XHCI_HID_RING_SIZE);
-    if !dma_buffer_cpu_owned(&ring_buffer) ||
-       !xhci_hid_context_zero(ring_buffer.virtual_address, ring_buffer.size) {
+    if !dma_buffer_cpu_owned(&ring_buffer) { return false; }
+    if !xhci_hid_context_zero(ring_buffer.virtual_address, ring_buffer.size) {
+        xhci_hid_context_release_unpublished_ring(ring_buffer);
         return false;
     }
     let ring = xhci_ring_bind(ring_buffer, XHCI_HID_RING_TRBS);
-    if !xhci_ring_is_ready(&ring) { return false; }
+    if !xhci_ring_is_ready(&ring) {
+        xhci_hid_context_release_unpublished_ring(ring_buffer);
+        return false;
+    }
     let link_index = XHCI_HID_RING_TRBS - 1;
     unsafe {
         let link = ((ring.virtual_base as usize) + ((link_index as usize) * 16)) as *mut XhciTrb;
         *link = xhci_trb_link(ring.physical_base, true, true);
     }
 
-    let drop_flags_offset: u64 = 0;
-    let add_flags_offset: u64 = 4;
     let add_flag = 1 << (dci as u32);
     if !xhci_hid_context_write32(input, drop_flags_offset, 0) ||
        !xhci_hid_context_write32(input, add_flags_offset,
-           XHCI_INPUT_CONTROL_ADD_SLOT | add_flag) { return false; }
-
-    let slot_offset = context_size as u64;
-    unsafe {
-        let slot_dw0_ptr = ((input as usize) + (slot_offset as usize)) as *const u32;
-        let slot_dw0 = *slot_dw0_ptr;
-        let cleared = slot_dw0 & ~(0x1F << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
-        if !xhci_hid_context_write32(input, slot_offset,
-            cleared | ((dci as u32) << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT)) {
-            return false;
-        }
+           XHCI_INPUT_CONTROL_ADD_SLOT | add_flag) {
+        xhci_hid_context_rollback_prepare(
+            input, old_drop_flags, old_add_flags, slot_offset, old_slot_dw0,
+            endpoint_offset, old_ep_dw0, old_ep_dw1, old_ep_dequeue, old_ep_dw4,
+            ring_buffer
+        );
+        return false;
     }
 
-    let endpoint_offset = ((dci as u64) + 1) * (context_size as u64);
+    let cleared = old_slot_dw0 & ~(0x1F << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
+    if !xhci_hid_context_write32(input, slot_offset,
+        cleared | ((dci as u32) << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT)) {
+        xhci_hid_context_rollback_prepare(
+            input, old_drop_flags, old_add_flags, slot_offset, old_slot_dw0,
+            endpoint_offset, old_ep_dw0, old_ep_dw1, old_ep_dequeue, old_ep_dw4,
+            ring_buffer
+        );
+        return false;
+    }
+
     let ep_dw0 = (interval as u32) << XHCI_ENDPOINT_CONTEXT_INTERVAL_SHIFT;
     let ep_dw1 = (XHCI_ENDPOINT_CONTEXT_CERR_3 << XHCI_ENDPOINT_CONTEXT_CERR_SHIFT) |
         (XHCI_ENDPOINT_TYPE_INTERRUPT_IN << XHCI_ENDPOINT_CONTEXT_TYPE_SHIFT) |
@@ -264,10 +354,26 @@ pub fn xhci_hid_context_prepare_for_slot(slot_id: u8,
        !xhci_hid_context_write64(input, endpoint_offset + 8,
            ring.physical_base | XHCI_TR_DEQUEUE_DCS) ||
        !xhci_hid_context_write32(input, endpoint_offset + 16, ep_dw4) {
+        xhci_hid_context_rollback_prepare(
+            input, old_drop_flags, old_add_flags, slot_offset, old_slot_dw0,
+            endpoint_offset, old_ep_dw0, old_ep_dw1, old_ep_dequeue, old_ep_dw4,
+            ring_buffer
+        );
         return false;
     }
 
-    if x86_read_cr3_raw() == 0 || !dma_share_with_device(&mut ring_buffer) { return false; }
+    // dma_share_with_device só publica SHARED após o prepare/fence completo. Em
+    // caso de false o buffer continua CPU-owned, portanto restauramos o Input
+    // Context e devolvemos as páginas antes de sair.
+    if !dma_share_with_device(&mut ring_buffer) {
+        xhci_hid_context_rollback_prepare(
+            input, old_drop_flags, old_add_flags, slot_offset, old_slot_dw0,
+            endpoint_offset, old_ep_dw0, old_ep_dw1, old_ep_dequeue, old_ep_dw4,
+            ring_buffer
+        );
+        return false;
+    }
+
     unsafe {
         XHCI_HID_CONTEXTS[index].ready = true;
         XHCI_HID_CONTEXTS[index].epoch = epoch;
