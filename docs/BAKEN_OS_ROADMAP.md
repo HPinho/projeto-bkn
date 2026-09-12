@@ -517,3 +517,66 @@ Primitivas já existentes e reutilizadas:
 - rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
 
 Esses débitos continuam separados dos microcortes de teardown para não misturar ownership de prepare/rollback com ownership de hot-unplug.
+
+---
+
+# Atualização autoritativa — HID-4d hot-plug/recovery certificado
+
+> Estado corrente em **2026-09-12 (America/Fortaleza)**. Esta seção é append-only e substitui apenas o estado operacional das seções históricas acima. Nenhuma decisão, checkpoint ou histórico anterior foi removido.
+
+## Fechamento certificado do teardown físico e reuse
+
+- **HID-4d.3c3 — endpoint teardown complete:** ✅ `2486600dab290d86cb48645d0fc50535565f5376` — CI #1181 / SMP #284 / NVMe #381 / HID Dual #40.
+- **HID-4d.4a1 — enumeration DMA teardown:** ✅ `fa66a3cb9e269370eea99b39c12162534f811efd` — CI #1184 / SMP #287 / NVMe #384 / HID Dual #43.
+- **HID-4d.4a2 — per-slot logical quiesce:** ✅ `8176d557f2ed1107ce790c62c00e7fc0592f88db` — CI #1185 / SMP #288 / NVMe #385 / HID Dual #44.
+- **HID-4d.4b — Disable Slot + DCBAA + context arena:** ✅ `2bcdcd3728a43955da81738ec7ca0c53bdfc6301` — CI #1187 / SMP #290 / NVMe #387 / HID Dual #46.
+- **HID-4d.5 — registry/reuse finalization:** ✅ `2c055ac73217340078ca30f301133b8267208170` — CI #1189 / SMP #292 / NVMe #389 / HID Dual #48.
+- **HID-4d.6 — runtime hotplug/re-enumeration:** ✅ `0887373c8e22b35260dcbf11ce7cd05b2dac4311` — CI #1197 / SMP #300 / NVMe #397 / HID Dual #56.
+
+### Correção arquitetural autoritativa do 4d.5
+
+As seções históricas acima que descrevem o 4d.5 como um segundo `Event Ring drain/barrier` ficaram supersededas pela auditoria final do fluxo xHCI. O drain terminal de um TD outstanding acontece **antes de `Disable Slot`**, no **HID-4d.2b**, através do consumidor global único do Event Ring. Depois de `Stop Endpoint` e do recebimento da completion terminal válida, 3b/3c/4a/4b podem desmontar ownership físico com segurança.
+
+O 4d.5 certificado não cria scanner tardio nem segundo consumidor do Event Ring. Sua função é finalizar o registry e o reuse guard somente depois de `Disable Slot` confirmado, `DCBAA[slot]=0`, arena de contexto liberada e tombstones físicos do mesmo epoch comprovados. Só então um novo `Enable Slot` pode reutilizar o Slot ID, e `xhci_device_table_reserve()` publica um **epoch novo**.
+
+## HID-4d.6 — prova real de runtime
+
+O serviço `kernel/src/platform/hid_hotplug.sotlas` é stage-aware e avança no máximo uma fronteira certificada por passagem do runtime:
+
+```text
+detectar disconnect / DETACH_PENDING
+→ Stop Endpoint + terminal drain (4d.2b)
+→ teardown lógico generation-safe (3b)
+→ Drop Endpoint + Transfer Ring release (3c)
+→ enumeration DMA release (4a1)
+→ per-slot logical quiesce (4a2)
+→ Disable Slot + DCBAA/context arena release (4b)
+→ registry/reuse finalization (4d.5)
+→ reenumeração pelo pipeline multi-port existente
+```
+
+O workflow HID Dual #56 preservou a prova keyboard+mouse/interleaving e, na mesma VM QEMU, executou dois ciclos físicos emulados completos:
+
+```text
+mouse0 → device_del → teardown completo → DETACH_READY
+→ device_add mouse1 → reenumeração HID_READY → RECONNECT_READY
+→ device_del mouse1 → teardown completo → DETACH_READY
+→ device_add mouse2 → reenumeração HID_READY → RECONNECT_READY
+```
+
+Markers obrigatórios observados no runtime: `BAKEN:USB_HID_DUAL_READY`, `BAKEN:USB_HID_INTERLEAVE_READY`, `BAKEN:USB_HID_HOTPLUG_RUNTIME_READY`, pelo menos dois `BAKEN:USB_HID_HOTPLUG_DETACH_READY` e pelo menos dois `BAKEN:USB_HID_HOTPLUG_RECONNECT_READY`.
+
+### Estado do escopo xHCI/HID
+
+O **escopo funcional planejado de xHCI + USB HID desta trilha está concluído e certificado** para boot HID, descriptor/parser, event model, identity/generation, multi-slot keyboard+mouse, interleaving, detach, teardown físico, Slot ID reuse generation-safe e reenumeração de hotplug. Isso **não** significa implementação universal de todas as classes, capacidades e extensões previstas pela especificação xHCI/USB.
+
+A prova 4d.6 certifica reconnect até `HID_READY`/pipeline de enumeração concluído. O workflow injeta movimento após cada `device_add`, mas ainda não exige uma nova Transfer Event pós-reconnect como marker independente. Um serviço contínuo de Interrupt-IN xHCI integrado ao desktop pode ser endurecido depois, sem reabrir o contrato de teardown/reuse certificado e sem criar segundo consumidor do Event Ring.
+
+### Hardening independente ainda pendente
+
+Os débitos abaixo continuam separados do hot-unplug teardown e não invalidam a certificação 4d.6:
+
+- rollback de DMA em falhas intermediárias de `xhci_hid_context_prepare_for_slot()`;
+- rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
+
+Esses itens devem ser tratados em microcortes próprios, preservando os quatro gates e sem alterar o consumidor global único do Event Ring.
