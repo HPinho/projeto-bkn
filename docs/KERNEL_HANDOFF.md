@@ -349,3 +349,108 @@ post_cutover_prepare_first_usb_port
 5. fazer um microcorte funcional por vez
 6. se qualquer gate falhar, corrigir o próprio checkpoint antes de avançar
 7. próxima implementação: **HID-4d.3b descriptor DMA exact-epoch**, retry-safe, após identity teardown e ainda sem Drop Endpoint, Transfer Ring release ou `Disable Slot`
+
+---
+
+# Atualização de continuidade — baseline 4d.3b encerrada, 4d.3c1 candidato
+
+> Esta seção é o estado operacional autoritativo mais recente e preserva as seções históricas acima sem apagá-las.
+
+## Baselines certificadas posteriores
+
+### HID-4d.3b final — teardown HID lógico generation-safe
+
+```text
+e9fbdee39fd791351d0b04fc81cbe787b1c37413
+```
+
+Provas no mesmo SHA:
+
+- CI #1173 ✅
+- SMP #276 ✅
+- NVMe #373 ✅
+- HID Dual-device #32 ✅
+
+Escopo certificado:
+
+- `InputDevice/events/map → descriptor DMA → report DMA → mailbox/result lógico`;
+- preflight side-effect-free antes de qualquer cleanup de InputDevice/DMA;
+- mailbox ainda válida bloqueia teardown;
+- `XHCI_TRANSFER_RESULT` válido de foreign epoch bloqueia teardown;
+- preflight ocorre sob o mesmo teardown lock SMP;
+- nenhum HID Transfer Ring, Device/Input Context, EP0 ring ou Slot ID é liberado em 3b.
+
+### Command Ring global — SMP/preemption-safe
+
+```text
+8300215380d2b15f95705531f884be2a37047353
+fix(xhci): make command transactions preemption-safe
+```
+
+Provas no mesmo SHA:
+
+- CI #1175 ✅
+- SMP #278 ✅
+- NVMe #375 ✅
+- HID Dual-device #34 ✅
+
+A transação global agora é indivisível por software:
+
+```text
+IRQ save/disable
+→ spinlock
+→ submit
+→ Command Completion
+→ captura do Slot ID
+→ unlock
+→ IRQ restore
+```
+
+`75a9a0cf74aad60bb71d8385804022b3dfc8b384` foi candidato vermelho e não é baseline.
+
+## Candidato atual — HID-4d.3c1 Drop Endpoint
+
+```text
+146e3e8d5db55d0b18e7198ce164f3db1ab4e056
+feat(xhci): add HID Drop Endpoint teardown proof
+```
+
+Estado: **⏳ EM CERTIFICAÇÃO**. Não iniciar 3c2 antes do 4/4 verde no SHA final que contém também esta atualização documental.
+
+Contrato implementado:
+
+```text
+slot_id + epoch exatos
+→ logical_teardown_complete
+→ Output Endpoint Context == Stopped
+→ Input Control Context: Drop[Dci] = 1
+→ Add Context: somente Slot Context
+→ Context Entries = 1 (EP0 permanece)
+→ Configure Endpoint com deconfigure=false
+→ Command Completion validado para o mesmo Slot ID
+→ Output Endpoint Context == Disabled
+→ publicar drop_complete
+```
+
+Pontos de segurança:
+
+- `Disabled` tem encoding `0`; erro de acesso ao Output Context é representado separadamente como `0xFF`, evitando falso sucesso;
+- chamadas stale/foreign-epoch falham antes de alterar o Input Context;
+- falhas antes da Command Completion restauram Drop Flags, Add Flags e Slot Context DW0;
+- depois de Command Completion bem-sucedida, uma prova física inconsistente falha fechado sem restaurar memória que o xHC já pode ter consumido;
+- 3c1 não chama `dma_unshare_from_device`, `dma_release`, `Disable Slot`, DCBAA teardown ou release da device table.
+
+## Próxima sequência, somente após 3c1 certificado
+
+1. **HID-4d.3c2:** Transfer Ring `SHARED → unshare → CPU-owned → dma_release`, somente se `drop_complete` do mesmo epoch estiver comprovado.
+2. **HID-4d.3c3:** orquestrar/publicar conclusão do teardown físico de endpoint.
+3. **HID-4d.4:** `Disable Slot → confirmação → DCBAA/context arena/EP0 → device-table teardown`.
+4. **HID-4d.5:** drain/barrier explícito do Event Ring antes de qualquer reuso físico de Slot ID.
+5. **HID-4d.6:** ligar o state machine completo no runtime e provar detach/reconnect/hotplug stress em QEMU.
+
+## Robustez obrigatória antes de encerrar a Trilha B
+
+- rollback de DMA em falhas intermediárias de `xhci_hid_context_prepare_for_slot()`;
+- rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
+
+Esses itens não devem ser misturados com 3c1/3c2: são dívidas de rollback independentes e precisam de microcortes próprios antes do fechamento da trilha.
