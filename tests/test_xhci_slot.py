@@ -24,14 +24,16 @@ class XhciSlotTests(unittest.TestCase):
         body = text.split("pub fn xhci_slot_enable_port", 1)[1]
         self.assertIn("xhci_command_is_ready()", body)
         self.assertIn("xhci_trb_enable_slot", body)
-        self.assertIn("xhci_command_submit(command)", body)
-        self.assertIn("xhci_command_wait_completion(command_physical)", body)
+        self.assertIn("xhci_command_execute_capture_slot(command)", body)
+        self.assertNotIn("xhci_command_submit(command)", body)
+        self.assertNotIn("xhci_command_wait_completion(command_physical)", body)
         self.assertIn("xhci_device_table_reserve(slot_id, port_id, slot_type)", body)
 
-    def test_slot_id_comes_from_completion_and_is_range_checked(self):
+    def test_slot_id_comes_from_serialized_completion_and_is_range_checked(self):
         text = SLOT.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_slot_enable_port", 1)[1]
-        self.assertIn("xhci_command_last_slot_id()", body)
+        self.assertIn("let slot_id = xhci_command_execute_capture_slot(command)", body)
+        self.assertNotIn("xhci_command_last_slot_id()", body)
         self.assertIn("xhci_controller_max_slots()", body)
         self.assertIn("slot_id == 0", body)
         self.assertIn("slot_id > max_slots", body)

@@ -44,11 +44,7 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     let identity_released = xhci_hid_descriptor_release_input_device_for_slot(slot_id);
 
     let command = xhci_trb_disable_slot(slot_id, xhci_command_producer_cycle());
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 || !xhci_command_wait_completion(command_physical) ||
-       xhci_command_last_slot_id() != slot_id {
-        return false;
-    }
+    if !xhci_command_execute(command, slot_id) { return false; }
 
     // Não chama xhci_device_table_release(): xhci_context e outros módulos ainda
     // não possuem teardown completo de estado antigo. Manter FAILED impede que

@@ -2,12 +2,72 @@
 """Guardrails do produtor stateful do Command Ring xHCI e consumidor compartilhado."""
 
 from pathlib import Path
+import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 COMMAND = ROOT / "kernel/src/drivers/xhci_command.sotlas"
 CONSUMER = ROOT / "kernel/src/drivers/xhci_event_consumer.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
+
+
+def function_body(source: str, name: str) -> str:
+    match = re.search(rf"\bfn\s+{re.escape(name)}\s*\(", source)
+    if match is None:
+        raise AssertionError(f"missing function {name}")
+    brace = source.find("{", match.end())
+    if brace < 0:
+        raise AssertionError(f"missing function body {name}")
+    depth = 0
+    index = brace
+    in_string = False
+    escaped = False
+    line_comment = False
+    block_comment = False
+    while index < len(source):
+        char = source[index]
+        nxt = source[index + 1] if index + 1 < len(source) else ""
+        if line_comment:
+            if char == "\n":
+                line_comment = False
+            index += 1
+            continue
+        if block_comment:
+            if char == "*" and nxt == "/":
+                block_comment = False
+                index += 2
+                continue
+            index += 1
+            continue
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == "/" and nxt == "/":
+            line_comment = True
+            index += 2
+            continue
+        if char == "/" and nxt == "*":
+            block_comment = True
+            index += 2
+            continue
+        if char == '"':
+            in_string = True
+            index += 1
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return source[brace + 1:index]
+        index += 1
+    raise AssertionError(f"unterminated function {name}")
 
 
 class XhciCommandTests(unittest.TestCase):
@@ -29,7 +89,7 @@ class XhciCommandTests(unittest.TestCase):
 
     def test_submit_overrides_cycle_bit_and_advances_only_after_doorbell(self):
         text = COMMAND.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_command_submit(command: XhciTrb)", 1)[1]
+        body = function_body(text, "xhci_command_submit")
         write = body.index("*slot = published")
         barrier = body.index("x86_read_cr3_raw()")
         doorbell = body.index("xhci_command_ring_doorbell0()")
@@ -41,7 +101,7 @@ class XhciCommandTests(unittest.TestCase):
 
     def test_completion_uses_shared_consumer_and_matches_command_pointer(self):
         text = COMMAND.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
+        body = function_body(text, "xhci_command_wait_completion")
         self.assertIn("xhci_event_consumer_peek()", body)
         self.assertIn("XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", body)
         self.assertIn("xhci_event_success(event)", body)
@@ -52,7 +112,7 @@ class XhciCommandTests(unittest.TestCase):
 
     def test_command_waiter_routes_known_async_events_before_command_completion(self):
         text = COMMAND.read_text(encoding="utf-8")
-        body = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
+        body = function_body(text, "xhci_command_wait_completion")
         port = body.index("event_type == XHCI_TRB_TYPE_PORT_STATUS_CHANGE_EVENT")
         validate_port = body.index("xhci_port_status_change_port_id(event) == 0", port)
         consume = body.index("xhci_event_consumer_consume()", validate_port)
@@ -73,21 +133,28 @@ class XhciCommandTests(unittest.TestCase):
     def test_transfer_events_are_delegated_to_per_slot_demux(self):
         text = COMMAND.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::xhci_transfer::*;", text)
-        body = text.split("if event_type == XHCI_TRB_TYPE_TRANSFER_EVENT", 1)[1]
-        body = body.split("if event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", 1)[0]
-        self.assertIn("xhci_transfer_route_next_event()", body)
-        self.assertNotIn("xhci_event_consumer_consume()", body)
+        body = function_body(text, "xhci_command_wait_completion")
+        transfer = body.split("if event_type == XHCI_TRB_TYPE_TRANSFER_EVENT", 1)[1]
+        transfer = transfer.split("if event_type != XHCI_TRB_TYPE_COMMAND_COMPLETION_EVENT", 1)[0]
+        self.assertIn("xhci_transfer_route_next_event()", transfer)
+        self.assertNotIn("xhci_event_consumer_consume()", transfer)
 
     def test_slot_id_state_is_fail_closed_per_command(self):
         text = COMMAND.read_text(encoding="utf-8")
-        submit = text.split("pub fn xhci_command_submit(command: XhciTrb)", 1)[1]
-        submit = submit.split("pub fn xhci_command_wait_completion", 1)[0]
-        wait = text.split("pub fn xhci_command_wait_completion(command_physical: u64)", 1)[1]
+        submit = function_body(text, "xhci_command_submit")
+        wait = function_body(text, "xhci_command_wait_completion")
         self.assertIn("XHCI_COMMAND_LAST_SLOT_ID = 0", submit)
         self.assertIn("XHCI_COMMAND_LAST_SLOT_ID = xhci_event_slot_id(event)", wait)
         consume = wait.rindex("xhci_event_consumer_consume()")
         clear_after_consume_failure = wait.index("XHCI_COMMAND_LAST_SLOT_ID = 0", consume)
         self.assertGreater(clear_after_consume_failure, consume)
+
+    def test_raw_submit_and_wait_are_private_to_transaction_layer(self):
+        text = COMMAND.read_text(encoding="utf-8")
+        self.assertRegex(text, r"(?m)^fn\s+xhci_command_submit\s*\(")
+        self.assertRegex(text, r"(?m)^fn\s+xhci_command_wait_completion\s*\(")
+        self.assertIn("pub fn xhci_command_execute_capture_slot(command: XhciTrb)", text)
+        self.assertIn("pub fn xhci_command_execute(command: XhciTrb, expected_slot_id: u8)", text)
 
     def test_event_cursor_getters_delegate_to_shared_consumer(self):
         text = COMMAND.read_text(encoding="utf-8")

@@ -51,7 +51,8 @@ class XhciEvaluateContextTests(unittest.TestCase):
         self.assertIn("xhci_context_input_physical_for(slot_id)", self.text)
         self.assertIn("xhci_context_size_for(slot_id)", self.text)
         self.assertIn("xhci_trb_evaluate_context(\n        input_physical,\n        slot_id,", self.text)
-        self.assertIn("xhci_command_last_slot_id() != slot_id", self.text)
+        self.assertIn("xhci_command_execute(command, slot_id)", self.text)
+        self.assertNotIn("xhci_command_last_slot_id()", self.text)
 
     def test_descriptor_probe_is_normalized_per_slot(self):
         self.assertIn("xhci_descriptor_ep0_max_packet_bytes(raw: u8)", self.text)

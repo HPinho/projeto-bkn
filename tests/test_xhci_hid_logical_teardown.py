@@ -132,7 +132,7 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
         body = function_body(self.source, "xhci_hid_lifecycle_stop_endpoint_for")
         exact = "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)"
         pending = "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)"
-        command_wait = "xhci_command_wait_completion(command_physical)"
+        command_execute = "xhci_command_execute(command, slot_id)"
         drain = "xhci_hid_report_drain_cancelled_for_slot(slot_id)"
         quiescent = "xhci_hid_lifecycle_quiescent_for(slot_id, epoch)"
 
@@ -141,15 +141,17 @@ class HidLogicalTeardownGateTests(unittest.TestCase):
         self.assertGreater(body.find(exact, pending_pos + len(pending)), pending_pos)
         self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
 
-        wait_pos = body.find(command_wait)
+        execute_pos = body.find(command_execute)
         drain_pos = body.find(drain)
-        self.assertGreaterEqual(wait_pos, 0)
-        self.assertGreater(drain_pos, wait_pos)
-        before_drain = body.rfind(exact, wait_pos, drain_pos)
+        self.assertGreaterEqual(execute_pos, 0)
+        self.assertGreater(drain_pos, execute_pos)
+        before_drain = body.rfind(exact, execute_pos, drain_pos)
         after_drain = body.find(exact, drain_pos + len(drain))
-        self.assertGreaterEqual(before_drain, wait_pos)
+        self.assertGreaterEqual(before_drain, execute_pos)
         self.assertGreater(after_drain, drain_pos)
         self.assertGreater(body.find(quiescent, after_drain), after_drain)
+        self.assertNotIn("xhci_command_submit(command)", body)
+        self.assertNotIn("xhci_command_wait_completion(command_physical)", body)
 
     def test_begin_requires_finalize_gate_before_mutation(self) -> None:
         body = function_body(

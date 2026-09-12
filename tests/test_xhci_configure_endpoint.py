@@ -32,9 +32,10 @@ class XhciConfigureEndpointTests(unittest.TestCase):
         text = STAGE.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_configure_hid_endpoint_for_slot", 1)[1]
         self.assertIn("xhci_trb_configure_endpoint", body)
-        self.assertIn("xhci_command_submit", body)
-        self.assertIn("xhci_command_wait_completion", body)
-        self.assertIn("xhci_command_last_slot_id() != slot_id", body)
+        self.assertIn("xhci_command_execute(command, slot_id)", body)
+        self.assertNotIn("xhci_command_submit", body)
+        self.assertNotIn("xhci_command_wait_completion", body)
+        self.assertNotIn("xhci_command_last_slot_id()", body)
         self.assertIn("false,", body)
 
     def test_output_context_must_report_endpoint_running_for_same_slot(self):

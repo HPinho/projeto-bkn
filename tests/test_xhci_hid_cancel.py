@@ -124,21 +124,22 @@ class XhciHidCancelTests(unittest.TestCase):
         text = LIFECYCLE.read_text(encoding="utf-8")
         body = function_body(text, "xhci_hid_lifecycle_stop_endpoint_for")
         exact = "xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch)"
-        submit = "xhci_command_submit(command)"
-        wait = "xhci_command_wait_completion(command_physical)"
+        execute = "xhci_command_execute(command, slot_id)"
         drain = "xhci_hid_report_drain_cancelled_for_slot(slot_id)"
         quiescent = "xhci_hid_lifecycle_quiescent_for(slot_id, epoch)"
         stopped = "XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = true"
 
-        assert_order(self, body, submit, wait, drain, quiescent, stopped)
+        assert_order(self, body, execute, drain, quiescent, stopped)
 
-        wait_pos = body.find(wait)
+        execute_pos = body.find(execute)
         drain_pos = body.find(drain)
         quiescent_pos = body.find(quiescent, drain_pos + len(drain))
-        before_drain = body.rfind(exact, wait_pos, drain_pos)
+        before_drain = body.rfind(exact, execute_pos, drain_pos)
         after_drain = body.find(exact, drain_pos + len(drain), quiescent_pos)
-        self.assertGreaterEqual(before_drain, wait_pos)
+        self.assertGreaterEqual(before_drain, execute_pos)
         self.assertGreater(after_drain, drain_pos)
+        self.assertNotIn("xhci_command_submit(command)", body)
+        self.assertNotIn("xhci_command_wait_completion(command_physical)", body)
 
     def test_quiescence_is_generation_safe_and_checks_both_pending_sources(self):
         text = LIFECYCLE.read_text(encoding="utf-8")
