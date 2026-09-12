@@ -1,1 +1,249 @@
-THIS_SHOULD_NOT_BE_CALLED
+// Baken OS — HID-4d.6: serviço de runtime para detach, teardown, reuse e reconnect.
+//
+// Esta camada não possui Command/Event Ring nem primitivas DMA. Ela apenas avança
+// uma fronteira já certificada por chamada e retoma pelos tombstones públicos de
+// cada owner. O único consumidor do Event Ring permanece xhci_event_consumer.
+//
+// Ordem de teardown:
+// Stop Endpoint/drain -> logical teardown -> 3c3 endpoint teardown -> 4a1 DMA
+// persistente -> 4a2 estado lógico -> 4b Disable Slot/context -> 4d.5 registry
+// release/reuse. Só quando nenhum DETACH_PENDING permanece uma nova porta pode
+// ser enumerada pelo pipeline per-slot já existente.
+
+module kernel::platform::hid_hotplug;
+
+import kernel::arch::x86_64::serial::*;
+import kernel::drivers::xhci_controller::*;
+import kernel::drivers::xhci_start::*;
+import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_hid_lifecycle::*;
+import kernel::drivers::xhci_hid_teardown::*;
+import kernel::drivers::xhci_slot_teardown::*;
+import kernel::drivers::xhci_slot_reuse::*;
+import kernel::drivers::xhci_hid_enumeration::*;
+
+static mut PLATFORM_HID_HOTPLUG_RUNTIME_MARKER_EMITTED: bool = false;
+static mut PLATFORM_HID_HOTPLUG_FINALIZED_COUNT: u32 = 0;
+static mut PLATFORM_HID_HOTPLUG_RECONNECT_COUNT: u32 = 0;
+static mut PLATFORM_HID_HOTPLUG_LAST_DETACHED_SLOT: u8 = 0;
+static mut PLATFORM_HID_HOTPLUG_LAST_DETACHED_PORT: u8 = 0;
+static mut PLATFORM_HID_HOTPLUG_LAST_DETACHED_EPOCH: u32 = 0;
+static mut PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_SLOT: u8 = 0;
+static mut PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_PORT: u8 = 0;
+static mut PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_EPOCH: u32 = 0;
+
+@system
+fn platform_hid_hotplug_emit_runtime_ready() -> bool {
+    // BAKEN:USB_HID_HOTPLUG_RUNTIME_READY\n
+    let marker: [u8; 36] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,72,79,84,80,
+        76,85,71,95,82,85,78,84,73,77,69,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 36 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn platform_hid_hotplug_emit_detach_ready() -> bool {
+    // BAKEN:USB_HID_HOTPLUG_DETACH_READY\n
+    let marker: [u8; 35] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,72,79,84,80,
+        76,85,71,95,68,69,84,65,67,72,95,82,69,65,68,89,10
+    ];
+    let mut index: usize = 0;
+    while index < 35 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+@system
+fn platform_hid_hotplug_emit_reconnect_ready() -> bool {
+    // BAKEN:USB_HID_HOTPLUG_RECONNECT_READY\n
+    let marker: [u8; 38] = [
+        66,65,75,69,78,58,85,83,66,95,72,73,68,95,72,79,84,80,
+        76,85,71,95,82,69,67,79,78,78,69,67,84,95,82,69,65,68,
+        89,10
+    ];
+    let mut index: usize = 0;
+    while index < 38 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
+    }
+    return true;
+}
+
+// Avança exatamente uma fronteira por chamada. A ordem descendente das provas é
+// deliberada: depois que uma etapa destrói seu owner, retries não voltam a APIs
+// anteriores que dependiam daquele recurso ainda estar ready.
+@system
+fn platform_hid_hotplug_progress_detach_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    let port_id = xhci_device_table_port_id(slot_id);
+    if port_id == 0 { return false; }
+
+    // 4b completo: a última operação é 4d.5. Capturamos a porta antes de o
+    // registry antigo ser removido; a prova de completion de reuse sobrevive sem
+    // reconsultar a device table.
+    if xhci_slot_teardown_physical_complete_for(slot_id, epoch) {
+        if !xhci_slot_reuse_finalize_for(slot_id, epoch) ||
+           !xhci_slot_reuse_complete_for(slot_id, epoch) ||
+           xhci_device_table_slot_is_valid(slot_id) {
+            return false;
+        }
+        unsafe {
+            PLATFORM_HID_HOTPLUG_LAST_DETACHED_SLOT = slot_id;
+            PLATFORM_HID_HOTPLUG_LAST_DETACHED_PORT = port_id;
+            PLATFORM_HID_HOTPLUG_LAST_DETACHED_EPOCH = epoch;
+            PLATFORM_HID_HOTPLUG_FINALIZED_COUNT += 1;
+        }
+        return platform_hid_hotplug_emit_detach_ready();
+    }
+
+    // 4a2 -> 4b.
+    if xhci_slot_teardown_logical_state_complete_for(slot_id, epoch) {
+        return xhci_slot_teardown_disable_and_release_context_for(slot_id, epoch);
+    }
+
+    // 4a1 -> 4a2.
+    if xhci_slot_teardown_enumeration_dma_complete_for(slot_id, epoch) {
+        return xhci_slot_teardown_quiesce_logical_state_for(slot_id, epoch);
+    }
+
+    // 3c3 -> 4a1.
+    if xhci_hid_teardown_endpoint_complete_for(slot_id, epoch) {
+        return xhci_slot_teardown_release_enumeration_dma_for(slot_id, epoch);
+    }
+
+    // 3b -> 3c3.
+    if xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
+        return xhci_hid_teardown_endpoint_for(slot_id, epoch);
+    }
+
+    // 3b1 já aberto -> fechar teardown lógico.
+    if xhci_hid_lifecycle_logical_teardown_started_for(slot_id, epoch) {
+        return xhci_hid_lifecycle_complete_logical_teardown_for(slot_id, epoch);
+    }
+
+    // 2b completo -> abrir transação lógica.
+    if xhci_hid_lifecycle_endpoint_stopped_for(slot_id, epoch) {
+        return xhci_hid_lifecycle_begin_logical_teardown_for(slot_id, epoch);
+    }
+
+    // Primeira fronteira depois da detecção: Stop Endpoint + drain terminal.
+    return xhci_hid_lifecycle_stop_endpoint_for(slot_id, epoch);
+}
+
+@system
+fn platform_hid_hotplug_record_reconnect(slot_id: u8) -> bool {
+    if slot_id == 0 || !xhci_hid_enumeration_is_ready_for(slot_id) ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_HID_READY {
+        return false;
+    }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    let port_id = xhci_device_table_port_id(slot_id);
+    if epoch == 0 || port_id == 0 { return false; }
+
+    // Se o xHC reutilizou o mesmo Slot ID, a geração de software obrigatoriamente
+    // precisa ter avançado. Um epoch antigo nunca pode ser anunciado como reconnect.
+    unsafe {
+        if PLATFORM_HID_HOTPLUG_LAST_DETACHED_SLOT == slot_id &&
+           PLATFORM_HID_HOTPLUG_LAST_DETACHED_EPOCH != 0 &&
+           epoch <= PLATFORM_HID_HOTPLUG_LAST_DETACHED_EPOCH {
+            return false;
+        }
+        PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_SLOT = slot_id;
+        PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_PORT = port_id;
+        PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_EPOCH = epoch;
+        PLATFORM_HID_HOTPLUG_RECONNECT_COUNT += 1;
+    }
+    return platform_hid_hotplug_emit_reconnect_ready();
+}
+
+// Serviço BSP-owned chamado pelo loop nativo. Ausência de xHCI não é fatal. Em
+// cada chamada avançamos no máximo uma fase de um detach OU uma enumeração nova,
+// evitando uma sequência longa de comandos dentro de um único frame.
+@system
+pub fn platform_hid_hotplug_service_once() -> bool {
+    if !xhci_controller_is_ready() || !xhci_start_is_ready() ||
+       !xhci_start_noop_completed() {
+        return true;
+    }
+
+    unsafe {
+        if !PLATFORM_HID_HOTPLUG_RUNTIME_MARKER_EMITTED {
+            if !platform_hid_hotplug_emit_runtime_ready() { return false; }
+            PLATFORM_HID_HOTPLUG_RUNTIME_MARKER_EMITTED = true;
+        }
+    }
+
+    if !xhci_hid_lifecycle_scan_detached() { return false; }
+
+    let mut index: usize = 1;
+    while index < XHCI_DEVICE_SLOT_CAPACITY {
+        let slot_id = index as u8;
+        if xhci_device_table_slot_is_valid(slot_id) &&
+           xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_DETACH_PENDING {
+            let epoch = xhci_device_table_slot_epoch(slot_id);
+            if epoch == 0 { return false; }
+            return platform_hid_hotplug_progress_detach_for(slot_id, epoch);
+        }
+        index += 1;
+    }
+
+    // Nenhum epoch antigo está em teardown. Agora o reuse guard pode estar livre
+    // e o pipeline existente pode anexar no máximo uma nova porta por frame.
+    let new_slot = xhci_hid_enumerate_next_connected(0);
+    if new_slot == 0 { return true; }
+    return platform_hid_hotplug_record_reconnect(new_slot);
+}
+
+@system
+pub fn platform_hid_hotplug_finalized_count() -> u32 {
+    unsafe { return PLATFORM_HID_HOTPLUG_FINALIZED_COUNT; }
+}
+
+@system
+pub fn platform_hid_hotplug_reconnect_count() -> u32 {
+    unsafe { return PLATFORM_HID_HOTPLUG_RECONNECT_COUNT; }
+}
+
+@system
+pub fn platform_hid_hotplug_last_detached_slot() -> u8 {
+    unsafe { return PLATFORM_HID_HOTPLUG_LAST_DETACHED_SLOT; }
+}
+
+@system
+pub fn platform_hid_hotplug_last_detached_port() -> u8 {
+    unsafe { return PLATFORM_HID_HOTPLUG_LAST_DETACHED_PORT; }
+}
+
+@system
+pub fn platform_hid_hotplug_last_detached_epoch() -> u32 {
+    unsafe { return PLATFORM_HID_HOTPLUG_LAST_DETACHED_EPOCH; }
+}
+
+@system
+pub fn platform_hid_hotplug_last_reconnected_slot() -> u8 {
+    unsafe { return PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_SLOT; }
+}
+
+@system
+pub fn platform_hid_hotplug_last_reconnected_port() -> u8 {
+    unsafe { return PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_PORT; }
+}
+
+@system
+pub fn platform_hid_hotplug_last_reconnected_epoch() -> u32 {
+    unsafe { return PLATFORM_HID_HOTPLUG_LAST_RECONNECTED_EPOCH; }
+}

@@ -30,6 +30,7 @@ jobs:
           python3 tests/test_hid_dual_runtime.py
           python3 tests/test_xhci_transfer.py
           python3 tests/test_xhci_hid_report.py
+          python3 tests/test_xhci_hid_hotplug_runtime.py
           python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
 
       - name: Build Native Sotlas UEFI Kernel
@@ -46,7 +47,7 @@ jobs:
           python3 tools/scripts/create_uefi_iso.py
           test -s build/baken_os.iso
 
-      - name: Prove keyboard and mouse interleaving on independent xHCI slots
+      - name: Prove keyboard/mouse interleaving and hotplug reuse on independent xHCI slots
         timeout-minutes: 4
         shell: bash
         run: |
@@ -65,8 +66,8 @@ jobs:
             -drive if=pflash,format=raw,file=build/OVMF_VARS_HID_DUAL.fd \
             -cdrom build/baken_os.iso \
             -device qemu-xhci,id=xhci \
-            -device usb-kbd,bus=xhci.0 \
-            -device usb-mouse,bus=xhci.0 \
+            -device usb-kbd,bus=xhci.0,id=kbd0 \
+            -device usb-mouse,bus=xhci.0,id=mouse0 \
             -display none \
             -monitor unix:build/qemu-hid-dual.sock,server=on,wait=off \
             -serial file:build/qemu-hid-dual.log &
@@ -93,6 +94,88 @@ jobs:
             sleep 0.2
           done
 
+          runtime_ready=0
+          if test "$interleave_seen" -eq 1; then
+            for i in $(seq 1 300); do
+              if grep -q 'BAKEN:USB_HID_HOTPLUG_RUNTIME_READY' build/qemu-hid-dual.log 2>/dev/null; then
+                runtime_ready=1
+                break
+              fi
+              sleep 0.1
+            done
+          fi
+
+          hotplug_failed=0
+          if test "$runtime_ready" -eq 1; then
+            if ! printf 'device_del mouse0\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1; then
+              hotplug_failed=1
+            fi
+          else
+            hotplug_failed=1
+          fi
+
+          detach_one=0
+          if test "$hotplug_failed" -eq 0; then
+            for i in $(seq 1 200); do
+              detach_count="$(grep -c 'BAKEN:USB_HID_HOTPLUG_DETACH_READY' build/qemu-hid-dual.log 2>/dev/null || true)"
+              if test "$detach_count" -ge 1; then
+                detach_one=1
+                break
+              fi
+              sleep 0.1
+            done
+          fi
+
+          reconnect_one=0
+          if test "$detach_one" -eq 1; then
+            if ! printf 'device_add usb-mouse,bus=xhci.0,id=mouse1\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1; then
+              hotplug_failed=1
+            else
+              for i in $(seq 1 200); do
+                printf 'mouse_move 3 2\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1 || true
+                reconnect_count="$(grep -c 'BAKEN:USB_HID_HOTPLUG_RECONNECT_READY' build/qemu-hid-dual.log 2>/dev/null || true)"
+                if test "$reconnect_count" -ge 1; then
+                  reconnect_one=1
+                  break
+                fi
+                sleep 0.1
+              done
+            fi
+          fi
+
+          detach_two=0
+          if test "$reconnect_one" -eq 1; then
+            if ! printf 'device_del mouse1\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1; then
+              hotplug_failed=1
+            else
+              for i in $(seq 1 200); do
+                detach_count="$(grep -c 'BAKEN:USB_HID_HOTPLUG_DETACH_READY' build/qemu-hid-dual.log 2>/dev/null || true)"
+                if test "$detach_count" -ge 2; then
+                  detach_two=1
+                  break
+                fi
+                sleep 0.1
+              done
+            fi
+          fi
+
+          reconnect_two=0
+          if test "$detach_two" -eq 1; then
+            if ! printf 'device_add usb-mouse,bus=xhci.0,id=mouse2\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1; then
+              hotplug_failed=1
+            else
+              for i in $(seq 1 200); do
+                printf 'mouse_move 4 1\n' | socat - UNIX-CONNECT:build/qemu-hid-dual.sock >/dev/null 2>&1 || true
+                reconnect_count="$(grep -c 'BAKEN:USB_HID_HOTPLUG_RECONNECT_READY' build/qemu-hid-dual.log 2>/dev/null || true)"
+                if test "$reconnect_count" -ge 2; then
+                  reconnect_two=1
+                  break
+                fi
+                sleep 0.1
+              done
+            fi
+          fi
+
           if kill -0 "$qemu_pid" >/dev/null 2>&1; then
             kill "$qemu_pid" >/dev/null 2>&1 || true
           fi
@@ -107,8 +190,19 @@ jobs:
             echo '::error::O kernel não publicou BAKEN:USB_HID_INTERLEAVE_READY.'
             exit 1
           fi
+          if test "$runtime_ready" -ne 1; then
+            echo '::error::O serviço HID-4d.6 não entrou no runtime nativo.'
+            exit 1
+          fi
+          if test "$hotplug_failed" -ne 0 || test "$detach_two" -ne 1 || test "$reconnect_two" -ne 1; then
+            echo '::error::A prova real device_del/device_add de HID-4d.6 não completou dois ciclos.'
+            exit 1
+          fi
           grep -q 'BAKEN:USB_HID_DUAL_READY' build/qemu-hid-dual.log
           grep -q 'BAKEN:USB_HID_INTERLEAVE_READY' build/qemu-hid-dual.log
+          grep -q 'BAKEN:USB_HID_HOTPLUG_RUNTIME_READY' build/qemu-hid-dual.log
+          test "$(grep -c 'BAKEN:USB_HID_HOTPLUG_DETACH_READY' build/qemu-hid-dual.log)" -ge 2
+          test "$(grep -c 'BAKEN:USB_HID_HOTPLUG_RECONNECT_READY' build/qemu-hid-dual.log)" -ge 2
 
       - name: Upload HID dual-device diagnostics
         if: always()

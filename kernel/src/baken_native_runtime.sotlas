@@ -36,6 +36,7 @@ import kernel::platform::inventory::*;
 import kernel::platform::device_catalog::*;
 import kernel::platform::storage_binding::*;
 import kernel::platform::hid_late_attach::*;
+import kernel::platform::hid_hotplug::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -142,6 +143,9 @@ pub fn baken_native_runtime_run(width: u32, height: u32) -> ! {
     baken_native_dispatch_move(mouse_x, mouse_y);
     loop {
         let frame_start = x86_timer_read_tsc();
+        // HID-4d.6 é oportunista: falha/transiente em um frame é retomado pelos
+        // tombstones no próximo, sem transformar ausência de xHCI em falha do UI.
+        platform_hid_hotplug_service_once();
         let mut scancode: u16 = 0;
         let mut unicode: u16 = 0;
         while ps2_keyboard_poll(&mut scancode, &mut unicode) == 1 {
