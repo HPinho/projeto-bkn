@@ -86,25 +86,27 @@ pub fn xhci_hid_enumeration_is_ready_for(slot_id: u8) -> bool {
         xhci_hid_report_is_ready_for(slot_id);
 }
 
+// Enumera exatamente uma porta conectada e ainda não associada a Slot ID.
+// Retorna o Slot ID pronto para reports, ou 0. Nenhuma etapa usa wrapper global
+// para decidir descriptor/configuração/endpoint do dispositivo recém-criado.
 @system
 pub fn xhci_hid_enumerate_port(port_id: u8) -> u8 {
-    if port_id == 0 || !xhci_command_is_ready() { return 0; }
-    let snapshot = xhci_port_snapshot(port_id);
-    if snapshot == (null as *const XhciPortSnapshot) { return 0; }
-    unsafe {
-        if !(*snapshot).valid || (*snapshot).port_id != port_id || !(*snapshot).connected {
-            return 0;
-        }
-    }
+    if port_id == 0 { return 0; }
     if xhci_device_table_find_slot_for_port(port_id) != 0 { return 0; }
 
     let previous_active = xhci_device_table_active_slot_id();
-    if !xhci_port_stage_prepare_for(port_id) { return 0; }
+    if !xhci_port_stage_prepare_for(port_id) ||
+       !xhci_port_stage_is_ready_for(port_id) {
+        return 0;
+    }
+
     let slot_type = xhci_port_stage_slot_type();
     let slot_id = xhci_slot_enable_port(port_id, slot_type);
     if slot_id == 0 { return 0; }
+
     let epoch = xhci_device_table_slot_epoch(slot_id);
-    if epoch == 0 || xhci_device_table_port_id(slot_id) != port_id {
+    if epoch == 0 || xhci_device_table_port_id(slot_id) != port_id ||
+       xhci_device_table_slot_type(slot_id) != slot_type {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
 
@@ -132,17 +134,21 @@ pub fn xhci_hid_enumerate_port(port_id: u8) -> u8 {
     if !xhci_read_configuration_full_for_slot(slot_id) {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
-    if !xhci_get_hid_configuration_for_slot(slot_id) {
+    if !xhci_get_hid_configuration_for_slot(slot_id) ||
+       !xhci_configuration_is_ready_for(slot_id) {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
 
     let endpoint_address = xhci_hid_endpoint_address_for(slot_id);
-    let max_packet = xhci_hid_endpoint_max_packet_for(slot_id);
-    let interval = xhci_hid_endpoint_interval_for(slot_id);
-    if endpoint_address == 0 || max_packet == 0 || interval == 0 {
+    let endpoint_max_packet = xhci_hid_endpoint_max_packet_for(slot_id);
+    let endpoint_interval = xhci_hid_endpoint_interval_for(slot_id);
+    if endpoint_address == 0 || endpoint_max_packet == 0 || endpoint_interval == 0 {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
-    if !xhci_hid_context_prepare_for_slot(slot_id, endpoint_address, max_packet, interval) {
+
+    if !xhci_hid_context_prepare_for_slot(
+        slot_id, endpoint_address, endpoint_max_packet, endpoint_interval
+    ) {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
     if !xhci_configure_hid_endpoint_for_slot(slot_id) {
@@ -151,21 +157,26 @@ pub fn xhci_hid_enumerate_port(port_id: u8) -> u8 {
     if !xhci_set_configuration_for_slot(slot_id) {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
-    if !xhci_hid_descriptor_prepare_for_slot(slot_id) {
+    if !xhci_hid_report_prepare_for_slot(slot_id) ||
+       !xhci_hid_enumeration_is_ready_for(slot_id) {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
-    if !xhci_hid_report_prepare_for_slot(slot_id) {
-        return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
-    }
-    if !xhci_hid_enumeration_is_ready_for(slot_id) {
+
+    // O device recém-enumerado permanece acessível por Slot ID, mas a seleção
+    // compatível anterior é restaurada para não deslocar o legado do teclado 1.
+    if !xhci_hid_enumeration_restore_active(previous_active) {
         return xhci_hid_enumeration_fail(slot_id, epoch, previous_active);
     }
     return slot_id;
 }
 
+// Procura a próxima porta conectada sem Slot ID e tenta enumerá-la uma vez.
+// Não pula silenciosamente uma porta nova que falhou: falha fechado e deixa o
+// slot, se criado, em quarentena FAILED para investigação/recovery posterior.
 @system
 pub fn xhci_hid_enumerate_next_connected(after_port_id: u8) -> u8 {
     if xhci_port_scan() == 0 { return 0; }
+
     let mut cursor = after_port_id;
     let mut scanned: u16 = 0;
     while scanned < XHCI_HID_ENUMERATION_SCAN_LIMIT {
