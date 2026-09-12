@@ -192,22 +192,31 @@ class XhciHidReportTransferTeardownTests(unittest.TestCase):
         ):
             self.assertIn(token, self.transfer_gate)
 
-    def test_transfer_clear_refuses_live_same_epoch_mailbox_before_mutation(self):
-        valid_token = "XHCI_TRANSFER_PENDING_EVENTS[index].valid"
-        epoch_token = "XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch"
+    def test_transfer_clear_fails_closed_on_any_mailbox_and_foreign_result(self):
+        pending_valid = "XHCI_TRANSFER_PENDING_EVENTS[index].valid"
+        result_valid = "XHCI_TRANSFER_RESULTS[index].valid &&"
+        foreign_result = "XHCI_TRANSFER_RESULTS[index].epoch != epoch"
         clear_token = "xhci_transfer_clear_pending_index(index)"
 
-        first_valid = self.transfer_clear.find(valid_token)
-        first_epoch = self.transfer_clear.find(epoch_token, first_valid)
-        second_valid = self.transfer_clear.find(valid_token, first_epoch + len(epoch_token))
-        second_epoch = self.transfer_clear.find(epoch_token, second_valid)
-        clear_pending = self.transfer_clear.find(clear_token, second_epoch)
+        first_pending = self.transfer_clear.find(pending_valid)
+        first_result = self.transfer_clear.find(result_valid, first_pending)
+        first_foreign = self.transfer_clear.find(foreign_result, first_result)
+        second_pending = self.transfer_clear.find(pending_valid, first_foreign)
+        second_result = self.transfer_clear.find(result_valid, second_pending)
+        second_foreign = self.transfer_clear.find(foreign_result, second_result)
+        clear_pending = self.transfer_clear.find(clear_token, second_foreign)
 
-        self.assertGreaterEqual(first_valid, 0)
-        self.assertGreater(first_epoch, first_valid)
-        self.assertGreater(second_valid, first_epoch)
-        self.assertGreater(second_epoch, second_valid)
-        self.assertGreater(clear_pending, second_epoch)
+        self.assertGreaterEqual(first_pending, 0)
+        self.assertGreater(first_result, first_pending)
+        self.assertGreater(first_foreign, first_result)
+        self.assertGreater(second_pending, first_foreign)
+        self.assertGreater(second_result, second_pending)
+        self.assertGreater(second_foreign, second_result)
+        self.assertGreater(clear_pending, second_foreign)
+        self.assertNotIn(
+            "XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch",
+            self.transfer_clear,
+        )
         self.assertGreaterEqual(
             self.transfer_clear.count(
                 "xhci_transfer_teardown_epoch_matches(slot_id, epoch)"

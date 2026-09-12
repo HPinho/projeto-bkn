@@ -116,10 +116,11 @@ fn xhci_transfer_teardown_epoch_matches(slot_id: u8, epoch: u32) -> bool {
 }
 
 // Limpa mailbox/result lógico do slot+epoch sem consumir Event Ring e sem tocar
-// no Transfer Ring físico. Uma mailbox válida do mesmo epoch é sempre recusada:
-// ela ainda representa uma completion que precisa ser tomada/drenada. Mailbox
-// stale de outro epoch pode ser descartada porque o device-table continua preso
-// ao epoch esperado; reuso físico de Slot ID segue proibido até HID-4d.5.
+// no Transfer Ring físico. Qualquer mailbox ainda válida bloqueia o teardown:
+// same-epoch significa completion ainda não drenada; foreign-epoch é violação de
+// invariante enquanto Slot ID físico não pode ser reutilizado antes de HID-4d.5.
+// Resultado terminal do mesmo epoch pode ser descartado, mas um resultado válido
+// de outro epoch também falha fechado em vez de apagar estado desconhecido.
 @system
 pub fn xhci_transfer_clear_slot_state_for_epoch(slot_id: u8, epoch: u32) -> bool {
     if !xhci_transfer_teardown_epoch_matches(slot_id, epoch) { return false; }
@@ -127,19 +128,21 @@ pub fn xhci_transfer_clear_slot_state_for_epoch(slot_id: u8, epoch: u32) -> bool
     if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
 
     unsafe {
-        if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
-           XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid { return false; }
+        if XHCI_TRANSFER_RESULTS[index].valid &&
+           XHCI_TRANSFER_RESULTS[index].epoch != epoch {
             return false;
         }
     }
     if !xhci_transfer_teardown_epoch_matches(slot_id, epoch) { return false; }
 
     // Revalida imediatamente antes da mutação. DETACH_PENDING + proibição de
-    // slot reuse antes de 4d.5 garantem que uma geração nova não pode aparecer
-    // legitimamente neste índice durante este microcorte.
+    // slot reuse antes de 4d.5 tornam qualquer foreign-epoch válido um erro de
+    // invariantes, nunca um estado que o cleanup possa silenciosamente apagar.
     unsafe {
-        if XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
-           XHCI_TRANSFER_PENDING_EVENTS[index].epoch == epoch {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].valid { return false; }
+        if XHCI_TRANSFER_RESULTS[index].valid &&
+           XHCI_TRANSFER_RESULTS[index].epoch != epoch {
             return false;
         }
     }
