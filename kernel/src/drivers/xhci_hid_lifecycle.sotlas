@@ -231,11 +231,7 @@ pub fn xhci_hid_lifecycle_stop_endpoint_for(slot_id: u8, epoch: u32) -> bool {
     let command = xhci_trb_stop_endpoint(
         slot_id, dci, xhci_command_producer_cycle()
     );
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 || !xhci_command_wait_completion(command_physical) ||
-       xhci_command_last_slot_id() != slot_id {
-        return false;
-    }
+    if !xhci_command_execute(command, slot_id) { return false; }
     if !xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) { return false; }
 
     if had_pending {
