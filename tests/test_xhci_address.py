@@ -16,9 +16,9 @@ class XhciAddressTests(unittest.TestCase):
         self.assertIn("pub fn xhci_address_slot(slot_id: u8)", text)
         self.assertIn("xhci_context_input_physical_for(slot_id)", text)
         self.assertIn("xhci_trb_address_device(input_physical, slot_id, false", text)
-        self.assertIn("xhci_command_submit(command)", text)
-        self.assertIn("xhci_command_wait_completion(command_physical)", text)
-        self.assertIn("xhci_command_last_slot_id() != slot_id", text)
+        self.assertIn("xhci_command_execute(command, slot_id)", text)
+        self.assertNotIn("xhci_command_submit(command)", text)
+        self.assertNotIn("xhci_command_last_slot_id()", text)
 
     def test_address_device_requires_output_context_addressed_state(self):
         text = ADDRESS.read_text(encoding="utf-8")
