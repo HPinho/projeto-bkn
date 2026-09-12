@@ -1,8 +1,14 @@
-// Baken OS — HID-4c.2: Configure Endpoint HID por Slot ID.
+// Baken OS — HID-4c.2 / HID-4d.3c1: Configure/Drop Endpoint HID por Slot ID.
 //
 // O estado de confirmação do endpoint é associado ao epoch do slot. O wrapper
 // legado mantém o bring-up do primeiro device, enquanto APIs _for_slot permitem
 // configurar múltiplos endpoints sem sobrescrever o estado de transporte.
+//
+// HID-4d.3c1 executa somente o teardown físico do Endpoint Context: depois do
+// teardown lógico generation-safe e do Stop Endpoint, programa Drop Context no
+// Input Context, envia Configure Endpoint e só publica conclusão quando o Output
+// Endpoint Context do mesmo DCI estiver realmente Disabled. O Transfer Ring,
+// Device/Input Context, EP0 ring e Slot ID permanecem intocados neste corte.
 
 module kernel::drivers::xhci_configure_endpoint;
 
@@ -12,13 +18,20 @@ import kernel::drivers::xhci_command::*;
 import kernel::drivers::xhci_context::*;
 import kernel::drivers::xhci_device_table::*;
 import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_hid_lifecycle::*;
 import kernel::drivers::xhci_trb::*;
 
 pub const XHCI_ENDPOINT_STATE_MASK: u32 = 0x7;
+pub const XHCI_ENDPOINT_STATE_DISABLED: u8 = 0;
 pub const XHCI_ENDPOINT_STATE_RUNNING: u8 = 1;
+pub const XHCI_ENDPOINT_STATE_STOPPED: u8 = 3;
+pub const XHCI_ENDPOINT_STATE_INVALID: u8 = 0xFF;
 pub const XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
+pub const XHCI_SLOT_CONTEXT_ENTRIES_MASK: u32 = 0x1F << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT;
 
 static mut XHCI_CONFIGURE_ENDPOINT_READY_SLOTS: [bool; XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY] =
+    [false; XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY];
+static mut XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS: [bool; XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY] =
     [false; XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY];
 static mut XHCI_CONFIGURE_ENDPOINT_EPOCHS: [u32; XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY] =
     [0; XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY];
@@ -33,15 +46,31 @@ fn xhci_configure_endpoint_index(slot_id: u8) -> usize {
 }
 
 @system
-fn xhci_configure_endpoint_output_dw0(slot_id: u8, dci: u8) -> u32 {
-    if slot_id == 0 || dci <= 1 { return 0; }
+fn xhci_configure_endpoint_output_state(slot_id: u8, dci: u8) -> u8 {
+    if slot_id == 0 || dci <= 1 || dci > XHCI_HID_MAX_CONTEXT_INDEX {
+        return XHCI_ENDPOINT_STATE_INVALID;
+    }
     let device_physical = xhci_context_device_physical_for(slot_id);
     let context_size = xhci_context_size_for(slot_id);
-    if device_physical == 0 || (context_size != 32 && context_size != 64) { return 0; }
+    if device_physical == 0 || (context_size != 32 && context_size != 64) {
+        return XHCI_ENDPOINT_STATE_INVALID;
+    }
     let device_virtual = direct_map_virtual_address(device_physical);
-    if device_virtual == 0 { return 0; }
+    if device_virtual == 0 || x86_read_cr3_raw() == 0 {
+        return XHCI_ENDPOINT_STATE_INVALID;
+    }
     let offset = (dci as u64) * (context_size as u64);
-    unsafe { return *((device_virtual + offset) as *const u32); }
+    let dw0 = unsafe { *((device_virtual + offset) as *const u32) };
+    return (dw0 & XHCI_ENDPOINT_STATE_MASK) as u8;
+}
+
+@system
+fn xhci_configure_endpoint_input_write32(input_virtual: u64,
+                                          byte_offset: u64,
+                                          value: u32) -> bool {
+    if input_virtual == 0 { return false; }
+    unsafe { *((input_virtual + byte_offset) as *mut u32) = value; }
+    return true;
 }
 
 @system
@@ -55,6 +84,7 @@ pub fn xhci_configure_endpoint_is_ready_for(slot_id: u8) -> bool {
     if epoch == 0 { return false; }
     unsafe {
         return XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] &&
+               !XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] &&
                XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] == epoch &&
                XHCI_CONFIGURE_ENDPOINT_DCIS[index] > 1;
     }
@@ -72,11 +102,16 @@ pub fn xhci_configure_hid_endpoint_for_slot(slot_id: u8) -> bool {
     let epoch = xhci_device_table_slot_epoch(slot_id);
     let dci = xhci_hid_context_dci_for(slot_id);
     let input_physical = xhci_context_input_physical_for(slot_id);
-    if epoch == 0 || dci <= 1 || input_physical == 0 || (input_physical & 0xF) != 0 {
+    if epoch == 0 || dci <= 1 || dci > XHCI_HID_MAX_CONTEXT_INDEX ||
+       input_physical == 0 || (input_physical & 0xF) != 0 {
         return false;
     }
 
     unsafe {
+        if XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] &&
+           XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] == epoch {
+            return false;
+        }
         if XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] &&
            XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] == epoch {
             return XHCI_CONFIGURE_ENDPOINT_DCIS[index] == dci;
@@ -91,13 +126,12 @@ pub fn xhci_configure_hid_endpoint_for_slot(slot_id: u8) -> bool {
     );
     if !xhci_command_execute(command, slot_id) { return false; }
 
-    if x86_read_cr3_raw() == 0 { return false; }
-    let dw0 = xhci_configure_endpoint_output_dw0(slot_id, dci);
-    let endpoint_state = (dw0 & XHCI_ENDPOINT_STATE_MASK) as u8;
+    let endpoint_state = xhci_configure_endpoint_output_state(slot_id, dci);
     if endpoint_state != XHCI_ENDPOINT_STATE_RUNNING { return false; }
 
     unsafe {
         XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] = true;
+        XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] = false;
         XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] = epoch;
         XHCI_CONFIGURE_ENDPOINT_DCIS[index] = dci;
         XHCI_CONFIGURE_ENDPOINT_ACTIVE_SLOT_ID = slot_id;
@@ -106,6 +140,139 @@ pub fn xhci_configure_hid_endpoint_for_slot(slot_id: u8) -> bool {
         return false;
     }
     return true;
+}
+
+// HID-4d.3c1: remove somente o HID Endpoint Context do xHC. A chamada exige
+// que o teardown lógico do mesmo epoch esteja concluído e prova o estado físico
+// Stopped antes de emitir Configure Endpoint com Drop Context. Se o comando
+// falhar, o Input Context é restaurado. Se o comando concluir mas a prova do
+// Output Context falhar, o estado de teardown permanece fail-closed e não é
+// reescrito para uma configuração potencialmente já consumida pelo controller.
+@system
+pub fn xhci_configure_endpoint_drop_hid_for_slot(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_command_is_ready() ||
+       !xhci_context_is_ready_for(slot_id) || !xhci_hid_context_is_ready_for(slot_id) ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
+        return false;
+    }
+
+    let index = xhci_configure_endpoint_index(slot_id);
+    if index >= XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY { return false; }
+    let dci = xhci_hid_context_dci_for(slot_id);
+    if dci <= 1 || dci > XHCI_HID_MAX_CONTEXT_INDEX { return false; }
+
+    unsafe {
+        if XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] &&
+           XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] == epoch &&
+           XHCI_CONFIGURE_ENDPOINT_DCIS[index] == dci {
+            return xhci_configure_endpoint_output_state(slot_id, dci) ==
+                   XHCI_ENDPOINT_STATE_DISABLED;
+        }
+        if !XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] ||
+           XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] != epoch ||
+           XHCI_CONFIGURE_ENDPOINT_DCIS[index] != dci {
+            return false;
+        }
+    }
+
+    if xhci_configure_endpoint_output_state(slot_id, dci) != XHCI_ENDPOINT_STATE_STOPPED {
+        return false;
+    }
+    if !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
+        return false;
+    }
+
+    let context_size = xhci_context_size_for(slot_id);
+    let input_physical = xhci_context_input_physical_for(slot_id);
+    if (context_size != 32 && context_size != 64) || input_physical == 0 ||
+       (input_physical & 0xF) != 0 {
+        return false;
+    }
+    let input_virtual = direct_map_virtual_address(input_physical);
+    if input_virtual == 0 || x86_read_cr3_raw() == 0 { return false; }
+
+    let drop_flags_offset: u64 = 0;
+    let add_flags_offset: u64 = 4;
+    let slot_context_offset = context_size as u64;
+    let old_drop_flags = unsafe { *((input_virtual + drop_flags_offset) as *const u32) };
+    let old_add_flags = unsafe { *((input_virtual + add_flags_offset) as *const u32) };
+    let old_slot_dw0 = unsafe { *((input_virtual + slot_context_offset) as *const u32) };
+    let drop_flag = 1 << (dci as u32);
+    let slot_dw0 = (old_slot_dw0 & ~XHCI_SLOT_CONTEXT_ENTRIES_MASK) |
+        (1 << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT);
+
+    if !xhci_configure_endpoint_input_write32(input_virtual, drop_flags_offset, drop_flag) ||
+       !xhci_configure_endpoint_input_write32(input_virtual, add_flags_offset,
+           XHCI_INPUT_CONTROL_ADD_SLOT) ||
+       !xhci_configure_endpoint_input_write32(input_virtual, slot_context_offset, slot_dw0) {
+        xhci_configure_endpoint_input_write32(input_virtual, drop_flags_offset, old_drop_flags);
+        xhci_configure_endpoint_input_write32(input_virtual, add_flags_offset, old_add_flags);
+        xhci_configure_endpoint_input_write32(input_virtual, slot_context_offset, old_slot_dw0);
+        return false;
+    }
+
+    if !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        xhci_configure_endpoint_input_write32(input_virtual, drop_flags_offset, old_drop_flags);
+        xhci_configure_endpoint_input_write32(input_virtual, add_flags_offset, old_add_flags);
+        xhci_configure_endpoint_input_write32(input_virtual, slot_context_offset, old_slot_dw0);
+        return false;
+    }
+
+    let command = xhci_trb_configure_endpoint(
+        input_physical,
+        slot_id,
+        false,
+        xhci_command_producer_cycle()
+    );
+    if !xhci_command_execute(command, slot_id) {
+        xhci_configure_endpoint_input_write32(input_virtual, drop_flags_offset, old_drop_flags);
+        xhci_configure_endpoint_input_write32(input_virtual, add_flags_offset, old_add_flags);
+        xhci_configure_endpoint_input_write32(input_virtual, slot_context_offset, old_slot_dw0);
+        return false;
+    }
+
+    if xhci_device_table_slot_epoch(slot_id) != epoch ||
+       !xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) {
+        return false;
+    }
+    if xhci_configure_endpoint_output_state(slot_id, dci) != XHCI_ENDPOINT_STATE_DISABLED {
+        return false;
+    }
+
+    unsafe {
+        if XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] != epoch ||
+           XHCI_CONFIGURE_ENDPOINT_DCIS[index] != dci {
+            return false;
+        }
+        XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] = false;
+        XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] = true;
+    }
+    return true;
+}
+
+@system
+pub fn xhci_configure_endpoint_drop_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    let index = xhci_configure_endpoint_index(slot_id);
+    if index >= XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY { return false; }
+    let mut dci: u8 = 0;
+    unsafe {
+        if !XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] ||
+           XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] ||
+           XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] != epoch {
+            return false;
+        }
+        dci = XHCI_CONFIGURE_ENDPOINT_DCIS[index];
+    }
+    if dci <= 1 || dci > XHCI_HID_MAX_CONTEXT_INDEX { return false; }
+    return xhci_configure_endpoint_output_state(slot_id, dci) ==
+           XHCI_ENDPOINT_STATE_DISABLED;
 }
 
 @system
