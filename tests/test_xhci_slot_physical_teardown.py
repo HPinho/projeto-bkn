@@ -133,7 +133,8 @@ class XhciSlotPhysicalTeardownTests(unittest.TestCase):
         self.assertIn("XHCI_SLOT_REUSE_ENABLE_INFLIGHT -= 1", end)
         self.assertIn("XHCI_SLOT_REUSE_ENABLE_INFLIGHT != 0", block)
         self.assertIn("XHCI_SLOT_REUSE_BLOCKED_EPOCHS[index] = epoch", block)
-        self.assertNotIn("xhci_slot_reuse_guard_release", self.guard)
+        for body in (begin, end, block, self.orchestrate):
+            self.assertNotIn("xhci_slot_reuse_guard_release_for", body)
 
     def test_enable_slot_is_inside_reuse_guard_transaction(self):
         enable = function_body(self.slot, "xhci_slot_enable_port")
@@ -149,10 +150,8 @@ class XhciSlotPhysicalTeardownTests(unittest.TestCase):
             if name == "xhci_slot_select":
                 self.assertIn("xhci_slot_is_ready_for(slot_id)", body)
             elif name == "xhci_slot_is_ready_for":
-                self.assertIn(
-                    "xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING",
-                    body,
-                )
+                self.assertIn("XHCI_DEVICE_STATE_FAILED", body)
+                self.assertIn("XHCI_DEVICE_STATE_DETACH_PENDING", body)
             else:
                 self.assertIn("xhci_slot_is_ready_for", body)
 
