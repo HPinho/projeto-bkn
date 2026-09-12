@@ -1,13 +1,12 @@
-// Baken OS — HID-4d.1/4d.2b/4d.3b: detach quarantine e teardown lógico seguro.
+// Baken OS — HID-4d.1/4d.2b/4d.3b/4d.3c2: detach e teardown seguro.
 //
 // DETACH_PENDING permanece generation-safe. HID-4d.2b para apenas o endpoint
 // HID do mesmo slot+epoch, drena o TD outstanding e registra endpoint_stopped.
 // HID-4d.3b abre uma transacao logica idempotente somente depois do drain e
 // conclui identity/descriptor/report/transfer state em ordem exact-epoch.
-// As consultas de pending/quiescence usadas pelo lifecycle recebem o epoch
-// esperado explicitamente; o drain legado per-slot permanece cercado por
-// revalidacao exata de slot+epoch ate sua migracao dedicada.
-// Drop Endpoint, rings, contexts e Slot ID continuam fora desta etapa.
+// HID-4d.3c2 autoriza o release do HID Transfer Ring somente depois de 3c1 ter
+// provado Drop Endpoint + Output Endpoint Context Disabled para o mesmo epoch.
+// Device/Input Context, EP0 ring, DCBAA e Slot ID continuam fora desta etapa.
 
 module kernel::drivers::xhci_hid_lifecycle;
 
@@ -20,6 +19,7 @@ import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_transfer::*;
 import kernel::drivers::xhci_command::*;
+import kernel::drivers::xhci_configure_endpoint::*;
 import kernel::drivers::xhci_trb::*;
 
 pub const XHCI_HID_LIFECYCLE_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
@@ -370,6 +370,38 @@ pub fn xhci_hid_lifecycle_logical_teardown_complete_for(slot_id: u8, epoch: u32)
                XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_started &&
                XHCI_HID_LIFECYCLE_STATES[index].logical_teardown_complete;
     }
+}
+
+// HID-4d.3c2: libera somente o HID Transfer Ring do mesmo slot+epoch. O mesmo
+// teardown lock de 3b cobre a transição de ownership e impede double-free entre
+// CPUs. 3c1 deve ter sido concluído antes desta chamada; esta função não emite
+// Configure Endpoint e portanto não antecipa a orquestração reservada a 3c3.
+@system
+pub fn xhci_hid_lifecycle_release_transfer_ring_for(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_hid_lifecycle_index(slot_id);
+    if index >= XHCI_HID_LIFECYCLE_SLOT_CAPACITY || epoch == 0 { return false; }
+
+    let flags = xhci_hid_lifecycle_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut release_ok = xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) &&
+        xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch);
+
+    if release_ok {
+        release_ok = xhci_configure_endpoint_drop_complete_for(slot_id, epoch);
+    }
+    if release_ok && !xhci_hid_context_ring_release_complete_for(slot_id, epoch) {
+        release_ok = xhci_hid_context_release_ring_for_epoch(slot_id, epoch);
+    }
+    if release_ok {
+        release_ok = xhci_hid_lifecycle_is_detach_pending_for(slot_id, epoch) &&
+                     xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch) &&
+                     xhci_configure_endpoint_drop_complete_for(slot_id, epoch) &&
+                     xhci_hid_context_ring_release_complete_for(slot_id, epoch);
+    }
+
+    xhci_hid_lifecycle_teardown_unlock_irq(flags);
+    return release_ok;
 }
 
 @system

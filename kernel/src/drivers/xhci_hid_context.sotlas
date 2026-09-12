@@ -1,9 +1,16 @@
-// Baken OS — HID-4c.2: Endpoint Context HID Interrupt IN por Slot ID.
+// Baken OS — HID-4c.2 / HID-4d.3c2: Endpoint Context HID Interrupt IN por Slot ID.
 //
 // Cada slot xHCI possui DCI/ring/interval próprios e é validado contra o epoch
 // do registro de transporte. O wrapper legado continua preparando o slot ativo
-// usando o Configuration Descriptor singleton; HID-4c.3 removerá esse último
-// acoplamento de configuração/descriptor.
+// usando o Configuration Descriptor singleton; HID-4c.3 removeu os acoplamentos
+// de runtime multi-device, mas o wrapper permanece para o bring-up inicial.
+//
+// HID-4d.3c2 adiciona somente a primitiva de lifetime do HID Transfer Ring. A
+// autorização física (Drop Endpoint + Output Endpoint Context Disabled) fica na
+// camada lifecycle para evitar dependência circular. Aqui o buffer só percorre
+// SHARED -> CPU-owned -> dma_release, com retry seguro se uma tentativa anterior
+// já tiver concluído o unshare. Device/Input Context, EP0 ring e Slot ID não são
+// liberados por este módulo.
 
 module kernel::drivers::xhci_hid_context;
 
@@ -143,6 +150,17 @@ fn xhci_hid_context_compute_interval(speed_id: u8, usb_interval: u8) -> u8 {
 }
 
 @system
+fn xhci_hid_context_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_hid_context_index(slot_id);
+    if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    unsafe { return XHCI_HID_CONTEXTS[index].epoch == epoch; }
+}
+
+@system
 pub fn xhci_hid_context_is_ready_for(slot_id: u8) -> bool {
     let index = xhci_hid_context_index(slot_id);
     if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY || !xhci_device_table_slot_is_valid(slot_id) {
@@ -176,6 +194,15 @@ pub fn xhci_hid_context_prepare_for_slot(slot_id: u8,
                    XHCI_HID_CONTEXTS[index].max_packet == max_packet;
         }
         if XHCI_HID_CONTEXTS[index].ready { return false; }
+        // Tombstone 3c2: um ring já liberado não pode ser recriado no mesmo
+        // epoch antes de Disable Slot/reuse físico. Epoch novo pode sobrescrever
+        // o tombstone somente depois da fronteira de reuse 4d.5.
+        if XHCI_HID_CONTEXTS[index].epoch == epoch &&
+           XHCI_HID_CONTEXTS[index].dci > 1 &&
+           XHCI_HID_CONTEXTS[index].ring_physical == 0 &&
+           !XHCI_HID_CONTEXTS[index].ring.valid {
+            return false;
+        }
     }
 
     let dci = xhci_hid_context_compute_dci(endpoint_address);
@@ -265,6 +292,82 @@ pub fn xhci_hid_context_prepare() -> bool {
         xhci_hid_endpoint_max_packet(),
         xhci_hid_endpoint_interval()
     );
+}
+
+// HID-4d.3c2 low-level lifetime primitive. A camada lifecycle é a única caller
+// autorizada e prova previamente Drop Endpoint/Disabled. Este módulo não importa
+// xhci_configure_endpoint para manter a direção de dependências acíclica.
+//
+// Retry-safe: se uma tentativa anterior já fez unshare e falhou no release, o
+// buffer CPU-owned é aceito e a próxima tentativa retoma diretamente no free.
+@system
+pub fn xhci_hid_context_release_ring_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_context_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_hid_context_index(slot_id);
+    if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY { return false; }
+
+    if xhci_hid_context_ring_release_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        if !XHCI_HID_CONTEXTS[index].ready ||
+           XHCI_HID_CONTEXTS[index].dci <= 1 ||
+           XHCI_HID_CONTEXTS[index].ring_physical == 0 ||
+           !XHCI_HID_CONTEXTS[index].ring.valid {
+            return false;
+        }
+    }
+
+    let mut shared = false;
+    let mut cpu_owned = false;
+    unsafe {
+        shared = dma_buffer_shared(&XHCI_HID_CONTEXTS[index].ring);
+        cpu_owned = dma_buffer_cpu_owned(&XHCI_HID_CONTEXTS[index].ring);
+    }
+    if !shared && !cpu_owned { return false; }
+
+    if shared {
+        unsafe {
+            if !dma_unshare_from_device(&mut XHCI_HID_CONTEXTS[index].ring) {
+                return false;
+            }
+        }
+        if !xhci_hid_context_epoch_matches(slot_id, epoch) { return false; }
+    }
+
+    unsafe {
+        if !dma_buffer_cpu_owned(&XHCI_HID_CONTEXTS[index].ring) {
+            return false;
+        }
+    }
+    if !xhci_hid_context_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        if !dma_release(&mut XHCI_HID_CONTEXTS[index].ring) {
+            return false;
+        }
+        if XHCI_HID_CONTEXTS[index].epoch != epoch ||
+           XHCI_HID_CONTEXTS[index].ring.valid {
+            return false;
+        }
+        XHCI_HID_CONTEXTS[index].ready = false;
+        XHCI_HID_CONTEXTS[index].ring = dma_invalid_buffer();
+        XHCI_HID_CONTEXTS[index].ring_physical = 0;
+    }
+
+    return xhci_hid_context_ring_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_hid_context_ring_release_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_context_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_hid_context_index(slot_id);
+    if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_HID_CONTEXTS[index].ready &&
+               XHCI_HID_CONTEXTS[index].dci > 1 &&
+               XHCI_HID_CONTEXTS[index].ring_physical == 0 &&
+               !XHCI_HID_CONTEXTS[index].ring.valid;
+    }
 }
 
 @system
