@@ -47,12 +47,18 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     let command = xhci_trb_disable_slot(slot_id, xhci_command_producer_cycle());
     if !xhci_command_execute(command, slot_id) { return false; }
 
-    // A Command Completion de Disable Slot é a fronteira física que torna seguro
-    // liberar um Device Descriptor que possa ter ficado preso em TD EP0 ambíguo.
-    // Outros owners continuam em FAILED e serão fechados em microcortes próprios;
-    // por isso a device table/Slot ID deliberadamente permanecem reservados.
-    let descriptor_released = xhci_device_descriptor_release_failed_for_epoch(slot_id, epoch);
-    return identity_released && descriptor_released;
+    // A Command Completion de Disable Slot é a fronteira física. A partir daqui
+    // buffers de control transfer que tenham ficado em submit/wait ambíguo não
+    // podem mais ser consumidos pelo slot físico. Libera primeiro Configuration
+    // Descriptor e depois Device Descriptor, em ordem inversa de ownership.
+    let configuration_released =
+        xhci_configuration_release_failed_for_epoch(slot_id, epoch);
+    let descriptor_released =
+        xhci_device_descriptor_release_failed_for_epoch(slot_id, epoch);
+
+    // Outros owners parciais ainda permanecem em FAILED e serão fechados nos
+    // próximos microcortes; device table/Slot ID continuam reservados por design.
+    return identity_released && configuration_released && descriptor_released;
 }
 
 @system

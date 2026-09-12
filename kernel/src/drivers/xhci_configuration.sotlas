@@ -4,6 +4,11 @@
 // bConfigurationValue. HID-4d.3a devolve esse buffer ao PMM após o parse.
 // HID-4d.4a1 adiciona teardown exact-epoch do Configuration Descriptor completo,
 // mantendo um tombstone que impede recriação do DMA no mesmo epoch.
+//
+// Hardening pós-HID-4d: qualquer DMA que já possa ter sido submetido ao EP0 é
+// publicado primeiro como owner per-slot. Submit/wait ambíguos mantêm o owner
+// em quarentena; somente completion terminal ou Disable Slot confirmado podem
+// autorizar unshare/release. Epoch novo nunca sobrescreve owner antigo válido.
 
 module kernel::drivers::xhci_configuration;
 
@@ -100,6 +105,8 @@ fn xhci_configuration_reset_state(slot_id: u8, epoch: u32) -> bool {
     let index = xhci_configuration_index(slot_id);
     if index >= XHCI_CONFIGURATION_SLOT_CAPACITY || epoch == 0 { return false; }
     unsafe {
+        // Nunca apagar a única referência de software para DMA ainda válido.
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
         XHCI_CONFIGURATION_STATES[index].epoch = epoch;
         XHCI_CONFIGURATION_STATES[index].header_ready = false;
         XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
@@ -138,6 +145,8 @@ fn xhci_configuration_prepare_state(slot_id: u8) -> bool {
     if epoch == 0 { return false; }
     unsafe {
         if XHCI_CONFIGURATION_STATES[index].epoch != epoch {
+            // Um Slot ID não pode trocar de epoch abandonando um owner DMA antigo.
+            if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
             return xhci_configuration_reset_state(slot_id, epoch);
         }
         if XHCI_CONFIGURATION_RELEASED_EPOCHS[index] == epoch {
@@ -173,10 +182,35 @@ fn xhci_configuration_epoch_matches(slot_id: u8, epoch: u32) -> bool {
 }
 
 @system
+fn xhci_configuration_current_buffer_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch {
+        return false;
+    }
+    unsafe { return XHCI_CONFIGURATION_STATES[index].epoch == epoch; }
+}
+
+@system
+fn xhci_configuration_failed_epoch_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    unsafe { return XHCI_CONFIGURATION_STATES[index].epoch == epoch; }
+}
+
+@system
 fn xhci_configuration_invalidate_after_header(slot_id: u8) -> bool {
     let index = xhci_configuration_index(slot_id);
     if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
     unsafe {
+        // Retry não pode apagar owner publicado por um TD ambíguo anterior.
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
         XHCI_CONFIGURATION_STATES[index].full_ready = false;
         XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
         XHCI_CONFIGURATION_STATES[index].full_value = 0;
@@ -238,6 +272,7 @@ fn xhci_configuration_zero(base: *mut u8, size: u64) -> bool {
     return true;
 }
 
+// Somente candidatos que ainda não foram publicados como owner per-slot.
 @system
 fn xhci_configuration_release_temporary(buffer: *mut DmaBuffer) -> bool {
     if buffer == (null as *mut DmaBuffer) { return false; }
@@ -251,6 +286,63 @@ fn xhci_configuration_release_temporary(buffer: *mut DmaBuffer) -> bool {
     return dma_release(buffer);
 }
 
+// Owner canônico depois da publicação. O caller só pode invocar este helper
+// depois de uma completion terminal já consumida ou de Disable Slot confirmado.
+@system
+fn xhci_configuration_release_current_buffer_for_epoch(slot_id: u8,
+                                                       epoch: u32) -> bool {
+    if !xhci_configuration_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        if !XHCI_CONFIGURATION_STATES[index].buffer.valid { return true; }
+    }
+
+    let mut shared = false;
+    unsafe { shared = dma_buffer_shared(&XHCI_CONFIGURATION_STATES[index].buffer); }
+    if shared {
+        unsafe {
+            if !dma_unshare_from_device(&mut XHCI_CONFIGURATION_STATES[index].buffer) {
+                return false;
+            }
+        }
+        if !xhci_configuration_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    }
+
+    unsafe {
+        if !dma_buffer_cpu_owned(&XHCI_CONFIGURATION_STATES[index].buffer) {
+            return false;
+        }
+    }
+    if !xhci_configuration_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    unsafe {
+        if !dma_release(&mut XHCI_CONFIGURATION_STATES[index].buffer) {
+            return false;
+        }
+    }
+    if !xhci_configuration_current_buffer_epoch_matches(slot_id, epoch) { return false; }
+    unsafe { return !XHCI_CONFIGURATION_STATES[index].buffer.valid; }
+}
+
+@system
+fn xhci_configuration_publish_candidate_buffer(slot_id: u8,
+                                               epoch: u32,
+                                               buffer: DmaBuffer) -> bool {
+    if !xhci_configuration_current_buffer_epoch_matches(slot_id, epoch) ||
+       !buffer.valid || !dma_buffer_shared(&buffer) {
+        return false;
+    }
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
+        XHCI_CONFIGURATION_STATES[index].buffer = buffer;
+    }
+    // Depois da atribuição o owner canônico é o estado per-slot. Não retornar
+    // false pós-publicação: isso faria o caller liberar uma cópia do mesmo DMA.
+    return true;
+}
+
 @system
 fn xhci_configuration_fetch_for_slot(slot_id: u8,
                                      buffer: *mut DmaBuffer,
@@ -259,10 +351,21 @@ fn xhci_configuration_fetch_for_slot(slot_id: u8,
        !xhci_configuration_prepare_state(slot_id) {
         return false;
     }
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    let index = xhci_configuration_index(slot_id);
+    if epoch == 0 || index >= XHCI_CONFIGURATION_SLOT_CAPACITY ||
+       !xhci_configuration_current_buffer_epoch_matches(slot_id, epoch) {
+        return false;
+    }
     unsafe {
         if !(*buffer).valid || (*buffer).physical_address == 0 ||
            (*buffer).virtual_address == (null as *mut u8) { return false; }
         if (length as u64) > (*buffer).size { return false; }
+        if !XHCI_CONFIGURATION_STATES[index].buffer.valid ||
+           XHCI_CONFIGURATION_STATES[index].buffer.physical_address != (*buffer).physical_address ||
+           !dma_buffer_shared(&XHCI_CONFIGURATION_STATES[index].buffer) {
+            return false;
+        }
     }
 
     let setup = xhci_trb_setup_stage(
@@ -291,9 +394,17 @@ fn xhci_configuration_fetch_for_slot(slot_id: u8,
         let status_physical = xhci_ep0_submit_control_td_for_slot(
             slot_id, setup, data, status, true
         );
+        // Falhas daqui são deliberadamente ambíguas: o owner continua no estado
+        // per-slot até que o recovery confirme Disable Slot.
         if status_physical == 0 { return false; }
         if !xhci_transfer_wait_ep0_completion(slot_id, status_physical) { return false; }
-        return xhci_transfer_last_residual_length_for(slot_id) == 0;
+        let transfer_complete = xhci_transfer_last_residual_length_for(slot_id) == 0;
+        if !transfer_complete {
+            // A completion foi consumida: residual != 0 é uma fronteira terminal.
+            xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch);
+            return false;
+        }
+        return true;
     }
 }
 
@@ -301,7 +412,10 @@ fn xhci_configuration_fetch_for_slot(slot_id: u8,
 pub fn xhci_probe_configuration_header_for_slot(slot_id: u8) -> bool {
     if !xhci_configuration_prepare_state(slot_id) { return false; }
     let index = xhci_configuration_index(slot_id);
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
     unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
         XHCI_CONFIGURATION_STATES[index].header_ready = false;
         XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
         XHCI_CONFIGURATION_STATES[index].header_value = 0;
@@ -311,14 +425,23 @@ pub fn xhci_probe_configuration_header_for_slot(slot_id: u8) -> bool {
     let mut buffer = dma_alloc(XHCI_CONFIGURATION_DMA_SIZE, XHCI_CONFIGURATION_DMA_SIZE);
     if !dma_buffer_cpu_owned(&buffer) { return false; }
     if !xhci_configuration_zero(buffer.virtual_address, USB_CONFIGURATION_HEADER_LENGTH as u64) {
+        xhci_configuration_release_temporary(&mut buffer);
         return false;
     }
-    if !dma_share_with_device(&mut buffer) { return false; }
+    if !dma_share_with_device(&mut buffer) {
+        xhci_configuration_release_temporary(&mut buffer);
+        return false;
+    }
+    let buffer_virtual = buffer.virtual_address;
+    if !xhci_configuration_publish_candidate_buffer(slot_id, epoch, buffer) {
+        xhci_configuration_release_temporary(&mut buffer);
+        return false;
+    }
     if !xhci_configuration_fetch_for_slot(
         slot_id, &mut buffer, USB_CONFIGURATION_HEADER_LENGTH
     ) { return false; }
 
-    let base = buffer.virtual_address as *const u8;
+    let base = buffer_virtual as *const u8;
     let length = xhci_configuration_read8(base, 0);
     let descriptor_type = xhci_configuration_read8(base, 1);
     let total_length = xhci_configuration_read16(base, 2);
@@ -328,14 +451,15 @@ pub fn xhci_probe_configuration_header_for_slot(slot_id: u8) -> bool {
        total_length < USB_CONFIGURATION_HEADER_LENGTH ||
        (total_length as u64) > XHCI_CONFIGURATION_DMA_SIZE ||
        configuration_value == 0 {
-        xhci_configuration_release_temporary(&mut buffer);
+        xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch);
         return false;
     }
     if !xhci_configuration_state_is_current(slot_id) {
-        xhci_configuration_release_temporary(&mut buffer);
+        xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch);
         return false;
     }
-    if !xhci_configuration_release_temporary(&mut buffer) { return false; }
+    if !xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_configuration_state_is_current(slot_id) { return false; }
 
     unsafe {
         XHCI_CONFIGURATION_STATES[index].header_total_length = total_length;
@@ -392,11 +516,13 @@ pub fn xhci_read_configuration_full_for_slot(slot_id: u8) -> bool {
         return false;
     }
     let index = xhci_configuration_index(slot_id);
+    let epoch = xhci_device_table_slot_epoch(slot_id);
+    if epoch == 0 { return false; }
     unsafe {
+        if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
         XHCI_CONFIGURATION_STATES[index].full_ready = false;
         XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
         XHCI_CONFIGURATION_STATES[index].full_value = 0;
-        XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
     }
     if !xhci_configuration_invalidate_after_full(slot_id) { return false; }
 
@@ -410,21 +536,35 @@ pub fn xhci_read_configuration_full_for_slot(slot_id: u8) -> bool {
 
     let mut buffer = dma_alloc(XHCI_CONFIGURATION_DMA_SIZE, XHCI_CONFIGURATION_DMA_SIZE);
     if !dma_buffer_cpu_owned(&buffer) { return false; }
-    if !xhci_configuration_zero(buffer.virtual_address, total_length as u64) { return false; }
-    if !dma_share_with_device(&mut buffer) { return false; }
+    if !xhci_configuration_zero(buffer.virtual_address, total_length as u64) {
+        xhci_configuration_release_temporary(&mut buffer);
+        return false;
+    }
+    if !dma_share_with_device(&mut buffer) {
+        xhci_configuration_release_temporary(&mut buffer);
+        return false;
+    }
+    let buffer_virtual = buffer.virtual_address;
+    if !xhci_configuration_publish_candidate_buffer(slot_id, epoch, buffer) {
+        xhci_configuration_release_temporary(&mut buffer);
+        return false;
+    }
     if !xhci_configuration_fetch_for_slot(slot_id, &mut buffer, total_length) { return false; }
 
-    let base = buffer.virtual_address as *const u8;
+    let base = buffer_virtual as *const u8;
     if xhci_configuration_read8(base, 0) < (USB_CONFIGURATION_HEADER_LENGTH as u8) ||
        xhci_configuration_read8(base, 1) != USB_DESCRIPTOR_TYPE_CONFIGURATION ||
        xhci_configuration_read16(base, 2) != total_length ||
        xhci_configuration_read8(base, 5) != configuration_value {
+        xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch);
         return false;
     }
-    if !xhci_configuration_state_is_current(slot_id) { return false; }
+    if !xhci_configuration_state_is_current(slot_id) {
+        xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch);
+        return false;
+    }
 
     unsafe {
-        XHCI_CONFIGURATION_STATES[index].buffer = buffer;
         XHCI_CONFIGURATION_STATES[index].full_total_length = total_length;
         XHCI_CONFIGURATION_STATES[index].full_value = configuration_value;
         XHCI_CONFIGURATION_STATES[index].full_ready = true;
@@ -773,6 +913,100 @@ pub fn xhci_configuration_release_persistent_for_epoch(slot_id: u8,
 pub fn xhci_configuration_persistent_release_complete_for(slot_id: u8,
                                                            epoch: u32) -> bool {
     if !xhci_configuration_epoch_matches(slot_id, epoch) { return false; }
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] == epoch &&
+               XHCI_CONFIGURATION_RELEASED_EPOCHS[index] == epoch &&
+               !XHCI_CONFIGURATION_STATES[index].header_ready &&
+               XHCI_CONFIGURATION_STATES[index].header_total_length == 0 &&
+               XHCI_CONFIGURATION_STATES[index].header_value == 0 &&
+               !XHCI_CONFIGURATION_STATES[index].full_ready &&
+               XHCI_CONFIGURATION_STATES[index].full_total_length == 0 &&
+               XHCI_CONFIGURATION_STATES[index].full_value == 0 &&
+               !XHCI_CONFIGURATION_STATES[index].ready &&
+               XHCI_CONFIGURATION_STATES[index].value == 0 &&
+               XHCI_CONFIGURATION_STATES[index].total_length == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_interface_number == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_protocol == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_endpoint_address == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval == 0 &&
+               XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length == 0 &&
+               !XHCI_CONFIGURATION_STATES[index].buffer.valid;
+    }
+}
+
+// Recovery de enumeração parcial. Só pode ser chamado depois de Disable Slot
+// confirmado pelo orquestrador; por isso FAILED é a barreira lógica exigida.
+@system
+pub fn xhci_configuration_release_failed_for_epoch(slot_id: u8,
+                                                    epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    let index = xhci_configuration_index(slot_id);
+    if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
+    if xhci_configuration_failed_release_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        if XHCI_CONFIGURATION_STATES[index].epoch != epoch {
+            if XHCI_CONFIGURATION_STATES[index].buffer.valid { return false; }
+            // Falha pode ocorrer antes de Configuration state ter sido iniciado.
+            XHCI_CONFIGURATION_STATES[index].epoch = epoch;
+            XHCI_CONFIGURATION_STATES[index].header_ready = false;
+            XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
+            XHCI_CONFIGURATION_STATES[index].header_value = 0;
+            XHCI_CONFIGURATION_STATES[index].full_ready = false;
+            XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
+            XHCI_CONFIGURATION_STATES[index].full_value = 0;
+            XHCI_CONFIGURATION_STATES[index].ready = false;
+            XHCI_CONFIGURATION_STATES[index].value = 0;
+            XHCI_CONFIGURATION_STATES[index].total_length = 0;
+            XHCI_CONFIGURATION_STATES[index].hid_interface_number = 0;
+            XHCI_CONFIGURATION_STATES[index].hid_protocol = 0;
+            XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = 0;
+            XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = 0;
+            XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
+            XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
+            XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+        }
+        XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] = epoch;
+    }
+    if !xhci_configuration_failed_epoch_matches(slot_id, epoch) { return false; }
+    if !xhci_configuration_release_current_buffer_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_configuration_failed_epoch_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        XHCI_CONFIGURATION_STATES[index].header_ready = false;
+        XHCI_CONFIGURATION_STATES[index].header_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].header_value = 0;
+        XHCI_CONFIGURATION_STATES[index].full_ready = false;
+        XHCI_CONFIGURATION_STATES[index].full_total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].full_value = 0;
+        XHCI_CONFIGURATION_STATES[index].ready = false;
+        XHCI_CONFIGURATION_STATES[index].value = 0;
+        XHCI_CONFIGURATION_STATES[index].total_length = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_interface_number = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_protocol = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_address = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_max_packet = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_endpoint_interval = 0;
+        XHCI_CONFIGURATION_STATES[index].hid_report_descriptor_length = 0;
+        XHCI_CONFIGURATION_STATES[index].buffer = dma_invalid_buffer();
+        XHCI_CONFIGURATION_RELEASE_STARTED_EPOCHS[index] = epoch;
+        XHCI_CONFIGURATION_RELEASED_EPOCHS[index] = epoch;
+    }
+    return xhci_configuration_failed_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_configuration_failed_release_complete_for(slot_id: u8,
+                                                       epoch: u32) -> bool {
+    if !xhci_configuration_failed_epoch_matches(slot_id, epoch) { return false; }
     let index = xhci_configuration_index(slot_id);
     if index >= XHCI_CONFIGURATION_SLOT_CAPACITY { return false; }
     unsafe {
