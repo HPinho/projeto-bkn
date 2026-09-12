@@ -1,0 +1,213 @@
+// Baken OS — HID-4d.3c3: orquestracao do teardown fisico do endpoint HID.
+//
+// Esta camada fica deliberadamente acima de lifecycle/configure-endpoint/context.
+// Ela nao possui primitiva DMA nem emite comandos novos: apenas encadeia as
+// provas ja certificadas 3b -> 3c1 -> 3c2 para o mesmo slot_id + epoch e publica
+// endpoint_teardown_complete de forma SMP-safe e retry-safe.
+//
+// Disable Slot, DCBAA, arena Device/Input/EP0 e reuse fisico de Slot ID ficam
+// explicitamente fora desta etapa.
+
+module kernel::drivers::xhci_hid_teardown;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::drivers::xhci_device_table::*;
+import kernel::drivers::xhci_hid_context::*;
+import kernel::drivers::xhci_configure_endpoint::*;
+import kernel::drivers::xhci_hid_lifecycle::*;
+
+pub const XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY: usize = XHCI_DEVICE_SLOT_CAPACITY;
+
+pub struct XhciHidEndpointTeardownState {
+    pub valid: bool;
+    pub epoch: u32;
+    pub started: bool;
+    pub complete: bool;
+}
+
+static mut XHCI_HID_ENDPOINT_TEARDOWN_STATES:
+    [XhciHidEndpointTeardownState; XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY] = [
+    XhciHidEndpointTeardownState {
+        valid: false,
+        epoch: 0,
+        started: false,
+        complete: false
+    };
+    XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY
+];
+static mut XHCI_HID_ENDPOINT_TEARDOWN_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+
+@system
+fn xhci_hid_teardown_index(slot_id: u8) -> usize {
+    if slot_id == 0 { return XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY; }
+    return slot_id as usize;
+}
+
+@system
+fn xhci_hid_teardown_lock_irq() -> u64 {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut XHCI_HID_ENDPOINT_TEARDOWN_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+    }
+    return flags;
+}
+
+@system
+fn xhci_hid_teardown_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut XHCI_HID_ENDPOINT_TEARDOWN_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+// Gate comum de 3c3. O Slot ID permanece reservado na device table durante toda
+// esta etapa; portanto a identidade fisica e logica precisa continuar exatamente
+// em DETACH_PENDING + epoch esperado e o teardown logico 3b ja deve estar fechado.
+@system
+fn xhci_hid_teardown_epoch_ready(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_DETACH_PENDING {
+        return false;
+    }
+    return xhci_hid_lifecycle_logical_teardown_complete_for(slot_id, epoch);
+}
+
+// Publica apenas o inicio logico da orquestracao. O lock nao atravessa Configure
+// Endpoint nem dma_release: as primitivas 3c1/3c2 possuem suas proprias garantias
+// de serializacao/idempotencia e podem ser chamadas por CPUs concorrentes sem
+// criar lock recursivo entre Command Ring e lifecycle teardown.
+@system
+fn xhci_hid_teardown_begin_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_teardown_epoch_ready(slot_id, epoch) { return false; }
+    let index = xhci_hid_teardown_index(slot_id);
+    if index >= XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY { return false; }
+
+    let flags = xhci_hid_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut begin_ok = xhci_hid_teardown_epoch_ready(slot_id, epoch);
+    unsafe {
+        if begin_ok {
+            if XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid &&
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch != epoch {
+                // Um tombstone anterior so pode ser substituido depois de ter
+                // chegado a complete. O barrier/reuse real continua em 4d.5.
+                if !XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].complete {
+                    begin_ok = false;
+                } else {
+                    XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid = true;
+                    XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch = epoch;
+                    XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].started = false;
+                    XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].complete = false;
+                }
+            } else if !XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid {
+                XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid = true;
+                XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch = epoch;
+                XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].started = false;
+                XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].complete = false;
+            }
+
+            if begin_ok {
+                if XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch != epoch {
+                    begin_ok = false;
+                } else {
+                    XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].started = true;
+                }
+            }
+        }
+    }
+
+    xhci_hid_teardown_unlock_irq(flags);
+    return begin_ok;
+}
+
+// A publicacao final revalida software + prova fisica. O bool complete nunca e
+// suficiente sozinho: queries posteriores continuam exigindo Drop/Disabled e o
+// tombstone de Transfer Ring liberado para o mesmo epoch.
+@system
+fn xhci_hid_teardown_publish_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_teardown_epoch_ready(slot_id, epoch) { return false; }
+    let index = xhci_hid_teardown_index(slot_id);
+    if index >= XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY { return false; }
+
+    let flags = xhci_hid_teardown_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut publish_ok = xhci_hid_teardown_epoch_ready(slot_id, epoch) &&
+        xhci_configure_endpoint_drop_complete_for(slot_id, epoch) &&
+        xhci_hid_context_ring_release_complete_for(slot_id, epoch);
+
+    unsafe {
+        if publish_ok {
+            if !XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid ||
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch != epoch ||
+               !XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].started {
+                publish_ok = false;
+            } else {
+                XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].complete = true;
+            }
+        }
+    }
+
+    xhci_hid_teardown_unlock_irq(flags);
+    return publish_ok;
+}
+
+@system
+pub fn xhci_hid_teardown_endpoint_started_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_teardown_epoch_ready(slot_id, epoch) { return false; }
+    let index = xhci_hid_teardown_index(slot_id);
+    if index >= XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid &&
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch == epoch &&
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].started;
+    }
+}
+
+@system
+pub fn xhci_hid_teardown_endpoint_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_teardown_epoch_ready(slot_id, epoch) ||
+       !xhci_configure_endpoint_drop_complete_for(slot_id, epoch) ||
+       !xhci_hid_context_ring_release_complete_for(slot_id, epoch) {
+        return false;
+    }
+    let index = xhci_hid_teardown_index(slot_id);
+    if index >= XHCI_HID_ENDPOINT_TEARDOWN_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].valid &&
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].epoch == epoch &&
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].started &&
+               XHCI_HID_ENDPOINT_TEARDOWN_STATES[index].complete;
+    }
+}
+
+// HID-4d.3c3: orquestrador retry-safe. Nao segura o lock de publicacao durante
+// 3c1 ou 3c2. Repeticoes concorrentes convergem porque Drop Endpoint e ring
+// release ja sao idempotentes/exact-epoch em suas camadas proprietarias.
+@system
+pub fn xhci_hid_teardown_endpoint_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_hid_teardown_begin_for(slot_id, epoch) { return false; }
+    if xhci_hid_teardown_endpoint_complete_for(slot_id, epoch) { return true; }
+
+    if !xhci_configure_endpoint_drop_complete_for(slot_id, epoch) {
+        if !xhci_configure_endpoint_drop_hid_for_slot(slot_id, epoch) {
+            return false;
+        }
+    }
+    if !xhci_configure_endpoint_drop_complete_for(slot_id, epoch) { return false; }
+
+    if !xhci_hid_context_ring_release_complete_for(slot_id, epoch) {
+        if !xhci_hid_lifecycle_release_transfer_ring_for(slot_id, epoch) {
+            return false;
+        }
+    }
+    if !xhci_hid_context_ring_release_complete_for(slot_id, epoch) { return false; }
+
+    return xhci_hid_teardown_publish_complete_for(slot_id, epoch);
+}
