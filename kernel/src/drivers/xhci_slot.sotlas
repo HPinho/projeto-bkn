@@ -25,11 +25,7 @@ pub fn xhci_slot_enable_port(port_id: u8, slot_type: u8) -> u8 {
     if xhci_device_table_find_slot_for_port(port_id) != 0 { return 0; }
 
     let command = xhci_trb_enable_slot(slot_type, xhci_command_producer_cycle());
-    let command_physical = xhci_command_submit(command);
-    if command_physical == 0 { return 0; }
-    if !xhci_command_wait_completion(command_physical) { return 0; }
-
-    let slot_id = xhci_command_last_slot_id();
+    let slot_id = xhci_command_execute_capture_slot(command);
     let max_slots = xhci_controller_max_slots();
     if slot_id == 0 || max_slots == 0 || slot_id > max_slots { return 0; }
     if !xhci_device_table_reserve(slot_id, port_id, slot_type) { return 0; }
