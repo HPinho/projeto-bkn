@@ -118,20 +118,20 @@ class XhciHidLifecycleTests(unittest.TestCase):
             "xhci_hid_context_dci_for(slot_id)",
             "xhci_hid_report_transfer_pending_for_epoch(slot_id, epoch)",
             "xhci_trb_stop_endpoint(",
-            "xhci_command_submit(command)",
-            "xhci_command_wait_completion(command_physical)",
-            "xhci_command_last_slot_id() != slot_id",
+            "xhci_command_execute(command, slot_id)",
             "xhci_hid_report_drain_cancelled_for_slot(slot_id)",
             "xhci_hid_lifecycle_quiescent_for(slot_id, epoch)",
             "XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = true",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("xhci_command_submit(command)", body)
+        self.assertNotIn("xhci_command_wait_completion(command_physical)", body)
+        self.assertNotIn("xhci_command_last_slot_id()", body)
         self.assertNotIn("xhci_hid_report_transfer_pending_for(slot_id)", body)
         assert_order(
             self,
             body,
-            "xhci_command_submit(command)",
-            "xhci_command_wait_completion(command_physical)",
+            "xhci_command_execute(command, slot_id)",
             "xhci_hid_report_drain_cancelled_for_slot(slot_id)",
             "xhci_hid_lifecycle_quiescent_for(slot_id, epoch)",
             "XHCI_HID_LIFECYCLE_STATES[index].endpoint_stopped = true",
