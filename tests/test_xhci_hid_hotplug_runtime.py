@@ -44,7 +44,7 @@ class XhciHidHotplugRuntimeTests(unittest.TestCase):
         cls.service = function_body(
             cls.hotplug, "platform_hid_hotplug_service_once"
         )
-        cls.run = function_body(cls.runtime, "baken_native_runtime_run")
+        cls.runtime_run = function_body(cls.runtime, "baken_native_runtime_run")
 
     def test_hotplug_uses_only_certified_owner_apis(self):
         required = (
@@ -141,8 +141,8 @@ class XhciHidHotplugRuntimeTests(unittest.TestCase):
 
     def test_runtime_loop_services_hotplug_opportunistically(self):
         self.assertIn("import kernel::platform::hid_hotplug::*;", self.runtime)
-        self.assertIn("platform_hid_hotplug_service_once();", self.run)
-        self.assertNotIn("if !platform_hid_hotplug_service_once()", self.run)
+        self.assertIn("platform_hid_hotplug_service_once();", self.runtime_run)
+        self.assertNotIn("if !platform_hid_hotplug_service_once()", self.runtime_run)
 
     def test_hotplug_adds_no_second_event_consumer_command_or_dma_owner(self):
         forbidden = (
