@@ -3,7 +3,7 @@
 // Cada slot recebe uma única arena DMA de três páginas: Device Context, Input
 // Context e EP0 Transfer Ring. HID-4d.4b libera essa arena exatamente uma vez,
 // somente depois de Disable Slot confirmado pela camada superior. A entrada da
-// device table e o epoch permanecem vivos até o Event Ring barrier de 4d.5.
+// device table e o epoch permanecem vivos até a finalização registry/reuse 4d.5.
 
 module kernel::drivers::xhci_context;
 
@@ -208,6 +208,74 @@ pub fn xhci_context_clear_dcbaa_for_epoch(slot_id: u8, epoch: u32) -> bool {
     return cleared != XHCI_CONTEXT_DCBAA_INVALID && cleared == 0;
 }
 
+// Prepare rollback only: the controller has not received Address Device yet.
+// If DCBAA was published, remove that hardware-visible pointer first. A mismatch
+// fails closed because freeing an arena referenced by another owner is worse
+// than leaking the candidate arena.
+@system
+fn xhci_context_restore_dcbaa_after_prepare_failure(slot_id: u8,
+                                                     device_physical: u64) -> bool {
+    if slot_id == 0 || device_physical == 0 { return false; }
+    let observed = xhci_context_dcbaa_slot_value(slot_id);
+    if observed == XHCI_CONTEXT_DCBAA_INVALID { return false; }
+    if observed == 0 { return true; }
+    if observed != device_physical { return false; }
+
+    let dcbaa_physical = xhci_runtime_dcbaa_physical();
+    if dcbaa_physical == 0 { return false; }
+    let dcbaa_virtual = direct_map_virtual_address(dcbaa_physical);
+    if dcbaa_virtual == 0 { return false; }
+    let offset = (slot_id as u64) * 8;
+    unsafe { *((dcbaa_virtual + offset) as *mut u64) = 0; }
+    if x86_read_cr3_raw() == 0 { return false; }
+    let cleared = xhci_context_dcbaa_slot_value(slot_id);
+    return cleared != XHCI_CONTEXT_DCBAA_INVALID && cleared == 0;
+}
+
+@system
+fn xhci_context_release_unpublished_arena(buffer: DmaBuffer) -> bool {
+    let mut rollback = buffer;
+    if !rollback.valid { return true; }
+    if !dma_buffer_cpu_owned(&rollback) { return false; }
+    return dma_release(&mut rollback);
+}
+
+@system
+fn xhci_context_rollback_published_dcbaa(slot_id: u8,
+                                         device_physical: u64,
+                                         buffer: DmaBuffer,
+                                         shared: bool) -> bool {
+    let mut rollback = buffer;
+    if !rollback.valid { return false; }
+    if !xhci_context_restore_dcbaa_after_prepare_failure(slot_id, device_physical) {
+        return false;
+    }
+    if shared {
+        if !dma_buffer_shared(&rollback) || !dma_unshare_from_device(&mut rollback) {
+            return false;
+        }
+    }
+    if !dma_buffer_cpu_owned(&rollback) { return false; }
+    return dma_release(&mut rollback);
+}
+
+@system
+fn xhci_context_reset_unpublished_record(index: usize, epoch: u32) -> bool {
+    if index >= XHCI_CONTEXT_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        if XHCI_CONTEXTS[index].epoch != epoch || XHCI_CONTEXTS[index].ready {
+            return false;
+        }
+        XHCI_CONTEXTS[index].context_size = 0;
+        XHCI_CONTEXTS[index].arena = dma_invalid_buffer();
+        XHCI_CONTEXTS[index].device_physical = 0;
+        XHCI_CONTEXTS[index].input_physical = 0;
+        XHCI_CONTEXTS[index].ep0_ring_physical = 0;
+        XHCI_CONTEXTS[index].ep0_max_packet = 0;
+    }
+    return true;
+}
+
 @system
 pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
     if !xhci_controller_is_ready() || !xhci_runtime_is_ready() ||
@@ -238,21 +306,36 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
     if context_size != 32 && context_size != 64 { return false; }
     let speed_id = unsafe { (*snapshot).speed_id };
     let max_packet = xhci_context_compute_ep0_max_packet(speed_id);
-    if max_packet == 0 { return false; }
+    if max_packet == 0 || x86_read_cr3_raw() == 0 { return false; }
+
+    // A fresh Enable Slot must not inherit a stale DCBAA pointer. Refuse to
+    // allocate until the slot entry is provably zero.
+    let dcbaa_before = xhci_context_dcbaa_slot_value(slot_id);
+    if dcbaa_before == XHCI_CONTEXT_DCBAA_INVALID || dcbaa_before != 0 {
+        return false;
+    }
 
     let mut arena = dma_alloc(XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE,
                               XHCI_CONTEXT_PAGE_SIZE);
-    if !dma_buffer_cpu_owned(&arena) || !xhci_context_zero(arena.virtual_address, arena.size) {
+    if !dma_buffer_cpu_owned(&arena) { return false; }
+    if !xhci_context_zero(arena.virtual_address, arena.size) {
+        xhci_context_release_unpublished_arena(arena);
         return false;
     }
     let device = xhci_context_subbuffer(&arena, XHCI_DEVICE_CONTEXT_PAGE);
     let input = xhci_context_subbuffer(&arena, XHCI_INPUT_CONTEXT_PAGE);
     let ep0_ring_buffer = xhci_context_subbuffer(&arena, XHCI_EP0_RING_PAGE);
     if !dma_buffer_cpu_owned(&device) || !dma_buffer_cpu_owned(&input) ||
-       !dma_buffer_cpu_owned(&ep0_ring_buffer) { return false; }
+       !dma_buffer_cpu_owned(&ep0_ring_buffer) {
+        xhci_context_release_unpublished_arena(arena);
+        return false;
+    }
 
     let ep0_ring = xhci_ring_bind(ep0_ring_buffer, XHCI_EP0_RING_TRBS);
-    if !xhci_ring_is_ready(&ep0_ring) { return false; }
+    if !xhci_ring_is_ready(&ep0_ring) {
+        xhci_context_release_unpublished_arena(arena);
+        return false;
+    }
     let link_index = XHCI_EP0_RING_TRBS - 1;
     unsafe {
         let link_address = (ep0_ring.virtual_base as usize) + ((link_index as usize) * 16);
@@ -260,7 +343,10 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
     }
 
     if !xhci_context_write32(input.virtual_address, 4,
-        XHCI_INPUT_CONTROL_ADD_SLOT | XHCI_INPUT_CONTROL_ADD_EP0) { return false; }
+        XHCI_INPUT_CONTROL_ADD_SLOT | XHCI_INPUT_CONTROL_ADD_EP0) {
+        xhci_context_release_unpublished_arena(arena);
+        return false;
+    }
     let slot_context_offset = context_size as u64;
     let ep0_context_offset = (context_size as u64) * 2;
     let slot_dw0 = (1 << XHCI_SLOT_CONTEXT_ENTRIES_SHIFT) |
@@ -268,6 +354,7 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
     let slot_dw1 = (port_id as u32) << XHCI_SLOT_CONTEXT_ROOT_PORT_SHIFT;
     if !xhci_context_write32(input.virtual_address, slot_context_offset, slot_dw0) ||
        !xhci_context_write32(input.virtual_address, slot_context_offset + 4, slot_dw1) {
+        xhci_context_release_unpublished_arena(arena);
         return false;
     }
     let ep0_dw1 = (XHCI_EP_CONTEXT_CERR_3 << XHCI_EP_CONTEXT_CERR_SHIFT) |
@@ -277,13 +364,25 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
        !xhci_context_write64(input.virtual_address, ep0_context_offset + 8,
            ep0_ring.physical_base | XHCI_TR_DEQUEUE_DCS) ||
        !xhci_context_write32(input.virtual_address, ep0_context_offset + 16, 8) {
+        xhci_context_release_unpublished_arena(arena);
         return false;
     }
-    if !xhci_context_write_dcbaa_slot(slot_id, device.physical_address) { return false; }
-    if !dma_share_with_device(&mut arena) { return false; }
 
+    // DCBAA is the first hardware-visible publication. From here every failure
+    // must restore it to zero before the arena can be unshared or released.
+    if !xhci_context_write_dcbaa_slot(slot_id, device.physical_address) {
+        xhci_context_rollback_published_dcbaa(slot_id, device.physical_address, arena, false);
+        return false;
+    }
+    if !dma_share_with_device(&mut arena) {
+        xhci_context_rollback_published_dcbaa(slot_id, device.physical_address, arena, false);
+        return false;
+    }
+
+    // Publish ownership first, but keep ready=false. Consumers cannot obtain any
+    // physical context pointer until the exact device-table transition succeeds.
     unsafe {
-        XHCI_CONTEXTS[index].ready = true;
+        XHCI_CONTEXTS[index].ready = false;
         XHCI_CONTEXTS[index].epoch = epoch;
         XHCI_CONTEXTS[index].context_size = context_size;
         XHCI_CONTEXTS[index].arena = arena;
@@ -293,8 +392,13 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
         XHCI_CONTEXTS[index].ep0_max_packet = max_packet;
     }
     if !xhci_device_table_set_state(slot_id, epoch, XHCI_DEVICE_STATE_CONTEXT_READY) {
+        if !xhci_context_reset_unpublished_record(index, epoch) {
+            return false;
+        }
+        xhci_context_rollback_published_dcbaa(slot_id, device.physical_address, arena, true);
         return false;
     }
+    unsafe { XHCI_CONTEXTS[index].ready = true; }
     return true;
 }
 
