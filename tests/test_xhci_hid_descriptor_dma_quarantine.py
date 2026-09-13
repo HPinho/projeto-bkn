@@ -110,16 +110,22 @@ class XhciHidDescriptorDmaQuarantineTests(unittest.TestCase):
         self.assertNotIn("dma_unshare_from_device", self.fetch)
         self.assertNotIn("xhci_hid_descriptor_release_temporary", self.fetch)
 
-    def test_prepublication_failures_release_candidate(self):
+    def test_prepublication_failures_release_candidate_but_fetch_does_not(self):
         zero = self.probe.index("xhci_hid_descriptor_zero")
         first_release = self.probe.index("xhci_hid_descriptor_release_temporary")
         share = self.probe.index("dma_share_with_device(&mut buffer)")
         publish = self.probe.index("xhci_hid_descriptor_publish_candidate_buffer")
+        fetch = self.probe.index("xhci_hid_descriptor_fetch_for_slot(")
         self.assertLess(zero, first_release)
         self.assertLess(first_release, share)
         self.assertLess(share, publish)
-        post_publish = self.probe[publish:]
-        self.assertNotIn("xhci_hid_descriptor_release_temporary", post_publish)
+        self.assertLess(publish, fetch)
+        self.assertEqual(
+            self.probe[:fetch].count("xhci_hid_descriptor_release_temporary"), 3
+        )
+        self.assertNotIn(
+            "xhci_hid_descriptor_release_temporary", self.probe[fetch:]
+        )
 
     def test_successful_descriptor_initialization_is_retry_idempotent(self):
         ready = self.initialize.index("xhci_hid_descriptor_is_ready_for(slot_id)")
