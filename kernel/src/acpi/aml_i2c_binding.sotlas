@@ -1,0 +1,396 @@
+// Baken OS — I2C-0b: binding ACPI read-only de ResourceSource/controller e preparação HID-over-I2C.
+// Consome namespace/discovery já publicados; não executa Method/_DSM e não toca hardware.
+module kernel::acpi::aml_i2c_binding;
+
+import kernel::acpi::aml_decoder::*;
+import kernel::acpi::aml_data::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_i2c_resources::*;
+
+pub const AML_I2C_NAME_DSM: u32 = 0x4D53445F;
+pub const AML_I2C_HID_DSM_GUID_DATA1: u32 = 0x3CDFF6F7;
+pub const AML_I2C_HID_DSM_GUID_DATA2: u16 = 0x4267;
+pub const AML_I2C_HID_DSM_GUID_DATA3: u16 = 0x4555;
+pub const AML_I2C_HID_DSM_GUID_DATA4_0: u8 = 0xAD;
+pub const AML_I2C_HID_DSM_GUID_DATA4_1: u8 = 0x05;
+pub const AML_I2C_HID_DSM_GUID_DATA4_2: u8 = 0xB3;
+pub const AML_I2C_HID_DSM_GUID_DATA4_3: u8 = 0x0A;
+pub const AML_I2C_HID_DSM_GUID_DATA4_4: u8 = 0x3D;
+pub const AML_I2C_HID_DSM_GUID_DATA4_5: u8 = 0x89;
+pub const AML_I2C_HID_DSM_GUID_DATA4_6: u8 = 0x38;
+pub const AML_I2C_HID_DSM_GUID_DATA4_7: u8 = 0xDE;
+pub const AML_I2C_HID_DSM_REVISION: u64 = 1;
+pub const AML_I2C_HID_DSM_FUNCTION_QUERY: u64 = 0;
+pub const AML_I2C_HID_DSM_FUNCTION_DESCRIPTOR_ADDRESS: u64 = 1;
+pub const AML_I2C_INVALID_RESOURCE_INDEX: usize = AML_DISCOVERY_MAX_RESOURCES;
+
+pub struct AmlI2cAcpiBinding {
+    pub resource_index: usize;
+    pub device_slot: usize;
+    pub namespace_index: usize;
+    pub controller_namespace_index: usize;
+    pub resource_source_index: u8;
+    pub slave_address: u16;
+    pub connection_speed_hz: u32;
+    pub ten_bit_addressing: bool;
+    pub device_initiated: bool;
+    pub gpio_resource_index: usize;
+    pub gpio_resource_count: usize;
+    pub gpio_controller_namespace_index: usize;
+    pub gpio_pin_count: usize;
+    pub gpio_consumer: bool;
+    pub cid_requires_evaluator: bool;
+    pub pnp0c50_static: bool;
+    pub dsm_method_index: usize;
+    pub dsm_method_present: bool;
+    // Somente preparação estática. _HRV e execução/query de _DSM ficam em I2C-HID-0.
+    pub hid_transport_prepared: bool;
+    pub valid: bool;
+}
+
+@system
+fn aml_i2c_binding_invalid() -> AmlI2cAcpiBinding {
+    return AmlI2cAcpiBinding {
+        resource_index: AML_I2C_INVALID_RESOURCE_INDEX,
+        device_slot: 0,
+        namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        resource_source_index: 0,
+        slave_address: 0,
+        connection_speed_hz: 0,
+        ten_bit_addressing: false,
+        device_initiated: false,
+        gpio_resource_index: AML_I2C_INVALID_RESOURCE_INDEX,
+        gpio_resource_count: 0,
+        gpio_controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        gpio_pin_count: 0,
+        gpio_consumer: false,
+        cid_requires_evaluator: false,
+        pnp0c50_static: false,
+        dsm_method_index: AML_NAMESPACE_INVALID_INDEX,
+        dsm_method_present: false,
+        hid_transport_prepared: false,
+        valid: false
+    };
+}
+
+@system
+fn aml_i2c_source_lead_char(value: u8) -> bool {
+    return value == '_' as u8 || (value >= 'A' as u8 && value <= 'Z' as u8);
+}
+
+@system
+fn aml_i2c_source_name_char(value: u8) -> bool {
+    return aml_i2c_source_lead_char(value) ||
+        (value >= '0' as u8 && value <= '9' as u8);
+}
+
+@system
+fn aml_i2c_source_segment(data: *const u8, start: usize, length: usize) -> u32 {
+    if data == (null as *const u8) || length != 4 { return 0; }
+    unsafe {
+        let a = data[start];
+        let b = data[start + 1];
+        let c = data[start + 2];
+        let d = data[start + 3];
+        if !aml_i2c_source_lead_char(a) || !aml_i2c_source_name_char(b) ||
+           !aml_i2c_source_name_char(c) || !aml_i2c_source_name_char(d) {
+            return 0;
+        }
+        return (a as u32) | ((b as u32) << 8) |
+            ((c as u32) << 16) | ((d as u32) << 24);
+    }
+}
+
+@system
+fn aml_i2c_namespace_parent(index: usize) -> usize {
+    let node = aml_namespace_node(index);
+    if node == (null as *const AmlNamespaceNode) { return AML_NAMESPACE_INVALID_INDEX; }
+    unsafe { return (*node).parent; }
+}
+
+@system
+fn aml_i2c_namespace_walk(base: usize, segments: *const u32,
+                          segment_count: usize) -> usize {
+    if segments == (null as *const u32) || segment_count == 0 ||
+       segment_count > AML_NAME_MAX_SEGMENTS {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    let mut current = base;
+    let mut index: usize = 0;
+    while index < segment_count {
+        let segment = unsafe { segments[index] };
+        if segment == 0 { return AML_NAMESPACE_INVALID_INDEX; }
+        current = aml_namespace_find_child(current, segment);
+        if current == AML_NAMESPACE_INVALID_INDEX { return AML_NAMESPACE_INVALID_INDEX; }
+        index += 1;
+    }
+    return current;
+}
+
+@system
+fn aml_i2c_controller_node_valid(index: usize) -> bool {
+    let node = aml_namespace_node(index);
+    if node == (null as *const AmlNamespaceNode) { return false; }
+    unsafe { return (*node).valid && (*node).kind == AML_NAMESPACE_KIND_DEVICE; }
+}
+
+@system
+pub fn aml_i2c_resolve_resource_source(device_slot: usize,
+                                       source: *const u8,
+                                       source_length: usize) -> usize {
+    if source == (null as *const u8) || source_length == 0 ||
+       source_length > AML_DATA_MAX_STRING_BYTES ||
+       !aml_namespace_is_ready() || !aml_discovery_is_ready() {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+    let device = aml_discovery_device(device_slot);
+    if device == (null as *const AmlDiscoveredDevice) {
+        return AML_NAMESPACE_INVALID_INDEX;
+    }
+
+    let mut offset: usize = 0;
+    let mut rooted = false;
+    let mut parent_prefixes: usize = 0;
+    unsafe {
+        if source[0] == '\\' as u8 {
+            rooted = true;
+            offset = 1;
+        } else {
+            while offset < source_length && source[offset] == '^' as u8 {
+                parent_prefixes += 1;
+                offset += 1;
+                if parent_prefixes > AML_NAME_MAX_SEGMENTS {
+                    return AML_NAMESPACE_INVALID_INDEX;
+                }
+            }
+        }
+    }
+    if offset >= source_length { return AML_NAMESPACE_INVALID_INDEX; }
+
+    let mut segments: [u32; AML_NAME_MAX_SEGMENTS] = [0; AML_NAME_MAX_SEGMENTS];
+    let mut segment_count: usize = 0;
+    while offset < source_length {
+        if segment_count >= AML_NAME_MAX_SEGMENTS { return AML_NAMESPACE_INVALID_INDEX; }
+        let start = offset;
+        unsafe {
+            while offset < source_length && source[offset] != '.' as u8 { offset += 1; }
+        }
+        let segment = aml_i2c_source_segment(source, start, offset - start);
+        if segment == 0 { return AML_NAMESPACE_INVALID_INDEX; }
+        segments[segment_count] = segment;
+        segment_count += 1;
+        if offset < source_length {
+            offset += 1;
+            if offset >= source_length { return AML_NAMESPACE_INVALID_INDEX; }
+        }
+    }
+    if segment_count == 0 { return AML_NAMESPACE_INVALID_INDEX; }
+
+    let mut base: usize = 0;
+    unsafe { base = if rooted { 0 } else { (*device).namespace_index }; }
+    if base == AML_NAMESPACE_INVALID_INDEX { return AML_NAMESPACE_INVALID_INDEX; }
+
+    if parent_prefixes != 0 {
+        let mut parents = parent_prefixes;
+        while parents > 0 {
+            if base == 0 { return AML_NAMESPACE_INVALID_INDEX; }
+            base = aml_i2c_namespace_parent(base);
+            if base == AML_NAMESPACE_INVALID_INDEX { return AML_NAMESPACE_INVALID_INDEX; }
+            parents -= 1;
+        }
+        let exact = aml_i2c_namespace_walk(base, &segments[0], segment_count);
+        if !aml_i2c_controller_node_valid(exact) { return AML_NAMESPACE_INVALID_INDEX; }
+        return exact;
+    }
+
+    if rooted {
+        let exact = aml_i2c_namespace_walk(0, &segments[0], segment_count);
+        if !aml_i2c_controller_node_valid(exact) { return AML_NAMESPACE_INVALID_INDEX; }
+        return exact;
+    }
+
+    // Sem prefixo: aplica namespace search rules subindo de escopo em escopo.
+    let mut search_scope = base;
+    let mut searching = true;
+    while searching {
+        let found = aml_i2c_namespace_walk(search_scope, &segments[0], segment_count);
+        if aml_i2c_controller_node_valid(found) { return found; }
+        if search_scope == 0 {
+            searching = false;
+        } else {
+            search_scope = aml_i2c_namespace_parent(search_scope);
+            if search_scope == AML_NAMESPACE_INVALID_INDEX {
+                return AML_NAMESPACE_INVALID_INDEX;
+            }
+        }
+    }
+    return AML_NAMESPACE_INVALID_INDEX;
+}
+
+@system
+fn aml_i2c_bytes_are_pnp0c50(data: *const u8, length: usize) -> bool {
+    if data == (null as *const u8) || length != 7 { return false; }
+    unsafe {
+        return data[0] == 'P' as u8 && data[1] == 'N' as u8 &&
+            data[2] == 'P' as u8 && data[3] == '0' as u8 &&
+            data[4] == 'C' as u8 && data[5] == '5' as u8 && data[6] == '0' as u8;
+    }
+}
+
+@system
+fn aml_i2c_bytes_are_acpi0c50(data: *const u8, length: usize) -> bool {
+    if data == (null as *const u8) || length != 8 { return false; }
+    unsafe {
+        return data[0] == 'A' as u8 && data[1] == 'C' as u8 &&
+            data[2] == 'P' as u8 && data[3] == 'I' as u8 &&
+            data[4] == '0' as u8 && data[5] == 'C' as u8 &&
+            data[6] == '5' as u8 && data[7] == '0' as u8;
+    }
+}
+
+@system
+fn aml_i2c_compat_id_is_pnp0c50(id: *const AmlDiscoveryId) -> bool {
+    if id == (null as *const AmlDiscoveryId) { return false; }
+    unsafe {
+        if !(*id).valid { return false; }
+        if (*id).kind == AML_DISCOVERY_ID_STRING {
+            return aml_i2c_bytes_are_pnp0c50((*id).data, (*id).data_length) ||
+                aml_i2c_bytes_are_acpi0c50((*id).data, (*id).data_length);
+        }
+        if (*id).kind == AML_DISCOVERY_ID_INTEGER {
+            let mut converted: [u8; 8] = [0; 8];
+            if !aml_discovery_eisa_id_to_string((*id).integer_value, &converted[0], 8) {
+                return false;
+            }
+            return aml_i2c_bytes_are_pnp0c50(&converted[0], 7);
+        }
+    }
+    return false;
+}
+
+@system
+pub fn aml_i2c_device_has_static_pnp0c50(device_slot: usize) -> bool {
+    let device = aml_discovery_device(device_slot);
+    if device == (null as *const AmlDiscoveredDevice) { return false; }
+    unsafe {
+        if !(*device).valid || (*device).cid_requires_evaluator { return false; }
+        let total = aml_discovery_compat_id_count();
+        if (*device).cid_count == 0 || (*device).cid_start > total ||
+           (*device).cid_count > total - (*device).cid_start {
+            return false;
+        }
+        let mut offset: usize = 0;
+        while offset < (*device).cid_count {
+            let id = aml_discovery_compat_id((*device).cid_start + offset);
+            if aml_i2c_compat_id_is_pnp0c50(id) { return true; }
+            offset += 1;
+        }
+    }
+    return false;
+}
+
+@system
+fn aml_i2c_dsm_method_index(namespace_index: usize) -> usize {
+    if namespace_index == AML_NAMESPACE_INVALID_INDEX { return AML_NAMESPACE_INVALID_INDEX; }
+    let method_index = aml_namespace_find_child(namespace_index, AML_I2C_NAME_DSM);
+    if method_index == AML_NAMESPACE_INVALID_INDEX { return AML_NAMESPACE_INVALID_INDEX; }
+    let node = aml_namespace_node(method_index);
+    if node == (null as *const AmlNamespaceNode) { return AML_NAMESPACE_INVALID_INDEX; }
+    unsafe {
+        if !(*node).valid || (*node).kind != AML_NAMESPACE_KIND_METHOD {
+            return AML_NAMESPACE_INVALID_INDEX;
+        }
+    }
+    return method_index;
+}
+
+@system
+pub fn aml_i2c_binding_for_resource(resource_index: usize) -> AmlI2cAcpiBinding {
+    let serial = aml_i2c_decode_serial_bus(resource_index);
+    if !serial.valid || !serial.consumer { return aml_i2c_binding_invalid(); }
+    let device = aml_discovery_device(serial.device_slot);
+    if device == (null as *const AmlDiscoveredDevice) { return aml_i2c_binding_invalid(); }
+
+    let mut namespace_index = AML_NAMESPACE_INVALID_INDEX;
+    let mut resource_start: usize = 0;
+    let mut resource_count: usize = 0;
+    let mut cid_requires_evaluator = false;
+    unsafe {
+        if !(*device).valid { return aml_i2c_binding_invalid(); }
+        namespace_index = (*device).namespace_index;
+        resource_start = (*device).resource_start;
+        resource_count = (*device).resource_count;
+        cid_requires_evaluator = (*device).cid_requires_evaluator;
+    }
+    let total_resources = aml_discovery_resource_count();
+    if namespace_index == AML_NAMESPACE_INVALID_INDEX ||
+       resource_start > total_resources || resource_count > total_resources - resource_start ||
+       resource_index < resource_start || resource_index >= resource_start + resource_count {
+        return aml_i2c_binding_invalid();
+    }
+
+    let controller = aml_i2c_resolve_resource_source(
+        serial.device_slot, serial.controller_source, serial.controller_source_length
+    );
+    if !aml_i2c_controller_node_valid(controller) { return aml_i2c_binding_invalid(); }
+
+    let mut gpio_resource_index = AML_I2C_INVALID_RESOURCE_INDEX;
+    let mut gpio_resource_count: usize = 0;
+    let mut gpio_controller = AML_NAMESPACE_INVALID_INDEX;
+    let mut gpio_pin_count: usize = 0;
+    let mut gpio_consumer = false;
+    let end = resource_start + resource_count;
+    let mut index = resource_start;
+    while index < end {
+        let gpio = aml_i2c_decode_gpio_int(index);
+        if gpio.valid {
+            gpio_resource_count += 1;
+            if gpio_resource_count == 1 {
+                gpio_resource_index = index;
+                gpio_pin_count = gpio.pin_count;
+                gpio_consumer = gpio.consumer;
+                gpio_controller = aml_i2c_resolve_resource_source(
+                    serial.device_slot, gpio.controller_source, gpio.controller_source_length
+                );
+                if gpio_controller != AML_NAMESPACE_INVALID_INDEX &&
+                   !aml_i2c_controller_node_valid(gpio_controller) {
+                    gpio_controller = AML_NAMESPACE_INVALID_INDEX;
+                }
+            }
+        }
+        index += 1;
+    }
+
+    let pnp0c50 = aml_i2c_device_has_static_pnp0c50(serial.device_slot);
+    let dsm_method_index = aml_i2c_dsm_method_index(namespace_index);
+    let dsm_present = dsm_method_index != AML_NAMESPACE_INVALID_INDEX;
+    let hid_prepared = pnp0c50 && !cid_requires_evaluator && dsm_present &&
+        gpio_resource_count == 1 && gpio_resource_index != AML_I2C_INVALID_RESOURCE_INDEX &&
+        gpio_controller != AML_NAMESPACE_INVALID_INDEX && gpio_consumer &&
+        gpio_pin_count == 1 && !serial.device_initiated;
+
+    return AmlI2cAcpiBinding {
+        resource_index: resource_index,
+        device_slot: serial.device_slot,
+        namespace_index: namespace_index,
+        controller_namespace_index: controller,
+        resource_source_index: serial.resource_source_index,
+        slave_address: serial.slave_address,
+        connection_speed_hz: serial.connection_speed_hz,
+        ten_bit_addressing: serial.ten_bit_addressing,
+        device_initiated: serial.device_initiated,
+        gpio_resource_index: gpio_resource_index,
+        gpio_resource_count: gpio_resource_count,
+        gpio_controller_namespace_index: gpio_controller,
+        gpio_pin_count: gpio_pin_count,
+        gpio_consumer: gpio_consumer,
+        cid_requires_evaluator: cid_requires_evaluator,
+        pnp0c50_static: pnp0c50,
+        dsm_method_index: dsm_method_index,
+        dsm_method_present: dsm_present,
+        hid_transport_prepared: hid_prepared,
+        valid: true
+    };
+}

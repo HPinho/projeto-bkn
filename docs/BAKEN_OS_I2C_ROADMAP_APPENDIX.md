@@ -52,3 +52,67 @@ Escopo deste candidato:
 Fora de escopo deste corte: resolução do namespace de `ResourceSource`, `_DSM`, `PNP0C50`, MMIO, controlador I2C, GPIO programming, IRQ registration, DMA, HID parsing ou input runtime.
 
 A mesma regra de certificação continua valendo: **nenhum I2C-0b começa antes de CI + SMP + NVMe-only + HID Dual-device fecharem verdes no mesmo SHA I2C-0a**. Em caso de gate vermelho, o próximo commit é correction-only e a falha deve ser preservada.
+
+---
+
+## 2026-09-13 — fechamento I2C-0a / semantic ACPI resources
+
+**✅ CERTIFICADO 4/4 — nenhuma correção intermediária necessária.**
+
+```text
+acfd6a203a5a3eb6e5e5c20865384704b02055e7
+feat(i2c): decode ACPI serial and GPIO resources
+```
+
+Provas no mesmo SHA:
+
+- CI #1214 ✅
+- SMP #317 ✅
+- NVMe-only #414 ✅
+- HID Dual-device #73 ✅
+
+Resultado certificado:
+
+- `I2CSerialBus` ACPI 6.6 é decodificado com revision/type revision, flags, TypeDataLength, speed, endereço 7/10-bit, LVR, vendor data e `ResourceSource` bounded;
+- `GpioInt` é decodificado com offsets validados, pin table bounded, trigger/polaridade/share/wake, `ResourceSource` e vendor data;
+- o módulo pertence ao grafo Sotlas nativo real;
+- nenhum MMIO, PCI, DMA, PMM, IRQ, transação I2C, execução AML ou HID runtime foi introduzido;
+- LangSotlas permaneceu inalterado.
+
+---
+
+## 2026-09-13 — I2C-0b / ACPI namespace-resource binding
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende de CI + SMP + NVMe-only + HID Dual-device no mesmo SHA.**
+
+Contrato deliberadamente read-only:
+
+```text
+AmlResourceDescriptor I2C já validado
+→ resolver ResourceSource no namespace AML publicado
+→ aceitar caminho absoluto, ^ relativo e namespace search rules
+→ exigir controller resolvido como Device ACPI
+→ preservar master/source index, address, speed e mode
+→ catalogar GpioInt do mesmo device sem programá-lo
+→ reconhecer _CID PNP0C50/ACPI0C50 estático
+→ localizar _DSM como Method sem executá-lo
+→ marcar somente hid_transport_prepared quando recursos estáticos mínimos convergem
+```
+
+Invariantes:
+
+- resolver de `ResourceSource` é bounded por `AML_NAME_MAX_SEGMENTS` e `AML_DATA_MAX_STRING_BYTES`;
+- NameSeg textual exige exatamente quatro caracteres com gramática AML válida;
+- nome sem prefixo usa busca ascendente de namespace; `\\` e `^` têm resolução explícita e fail-closed;
+- controller I2C/GPIO resolvido deve ser `AML_NAMESPACE_KIND_DEVICE`;
+- binding genérico exige I2C `ResourceConsumer`, mas GPIO permanece apenas catalogado;
+- identificação HID estática aceita `_CID` `PNP0C50`, `ACPI0C50` ou EISA integer equivalente;
+- CID dinâmica fica `cid_requires_evaluator` e não é promovida como PNP0C50 estática;
+- `_DSM` só é localizado como Method; nenhuma query/function é executada;
+- GUID HIDI2C `{3CDFF6F7-4267-4555-AD05-B30A3D8938DE}`, revision 1, function 0 e function 1 ficam declarados para o próximo transporte;
+- `hid_transport_prepared` exige PNP0C50 estático, `_DSM` Method, exatamente um `GpioInt` consumer com um pin e conexão I2C controller-initiated;
+- `_HRV`, execução de `_DSM`, HID Descriptor Register, MMIO, GPIO routing, IRQ e transação I2C permanecem fora deste corte;
+- nenhum `static mut`, registry ou lifecycle generation-safe é introduzido ainda;
+- nenhum ajuste de lexer/parser/semântica/lowering em LangSotlas é esperado.
+
+Se este candidato fechar 4/4, o próximo microcorte é **I2C-1 — Generic I2C Core**, começando pela interface de transação e estados de erro/timeout sem ainda assumir um controlador físico específico. Se qualquer gate falhar, `main` congela e o próximo commit é correction-only.
