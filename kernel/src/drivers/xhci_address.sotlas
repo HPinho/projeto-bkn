@@ -4,6 +4,10 @@
 // operacionais assim que a device table entra em DETACH_PENDING e permite
 // zerar o estado lógico somente para o slot+epoch exato. A entrada da device
 // table permanece viva até o barrier de HID-4d.5.
+//
+// Recovery de enumeração FAILED é separado do detach normal: depois de Disable
+// Slot confirmado, somente o estado lógico Address Device do mesmo epoch pode
+// ser invalidado. Contexts, EP0 ring, DMA e Slot ID permanecem intocados.
 
 module kernel::drivers::xhci_address;
 
@@ -54,6 +58,68 @@ fn xhci_address_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
         return false;
     }
     unsafe { return XHCI_ADDRESS_EPOCHS[index] == epoch; }
+}
+
+@system
+fn xhci_address_failed_slot_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn xhci_address_failed_state_empty_for(index: usize, slot_id: u8) -> bool {
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_ADDRESS_READY_SLOTS[index] &&
+               XHCI_ADDRESS_DEVICE_ADDRESSES[index] == 0 &&
+               XHCI_ADDRESS_SLOT_ID != slot_id;
+    }
+}
+
+@system
+pub fn xhci_address_release_failed_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_address_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        // Uma etapa Address Device pode nunca ter sido publicada antes da falha.
+        // Nesse caso estado vazio de outro/nenhum epoch já está concluído e não
+        // deve ser sobrescrito. Estado vivo de outro epoch permanece em quarentena.
+        if XHCI_ADDRESS_EPOCHS[index] != epoch {
+            return xhci_address_failed_state_empty_for(index, slot_id);
+        }
+    }
+    if xhci_address_failed_release_complete_for(slot_id, epoch) { return true; }
+
+    unsafe {
+        XHCI_ADDRESS_READY_SLOTS[index] = false;
+        XHCI_ADDRESS_DEVICE_ADDRESSES[index] = 0;
+        if XHCI_ADDRESS_SLOT_ID == slot_id {
+            XHCI_ADDRESS_READY = false;
+            XHCI_ADDRESS_SLOT_ID = 0;
+        }
+    }
+    return xhci_address_failed_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_address_failed_release_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_address_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_address_index(slot_id);
+    if index >= XHCI_ADDRESS_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_ADDRESS_EPOCHS[index] != epoch {
+            return xhci_address_failed_state_empty_for(index, slot_id);
+        }
+    }
+    return xhci_address_failed_state_empty_for(index, slot_id);
 }
 
 @system

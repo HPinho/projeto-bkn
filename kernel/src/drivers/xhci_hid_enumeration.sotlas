@@ -56,9 +56,15 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     let descriptor_released =
         xhci_device_descriptor_release_failed_for_epoch(slot_id, epoch);
 
+    // Address Device é apenas estado lógico neste corte. Ele só é desmontado
+    // depois de Disable Slot confirmado e depois dos owners de descriptor já
+    // terem recebido sua tentativa de recovery. Contexts/EP0/rings permanecem.
+    let address_released = xhci_address_release_failed_for_epoch(slot_id, epoch);
+
     // Outros owners parciais ainda permanecem em FAILED e serão fechados nos
     // próximos microcortes; device table/Slot ID continuam reservados por design.
-    return identity_released && configuration_released && descriptor_released;
+    return identity_released && configuration_released && descriptor_released &&
+        address_released;
 }
 
 @system
