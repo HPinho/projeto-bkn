@@ -1,0 +1,143 @@
+name: Baken OS SMP Fault Diagnostic
+
+on:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  smp-fault-diagnostic:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install QEMU and cross-toolchain
+        timeout-minutes: 20
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64
+
+      - name: Build exact Sotlas kernel
+        run: |
+          mkdir -p build/iso_root/EFI/BOOT
+          SOTLAS_CC=x86_64-w64-mingw32-gcc python3 tools/sotlas_compile/compiler.py build \
+            kernel/src/main.sotlas \
+            --manifest build/sotlas-main.manifest.json \
+            --output build/iso_root/EFI/BOOT/BOOTX64.EFI
+          test "$(head -c 2 build/iso_root/EFI/BOOT/BOOTX64.EFI)" = "MZ"
+          python3 tools/scripts/create_uefi_iso.py
+          x86_64-w64-mingw32-nm -n build/iso_root/EFI/BOOT/BOOTX64.EFI > build/BOOTX64.symbols.txt || true
+
+      - name: Reproduce and symbolize AP page fault
+        timeout-minutes: 12
+        shell: bash
+        run: |
+          OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
+          test -n "$OVMF_CODE"
+          OVMF_VARS="${OVMF_CODE/CODE/VARS}"
+          test -f "$OVMF_VARS"
+          fault_found=0
+
+          for proof in 1 2 3; do
+            echo "Diagnostic SMP proof ${proof}/3 revision $(git rev-parse HEAD)"
+            cp "$OVMF_VARS" build/OVMF_VARS_SMP_DIAG.fd
+            serial="build/qemu-smp-diag-${proof}.serial.log"
+            intr="build/qemu-smp-diag-${proof}.int.log"
+            rm -f "$serial" "$intr"
+
+            qemu-system-x86_64 \
+              -machine q35 -smp 2 -m 512M -no-reboot \
+              -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+              -drive if=pflash,format=raw,file=build/OVMF_VARS_SMP_DIAG.fd \
+              -cdrom build/baken_os.iso \
+              -device qemu-xhci,id=xhci \
+              -device usb-kbd,bus=xhci.0 \
+              -display none -monitor none \
+              -serial file:"$serial" \
+              -d int -D "$intr" &
+            qemu_pid=$!
+
+            stop_reason=timeout
+            for i in $(seq 1 2400); do
+              if test -f "$serial" && grep -Fq 'BAKEN:HEX=E:' "$serial"; then
+                stop_reason=cpu-exception
+                break
+              fi
+              if test -f "$serial" && grep -Fxq 'BAKEN:SMP_FPU_MIGRATION_READY' "$serial"; then
+                stop_reason=complete
+                break
+              fi
+              if ! kill -0 "$qemu_pid" 2>/dev/null; then
+                stop_reason=qemu-exited
+                break
+              fi
+              sleep 0.05
+            done
+
+            kill "$qemu_pid" 2>/dev/null || true
+            wait "$qemu_pid" 2>/dev/null || true
+            echo "Diagnostic proof ${proof}: ${stop_reason}"
+
+            if test "$stop_reason" = cpu-exception; then
+              fault_found=1
+              echo '--- serial fault context ---'
+              cat "$serial"
+              rip="$(grep -Eo 'BAKEN:HEX=i:[0-9A-Fa-f]{8}' "$serial" | tail -n 1 | cut -d: -f3 || true)"
+              echo "FAULT_RIP=${rip:-unknown}"
+              if test -n "$rip"; then
+                python3 - "$rip" build/BOOTX64.symbols.txt <<'PY'
+import sys
+rip = int(sys.argv[1], 16)
+best = None
+for raw in open(sys.argv[2], encoding='utf-8', errors='ignore'):
+    parts = raw.split()
+    if len(parts) < 3:
+        continue
+    try:
+        address = int(parts[0], 16)
+    except ValueError:
+        continue
+    if address <= rip and (best is None or address > best[0]):
+        best = (address, parts[-1])
+if best is None:
+    print(f'NEAREST_SYMBOL=none RIP=0x{rip:016X}')
+else:
+    print(f'NEAREST_SYMBOL={best[1]} BASE=0x{best[0]:016X} OFFSET=0x{rip-best[0]:X} RIP=0x{rip:016X}')
+PY
+                start=$((0x$rip - 96))
+                stop=$((0x$rip + 96))
+                echo '--- disassembly around RIP ---'
+                x86_64-w64-mingw32-objdump -d \
+                  --start-address="$start" --stop-address="$stop" \
+                  build/iso_root/EFI/BOOT/BOOTX64.EFI || true
+              fi
+              echo '--- QEMU #PF / CR2 context ---'
+              grep -n -B 20 -A 40 'v=0e' "$intr" | tail -n 160 || tail -n 160 "$intr" || true
+              break
+            fi
+          done
+
+          if test "$fault_found" -eq 0; then
+            echo 'FAULT_REPRODUCED=0 (three diagnostic boots completed without terminal #PF)'
+          else
+            echo 'FAULT_REPRODUCED=1'
+          fi
+
+      - name: Upload SMP fault diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: qemu-smp-fault-diagnostic
+          path: |
+            build/qemu-smp-diag-*.serial.log
+            build/qemu-smp-diag-*.int.log
+            build/BOOTX64.symbols.txt
+            build/iso_root/EFI/BOOT/BOOTX64.EFI
+          if-no-files-found: warn
+          retention-days: 7
