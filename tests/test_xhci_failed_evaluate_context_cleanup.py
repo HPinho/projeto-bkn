@@ -138,10 +138,12 @@ class XhciFailedEvaluateContextCleanupTests(unittest.TestCase):
         self.assertLess(descriptor, evaluate)
         self.assertLess(evaluate, ep0)
         self.assertLess(ep0, address)
-        self.assertIn(
-            "evaluate_released && ep0_released && address_released",
-            self.failed_enum,
-        )
+        return_start = self.failed_enum.rfind("return ")
+        self.assertGreaterEqual(return_start, 0)
+        return_expression = self.failed_enum[return_start:]
+        self.assertIn("evaluate_released", return_expression)
+        self.assertIn("ep0_released", return_expression)
+        self.assertIn("address_released", return_expression)
 
 
 if __name__ == "__main__":

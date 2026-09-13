@@ -275,3 +275,41 @@ Nenhuma mudança em `HPinho/LangSotlas` foi necessária.
 ## Continuação depois deste gate
 
 Se este SHA fechar 4/4, avançar para **Configure Endpoint logical cleanup exact-epoch em FAILED**, sem chamar a primitiva física `xhci_configure_endpoint_drop_hid_for_slot()` depois de `Disable Slot`. Qualquer falha congela `main` e exige correção-only registrada antes de novo avanço.
+
+---
+
+# Atualização operacional — 2026-09-13 / SET_CONFIGURATION reprovado no CI #1210
+
+O candidato funcional abaixo **não pode ser certificado 4/4**:
+
+```text
+3a45e9a777f9a823b621e2d74db68f4b4758cbf5
+fix(xhci): quiesce failed set configuration state by epoch
+```
+
+Status observado:
+
+- CI #1210 ❌ — `Run Complete Test Suite`;
+- SMP #313 ✅;
+- NVMe #410 ✅;
+- HID Dual-device #69 ✅.
+
+A suíte executou 1630 testes e terminou com 2 falhas, ambas em guardrails históricos:
+
+- `test_xhci_failed_ep0_cleanup.py` exigia a substring contígua `ep0_released && address_released`;
+- `test_xhci_failed_evaluate_context_cleanup.py` exigia a substring contígua `evaluate_released && ep0_released && address_released`.
+
+O novo owner `set_configuration_released` foi corretamente inserido antes de Evaluate/EP0/Address, então a expressão de retorno deixou de possuir essas sequências textuais adjacentes. As verificações de ordem por posição continuaram válidas; os três gates runtime/build independentes fecharam verdes. Assim, a causa foi classificada como **guardrail antigo excessivamente dependente da formatação/composição da expressão de retorno**, não regressão funcional do recovery.
+
+## Candidato correction-only
+
+A correção subsequente:
+
+- não altera nenhum `.sotlas` funcional;
+- não altera LangSotlas;
+- não altera workflows;
+- muda apenas os dois guardrails antigos para localizar a expressão final `return` e verificar que os owners que cada guardrail certifica continuam incluídos nela;
+- mantém integralmente as provas de ordem `Evaluate → EP0 → Address` e `EP0 → Address`;
+- preserva o novo guardrail SET_CONFIGURATION sem relaxamento.
+
+A `main` deve permanecer congelada no SHA correction-only até os quatro gates fecharem verdes. **Configure Endpoint continua bloqueado** até essa certificação.

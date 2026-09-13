@@ -259,3 +259,40 @@ Invariantes:
 - guardrail prova a ordem `Disable Slot → descriptors → SET_CONFIGURATION → Evaluate → EP0 → Address`.
 
 Se este candidato fechar 4/4, o próximo microcorte será **Configure Endpoint lógico exact-epoch em FAILED**, explicitamente sem reutilizar a primitiva física `Drop Endpoint` após `Disable Slot`.
+
+---
+
+## 2026-09-13 — gate vermelho SET_CONFIGURATION / correção-only de guardrails históricos
+
+**❌ `3a45e9a777f9a823b621e2d74db68f4b4758cbf5` REPROVADO no gate 4/4 por CI principal.**
+
+Resultado observado no mesmo SHA:
+
+- CI #1210 ❌ — step `Run Complete Test Suite`;
+- SMP #313 ✅;
+- NVMe #410 ✅;
+- HID Dual-device #69 ✅.
+
+Falha preservada:
+
+```text
+test_xhci_failed_ep0_cleanup
+→ esperava substring contígua `ep0_released && address_released`
+
+test_xhci_failed_evaluate_context_cleanup
+→ esperava substring contígua `evaluate_released && ep0_released && address_released`
+```
+
+Causa técnica:
+
+- o microcorte SET_CONFIGURATION inseriu legitimamente `set_configuration_released` antes de Evaluate/EP0/Address e quebrou apenas asserções textuais antigas que exigiam nomes adjacentes na expressão final;
+- as próprias provas de ordenação dos guardrails continuavam corretas;
+- SMP, NVMe e HID completaram verdes, portanto não houve evidência de regressão funcional, compilação Sotlas ou runtime.
+
+Correção aplicada neste candidato correction-only:
+
+- os guardrails EP0 e Evaluate passam a localizar a expressão final `return` e verificar que seus owners obrigatórios continuam presentes nela, sem exigir adjacência textual;
+- as provas de ordem `Evaluate → EP0 → Address` e `EP0 → Address` permanecem intactas;
+- nenhum arquivo funcional de kernel, LangSotlas ou workflow é alterado.
+
+A `main` permanece congelada nesta correção até **CI + SMP + NVMe + HID** fecharem 4/4 no novo SHA. Somente então Configure Endpoint lógico FAILED poderá começar.
