@@ -116,3 +116,74 @@ Invariantes:
 - nenhum ajuste de lexer/parser/semântica/lowering em LangSotlas é esperado.
 
 Se este candidato fechar 4/4, o próximo microcorte é **I2C-1 — Generic I2C Core**, começando pela interface de transação e estados de erro/timeout sem ainda assumir um controlador físico específico. Se qualquer gate falhar, `main` congela e o próximo commit é correction-only.
+
+---
+
+## 2026-09-13 — fechamento I2C-0b / ACPI namespace-resource binding
+
+**✅ CERTIFICADO 4/4 — sem correction-only intermediário.**
+
+```text
+aa3c48a35172cf30c7f7754ebbbf16a84b0044fc
+feat(i2c): bind ACPI resources to namespace controllers
+```
+
+Provas no mesmo SHA:
+
+- CI #1215 ✅
+- SMP #318 ✅
+- NVMe-only #415 ✅
+- HID Dual-device #74 ✅
+
+Resultado certificado:
+
+- `ResourceSource` absoluto, relativo por `^` e relativo por namespace search é resolvido fail-closed;
+- o alvo I2C/GPIO precisa existir no namespace publicado e ser `Device` ACPI;
+- `_CID` estático `PNP0C50`/`ACPI0C50` e EISA equivalente são reconhecidos sem executar AML;
+- CID dinâmica permanece explicitamente dependente de evaluator;
+- `_DSM` é somente localizado como `Method`; nenhuma function foi executada;
+- `hid_transport_prepared` continua sendo apenas prontidão estática, não enumeração HID-I2C;
+- nenhum MMIO, PCI, DMA, PMM, IRQ, GPIO programming, transação I2C ou HID runtime foi introduzido;
+- LangSotlas permaneceu inalterado.
+
+---
+
+## 2026-09-13 — I2C-1a / generic transaction contract
+
+**⏳ CANDIDATO DESTE MICROCORTE — aguarda CI + SMP + NVMe-only + HID Dual-device no mesmo SHA.**
+
+Primeiro recorte do Generic I2C Core:
+
+```text
+I2cTransaction
+→ validação bounded/fail-closed
+→ I2cTransferPlan
+→ checagem de I2cControllerCapabilities
+→ I2cTransferResult normalizado
+```
+
+Escopo:
+
+- mensagens `WRITE` e `READ` bounded;
+- endereço 7-bit/10-bit validado por largura neste estágio;
+- `bus_speed_hz` e timeout em microssegundos explícitos;
+- máximo de mensagens, bytes por mensagem e bytes totais definidos no contrato;
+- uma transação multi-message é combinada: START inicial, repeated START nas fronteiras e STOP ao fim pelo backend futuro;
+- leitura 10-bit iniciando a transação registra o repeated START adicional necessário à fase de endereço;
+- capabilities declaram 7/10-bit, repeated-start, limites de mensagens/bytes e velocidade máxima;
+- resultados normalizam `ADDRESS_NACK`, `DATA_NACK`, `ARBITRATION_LOST`, `BUS_BUSY`, `TIMEOUT`, `CONTROLLER_ERROR` e `UNSUPPORTED`;
+- sucesso/erro possuem contagem de mensagens/bytes e índice da mensagem com falha quando aplicável.
+
+Invariantes:
+
+- contrato stateless: nenhum `static mut`;
+- zero MMIO/PCI/DMA/PMM/IRQ/GPIO/xHCI;
+- zero polling, sleep ou acesso a timer no core deste corte;
+- zero execução AML;
+- zero registry/controller binding;
+- zero HID-specific behavior;
+- probe address-only/zero-length fica fora deste primeiro contrato;
+- política de endereços I2C reservados/general-call não é embutida ainda: I2C-1a valida largura e deixa política para device/controller layers;
+- nenhum ajuste em LangSotlas é esperado.
+
+Se I2C-1a fechar 4/4, o próximo microcorte será **I2C-1b — executor/backend interface + deadline/error propagation**, ainda desacoplado de um controlador físico específico. Qualquer gate vermelho congela `main` e exige correction-only antes de continuar.

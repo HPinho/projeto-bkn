@@ -1,0 +1,298 @@
+// Baken OS — I2C-1a: contrato genérico e stateless de transações I2C.
+//
+// Define mensagens, plano bounded, capacidades e resultado normalizado. Não possui
+// backend físico, registry, MMIO, IRQ, DMA ou polling. A execução entra somente
+// depois deste contrato ser certificado.
+module kernel::drivers::i2c_core;
+
+pub const I2C_DIRECTION_WRITE: u8 = 0;
+pub const I2C_DIRECTION_READ: u8 = 1;
+
+pub const I2C_STATUS_OK: u8 = 0;
+pub const I2C_STATUS_INVALID: u8 = 1;
+pub const I2C_STATUS_ADDRESS_NACK: u8 = 2;
+pub const I2C_STATUS_DATA_NACK: u8 = 3;
+pub const I2C_STATUS_ARBITRATION_LOST: u8 = 4;
+pub const I2C_STATUS_BUS_BUSY: u8 = 5;
+pub const I2C_STATUS_TIMEOUT: u8 = 6;
+pub const I2C_STATUS_CONTROLLER_ERROR: u8 = 7;
+pub const I2C_STATUS_UNSUPPORTED: u8 = 8;
+
+pub const I2C_MAX_MESSAGES: usize = 8;
+pub const I2C_MAX_MESSAGE_BYTES: usize = 65535;
+pub const I2C_MAX_TRANSACTION_BYTES: usize = 65535;
+pub const I2C_TIMEOUT_MAX_US: u64 = 5000000;
+pub const I2C_INVALID_MESSAGE_INDEX: usize = I2C_MAX_MESSAGES;
+
+pub struct I2cMessage {
+    pub direction: u8;
+    pub data: *mut u8;
+    pub length: usize;
+}
+
+pub struct I2cTransaction {
+    pub address: u16;
+    pub ten_bit_addressing: bool;
+    pub bus_speed_hz: u32;
+    pub timeout_us: u64;
+    pub messages: [I2cMessage; I2C_MAX_MESSAGES];
+    pub message_count: usize;
+}
+
+pub struct I2cTransferPlan {
+    pub address: u16;
+    pub ten_bit_addressing: bool;
+    pub bus_speed_hz: u32;
+    pub timeout_us: u64;
+    pub message_count: usize;
+    pub total_bytes: usize;
+    pub largest_message_bytes: usize;
+    pub write_message_count: usize;
+    pub read_message_count: usize;
+    // START abre a primeira fase. Cada fronteira de mensagem usa repeated START.
+    // Leitura 10-bit como primeira fase requer ainda o repeated START do address phase.
+    pub repeated_start_count: usize;
+    pub ten_bit_read_address_restart: bool;
+    pub valid: bool;
+}
+
+pub struct I2cControllerCapabilities {
+    pub supports_7bit: bool;
+    pub supports_10bit: bool;
+    pub supports_repeated_start: bool;
+    pub max_messages: usize;
+    pub max_message_bytes: usize;
+    pub max_transaction_bytes: usize;
+    pub max_speed_hz: u32;
+    pub valid: bool;
+}
+
+pub struct I2cTransferResult {
+    pub status: u8;
+    pub completed_messages: usize;
+    pub transferred_bytes: usize;
+    pub failed_message_index: usize;
+    pub valid: bool;
+}
+
+@system
+fn i2c_plan_invalid() -> I2cTransferPlan {
+    return I2cTransferPlan {
+        address: 0,
+        ten_bit_addressing: false,
+        bus_speed_hz: 0,
+        timeout_us: 0,
+        message_count: 0,
+        total_bytes: 0,
+        largest_message_bytes: 0,
+        write_message_count: 0,
+        read_message_count: 0,
+        repeated_start_count: 0,
+        ten_bit_read_address_restart: false,
+        valid: false
+    };
+}
+
+@system
+fn i2c_result_invalid() -> I2cTransferResult {
+    return I2cTransferResult {
+        status: I2C_STATUS_INVALID,
+        completed_messages: 0,
+        transferred_bytes: 0,
+        failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_address_valid(address: u16, ten_bit_addressing: bool) -> bool {
+    // Este corte valida largura de endereço, não política de reserved/general-call.
+    if ten_bit_addressing { return address <= 0x03FF; }
+    return address <= 0x007F;
+}
+
+@system
+pub fn i2c_status_valid(status: u8) -> bool {
+    return status <= I2C_STATUS_UNSUPPORTED;
+}
+
+@system
+pub fn i2c_plan_transaction(transaction: *const I2cTransaction) -> I2cTransferPlan {
+    if transaction == (null as *const I2cTransaction) { return i2c_plan_invalid(); }
+
+    let mut address: u16 = 0;
+    let mut ten_bit = false;
+    let mut speed: u32 = 0;
+    let mut timeout: u64 = 0;
+    let mut count: usize = 0;
+    unsafe {
+        address = (*transaction).address;
+        ten_bit = (*transaction).ten_bit_addressing;
+        speed = (*transaction).bus_speed_hz;
+        timeout = (*transaction).timeout_us;
+        count = (*transaction).message_count;
+    }
+
+    if !i2c_address_valid(address, ten_bit) || speed == 0 ||
+       timeout == 0 || timeout > I2C_TIMEOUT_MAX_US ||
+       count == 0 || count > I2C_MAX_MESSAGES {
+        return i2c_plan_invalid();
+    }
+
+    let mut total: usize = 0;
+    let mut largest: usize = 0;
+    let mut writes: usize = 0;
+    let mut reads: usize = 0;
+    let mut first_is_read = false;
+    let mut index: usize = 0;
+    while index < count {
+        let direction = unsafe { (*transaction).messages[index].direction };
+        let data = unsafe { (*transaction).messages[index].data };
+        let length = unsafe { (*transaction).messages[index].length };
+
+        if direction != I2C_DIRECTION_WRITE && direction != I2C_DIRECTION_READ {
+            return i2c_plan_invalid();
+        }
+        // Address-only probing não pertence ao contrato I2C-1a.
+        if data == (null as *mut u8) || length == 0 ||
+           length > I2C_MAX_MESSAGE_BYTES ||
+           length > I2C_MAX_TRANSACTION_BYTES - total {
+            return i2c_plan_invalid();
+        }
+        if index == 0 && direction == I2C_DIRECTION_READ { first_is_read = true; }
+        if direction == I2C_DIRECTION_READ { reads += 1; } else { writes += 1; }
+        total += length;
+        if length > largest { largest = length; }
+        index += 1;
+    }
+
+    let ten_bit_read_restart = ten_bit && first_is_read;
+    let mut restart_count: usize = count - 1;
+    if ten_bit_read_restart { restart_count += 1; }
+
+    return I2cTransferPlan {
+        address: address,
+        ten_bit_addressing: ten_bit,
+        bus_speed_hz: speed,
+        timeout_us: timeout,
+        message_count: count,
+        total_bytes: total,
+        largest_message_bytes: largest,
+        write_message_count: writes,
+        read_message_count: reads,
+        repeated_start_count: restart_count,
+        ten_bit_read_address_restart: ten_bit_read_restart,
+        valid: true
+    };
+}
+
+@system
+pub fn i2c_controller_capabilities_valid(caps: *const I2cControllerCapabilities) -> bool {
+    if caps == (null as *const I2cControllerCapabilities) { return false; }
+    unsafe {
+        if !(*caps).valid || (!(*caps).supports_7bit && !(*caps).supports_10bit) ||
+           (*caps).max_messages == 0 || (*caps).max_messages > I2C_MAX_MESSAGES ||
+           (*caps).max_message_bytes == 0 ||
+           (*caps).max_message_bytes > I2C_MAX_MESSAGE_BYTES ||
+           (*caps).max_transaction_bytes == 0 ||
+           (*caps).max_transaction_bytes > I2C_MAX_TRANSACTION_BYTES ||
+           (*caps).max_message_bytes > (*caps).max_transaction_bytes ||
+           (*caps).max_speed_hz == 0 {
+            return false;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn i2c_plan_supported_by(plan: *const I2cTransferPlan,
+                             caps: *const I2cControllerCapabilities) -> bool {
+    if plan == (null as *const I2cTransferPlan) ||
+       !i2c_controller_capabilities_valid(caps) {
+        return false;
+    }
+    unsafe {
+        if !(*plan).valid { return false; }
+        if (*plan).ten_bit_addressing {
+            if !(*caps).supports_10bit { return false; }
+        } else if !(*caps).supports_7bit {
+            return false;
+        }
+        if (*plan).repeated_start_count != 0 && !(*caps).supports_repeated_start {
+            return false;
+        }
+        if (*plan).message_count > (*caps).max_messages ||
+           (*plan).largest_message_bytes > (*caps).max_message_bytes ||
+           (*plan).total_bytes > (*caps).max_transaction_bytes ||
+           (*plan).bus_speed_hz > (*caps).max_speed_hz {
+            return false;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn i2c_result_success(plan: *const I2cTransferPlan) -> I2cTransferResult {
+    if plan == (null as *const I2cTransferPlan) { return i2c_result_invalid(); }
+    unsafe {
+        if !(*plan).valid { return i2c_result_invalid(); }
+        return I2cTransferResult {
+            status: I2C_STATUS_OK,
+            completed_messages: (*plan).message_count,
+            transferred_bytes: (*plan).total_bytes,
+            failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn i2c_result_error(plan: *const I2cTransferPlan,
+                        status: u8,
+                        completed_messages: usize,
+                        transferred_bytes: usize,
+                        failed_message_index: usize) -> I2cTransferResult {
+    if plan == (null as *const I2cTransferPlan) || !i2c_status_valid(status) ||
+       status == I2C_STATUS_OK || status == I2C_STATUS_INVALID {
+        return i2c_result_invalid();
+    }
+    unsafe {
+        if !(*plan).valid || completed_messages > (*plan).message_count ||
+           transferred_bytes > (*plan).total_bytes ||
+           (failed_message_index != I2C_INVALID_MESSAGE_INDEX &&
+            failed_message_index >= (*plan).message_count) {
+            return i2c_result_invalid();
+        }
+    }
+    return I2cTransferResult {
+        status: status,
+        completed_messages: completed_messages,
+        transferred_bytes: transferred_bytes,
+        failed_message_index: failed_message_index,
+        valid: true
+    };
+}
+
+@system
+pub fn i2c_result_consistent(plan: *const I2cTransferPlan,
+                             result: *const I2cTransferResult) -> bool {
+    if plan == (null as *const I2cTransferPlan) ||
+       result == (null as *const I2cTransferResult) {
+        return false;
+    }
+    unsafe {
+        if !(*plan).valid || !(*result).valid || !i2c_status_valid((*result).status) ||
+           (*result).status == I2C_STATUS_INVALID ||
+           (*result).completed_messages > (*plan).message_count ||
+           (*result).transferred_bytes > (*plan).total_bytes {
+            return false;
+        }
+        if (*result).status == I2C_STATUS_OK {
+            return (*result).completed_messages == (*plan).message_count &&
+                (*result).transferred_bytes == (*plan).total_bytes &&
+                (*result).failed_message_index == I2C_INVALID_MESSAGE_INDEX;
+        }
+        return (*result).failed_message_index == I2C_INVALID_MESSAGE_INDEX ||
+            (*result).failed_message_index < (*plan).message_count;
+    }
+}

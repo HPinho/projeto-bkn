@@ -131,3 +131,71 @@ O objeto `hid_transport_prepared` significa apenas que o firmware estático poss
 ## Regra de continuação
 
 A `main` deve ficar congelada no SHA I2C-0b até CI principal + SMP + NVMe-only + HID Dual-device fecharem verdes. Se houver qualquer gate vermelho, registrar SHA/run/step/causa e fazer somente correction-only. Com 4/4 verde, iniciar **I2C-1 Generic I2C Core** com interface de transação, repeated-start e modelo de timeout/NACK/arbitration/busy ainda desacoplado de hardware específico.
+
+---
+
+# Atualização operacional — 2026-09-13 / I2C-0b certificado
+
+O binding ACPI I2C/HID-I2C preparation fechou **4/4** no mesmo SHA:
+
+```text
+aa3c48a35172cf30c7f7754ebbbf16a84b0044fc
+feat(i2c): bind ACPI resources to namespace controllers
+```
+
+Status final:
+
+- CI #1215 ✅;
+- SMP #318 ✅;
+- NVMe-only #415 ✅;
+- HID Dual-device #74 ✅.
+
+Não houve gate vermelho, correction-only ou mudança em LangSotlas. Essa passa a ser a baseline certificada para iniciar I2C-1.
+
+# Novo candidato — I2C-1a / generic transaction contract
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Arquivos funcionais deste microcorte:
+
+- `kernel/src/drivers/i2c_core.sotlas`
+  - define `I2cMessage`, `I2cTransaction`, `I2cTransferPlan`, `I2cControllerCapabilities` e `I2cTransferResult`;
+  - aceita sequências bounded de `WRITE`/`READ` com endereço 7/10-bit, velocidade e timeout explícitos;
+  - rejeita ponteiro nulo, mensagem zero-length, direção desconhecida, overflow de bytes e contagens fora do contrato;
+  - transforma multi-message em transação combinada com repeated START nas fronteiras;
+  - registra o restart adicional da address phase para leitura 10-bit iniciando a transação;
+  - normaliza `ADDRESS_NACK`, `DATA_NACK`, `ARBITRATION_LOST`, `BUS_BUSY`, `TIMEOUT`, `CONTROLLER_ERROR` e `UNSUPPORTED`;
+  - checa se um plano cabe nas capabilities do controller sem executar hardware;
+  - valida resultados de sucesso/erro contra o plano.
+- `kernel/src/main.sotlas`
+  - importa `kernel::drivers::i2c_core::*;` para incluir o contrato no grafo nativo real.
+- `tests/test_i2c_core.py`
+  - guardrails de bounds, repeated-start, 10-bit read, capabilities e resultados;
+  - proíbe estado global mutável e APIs concretas de MMIO/PCI/DMA/PMM/IRQ/GPIO/xHCI/AML execution.
+
+## Fronteira deliberada deste SHA
+
+I2C-1a **não executa** transações. Não há:
+
+- controller discovery/registry;
+- backend callback/dispatch;
+- MMIO/PCI/DMA;
+- GPIO/IRQ;
+- timer, wait ou polling;
+- recovery físico do barramento;
+- AML evaluation;
+- HID-I2C descriptor/report access.
+
+Política de endereços reservados/general-call também fica fora deste recorte; o core valida a largura 7/10-bit e permite que camadas de device/controller imponham política específica.
+
+## Próximo microcorte após 4/4
+
+**I2C-1b — executor/backend interface + deadline/error propagation**:
+
+- interface de backend explicitamente bounded;
+- ownership de buffers e duração da chamada definidos;
+- propagação de deadline/timeout sem busy-loop no core;
+- status normalizado do backend para `I2cTransferResult`;
+- nenhuma suposição de DesignWare/Intel/AMD até a interface genérica estar certificada.
+
+Se qualquer gate do I2C-1a falhar, `main` deve congelar no SHA reprovado e o próximo commit será exclusivamente correction-only.
