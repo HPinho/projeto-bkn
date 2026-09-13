@@ -1,0 +1,256 @@
+// Baken OS — I2C-1d: identidade stateless de controller e binding ACPI.
+//
+// Este corte conecta uma AmlI2cAcpiBinding ja validada a um descriptor de
+// controller fornecido por discovery futuro. Nao existe registry, lifecycle ou
+// acesso fisico aqui; controller_id + generation impedem autorizacao por handle stale.
+module kernel::drivers::i2c_controller;
+
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_i2c_binding::*;
+import kernel::drivers::i2c_core::*;
+
+pub const I2C_CONTROLLER_ID_NONE: u32 = 0;
+pub const I2C_CONTROLLER_GENERATION_INVALID: u32 = 0;
+pub const I2C_CONTROLLER_BACKEND_INSTANCE_NONE: u32 = 0;
+
+@repr(C)
+pub struct I2cControllerHandle {
+    pub controller_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct I2cControllerDescriptor {
+    pub controller_id: u32;
+    pub generation: u32;
+    // Identidade firmware do controller. O discovery/registry futuro sera
+    // responsavel por publicar a instancia concreta que corresponde a este node.
+    pub acpi_namespace_index: usize;
+    pub capabilities: I2cControllerCapabilities;
+    // Token opaco pertencente ao backend futuro. Zero significa que ainda nao
+    // existe executor fisico associado a esta identidade logica.
+    pub backend_instance: u32;
+    pub backend_ready: bool;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct I2cControllerBinding {
+    pub controller_id: u32;
+    pub generation: u32;
+    pub controller_namespace_index: usize;
+    pub resource_index: usize;
+    pub device_slot: usize;
+    pub resource_source_index: u8;
+    pub slave_address: u16;
+    pub connection_speed_hz: u32;
+    pub ten_bit_addressing: bool;
+    // Snapshot do token do backend. Um binding logico pode ser valido enquanto
+    // backend_ready=false; nesse caso ele nao autoriza execucao.
+    pub backend_instance: u32;
+    pub backend_ready: bool;
+    pub valid: bool;
+}
+
+@system
+pub fn i2c_controller_invalid_handle() -> I2cControllerHandle {
+    return I2cControllerHandle {
+        controller_id: I2C_CONTROLLER_ID_NONE,
+        generation: I2C_CONTROLLER_GENERATION_INVALID,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_controller_invalid_binding() -> I2cControllerBinding {
+    return I2cControllerBinding {
+        controller_id: I2C_CONTROLLER_ID_NONE,
+        generation: I2C_CONTROLLER_GENERATION_INVALID,
+        controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        resource_index: AML_I2C_INVALID_RESOURCE_INDEX,
+        device_slot: 0,
+        resource_source_index: 0,
+        slave_address: 0,
+        connection_speed_hz: 0,
+        ten_bit_addressing: false,
+        backend_instance: I2C_CONTROLLER_BACKEND_INSTANCE_NONE,
+        backend_ready: false,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_controller_handle_valid(handle: *const I2cControllerHandle) -> bool {
+    if handle == (null as *const I2cControllerHandle) { return false; }
+    unsafe {
+        return (*handle).valid &&
+            (*handle).controller_id != I2C_CONTROLLER_ID_NONE &&
+            (*handle).generation != I2C_CONTROLLER_GENERATION_INVALID;
+    }
+}
+
+@system
+pub fn i2c_controller_descriptor_valid(descriptor: *const I2cControllerDescriptor) -> bool {
+    if descriptor == (null as *const I2cControllerDescriptor) { return false; }
+    unsafe {
+        if !(*descriptor).valid ||
+           (*descriptor).controller_id == I2C_CONTROLLER_ID_NONE ||
+           (*descriptor).generation == I2C_CONTROLLER_GENERATION_INVALID ||
+           (*descriptor).acpi_namespace_index == AML_NAMESPACE_INVALID_INDEX ||
+           !i2c_controller_capabilities_valid(&(*descriptor).capabilities) {
+            return false;
+        }
+        // backend_ready e backend_instance formam uma prova coerente: nenhuma
+        // execucao e autorizada por um token zero nem por token sem owner pronto.
+        if (*descriptor).backend_ready {
+            return (*descriptor).backend_instance != I2C_CONTROLLER_BACKEND_INSTANCE_NONE;
+        }
+        return (*descriptor).backend_instance == I2C_CONTROLLER_BACKEND_INSTANCE_NONE;
+    }
+}
+
+@system
+pub fn i2c_controller_handle(descriptor: *const I2cControllerDescriptor) -> I2cControllerHandle {
+    if !i2c_controller_descriptor_valid(descriptor) {
+        return i2c_controller_invalid_handle();
+    }
+    unsafe {
+        return I2cControllerHandle {
+            controller_id: (*descriptor).controller_id,
+            generation: (*descriptor).generation,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn i2c_controller_handle_matches_descriptor(handle: *const I2cControllerHandle,
+                                                 descriptor: *const I2cControllerDescriptor) -> bool {
+    if !i2c_controller_handle_valid(handle) ||
+       !i2c_controller_descriptor_valid(descriptor) {
+        return false;
+    }
+    unsafe {
+        return (*handle).controller_id == (*descriptor).controller_id &&
+            (*handle).generation == (*descriptor).generation;
+    }
+}
+
+@system
+pub fn i2c_controller_can_host_acpi(binding: *const AmlI2cAcpiBinding,
+                                    descriptor: *const I2cControllerDescriptor) -> bool {
+    if binding == (null as *const AmlI2cAcpiBinding) ||
+       !i2c_controller_descriptor_valid(descriptor) {
+        return false;
+    }
+    unsafe {
+        if !(*binding).valid ||
+           (*binding).controller_namespace_index == AML_NAMESPACE_INVALID_INDEX ||
+           (*binding).controller_namespace_index != (*descriptor).acpi_namespace_index ||
+           (*binding).resource_index == AML_I2C_INVALID_RESOURCE_INDEX ||
+           (*binding).device_initiated ||
+           !i2c_address_valid((*binding).slave_address, (*binding).ten_bit_addressing) ||
+           (*binding).connection_speed_hz == 0 ||
+           (*binding).connection_speed_hz > (*descriptor).capabilities.max_speed_hz {
+            return false;
+        }
+
+        if (*binding).ten_bit_addressing {
+            return (*descriptor).capabilities.supports_10bit;
+        }
+        return (*descriptor).capabilities.supports_7bit;
+    }
+}
+
+@system
+pub fn i2c_controller_bind_acpi(binding: *const AmlI2cAcpiBinding,
+                                descriptor: *const I2cControllerDescriptor) -> I2cControllerBinding {
+    if !i2c_controller_can_host_acpi(binding, descriptor) {
+        return i2c_controller_invalid_binding();
+    }
+    unsafe {
+        return I2cControllerBinding {
+            controller_id: (*descriptor).controller_id,
+            generation: (*descriptor).generation,
+            controller_namespace_index: (*descriptor).acpi_namespace_index,
+            resource_index: (*binding).resource_index,
+            device_slot: (*binding).device_slot,
+            resource_source_index: (*binding).resource_source_index,
+            slave_address: (*binding).slave_address,
+            connection_speed_hz: (*binding).connection_speed_hz,
+            ten_bit_addressing: (*binding).ten_bit_addressing,
+            backend_instance: (*descriptor).backend_instance,
+            backend_ready: (*descriptor).backend_ready,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn i2c_controller_binding_handle(binding: *const I2cControllerBinding) -> I2cControllerHandle {
+    if binding == (null as *const I2cControllerBinding) { return i2c_controller_invalid_handle(); }
+    unsafe {
+        if !(*binding).valid ||
+           (*binding).controller_id == I2C_CONTROLLER_ID_NONE ||
+           (*binding).generation == I2C_CONTROLLER_GENERATION_INVALID {
+            return i2c_controller_invalid_handle();
+        }
+        return I2cControllerHandle {
+            controller_id: (*binding).controller_id,
+            generation: (*binding).generation,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn i2c_controller_binding_matches_descriptor(binding: *const I2cControllerBinding,
+                                                  descriptor: *const I2cControllerDescriptor) -> bool {
+    if binding == (null as *const I2cControllerBinding) ||
+       !i2c_controller_descriptor_valid(descriptor) {
+        return false;
+    }
+    unsafe {
+        if !(*binding).valid ||
+           (*binding).controller_id != (*descriptor).controller_id ||
+           (*binding).generation != (*descriptor).generation ||
+           (*binding).controller_namespace_index != (*descriptor).acpi_namespace_index {
+            return false;
+        }
+        if (*binding).backend_ready != (*descriptor).backend_ready ||
+           (*binding).backend_instance != (*descriptor).backend_instance {
+            return false;
+        }
+        return true;
+    }
+}
+
+@system
+pub fn i2c_controller_binding_is_executable(binding: *const I2cControllerBinding,
+                                             descriptor: *const I2cControllerDescriptor) -> bool {
+    if !i2c_controller_binding_matches_descriptor(binding, descriptor) {
+        return false;
+    }
+    unsafe {
+        return (*binding).backend_ready &&
+            (*binding).backend_instance != I2C_CONTROLLER_BACKEND_INSTANCE_NONE;
+    }
+}
+
+@system
+pub fn i2c_controller_binding_is_stale(binding: *const I2cControllerBinding,
+                                       descriptor: *const I2cControllerDescriptor) -> bool {
+    if binding == (null as *const I2cControllerBinding) ||
+       descriptor == (null as *const I2cControllerDescriptor) {
+        return false;
+    }
+    unsafe {
+        if !(*binding).valid || !(*descriptor).valid ||
+           (*binding).controller_id == I2C_CONTROLLER_ID_NONE ||
+           (*binding).controller_id != (*descriptor).controller_id {
+            return false;
+        }
+        return (*binding).generation != (*descriptor).generation;
+    }
+}
