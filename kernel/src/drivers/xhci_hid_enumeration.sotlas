@@ -56,11 +56,17 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     let descriptor_released =
         xhci_device_descriptor_release_failed_for_epoch(slot_id, epoch);
 
-    // SET_CONFIGURATION é posterior a Configure Endpoint/Evaluate/EP0 no
+    // SET_CONFIGURATION é a camada lógica mais downstream deste trecho do
     // bring-up. Após Disable Slot, invalida somente sua publicação lógica; não
     // envia novo control transfer nem toca o Report Descriptor DMA físico.
     let set_configuration_released =
         xhci_set_configuration_release_failed_for_epoch(slot_id, epoch);
+
+    // Configure Endpoint foi publicado antes de SET_CONFIGURATION no bring-up.
+    // Em FAILED, após Disable Slot, neutraliza apenas bookkeeping lógico. A
+    // primitiva física Drop Endpoint permanece exclusiva do teardown normal.
+    let configure_endpoint_released =
+        xhci_configure_endpoint_release_failed_for_epoch(slot_id, epoch);
 
     // Evaluate Context é estado lógico posterior a EP0/Address no bring-up e
     // deve ser invalidado antes deles no recovery. Input/Device Context e EP0
@@ -80,8 +86,8 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     // Outros owners parciais ainda permanecem em FAILED e serão fechados nos
     // próximos microcortes; device table/Slot ID continuam reservados por design.
     return identity_released && configuration_released && descriptor_released &&
-        set_configuration_released && evaluate_released && ep0_released &&
-        address_released;
+        set_configuration_released && configure_endpoint_released &&
+        evaluate_released && ep0_released && address_released;
 }
 
 @system

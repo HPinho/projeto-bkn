@@ -313,3 +313,63 @@ A correção subsequente:
 - preserva o novo guardrail SET_CONFIGURATION sem relaxamento.
 
 A `main` deve permanecer congelada no SHA correction-only até os quatro gates fecharem verdes. **Configure Endpoint continua bloqueado** até essa certificação.
+
+---
+
+# Atualização operacional — 2026-09-13 / correction-only SET_CONFIGURATION certificado
+
+O commit de correção dos guardrails fechou **4/4**:
+
+```text
+483e06ac02ada1a5511de6a1a6b6bf4f00a22d0e
+test(xhci): relax failed recovery return guardrails
+```
+
+Status final:
+
+- CI #1211 ✅ — suíte completa, grafo modular, build nativo, ISO e QEMU principal;
+- SMP #314 ✅;
+- NVMe #411 ✅;
+- HID Dual-device #70 ✅.
+
+A falha do SHA `3a45e9a7...` continua preservada na entrada anterior. O correction-only não alterou kernel Sotlas, LangSotlas ou workflows; apenas corrigiu a fragilidade textual dos guardrails EP0/Evaluate. Com isso, a cadeia de SET_CONFIGURATION fica encerrada e o próximo microcorte funcional pode avançar.
+
+## Novo candidato — FAILED Configure Endpoint logical cleanup
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Mudanças deste microcorte:
+
+- `kernel/src/drivers/xhci_configure_endpoint.sotlas`
+  - adiciona `xhci_configure_endpoint_failed_slot_matches()` com Device Table válida, `FAILED` e epoch exato;
+  - adiciona `xhci_configure_endpoint_release_failed_for_epoch()` e completion verifier;
+  - neutraliza somente `READY`, `DROPPED`, `DCI` e seleção global do slot;
+  - preserva `XHCI_CONFIGURE_ENDPOINT_EPOCHS` sem adoção/reescrita;
+  - estado de outro epoch só é aceito como já limpo quando o bookkeeping está completamente neutro;
+  - `dropped=false` é estado lógico neutro e não representa prova de Drop Endpoint físico.
+- `kernel/src/drivers/xhci_hid_enumeration.sotlas`
+  - recovery passa a executar `SET_CONFIGURATION → Configure Endpoint lógico → Evaluate → EP0 → Address` depois dos descriptors;
+  - retorno passa a exigir `configure_endpoint_released`.
+- `tests/test_xhci_failed_configure_endpoint_cleanup.py`
+  - prova exact-epoch + FAILED;
+  - prova stale-neutral e ausência de epoch adoption;
+  - proíbe no release FAILED a primitiva física Drop Endpoint, leitura de Output Context, escrita de Input Context, direct-map/CR3, command execute e frees;
+  - prova que a primitiva física normal continua separada e intacta;
+  - prova a ordem completa do recovery e a inclusão de todos os owners obrigatórios no retorno.
+- `tests/test_xhci_failed_set_configuration_cleanup.py`
+  - deixa de exigir adjacency entre owners no `return`, mantendo as provas de ordem e verificando presença individual na expressão final.
+
+### Recursos que permanecem deliberadamente em quarentena
+
+- HID Report Descriptor / Report DMA físico onde publicado;
+- HID Transfer Ring;
+- Device Context;
+- Input Context;
+- EP0 Ring físico;
+- Device Table entry, Slot ID e associação da porta.
+
+Nenhum ajuste de parser, lexer, semântica ou lowering em `HPinho/LangSotlas` foi necessário para este corte.
+
+## Continuação depois deste gate
+
+Se o novo SHA fechar 4/4, o próximo passo é **auditar e fechar o owner HID Report Descriptor / Report DMA em FAILED** antes de liberar HID Transfer Ring ou a arena Device/Input Context. Se qualquer gate falhar, congelar `main`, registrar SHA + workflow/step + causa e fazer somente a correção no próximo commit.

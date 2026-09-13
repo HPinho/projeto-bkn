@@ -74,6 +74,75 @@ fn xhci_configure_endpoint_input_write32(input_virtual: u64,
     return true;
 }
 
+// Recovery de enumeração FAILED após Disable Slot confirmado. Diferente da
+// primitiva física Drop Endpoint abaixo, esta trilha neutraliza somente o estado
+// lógico publicado pelo Configure Endpoint para o mesmo slot + epoch.
+@system
+fn xhci_configure_endpoint_failed_slot_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_configure_endpoint_index(slot_id);
+    if index >= XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn xhci_configure_endpoint_failed_state_empty_for(index: usize, slot_id: u8) -> bool {
+    if index >= XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] &&
+               !XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] &&
+               XHCI_CONFIGURE_ENDPOINT_DCIS[index] == 0 &&
+               XHCI_CONFIGURE_ENDPOINT_ACTIVE_SLOT_ID != slot_id;
+    }
+}
+
+@system
+pub fn xhci_configure_endpoint_release_failed_for_epoch(slot_id: u8,
+                                                          epoch: u32) -> bool {
+    if !xhci_configure_endpoint_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_configure_endpoint_index(slot_id);
+    if index >= XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        if XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] != epoch {
+            return xhci_configure_endpoint_failed_state_empty_for(index, slot_id);
+        }
+    }
+    if xhci_configure_endpoint_failed_release_complete_for(slot_id, epoch) {
+        return true;
+    }
+
+    unsafe {
+        XHCI_CONFIGURE_ENDPOINT_READY_SLOTS[index] = false;
+        // FAILED logical cleanup não afirma que Drop Endpoint físico ocorreu.
+        // O bit dropped volta ao estado neutro e o epoch permanece preservado.
+        XHCI_CONFIGURE_ENDPOINT_DROPPED_SLOTS[index] = false;
+        XHCI_CONFIGURE_ENDPOINT_DCIS[index] = 0;
+        if XHCI_CONFIGURE_ENDPOINT_ACTIVE_SLOT_ID == slot_id {
+            XHCI_CONFIGURE_ENDPOINT_ACTIVE_SLOT_ID = 0;
+        }
+    }
+    return xhci_configure_endpoint_failed_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_configure_endpoint_failed_release_complete_for(slot_id: u8,
+                                                             epoch: u32) -> bool {
+    if !xhci_configure_endpoint_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_configure_endpoint_index(slot_id);
+    if index >= XHCI_CONFIGURE_ENDPOINT_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_CONFIGURE_ENDPOINT_EPOCHS[index] != epoch {
+            return xhci_configure_endpoint_failed_state_empty_for(index, slot_id);
+        }
+    }
+    return xhci_configure_endpoint_failed_state_empty_for(index, slot_id);
+}
+
 @system
 pub fn xhci_configure_endpoint_is_ready_for(slot_id: u8) -> bool {
     let index = xhci_configure_endpoint_index(slot_id);

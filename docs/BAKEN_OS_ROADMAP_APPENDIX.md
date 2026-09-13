@@ -296,3 +296,68 @@ Correção aplicada neste candidato correction-only:
 - nenhum arquivo funcional de kernel, LangSotlas ou workflow é alterado.
 
 A `main` permanece congelada nesta correção até **CI + SMP + NVMe + HID** fecharem 4/4 no novo SHA. Somente então Configure Endpoint lógico FAILED poderá começar.
+
+---
+
+## 2026-09-13 — fechamento correction-only do SET_CONFIGURATION
+
+**✅ CERTIFICADO 4/4 após a correção dos guardrails históricos.**
+
+```text
+483e06ac02ada1a5511de6a1a6b6bf4f00a22d0e
+test(xhci): relax failed recovery return guardrails
+```
+
+Provas no mesmo SHA:
+
+- CI #1211 ✅;
+- SMP #314 ✅;
+- NVMe #411 ✅;
+- HID Dual-device #70 ✅.
+
+Resultado:
+
+- a falha do SHA `3a45e9a7...` permanece preservada acima como histórico real;
+- os dois guardrails antigos deixaram de depender de adjacência textual na expressão final de retorno;
+- a suíte completa, grafo Sotlas, build nativo, ISO, QEMU principal, SMP, NVMe-only e HID dual-device fecharam verdes;
+- nenhum `.sotlas` funcional foi alterado pelo correction-only;
+- o cleanup lógico SET_CONFIGURATION do candidato anterior fica, portanto, validado pela cadeia funcional + correção de testes;
+- LangSotlas permaneceu inalterado.
+
+---
+
+## 2026-09-13 — recovery de enumeração FAILED / Configure Endpoint lógico
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende dos quatro gates no novo SHA.**
+
+Contrato do corte:
+
+```text
+FAILED + slot_id + epoch exatos
+→ Disable Slot confirmado
+→ Configuration Descriptor recovery
+→ Device Descriptor recovery
+→ SET_CONFIGURATION lógico
+→ Configure Endpoint lógico:
+    ready=false
+    dropped=false
+    dci=0
+    active_slot limpo somente se pertencer ao slot
+→ Evaluate Context lógico
+→ EP0 lógico
+→ Address Device lógico
+```
+
+Invariantes:
+
+- `XHCI_CONFIGURE_ENDPOINT_EPOCHS[index]` nunca é adotado ou reescrito pelo caminho FAILED;
+- estado stale de outro epoch só é aceito se já estiver neutro: `ready=false`, `dropped=false`, `dci=0` e `active_slot != slot_id`;
+- `dropped=false` é neutralização lógica de bookkeeping, **não** afirma que Drop Endpoint físico ocorreu;
+- o caminho FAILED nunca chama `xhci_configure_endpoint_drop_hid_for_slot()`;
+- o caminho FAILED não lê Output Endpoint Context, não escreve Input Context, não usa direct-map/CR3, não envia Configure Endpoint command e não libera DMA/context/ring;
+- a primitiva física de Drop Endpoint permanece intacta e separada para o lifecycle normal;
+- a ordem de recovery passa a ser `SET_CONFIGURATION → Configure Endpoint → Evaluate → EP0 → Address` após os descriptors;
+- o guardrail SET_CONFIGURATION é atualizado para verificar owners no `return` sem exigir adjacência, evitando repetir a causa do CI #1210;
+- novo guardrail específico prova exact-epoch + FAILED, estado neutro, ausência de operação física e ordem do orquestrador.
+
+Se este candidato fechar 4/4, o próximo microcorte deve começar por uma auditoria do owner **HID Report Descriptor / Report DMA** no caminho FAILED antes de liberar qualquer Transfer Ring ou arena Device/Input Context. Qualquer gate vermelho congela a `main` e exige correção-only registrada antes de novo avanço.
