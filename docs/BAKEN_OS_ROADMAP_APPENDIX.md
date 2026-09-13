@@ -136,3 +136,65 @@ Invariantes:
 - guardrail prova a ordem `Disable Slot → descriptors → EP0 lógico → Address lógico`.
 
 Se este candidato fechar 4/4, o próximo microcorte será **Evaluate Context lógico exact-epoch em FAILED**. Se algum gate falhar, a próxima entrada preservará o SHA reprovado, workflow/step, causa e correção antes de qualquer feature nova.
+
+---
+
+## 2026-09-13 — fechamento do gate EP0 lógico FAILED
+
+**✅ CERTIFICADO 4/4 — nenhuma correção intermediária necessária.**
+
+```text
+3248fcd86581a5e8822564dcbd0d71eb60d2c6ed
+fix(xhci): quiesce failed EP0 state by epoch
+```
+
+Provas no mesmo SHA:
+
+- CI #1208 ✅
+- SMP #311 ✅
+- NVMe #408 ✅
+- HID Dual-device #67 ✅
+
+Resultado certificado:
+
+- cleanup EP0 exige Device Table válida, estado `FAILED` e epoch exato;
+- estado neutro de EP0 nunca publicado é reconhecido como já limpo sem adotar epoch;
+- estado vivo de outro epoch permanece em quarentena;
+- somente `ready`, enqueue, Producer Cycle State, correlação do Status TRB e seleção global do slot são desmontados;
+- EP0 Ring, Input/Device Context, HID Transfer Ring, Slot ID e porta permanecem fisicamente intactos;
+- nenhum ajuste em `HPinho/LangSotlas` foi necessário.
+
+Não houve gate vermelho neste candidato.
+
+---
+
+## 2026-09-13 — recovery de enumeração FAILED / Evaluate Context lógico
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende dos quatro gates no novo SHA.**
+
+Contrato do corte:
+
+```text
+FAILED + slot_id + epoch exatos
+→ Disable Slot confirmado
+→ Configuration Descriptor recovery
+→ Device Descriptor recovery
+→ Evaluate Context lógico:
+    LAST_EP0_MAX_PACKET = 0
+    COMMAND_SUBMITTED = false
+→ EP0 lógico
+→ Address Device lógico
+→ Input/Device Context e EP0 Ring físicos permanecem na arena
+```
+
+Invariantes:
+
+- `DETACH_PENDING` continua isolado em `xhci_evaluate_context_quiesce_for_epoch()`;
+- recovery `FAILED` nunca chama `xhci_evaluate_context_reset_slot()` e nunca reescreve `XHCI_EVALUATE_CONTEXT_EPOCHS`;
+- se Evaluate Context nunca publicou o epoch e o estado local está neutro, o cleanup é idempotente;
+- estado não neutro de outro epoch falha fechado;
+- nenhum `direct_map`, acesso a context físico, DMA release, command submission ou free físico ocorre no helper FAILED;
+- a ordem de recovery passa a ser `Disable Slot → descriptors → Evaluate Context lógico → EP0 lógico → Address lógico`;
+- a certificação EP0 anterior continua válida: naquele corte Evaluate Context permaneceu em quarentena e nenhum owner físico foi liberado. Este corte apenas refina a ordem de teardown lógico a partir daqui.
+
+Se este candidato fechar 4/4, o próximo microcorte planejado é **SET_CONFIGURATION lógico exact-epoch em FAILED**. Qualquer gate vermelho deve ser registrado e corrigido antes desse avanço.

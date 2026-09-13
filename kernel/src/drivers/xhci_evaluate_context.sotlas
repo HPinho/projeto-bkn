@@ -60,6 +60,66 @@ fn xhci_evaluate_context_epoch_matches_detach(slot_id: u8, epoch: u32) -> bool {
     unsafe { return XHCI_EVALUATE_CONTEXT_EPOCHS[index] == epoch; }
 }
 
+@system
+fn xhci_evaluate_context_failed_slot_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_evaluate_context_index(slot_id);
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn xhci_evaluate_context_failed_state_empty_for(index: usize) -> bool {
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY { return false; }
+    unsafe {
+        return XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKETS[index] == 0 &&
+               !XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED_SLOTS[index];
+    }
+}
+
+@system
+pub fn xhci_evaluate_context_release_failed_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_evaluate_context_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_evaluate_context_index(slot_id);
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY { return false; }
+
+    unsafe {
+        // A enumeração pode falhar antes de reconcile/Evaluate Context publicar
+        // este epoch. Estado neutro é idempotente; estado vivo de outro epoch
+        // permanece em quarentena e nunca é adotado pelo cleanup FAILED.
+        if XHCI_EVALUATE_CONTEXT_EPOCHS[index] != epoch {
+            return xhci_evaluate_context_failed_state_empty_for(index);
+        }
+    }
+    if xhci_evaluate_context_failed_release_complete_for(slot_id, epoch) {
+        return true;
+    }
+
+    unsafe {
+        XHCI_EVALUATE_CONTEXT_LAST_EP0_MAX_PACKETS[index] = 0;
+        XHCI_EVALUATE_CONTEXT_COMMAND_SUBMITTED_SLOTS[index] = false;
+    }
+    return xhci_evaluate_context_failed_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_evaluate_context_failed_release_complete_for(slot_id: u8,
+                                                           epoch: u32) -> bool {
+    if !xhci_evaluate_context_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_evaluate_context_index(slot_id);
+    if index >= XHCI_EVALUATE_SLOT_CAPACITY { return false; }
+    unsafe {
+        if XHCI_EVALUATE_CONTEXT_EPOCHS[index] != epoch {
+            return xhci_evaluate_context_failed_state_empty_for(index);
+        }
+    }
+    return xhci_evaluate_context_failed_state_empty_for(index);
+}
+
 // USB 2.x codifica bMaxPacketSize0 diretamente. SuperSpeed usa o expoente;
 // para EP0 o valor válido observado no Device Descriptor é 9 => 512 bytes.
 @system
