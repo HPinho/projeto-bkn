@@ -198,3 +198,64 @@ Invariantes:
 - a certificação EP0 anterior continua válida: naquele corte Evaluate Context permaneceu em quarentena e nenhum owner físico foi liberado. Este corte apenas refina a ordem de teardown lógico a partir daqui.
 
 Se este candidato fechar 4/4, o próximo microcorte planejado é **SET_CONFIGURATION lógico exact-epoch em FAILED**. Qualquer gate vermelho deve ser registrado e corrigido antes desse avanço.
+
+---
+
+## 2026-09-13 — fechamento do gate Evaluate Context lógico FAILED
+
+**✅ CERTIFICADO 4/4 — nenhuma correção intermediária necessária.**
+
+```text
+dc7a1fa8a003f9050e8a40817e2a1453f8e69714
+fix(xhci): quiesce failed evaluate context state by epoch
+```
+
+Provas no mesmo SHA:
+
+- CI #1209 ✅
+- SMP #312 ✅
+- NVMe #409 ✅
+- HID Dual-device #68 ✅
+
+Resultado certificado:
+
+- cleanup exige `FAILED + slot_id + epoch` exatos;
+- stale epoch só é aceito quando `LAST_EP0_MAX_PACKET == 0` e `COMMAND_SUBMITTED == false`;
+- `XHCI_EVALUATE_CONTEXT_EPOCHS` nunca é reescrito no recovery;
+- `xhci_evaluate_context_reset_slot()` não é usado no caminho FAILED;
+- nenhum context físico, DMA, command submission ou ring foi liberado;
+- teardown lógico certificado passa por `Evaluate Context → EP0 → Address` após os descriptors;
+- nenhum ajuste em `HPinho/LangSotlas` foi necessário.
+
+Não houve gate vermelho neste candidato.
+
+---
+
+## 2026-09-13 — recovery de enumeração FAILED / SET_CONFIGURATION lógico
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende dos quatro gates no novo SHA.**
+
+Contrato do corte:
+
+```text
+FAILED + slot_id + epoch exatos
+→ Disable Slot confirmado
+→ Configuration Descriptor recovery
+→ Device Descriptor recovery
+→ SET_CONFIGURATION lógico: ready=false, value=0, active_slot limpo
+→ Evaluate Context lógico
+→ EP0 lógico
+→ Address Device lógico
+```
+
+Invariantes:
+
+- o epoch armazenado por SET_CONFIGURATION é preservado e nunca adotado/reescrito;
+- estado stale só pode ser reconhecido como já limpo se `ready=false`, `value=0` e `active_slot != slot_id`;
+- recovery FAILED nunca chama `xhci_set_configuration_prepare_state()`;
+- nenhum novo control transfer, Status TRB, wait de EP0 ou inicialização de HID descriptor é executado;
+- nenhum DMA, context, ring, Slot ID ou porta é liberado neste corte;
+- o Report Descriptor DMA físico continua em quarentena onde aplicável;
+- guardrail prova a ordem `Disable Slot → descriptors → SET_CONFIGURATION → Evaluate → EP0 → Address`.
+
+Se este candidato fechar 4/4, o próximo microcorte será **Configure Endpoint lógico exact-epoch em FAILED**, explicitamente sem reutilizar a primitiva física `Drop Endpoint` após `Disable Slot`.

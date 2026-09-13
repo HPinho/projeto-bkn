@@ -210,3 +210,68 @@ Nenhuma mudança em parser, lexer, semântica ou lowering de `HPinho/LangSotlas`
 ## Continuação depois deste gate
 
 Se este SHA fechar 4/4, o próximo microcorte é **SET_CONFIGURATION logical cleanup exact-epoch em FAILED**. Se qualquer gate falhar, congelar a `main`, preservar o SHA reprovado + workflow/step + causa e fazer somente a correção antes de avançar.
+
+---
+
+# Atualização operacional — 2026-09-13 / Evaluate Context FAILED certificado
+
+O candidato Evaluate Context foi encerrado sem falhas:
+
+```text
+dc7a1fa8a003f9050e8a40817e2a1453f8e69714
+fix(xhci): quiesce failed evaluate context state by epoch
+```
+
+Status final do SHA:
+
+- CI #1209 ✅
+- SMP #312 ✅
+- NVMe #409 ✅
+- HID Dual-device #68 ✅
+
+`dc7a1fa8...` passa a ser a baseline certificada 4/4 para o cleanup lógico Evaluate Context em enumeração `FAILED`. Não houve gate vermelho nem correção intermediária.
+
+Escopo certificado:
+
+- exact `slot_id + epoch + FAILED`;
+- stale epoch aceito somente quando o estado Evaluate já está neutro;
+- `EPOCHS` preservado e `reset_slot()` proibido no recovery;
+- somente `LAST_EP0_MAX_PACKET` e `COMMAND_SUBMITTED` são neutralizados;
+- nenhum Input/Device Context, EP0 Ring, DMA, Slot ID ou porta é liberado;
+- ordem lógica após descriptors: Evaluate Context → EP0 → Address;
+- LangSotlas permaneceu inalterado.
+
+## Novo candidato — FAILED SET_CONFIGURATION logical cleanup
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Mudanças deste microcorte:
+
+- `kernel/src/drivers/xhci_set_configuration.sotlas`
+  - adiciona validação exact-epoch + `FAILED` dedicada;
+  - adiciona `xhci_set_configuration_release_failed_for_epoch()` e completion verifier;
+  - limpa somente `ready`, `value` e `ACTIVE_SLOT_ID` do mesmo slot;
+  - preserva `epoch` e nunca chama `xhci_set_configuration_prepare_state()` durante recovery;
+  - stale epoch só é aceito se o estado já estiver totalmente neutro.
+- `kernel/src/drivers/xhci_hid_enumeration.sotlas`
+  - recovery passa a ordenar `Configuration Descriptor → Device Descriptor → SET_CONFIGURATION lógico → Evaluate Context lógico → EP0 lógico → Address lógico`;
+  - retorno exige também `set_configuration_released`.
+- `tests/test_xhci_failed_set_configuration_cleanup.py`
+  - prova exact-epoch + FAILED;
+  - prova ausência de epoch adoption/prepare_state;
+  - prova que nenhum control transfer, wait de EP0, descriptor init, command ou free físico ocorre;
+  - prova a ordem do recovery e separação de `DETACH_PENDING`.
+
+### Recursos ainda em quarentena
+
+- Configure Endpoint state;
+- HID Report Descriptor/Report DMA onde aplicável;
+- HID Transfer Ring;
+- Device/Input Context e EP0 Ring;
+- Device Table entry, Slot ID e associação da porta.
+
+Nenhuma mudança em `HPinho/LangSotlas` foi necessária.
+
+## Continuação depois deste gate
+
+Se este SHA fechar 4/4, avançar para **Configure Endpoint logical cleanup exact-epoch em FAILED**, sem chamar a primitiva física `xhci_configure_endpoint_drop_hid_for_slot()` depois de `Disable Slot`. Qualquer falha congela `main` e exige correção-only registrada antes de novo avanço.
