@@ -608,7 +608,7 @@ pub fn scheduler_create_process_thread(pid: u64, entry_rip: u64, stack_pages: u6
     let root = process_borrow_root(pid);
     if root == 0 { process_release(pid); x86_irq_restore(flags); return 0; }
     // Compatibilidade: a API historica nasce pinned no BSP. Wrappers podem
-    // publicar outra afinidade antes de restaurar o IF externo.
+    // publicar outra afinidade antes de restaurar IF externo.
     let tid = scheduler_create_kernel_thread_with_affinity(entry_rip, stack_pages, 0);
     if tid == 0 { process_release(pid); x86_irq_restore(flags); return 0; }
     if !scheduler_switch_lock() { process_release(pid); x86_irq_restore(flags); return 0; }
@@ -893,7 +893,10 @@ fn scheduler_on_secondary_interrupt(cpu_slot: usize, frame_address: u64) -> u64 
     unsafe {
         let current = SCHEDULER_CPU_CURRENT_SLOT[cpu_slot];
         if current == SCHEDULER_INVALID_SLOT {
-            if SCHEDULER_CPU_IDLE_FRAME[cpu_slot] == 0 { SCHEDULER_CPU_IDLE_FRAME[cpu_slot] = frame_address; }
+            // O frame idle pertence a esta entrada de IRQ. Depois do IRET,
+            // frames idle antigos voltam a ser stack comum do runtime do AP e
+            // podem ser sobrescritos. Renove antes de qualquer novo dispatch.
+            SCHEDULER_CPU_IDLE_FRAME[cpu_slot] = frame_address;
             let next = scheduler_find_next_ready_for_cpu(SCHEDULER_FIRST_DYNAMIC_SLOT, cpu_slot);
             if next != SCHEDULER_INVALID_SLOT { return scheduler_select_slot_for_cpu(cpu_slot, next, frame_address); }
             return frame_address;

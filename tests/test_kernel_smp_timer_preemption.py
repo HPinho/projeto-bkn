@@ -4,6 +4,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROBE = ROOT / "kernel/src/scheduler/smp_probe.sotlas"
+CORE = ROOT / "kernel/src/scheduler/core.sotlas"
 IRQ = ROOT / "kernel/src/interrupts/irq.sotlas"
 SMP = ROOT / "kernel/src/arch/x86_64/smp.sotlas"
 WORKFLOW = ROOT / ".github/workflows/baken_smp.yml"
@@ -43,6 +44,22 @@ class KernelSmpTimerPreemptionTests(unittest.TestCase):
         self.assertLess(timer_idle, timer_marker)
         after_timer_ipi = run[timer_ipi + len("lapic_send_fixed(apic_id, IRQ_VECTOR_RESCHEDULE_IPI as u8)"):timer_marker]
         self.assertNotIn("lapic_send_fixed(", after_timer_ipi)
+
+    def test_ap_idle_frame_is_refreshed_before_every_idle_dispatch(self):
+        text = CORE.read_text(encoding="utf-8")
+        body = text.split("fn scheduler_on_secondary_interrupt", 1)[1].split(
+            "pub fn scheduler_on_timer_interrupt", 1
+        )[0]
+        idle = body.split("if current == SCHEDULER_INVALID_SLOT", 1)[1].split(
+            "if current < SCHEDULER_FIRST_DYNAMIC_SLOT", 1
+        )[0]
+        refresh = "SCHEDULER_CPU_IDLE_FRAME[cpu_slot] = frame_address;"
+        dispatch = "scheduler_find_next_ready_for_cpu(SCHEDULER_FIRST_DYNAMIC_SLOT, cpu_slot)"
+        self.assertIn(refresh, idle)
+        self.assertIn(dispatch, idle)
+        self.assertLess(idle.index(refresh), idle.index(dispatch))
+        self.assertNotIn("if SCHEDULER_CPU_IDLE_FRAME[cpu_slot] == 0", idle)
+        self.assertIn("let idle_frame = SCHEDULER_CPU_IDLE_FRAME[cpu_slot];", body)
 
     def test_any_affinity_thread_is_taken_by_ap_timer_without_ipi(self):
         text = PROBE.read_text(encoding="utf-8")
