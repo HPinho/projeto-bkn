@@ -1,0 +1,300 @@
+// Baken OS — I2C-2b: ACPI ↔ Controller Discovery Bridge.
+//
+// Conecta o namespace ACPI e os bindings de recursos ao registry central de
+// controladores I2C de forma generation-safe, sem alocação dinâmica e com
+// isolamento de falhas. Não acessa registradores de hardware diretamente.
+
+module kernel::drivers::i2c_discovery_bridge;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_i2c_resources::*;
+import kernel::acpi::aml_i2c_binding::*;
+import kernel::drivers::i2c_core::*;
+import kernel::drivers::i2c_controller::*;
+import kernel::drivers::i2c_controller_registry::*;
+
+pub const I2C_BRIDGE_CAPACITY: usize = 16;
+pub const I2C_BRIDGE_DEFAULT_SPEED_HZ: u32 = 400000;
+pub const I2C_BRIDGE_STANDARD_SPEED_HZ: u32 = 100000;
+
+@repr(C)
+pub struct I2cBridgeController {
+    pub acpi_namespace_index: usize;
+    pub handle: I2cControllerHandle;
+    pub max_speed_hz: u32;
+    pub supports_10bit: bool;
+    pub attached_devices: usize;
+    pub valid: bool;
+}
+
+static mut I2C_BRIDGE_CONTROLLERS: [I2cBridgeController; I2C_BRIDGE_CAPACITY] = [
+    I2cBridgeController {
+        acpi_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        handle: I2cControllerHandle {
+            controller_id: I2C_CONTROLLER_ID_NONE,
+            generation: I2C_CONTROLLER_GENERATION_INVALID,
+            valid: false
+        },
+        max_speed_hz: 0,
+        supports_10bit: false,
+        attached_devices: 0,
+        valid: false
+    };
+    I2C_BRIDGE_CAPACITY
+];
+
+static mut I2C_BRIDGE_READY: bool = false;
+static mut I2C_BRIDGE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut I2C_BRIDGE_LOCK_READY: bool = false;
+static mut I2C_BRIDGE_COUNT: usize = 0;
+
+@system
+pub fn i2c_discovery_default_capabilities(max_speed_hz: u32,
+                                          supports_10bit: bool) -> I2cControllerCapabilities {
+    let mut speed = max_speed_hz;
+    if speed == 0 { speed = I2C_BRIDGE_DEFAULT_SPEED_HZ; }
+    return I2cControllerCapabilities {
+        supports_7bit: true,
+        supports_10bit: supports_10bit,
+        supports_repeated_start: true,
+        max_messages: I2C_MAX_MESSAGES,
+        max_message_bytes: I2C_MAX_MESSAGE_BYTES,
+        max_transaction_bytes: I2C_MAX_TRANSACTION_BYTES,
+        max_speed_hz: speed,
+        valid: true
+    };
+}
+
+@system
+pub fn i2c_discovery_bridge_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !I2C_BRIDGE_LOCK_READY {
+            if !spinlock_init(&mut I2C_BRIDGE_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            I2C_BRIDGE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut I2C_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_BRIDGE_READY {
+            spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+            x86_irq_restore(flags);
+            return true;
+        }
+
+        let mut index: usize = 0;
+        while index < I2C_BRIDGE_CAPACITY {
+            I2C_BRIDGE_CONTROLLERS[index].acpi_namespace_index = AML_NAMESPACE_INVALID_INDEX;
+            I2C_BRIDGE_CONTROLLERS[index].handle = i2c_controller_invalid_handle();
+            I2C_BRIDGE_CONTROLLERS[index].max_speed_hz = 0;
+            I2C_BRIDGE_CONTROLLERS[index].supports_10bit = false;
+            I2C_BRIDGE_CONTROLLERS[index].attached_devices = 0;
+            I2C_BRIDGE_CONTROLLERS[index].valid = false;
+            index += 1;
+        }
+        I2C_BRIDGE_COUNT = 0;
+        I2C_BRIDGE_READY = true;
+        spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn i2c_discovery_bridge_find_by_namespace(acpi_namespace_index: usize) -> I2cControllerHandle {
+    if acpi_namespace_index == AML_NAMESPACE_INVALID_INDEX {
+        return i2c_controller_invalid_handle();
+    }
+    let flags = x86_irq_save_disable();
+    let mut handle = i2c_controller_invalid_handle();
+    unsafe {
+        if !I2C_BRIDGE_LOCK_READY || !spinlock_lock(&mut I2C_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return handle;
+        }
+        if I2C_BRIDGE_READY {
+            let mut index: usize = 0;
+            while index < I2C_BRIDGE_CAPACITY {
+                if I2C_BRIDGE_CONTROLLERS[index].valid &&
+                   I2C_BRIDGE_CONTROLLERS[index].acpi_namespace_index == acpi_namespace_index {
+                    handle = I2C_BRIDGE_CONTROLLERS[index].handle;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return handle;
+}
+
+@system
+pub fn i2c_discovery_register_controller(acpi_namespace_index: usize,
+                                         max_speed_hz: u32,
+                                         supports_10bit: bool) -> I2cControllerHandle {
+    if acpi_namespace_index == AML_NAMESPACE_INVALID_INDEX {
+        return i2c_controller_invalid_handle();
+    }
+
+    // Se já foi registrado na bridge, devolve o handle existente
+    let existing = i2c_discovery_bridge_find_by_namespace(acpi_namespace_index);
+    if i2c_controller_handle_valid(&existing) {
+        return existing;
+    }
+
+    // Garante que o registry central está inicializado
+    if !i2c_controller_registry_init() {
+        return i2c_controller_invalid_handle();
+    }
+
+    let caps = i2c_discovery_default_capabilities(max_speed_hz, supports_10bit);
+    let handle = i2c_controller_registry_attach(acpi_namespace_index, &caps);
+    if !i2c_controller_handle_valid(&handle) {
+        return i2c_controller_invalid_handle();
+    }
+
+    if !i2c_discovery_bridge_init() {
+        i2c_controller_registry_detach(handle.controller_id, handle.generation);
+        return i2c_controller_invalid_handle();
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut stored = false;
+    unsafe {
+        if !I2C_BRIDGE_LOCK_READY || !spinlock_lock(&mut I2C_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            i2c_controller_registry_detach(handle.controller_id, handle.generation);
+            return i2c_controller_invalid_handle();
+        }
+        if I2C_BRIDGE_READY {
+            let mut index: usize = 0;
+            while index < I2C_BRIDGE_CAPACITY {
+                if !I2C_BRIDGE_CONTROLLERS[index].valid {
+                    I2C_BRIDGE_CONTROLLERS[index].acpi_namespace_index = acpi_namespace_index;
+                    I2C_BRIDGE_CONTROLLERS[index].handle = handle;
+                    I2C_BRIDGE_CONTROLLERS[index].max_speed_hz = caps.max_speed_hz;
+                    I2C_BRIDGE_CONTROLLERS[index].supports_10bit = supports_10bit;
+                    I2C_BRIDGE_CONTROLLERS[index].attached_devices = 0;
+                    I2C_BRIDGE_CONTROLLERS[index].valid = true;
+                    I2C_BRIDGE_COUNT += 1;
+                    stored = true;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+    }
+    x86_irq_restore(flags);
+
+    if !stored {
+        i2c_controller_registry_detach(handle.controller_id, handle.generation);
+        return i2c_controller_invalid_handle();
+    }
+
+    return handle;
+}
+
+@system
+pub fn i2c_discovery_bridge_record_device(acpi_namespace_index: usize,
+                                          speed_hz: u32) -> bool {
+    if acpi_namespace_index == AML_NAMESPACE_INVALID_INDEX { return false; }
+    let flags = x86_irq_save_disable();
+    let mut recorded = false;
+    unsafe {
+        if !I2C_BRIDGE_LOCK_READY || !spinlock_lock(&mut I2C_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_BRIDGE_READY {
+            let mut index: usize = 0;
+            while index < I2C_BRIDGE_CAPACITY {
+                if I2C_BRIDGE_CONTROLLERS[index].valid &&
+                   I2C_BRIDGE_CONTROLLERS[index].acpi_namespace_index == acpi_namespace_index {
+                    I2C_BRIDGE_CONTROLLERS[index].attached_devices += 1;
+                    if speed_hz > I2C_BRIDGE_CONTROLLERS[index].max_speed_hz {
+                        I2C_BRIDGE_CONTROLLERS[index].max_speed_hz = speed_hz;
+                    }
+                    recorded = true;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return recorded;
+}
+
+@system
+pub fn i2c_discovery_scan_acpi_controllers() -> usize {
+    if !aml_discovery_is_ready() { return 0; }
+    if !i2c_discovery_bridge_init() { return 0; }
+
+    let count = aml_discovery_resource_count();
+    let mut controllers_found: usize = 0;
+    let mut index: usize = 0;
+
+    while index < count {
+        let binding = aml_i2c_binding_for_resource(index);
+        if binding.valid && binding.controller_namespace_index != AML_NAMESPACE_INVALID_INDEX {
+            let handle = i2c_discovery_find_controller_for_resource(index);
+            if !i2c_controller_handle_valid(&handle) {
+                let new_handle = i2c_discovery_register_controller(
+                    binding.controller_namespace_index,
+                    binding.connection_speed_hz,
+                    binding.ten_bit_addressing
+                );
+                if i2c_controller_handle_valid(&new_handle) {
+                    controllers_found += 1;
+                    i2c_discovery_bridge_record_device(
+                        binding.controller_namespace_index,
+                        binding.connection_speed_hz
+                    );
+                }
+            } else {
+                i2c_discovery_bridge_record_device(
+                    binding.controller_namespace_index,
+                    binding.connection_speed_hz
+                );
+            }
+        }
+        index += 1;
+    }
+
+    return controllers_found;
+}
+
+@system
+pub fn i2c_discovery_find_controller_for_resource(resource_index: usize) -> I2cControllerHandle {
+    let binding = aml_i2c_binding_for_resource(resource_index);
+    if !binding.valid || binding.controller_namespace_index == AML_NAMESPACE_INVALID_INDEX {
+        return i2c_controller_invalid_handle();
+    }
+    return i2c_discovery_bridge_find_by_namespace(binding.controller_namespace_index);
+}
+
+@system
+pub fn i2c_discovery_bridge_count() -> usize {
+    let flags = x86_irq_save_disable();
+    let mut count: usize = 0;
+    unsafe {
+        if !I2C_BRIDGE_LOCK_READY || !spinlock_lock(&mut I2C_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+        if I2C_BRIDGE_READY { count = I2C_BRIDGE_COUNT; }
+        spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return count;
+}

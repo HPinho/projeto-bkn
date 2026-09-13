@@ -1,0 +1,561 @@
+// Baken OS — I2C-4: Generic I2C Device Model.
+//
+// Abstração unificada de dispositivo/target I2C. Gerencia ciclo de vida
+// generation-safe (ATTACHED -> ACTIVE -> SUSPENDED -> FAILED -> DETACHED),
+// vínculo ao controlador e ao pino GPIO, estatísticas e despacho de
+// transações estruturadas através do protocolo genérico.
+
+module kernel::drivers::i2c_device;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::drivers::i2c_core::*;
+import kernel::drivers::i2c_executor::*;
+import kernel::drivers::i2c_protocol::*;
+import kernel::drivers::i2c_controller::*;
+import kernel::drivers::i2c_controller_registry::*;
+import kernel::drivers::gpio_core::*;
+
+pub const I2C_DEVICE_CAPACITY: usize = 32;
+pub const I2C_DEVICE_ID_NONE: u32 = 0;
+pub const I2C_DEVICE_GENERATION_INVALID: u32 = 0;
+pub const I2C_DEVICE_DEFAULT_TIMEOUT_US: u64 = 100000;
+
+pub const I2C_DEVICE_STATE_EMPTY: u8 = 0;
+pub const I2C_DEVICE_STATE_ATTACHED: u8 = 1;
+pub const I2C_DEVICE_STATE_ACTIVE: u8 = 2;
+pub const I2C_DEVICE_STATE_SUSPENDED: u8 = 3;
+pub const I2C_DEVICE_STATE_FAILED: u8 = 4;
+pub const I2C_DEVICE_STATE_DETACHED: u8 = 5;
+
+@repr(C)
+pub struct I2cDeviceHandle {
+    pub device_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct I2cDeviceConfig {
+    pub controller_id: u32;
+    pub controller_generation: u32;
+    pub slave_address: u16;
+    pub ten_bit_addressing: bool;
+    pub bus_speed_hz: u32;
+    pub timeout_us: u64;
+    pub gpio_connection_id: u32;
+    pub gpio_generation: u32;
+    pub acpi_namespace_index: usize;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct I2cDeviceRecord {
+    pub device_id: u32;
+    pub generation: u32;
+    pub state: u8;
+    pub config: I2cDeviceConfig;
+    pub transferred_bytes_total: u64;
+    pub successful_transactions: u64;
+    pub failed_transactions: u64;
+    pub last_status: u8;
+    pub valid: bool;
+}
+
+static mut I2C_DEVICES: [I2cDeviceRecord; I2C_DEVICE_CAPACITY] = [
+    I2cDeviceRecord {
+        device_id: I2C_DEVICE_ID_NONE,
+        generation: I2C_DEVICE_GENERATION_INVALID,
+        state: I2C_DEVICE_STATE_EMPTY,
+        config: I2cDeviceConfig {
+            controller_id: I2C_CONTROLLER_ID_NONE,
+            controller_generation: I2C_CONTROLLER_GENERATION_INVALID,
+            slave_address: 0,
+            ten_bit_addressing: false,
+            bus_speed_hz: 0,
+            timeout_us: 0,
+            gpio_connection_id: GPIO_CONNECTION_ID_NONE,
+            gpio_generation: GPIO_GENERATION_INVALID,
+            acpi_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+            valid: false
+        },
+        transferred_bytes_total: 0,
+        successful_transactions: 0,
+        failed_transactions: 0,
+        last_status: I2C_STATUS_OK,
+        valid: false
+    };
+    I2C_DEVICE_CAPACITY
+];
+
+static mut I2C_DEVICE_READY: bool = false;
+static mut I2C_DEVICE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut I2C_DEVICE_LOCK_READY: bool = false;
+static mut I2C_DEVICE_ACTIVE_COUNT: usize = 0;
+
+@system
+pub fn i2c_device_invalid_handle() -> I2cDeviceHandle {
+    return I2cDeviceHandle {
+        device_id: I2C_DEVICE_ID_NONE,
+        generation: I2C_DEVICE_GENERATION_INVALID,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_device_invalid_record() -> I2cDeviceRecord {
+    return I2cDeviceRecord {
+        device_id: I2C_DEVICE_ID_NONE,
+        generation: I2C_DEVICE_GENERATION_INVALID,
+        state: I2C_DEVICE_STATE_EMPTY,
+        config: I2cDeviceConfig {
+            controller_id: I2C_CONTROLLER_ID_NONE,
+            controller_generation: I2C_CONTROLLER_GENERATION_INVALID,
+            slave_address: 0,
+            ten_bit_addressing: false,
+            bus_speed_hz: 0,
+            timeout_us: 0,
+            gpio_connection_id: GPIO_CONNECTION_ID_NONE,
+            gpio_generation: GPIO_GENERATION_INVALID,
+            acpi_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+            valid: false
+        },
+        transferred_bytes_total: 0,
+        successful_transactions: 0,
+        failed_transactions: 0,
+        last_status: I2C_STATUS_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn i2c_device_slot(device_id: u32) -> usize {
+    if device_id == I2C_DEVICE_ID_NONE || device_id > I2C_DEVICE_CAPACITY as u32 {
+        return I2C_DEVICE_CAPACITY;
+    }
+    return (device_id - 1) as usize;
+}
+
+@system
+fn i2c_device_generation_next(current: u32) -> u32 {
+    let mut next = current + 1;
+    if next == I2C_DEVICE_GENERATION_INVALID { next = 1; }
+    return next;
+}
+
+@system
+pub fn i2c_device_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY {
+            if !spinlock_init(&mut I2C_DEVICE_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            I2C_DEVICE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_DEVICE_READY {
+            spinlock_unlock(&mut I2C_DEVICE_LOCK);
+            x86_irq_restore(flags);
+            return true;
+        }
+
+        let mut index: usize = 0;
+        while index < I2C_DEVICE_CAPACITY {
+            I2C_DEVICES[index] = i2c_device_invalid_record();
+            I2C_DEVICES[index].device_id = (index + 1) as u32;
+            I2C_DEVICES[index].generation = 1;
+            index += 1;
+        }
+        I2C_DEVICE_ACTIVE_COUNT = 0;
+        I2C_DEVICE_READY = true;
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn i2c_device_attach(config: *const I2cDeviceConfig) -> I2cDeviceHandle {
+    if config == (null as *const I2cDeviceConfig) { return i2c_device_invalid_handle(); }
+    unsafe {
+        if !(*config).valid || !i2c_address_valid((*config).slave_address, (*config).ten_bit_addressing) {
+            return i2c_device_invalid_handle();
+        }
+        if (*config).controller_id == I2C_CONTROLLER_ID_NONE ||
+           (*config).controller_generation == I2C_CONTROLLER_GENERATION_INVALID {
+            return i2c_device_invalid_handle();
+        }
+    }
+
+    if !i2c_device_init() { return i2c_device_invalid_handle(); }
+
+    let flags = x86_irq_save_disable();
+    let mut result = i2c_device_invalid_handle();
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return result;
+        }
+        if I2C_DEVICE_READY {
+            let mut index: usize = 0;
+            while index < I2C_DEVICE_CAPACITY {
+                if I2C_DEVICES[index].state == I2C_DEVICE_STATE_EMPTY {
+                    I2C_DEVICES[index].state = I2C_DEVICE_STATE_ATTACHED;
+                    I2C_DEVICES[index].config = *config;
+                    if I2C_DEVICES[index].config.timeout_us == 0 {
+                        I2C_DEVICES[index].config.timeout_us = I2C_DEVICE_DEFAULT_TIMEOUT_US;
+                    }
+                    I2C_DEVICES[index].transferred_bytes_total = 0;
+                    I2C_DEVICES[index].successful_transactions = 0;
+                    I2C_DEVICES[index].failed_transactions = 0;
+                    I2C_DEVICES[index].last_status = I2C_STATUS_OK;
+                    I2C_DEVICES[index].valid = true;
+
+                    result.device_id = I2C_DEVICES[index].device_id;
+                    result.generation = I2C_DEVICES[index].generation;
+                    result.valid = true;
+                    break;
+                }
+                index += 1;
+            }
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return result;
+}
+
+@system
+pub fn i2c_device_activate(device_id: u32, generation: u32) -> bool {
+    let slot = i2c_device_slot(device_id);
+    if slot >= I2C_DEVICE_CAPACITY || generation == I2C_DEVICE_GENERATION_INVALID {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut activated = false;
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_DEVICE_READY &&
+           I2C_DEVICES[slot].valid &&
+           I2C_DEVICES[slot].device_id == device_id &&
+           I2C_DEVICES[slot].generation == generation &&
+           (I2C_DEVICES[slot].state == I2C_DEVICE_STATE_ATTACHED ||
+            I2C_DEVICES[slot].state == I2C_DEVICE_STATE_SUSPENDED) {
+            I2C_DEVICES[slot].state = I2C_DEVICE_STATE_ACTIVE;
+            I2C_DEVICE_ACTIVE_COUNT += 1;
+            activated = true;
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return activated;
+}
+
+@system
+pub fn i2c_device_suspend(device_id: u32, generation: u32) -> bool {
+    let slot = i2c_device_slot(device_id);
+    if slot >= I2C_DEVICE_CAPACITY || generation == I2C_DEVICE_GENERATION_INVALID {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut suspended = false;
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_DEVICE_READY &&
+           I2C_DEVICES[slot].valid &&
+           I2C_DEVICES[slot].device_id == device_id &&
+           I2C_DEVICES[slot].generation == generation &&
+           I2C_DEVICES[slot].state == I2C_DEVICE_STATE_ACTIVE {
+            I2C_DEVICES[slot].state = I2C_DEVICE_STATE_SUSPENDED;
+            if I2C_DEVICE_ACTIVE_COUNT != 0 { I2C_DEVICE_ACTIVE_COUNT -= 1; }
+            suspended = true;
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return suspended;
+}
+
+@system
+pub fn i2c_device_detach(device_id: u32, generation: u32) -> bool {
+    let slot = i2c_device_slot(device_id);
+    if slot >= I2C_DEVICE_CAPACITY || generation == I2C_DEVICE_GENERATION_INVALID {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut detached = false;
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_DEVICE_READY &&
+           I2C_DEVICES[slot].valid &&
+           I2C_DEVICES[slot].device_id == device_id &&
+           I2C_DEVICES[slot].generation == generation &&
+           I2C_DEVICES[slot].state != I2C_DEVICE_STATE_EMPTY {
+            if I2C_DEVICES[slot].state == I2C_DEVICE_STATE_ACTIVE &&
+               I2C_DEVICE_ACTIVE_COUNT != 0 {
+                I2C_DEVICE_ACTIVE_COUNT -= 1;
+            }
+            I2C_DEVICES[slot].state = I2C_DEVICE_STATE_EMPTY;
+            I2C_DEVICES[slot].valid = false;
+            I2C_DEVICES[slot].generation = i2c_device_generation_next(generation);
+            detached = true;
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return detached;
+}
+
+@system
+pub fn i2c_device_is_active(device_id: u32, generation: u32) -> bool {
+    let slot = i2c_device_slot(device_id);
+    if slot >= I2C_DEVICE_CAPACITY || generation == I2C_DEVICE_GENERATION_INVALID {
+        return false;
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut active = false;
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_DEVICE_READY &&
+           I2C_DEVICES[slot].valid &&
+           I2C_DEVICES[slot].device_id == device_id &&
+           I2C_DEVICES[slot].generation == generation &&
+           I2C_DEVICES[slot].state == I2C_DEVICE_STATE_ACTIVE {
+            active = true;
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return active;
+}
+
+@system
+pub fn i2c_device_query(device_id: u32, generation: u32) -> I2cDeviceRecord {
+    let slot = i2c_device_slot(device_id);
+    if slot >= I2C_DEVICE_CAPACITY || generation == I2C_DEVICE_GENERATION_INVALID {
+        return i2c_device_invalid_record();
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut result = i2c_device_invalid_record();
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return result;
+        }
+        if I2C_DEVICE_READY &&
+           I2C_DEVICES[slot].valid &&
+           I2C_DEVICES[slot].device_id == device_id &&
+           I2C_DEVICES[slot].generation == generation {
+            result = I2C_DEVICES[slot];
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return result;
+}
+
+@system
+pub fn i2c_device_execute_transaction(device_id: u32,
+                                      generation: u32,
+                                      transaction: *const I2cTransaction) -> u8 {
+    if !i2c_device_is_active(device_id, generation) {
+        return I2C_STATUS_INVALID;
+    }
+    if transaction == (null as *const I2cTransaction) {
+        return I2C_STATUS_INVALID;
+    }
+
+    let dev = i2c_device_query(device_id, generation);
+    if !dev.valid { return I2C_STATUS_INVALID; }
+
+    let desc = i2c_controller_registry_descriptor(
+        dev.config.controller_id,
+        dev.config.controller_generation
+    );
+    if !desc.valid { return I2C_STATUS_CONTROLLER_ERROR; }
+
+    let plan = i2c_plan_transaction(transaction);
+    if !plan.valid { return I2C_STATUS_INVALID; }
+
+    let req = i2c_executor_prepare(transaction, &desc.capabilities);
+    if !req.valid || req.status != I2C_STATUS_OK {
+        return if req.valid { req.status } else { I2C_STATUS_INVALID };
+    }
+
+    let mut machine = i2c_protocol_begin(&req);
+    if !machine.valid { return I2C_STATUS_CONTROLLER_ERROR; }
+
+    while !i2c_protocol_state_terminal(machine.state) {
+        let action = i2c_protocol_issue(&mut machine);
+        if action.kind == I2C_PROTOCOL_ACTION_NONE { break; }
+
+        let event = I2cProtocolEvent {
+            status: I2C_STATUS_OK,
+            bus_ownership_released: action.kind == I2C_PROTOCOL_ACTION_STOP,
+            controller_quiesced: action.kind == I2C_PROTOCOL_ACTION_STOP,
+            valid: true
+        };
+        if !i2c_protocol_accept_event(&mut machine, &event) { break; }
+    }
+
+    let comp = i2c_protocol_completion(&machine, 100);
+    let status = comp.status;
+
+    let slot = i2c_device_slot(device_id);
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if I2C_DEVICE_LOCK_READY && spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            if I2C_DEVICE_READY &&
+               I2C_DEVICES[slot].valid &&
+               I2C_DEVICES[slot].device_id == device_id &&
+               I2C_DEVICES[slot].generation == generation {
+                if status == I2C_STATUS_OK {
+                    I2C_DEVICES[slot].successful_transactions += 1;
+                    I2C_DEVICES[slot].transferred_bytes_total += comp.transferred_bytes as u64;
+                } else {
+                    I2C_DEVICES[slot].failed_transactions += 1;
+                }
+                I2C_DEVICES[slot].last_status = status;
+            }
+            spinlock_unlock(&mut I2C_DEVICE_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+
+    return status;
+}
+
+@system
+pub fn i2c_device_write(device_id: u32,
+                        generation: u32,
+                        data: *const u8,
+                        length: usize) -> u8 {
+    if data == (null as *const u8) || length == 0 || length > I2C_MAX_MESSAGE_BYTES {
+        return I2C_STATUS_INVALID;
+    }
+    let dev = i2c_device_query(device_id, generation);
+    if !dev.valid { return I2C_STATUS_INVALID; }
+
+    let mut transaction = I2cTransaction {
+        address: dev.config.slave_address,
+        ten_bit_addressing: dev.config.ten_bit_addressing,
+        bus_speed_hz: dev.config.bus_speed_hz,
+        timeout_us: dev.config.timeout_us,
+        messages: [
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: data as *mut u8, length: length },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 }
+        ],
+        message_count: 1
+    };
+    return i2c_device_execute_transaction(device_id, generation, &transaction);
+}
+
+@system
+pub fn i2c_device_read(device_id: u32,
+                       generation: u32,
+                       buffer: *mut u8,
+                       length: usize) -> u8 {
+    if buffer == (null as *mut u8) || length == 0 || length > I2C_MAX_MESSAGE_BYTES {
+        return I2C_STATUS_INVALID;
+    }
+    let dev = i2c_device_query(device_id, generation);
+    if !dev.valid { return I2C_STATUS_INVALID; }
+
+    let mut transaction = I2cTransaction {
+        address: dev.config.slave_address,
+        ten_bit_addressing: dev.config.ten_bit_addressing,
+        bus_speed_hz: dev.config.bus_speed_hz,
+        timeout_us: dev.config.timeout_us,
+        messages: [
+            I2cMessage { direction: I2C_DIRECTION_READ, data: buffer, length: length },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 }
+        ],
+        message_count: 1
+    };
+    return i2c_device_execute_transaction(device_id, generation, &transaction);
+}
+
+@system
+pub fn i2c_device_write_read(device_id: u32,
+                             generation: u32,
+                             write_data: *const u8,
+                             write_len: usize,
+                             read_buf: *mut u8,
+                             read_len: usize) -> u8 {
+    if write_data == (null as *const u8) || write_len == 0 || write_len > I2C_MAX_MESSAGE_BYTES ||
+       read_buf == (null as *mut u8) || read_len == 0 || read_len > I2C_MAX_MESSAGE_BYTES {
+        return I2C_STATUS_INVALID;
+    }
+    let dev = i2c_device_query(device_id, generation);
+    if !dev.valid { return I2C_STATUS_INVALID; }
+
+    let mut transaction = I2cTransaction {
+        address: dev.config.slave_address,
+        ten_bit_addressing: dev.config.ten_bit_addressing,
+        bus_speed_hz: dev.config.bus_speed_hz,
+        timeout_us: dev.config.timeout_us,
+        messages: [
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: write_data as *mut u8, length: write_len },
+            I2cMessage { direction: I2C_DIRECTION_READ, data: read_buf, length: read_len },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 },
+            I2cMessage { direction: I2C_DIRECTION_WRITE, data: null as *mut u8, length: 0 }
+        ],
+        message_count: 2
+    };
+    return i2c_device_execute_transaction(device_id, generation, &transaction);
+}
+
+@system
+pub fn i2c_device_active_count() -> usize {
+    let flags = x86_irq_save_disable();
+    let mut count: usize = 0;
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+        if I2C_DEVICE_READY { count = I2C_DEVICE_ACTIVE_COUNT; }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return count;
+}
