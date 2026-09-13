@@ -1,0 +1,352 @@
+// Baken OS — I2C-0a: decodificação semântica bounded de recursos ACPI I2C/GPIO.
+//
+// Consome somente AmlResourceDescriptor já validado estruturalmente pelo AML-5.
+// Não executa AML, não resolve namespace, não programa controlador, GPIO, IRQ,
+// MMIO ou DMA. O binding de ResourceSource fica deliberadamente para I2C-0b/2.
+
+module kernel::acpi::aml_i2c_resources;
+
+import kernel::acpi::aml_discovery::*;
+
+pub const AML_I2C_RESOURCE_ITEM_GPIO_CONNECTION: u8 = 0x0C;
+pub const AML_I2C_RESOURCE_ITEM_SERIAL_BUS: u8 = 0x0E;
+pub const AML_I2C_SERIAL_BUS_TYPE: u8 = 1;
+pub const AML_I2C_SERIAL_REVISION: u8 = 2;
+pub const AML_I2C_TYPE_REVISION: u8 = 1;
+pub const AML_I2C_TYPE_DATA_MIN_LENGTH: usize = 6;
+pub const AML_I2C_SERIAL_FIXED_PAYLOAD: usize = 9;
+pub const AML_GPIO_CONNECTION_REVISION: u8 = 1;
+pub const AML_GPIO_CONNECTION_INTERRUPT: u8 = 0;
+pub const AML_GPIO_FIXED_PAYLOAD: usize = 20;
+pub const AML_RESOURCE_LARGE_HEADER_LENGTH: usize = 3;
+pub const AML_I2C_MAX_GPIO_PINS: usize = 256;
+
+pub struct AmlI2cSerialBusResource {
+    pub resource_index: usize;
+    pub device_slot: usize;
+    pub resource_source_index: u8;
+    pub connection_speed_hz: u32;
+    pub slave_address: u16;
+    pub ten_bit_addressing: bool;
+    pub shared: bool;
+    pub consumer: bool;
+    pub device_initiated: bool;
+    // ACPI 6.6 permite este byte como LVR para I2C ligado a host I3C.
+    // I2C-0a preserva o valor; I2C-2 decide se ele deve ser zero no controller real.
+    pub legacy_virtual_register: u8;
+    pub vendor_data: *const u8;
+    pub vendor_data_length: usize;
+    pub controller_source: *const u8;
+    pub controller_source_length: usize;
+    pub valid: bool;
+}
+
+pub struct AmlGpioIntResource {
+    pub resource_index: usize;
+    pub device_slot: usize;
+    pub consumer: bool;
+    pub edge_triggered: bool;
+    // 0=active-high, 1=active-low, 2=active-both.
+    pub polarity: u8;
+    pub shared: bool;
+    pub wake_capable: bool;
+    pub pin_config: u8;
+    pub drive_strength: u16;
+    pub debounce_timeout: u16;
+    // Tabela raw LE16 dentro do ResourceTemplate; nenhum pin é copiado.
+    pub pin_table: *const u8;
+    pub pin_count: usize;
+    pub controller_source: *const u8;
+    pub controller_source_length: usize;
+    pub vendor_data: *const u8;
+    pub vendor_data_length: usize;
+    pub valid: bool;
+}
+
+@system
+fn aml_i2c_serial_invalid() -> AmlI2cSerialBusResource {
+    return AmlI2cSerialBusResource {
+        resource_index: 0,
+        device_slot: 0,
+        resource_source_index: 0,
+        connection_speed_hz: 0,
+        slave_address: 0,
+        ten_bit_addressing: false,
+        shared: false,
+        consumer: false,
+        device_initiated: false,
+        legacy_virtual_register: 0,
+        vendor_data: null as *const u8,
+        vendor_data_length: 0,
+        controller_source: null as *const u8,
+        controller_source_length: 0,
+        valid: false
+    };
+}
+
+@system
+fn aml_gpio_int_invalid() -> AmlGpioIntResource {
+    return AmlGpioIntResource {
+        resource_index: 0,
+        device_slot: 0,
+        consumer: false,
+        edge_triggered: false,
+        polarity: 0,
+        shared: false,
+        wake_capable: false,
+        pin_config: 0,
+        drive_strength: 0,
+        debounce_timeout: 0,
+        pin_table: null as *const u8,
+        pin_count: 0,
+        controller_source: null as *const u8,
+        controller_source_length: 0,
+        vendor_data: null as *const u8,
+        vendor_data_length: 0,
+        valid: false
+    };
+}
+
+@system
+fn aml_i2c_pointer_add(base: *const u8, offset: usize) -> *const u8 {
+    if base == (null as *const u8) { return null as *const u8; }
+    let address = base as u64;
+    let delta = offset as u64;
+    if delta > 0xFFFFFFFFFFFFFFFF - address { return null as *const u8; }
+    unsafe { return (address + delta) as *const u8; }
+}
+
+@system
+fn aml_i2c_read_u16(data: *const u8, offset: usize) -> u16 {
+    unsafe {
+        return (data[offset] as u16) |
+            ((data[offset + 1] as u16) << 8);
+    }
+}
+
+@system
+fn aml_i2c_read_u32(data: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (data[offset] as u32) |
+            ((data[offset + 1] as u32) << 8) |
+            ((data[offset + 2] as u32) << 16) |
+            ((data[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn aml_i2c_source_exact_length(data: *const u8, region_length: usize) -> usize {
+    if data == (null as *const u8) || region_length < 2 { return 0; }
+    let mut index: usize = 0;
+    while index < region_length {
+        let value = unsafe { data[index] };
+        if value == 0 {
+            if index == 0 || index + 1 != region_length { return 0; }
+            return index;
+        }
+        if value < 0x20 || value > 0x7E { return 0; }
+        index += 1;
+    }
+    return 0;
+}
+
+@system
+pub fn aml_i2c_decode_serial_bus(resource_index: usize) -> AmlI2cSerialBusResource {
+    let descriptor = aml_discovery_resource(resource_index);
+    if descriptor == (null as *const AmlResourceDescriptor) {
+        return aml_i2c_serial_invalid();
+    }
+    unsafe {
+        if !(*descriptor).valid || (*descriptor).kind != AML_RESOURCE_KIND_LARGE ||
+           (*descriptor).item_name != AML_I2C_RESOURCE_ITEM_SERIAL_BUS ||
+           (*descriptor).payload == (null as *const u8) ||
+           (*descriptor).payload_length < AML_I2C_SERIAL_FIXED_PAYLOAD +
+                AML_I2C_TYPE_DATA_MIN_LENGTH + 1 {
+            return aml_i2c_serial_invalid();
+        }
+
+        let payload = (*descriptor).payload;
+        let payload_length = (*descriptor).payload_length;
+        if payload[0] != AML_I2C_SERIAL_REVISION ||
+           payload[2] != AML_I2C_SERIAL_BUS_TYPE ||
+           payload[6] != AML_I2C_TYPE_REVISION {
+            return aml_i2c_serial_invalid();
+        }
+
+        let general_flags = payload[3];
+        let type_flags_low = payload[4];
+        let type_flags_high = payload[5];
+        if (general_flags & 0xF8) != 0 || (type_flags_low & 0xFE) != 0 {
+            return aml_i2c_serial_invalid();
+        }
+
+        let type_data_length = aml_i2c_read_u16(payload, 7) as usize;
+        if type_data_length < AML_I2C_TYPE_DATA_MIN_LENGTH ||
+           type_data_length > payload_length - AML_I2C_SERIAL_FIXED_PAYLOAD {
+            return aml_i2c_serial_invalid();
+        }
+        let source_offset = AML_I2C_SERIAL_FIXED_PAYLOAD + type_data_length;
+        if source_offset >= payload_length { return aml_i2c_serial_invalid(); }
+
+        let source = aml_i2c_pointer_add(payload, source_offset);
+        let source_region_length = payload_length - source_offset;
+        let source_length = aml_i2c_source_exact_length(source, source_region_length);
+        if source_length == 0 { return aml_i2c_serial_invalid(); }
+
+        let speed = aml_i2c_read_u32(payload, 9);
+        let address = aml_i2c_read_u16(payload, 13);
+        let ten_bit = (type_flags_low & 0x01) != 0;
+        if ten_bit {
+            if (address & 0xFC00) != 0 { return aml_i2c_serial_invalid(); }
+        } else {
+            if (address & 0xFF80) != 0 { return aml_i2c_serial_invalid(); }
+        }
+
+        let vendor_length = type_data_length - AML_I2C_TYPE_DATA_MIN_LENGTH;
+        let vendor = if vendor_length == 0 {
+            null as *const u8
+        } else {
+            aml_i2c_pointer_add(payload, 15)
+        };
+        if vendor_length != 0 && vendor == (null as *const u8) {
+            return aml_i2c_serial_invalid();
+        }
+
+        return AmlI2cSerialBusResource {
+            resource_index: resource_index,
+            device_slot: (*descriptor).device_slot,
+            resource_source_index: payload[1],
+            connection_speed_hz: speed,
+            slave_address: address,
+            ten_bit_addressing: ten_bit,
+            shared: (general_flags & 0x04) != 0,
+            consumer: (general_flags & 0x02) != 0,
+            device_initiated: (general_flags & 0x01) != 0,
+            legacy_virtual_register: type_flags_high,
+            vendor_data: vendor,
+            vendor_data_length: vendor_length,
+            controller_source: source,
+            controller_source_length: source_length,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn aml_i2c_decode_gpio_int(resource_index: usize) -> AmlGpioIntResource {
+    let descriptor = aml_discovery_resource(resource_index);
+    if descriptor == (null as *const AmlResourceDescriptor) {
+        return aml_gpio_int_invalid();
+    }
+    unsafe {
+        if !(*descriptor).valid || (*descriptor).kind != AML_RESOURCE_KIND_LARGE ||
+           (*descriptor).item_name != AML_I2C_RESOURCE_ITEM_GPIO_CONNECTION ||
+           (*descriptor).payload == (null as *const u8) ||
+           (*descriptor).payload_length < AML_GPIO_FIXED_PAYLOAD + 3 {
+            return aml_gpio_int_invalid();
+        }
+
+        let payload = (*descriptor).payload;
+        let payload_length = (*descriptor).payload_length;
+        if payload[0] != AML_GPIO_CONNECTION_REVISION ||
+           payload[1] != AML_GPIO_CONNECTION_INTERRUPT {
+            return aml_gpio_int_invalid();
+        }
+
+        let general_flags = aml_i2c_read_u16(payload, 2);
+        let interrupt_flags = aml_i2c_read_u16(payload, 4);
+        if (general_flags & 0xFFFE) != 0 || (interrupt_flags & 0xFFE0) != 0 {
+            return aml_gpio_int_invalid();
+        }
+        let polarity = ((interrupt_flags >> 1) & 0x03) as u8;
+        let edge_triggered = (interrupt_flags & 0x01) != 0;
+        if polarity == 3 || (polarity == 2 && !edge_triggered) {
+            return aml_gpio_int_invalid();
+        }
+
+        let pin_config = payload[6];
+        if pin_config >= 0x04 && pin_config < 0x80 {
+            return aml_gpio_int_invalid();
+        }
+        if payload[13] != 0 { return aml_gpio_int_invalid(); }
+
+        let pin_table_full = aml_i2c_read_u16(payload, 11) as usize;
+        let source_full = aml_i2c_read_u16(payload, 14) as usize;
+        let vendor_full = aml_i2c_read_u16(payload, 16) as usize;
+        let vendor_length = aml_i2c_read_u16(payload, 18) as usize;
+        let descriptor_length = AML_RESOURCE_LARGE_HEADER_LENGTH + payload_length;
+
+        if pin_table_full < AML_RESOURCE_LARGE_HEADER_LENGTH + AML_GPIO_FIXED_PAYLOAD ||
+           source_full <= pin_table_full || vendor_full < source_full ||
+           vendor_full > descriptor_length || vendor_length > descriptor_length - vendor_full ||
+           vendor_full + vendor_length != descriptor_length {
+            return aml_gpio_int_invalid();
+        }
+
+        let pin_bytes = source_full - pin_table_full;
+        if pin_bytes == 0 || (pin_bytes & 1) != 0 {
+            return aml_gpio_int_invalid();
+        }
+        let pin_count = pin_bytes / 2;
+        if pin_count == 0 || pin_count > AML_I2C_MAX_GPIO_PINS {
+            return aml_gpio_int_invalid();
+        }
+
+        let pin_offset = pin_table_full - AML_RESOURCE_LARGE_HEADER_LENGTH;
+        let source_offset = source_full - AML_RESOURCE_LARGE_HEADER_LENGTH;
+        let vendor_offset = vendor_full - AML_RESOURCE_LARGE_HEADER_LENGTH;
+        if pin_offset >= payload_length || source_offset >= payload_length ||
+           vendor_offset > payload_length {
+            return aml_gpio_int_invalid();
+        }
+
+        let source_region_length = vendor_full - source_full;
+        let source = aml_i2c_pointer_add(payload, source_offset);
+        let source_length = aml_i2c_source_exact_length(source, source_region_length);
+        if source_length == 0 { return aml_gpio_int_invalid(); }
+
+        let pin_table = aml_i2c_pointer_add(payload, pin_offset);
+        if pin_table == (null as *const u8) { return aml_gpio_int_invalid(); }
+        let vendor = if vendor_length == 0 {
+            null as *const u8
+        } else {
+            aml_i2c_pointer_add(payload, vendor_offset)
+        };
+        if vendor_length != 0 && vendor == (null as *const u8) {
+            return aml_gpio_int_invalid();
+        }
+
+        return AmlGpioIntResource {
+            resource_index: resource_index,
+            device_slot: (*descriptor).device_slot,
+            consumer: (general_flags & 0x0001) != 0,
+            edge_triggered: edge_triggered,
+            polarity: polarity,
+            shared: (interrupt_flags & 0x0008) != 0,
+            wake_capable: (interrupt_flags & 0x0010) != 0,
+            pin_config: pin_config,
+            drive_strength: aml_i2c_read_u16(payload, 7),
+            debounce_timeout: aml_i2c_read_u16(payload, 9),
+            pin_table: pin_table,
+            pin_count: pin_count,
+            controller_source: source,
+            controller_source_length: source_length,
+            vendor_data: vendor,
+            vendor_data_length: vendor_length,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn aml_gpio_int_pin_at(resource: *const AmlGpioIntResource,
+                           index: usize) -> u16 {
+    if resource == (null as *const AmlGpioIntResource) { return 0xFFFF; }
+    unsafe {
+        if !(*resource).valid || (*resource).pin_table == (null as *const u8) ||
+           index >= (*resource).pin_count {
+            return 0xFFFF;
+        }
+        return aml_i2c_read_u16((*resource).pin_table, index * 2);
+    }
+}
