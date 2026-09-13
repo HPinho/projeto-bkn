@@ -76,3 +76,63 @@ Invariantes do corte:
 6. Depois dos estados lógicos: HID Report Descriptor DMA físico, HID Transfer Ring, arena Device/Input Context e, por último, release de Device Table / Slot ID / porta após barrier apropriado.
 
 A porta continua deliberadamente bloqueada enquanto qualquer owner físico ou estado obrigatório de cleanup permanecer em `FAILED`.
+
+---
+
+## 2026-09-13 — fechamento do gate Address Device lógico FAILED
+
+**✅ CERTIFICADO 4/4 — nenhuma correção intermediária necessária.**
+
+```text
+d0b8d98bbe8d1249f837519ef28e5022b1eb96d9
+fix(xhci): quiesce failed address state by epoch
+```
+
+Provas no mesmo SHA:
+
+- CI #1207 ✅
+- SMP #310 ✅
+- NVMe #407 ✅
+- HID Dual-device #66 ✅
+
+Resultado certificado:
+
+- `FAILED + slot_id + epoch` exatos são obrigatórios para o cleanup Address Device;
+- estado neutro quando Address Device nunca foi publicado é retry-safe/idempotente;
+- estado vivo de outro epoch continua em quarentena e não é sobrescrito;
+- cleanup ocorre somente depois de `Disable Slot` confirmado e depois do recovery dos descriptors;
+- nenhum owner físico, ring, context, Device Table ou Slot ID foi liberado;
+- nenhum ajuste em `HPinho/LangSotlas` foi necessário.
+
+Não houve gate vermelho neste candidato, portanto não existe correção de regressão associada a este SHA.
+
+---
+
+## 2026-09-13 — recovery de enumeração FAILED / EP0 lógico
+
+**⏳ CANDIDATO DO PRÓXIMO MICROCORTE — certificação depende dos quatro gates no novo SHA.**
+
+Contrato do corte:
+
+```text
+FAILED + slot_id + epoch exatos
+→ Disable Slot já confirmado
+→ Configuration Descriptor recovery
+→ Device Descriptor recovery
+→ EP0 lógico: ready=false, enqueue=0, PCS=true, last_status=0,
+  active_slot limpo somente se pertencer ao slot
+→ Address Device lógico
+→ EP0 Ring físico permanece na arena
+```
+
+Invariantes:
+
+- `DETACH_PENDING` continua usando exclusivamente `xhci_ep0_quiesce_for_epoch()`;
+- `FAILED` usa API dedicada e não muda o epoch armazenado;
+- estado EP0 neutro de uma etapa nunca publicada é aceito como já limpo;
+- estado vivo/stale de outro epoch falha fechado;
+- nenhum acesso a `xhci_context_ep0_ring_physical_for()` ocorre dentro do release FAILED;
+- nenhum DMA/free/context/Slot ID release ocorre neste corte;
+- guardrail prova a ordem `Disable Slot → descriptors → EP0 lógico → Address lógico`.
+
+Se este candidato fechar 4/4, o próximo microcorte será **Evaluate Context lógico exact-epoch em FAILED**. Se algum gate falhar, a próxima entrada preservará o SHA reprovado, workflow/step, causa e correção antes de qualquer feature nova.

@@ -70,3 +70,70 @@ SHA reprovado
 ```
 
 Somente depois de 4/4 verde o próximo corte funcional será iniciado. A sequência planejada após Address Device é EP0 lógico FAILED → Evaluate Context lógico FAILED → SET_CONFIGURATION lógico FAILED → Configure Endpoint lógico FAILED → owners DMA/rings/contexts físicos → barrier/release de Slot ID e porta.
+
+---
+
+# Atualização operacional — 2026-09-13 / Address Device FAILED certificado
+
+A entrada anterior de candidato foi encerrada sem falhas.
+
+```text
+d0b8d98bbe8d1249f837519ef28e5022b1eb96d9
+fix(xhci): quiesce failed address state by epoch
+```
+
+Status final do SHA:
+
+- CI #1207 ✅
+- SMP #310 ✅
+- NVMe #407 ✅
+- HID Dual-device #66 ✅
+
+Portanto `d0b8d98b...` passa a ser a **baseline certificada 4/4** para recovery lógico Address Device em enumeração `FAILED`. Não houve gate vermelho e nenhuma correção intermediária foi necessária.
+
+Escopo efetivamente certificado:
+
+- exact-epoch + `FAILED` para Address Device;
+- estado neutro pode ser reconhecido como já limpo sem adotar epoch;
+- stale/live state de outro epoch falha fechado;
+- cleanup após `Disable Slot` e após recovery dos descriptors;
+- EP0, Evaluate Context, SET_CONFIGURATION, Configure Endpoint, HID Report DMA, Transfer Ring, arena Device/Input Context e Slot ID continuam reservados.
+
+## Novo candidato — FAILED EP0 logical cleanup
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Mudanças deste microcorte:
+
+- `kernel/src/drivers/xhci_ep0.sotlas`
+  - `xhci_ep0_failed_slot_matches()` exige Device Table válida, mesmo epoch e estado `FAILED`;
+  - `xhci_ep0_release_failed_for_epoch()` limpa somente o estado lógico EP0 do epoch correspondente;
+  - `xhci_ep0_failed_release_complete_for()` torna retries idempotentes;
+  - se EP0 nunca foi publicado, estado neutro é aceito como cleanup já concluído;
+  - estado vivo de outro epoch não é sobrescrito;
+  - o epoch armazenado nunca é alterado pelo cleanup FAILED.
+- `kernel/src/drivers/xhci_hid_enumeration.sotlas`
+  - recovery passa a executar `Configuration Descriptor → Device Descriptor → EP0 lógico → Address lógico` após `Disable Slot` confirmado;
+  - o retorno do orquestrador exige também `ep0_released`.
+- `tests/test_xhci_failed_ep0_cleanup.py`
+  - prova exact-epoch + FAILED;
+  - prova separação do helper `DETACH_PENDING`;
+  - prova ausência de DMA/context/ring free;
+  - prova a ordem do recovery.
+
+### Recursos que permanecem deliberadamente vivos
+
+- EP0 Ring físico dentro da arena;
+- Device Context;
+- Input Context;
+- HID Transfer Ring;
+- HID Report Descriptor DMA/estado ainda não fechado pelo recovery FAILED;
+- Configure Endpoint e SET_CONFIGURATION state;
+- Evaluate Context state;
+- Device Table entry, Slot ID e associação da porta.
+
+Nenhuma mudança de parser, lexer, semântica ou lowering de `HPinho/LangSotlas` é necessária neste corte.
+
+## Continuação depois deste gate
+
+Se o novo SHA fechar 4/4: implementar **Evaluate Context logical cleanup exact-epoch em FAILED**. Se falhar, congelar a `main`, registrar o SHA + workflow/step + causa neste apêndice e fazer somente a correção no candidato seguinte antes de qualquer avanço funcional.
