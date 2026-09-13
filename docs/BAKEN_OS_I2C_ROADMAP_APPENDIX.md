@@ -254,3 +254,80 @@ Invariantes:
 - LangSotlas não deve ser alterado para este corte.
 
 Se este SHA fechar 4/4, o próximo microcorte será **I2C-1c — controller/backend protocol state machine + recuperação lógica**, ainda separando a máquina de estados genérica do primeiro backend físico específico. Se qualquer gate falhar, `main` congela e a próxima mudança será correction-only.
+
+---
+
+## 2026-09-13 — fechamento I2C-1b / executor + backend boundary
+
+**✅ CERTIFICADO 4/4 — sem correction-only intermediário.**
+
+```text
+71a1ed495d02520ad8430bc13366707b9efda885
+feat(i2c): add executor backend boundary
+```
+
+Provas no mesmo SHA:
+
+- CI #1217 ✅
+- SMP #320 ✅
+- NVMe-only #417 ✅
+- HID Dual-device #76 ✅
+
+Resultado certificado:
+
+- `I2cBackendRequest`, `I2cBackendCompletion` e `I2cExecutionOutcome` compilam no grafo Sotlas nativo;
+- preflight reutiliza planner/capabilities do I2C-1a e retorna `UNSUPPORTED` sem tocar backend quando necessário;
+- completion é bounded pelo plano e deadline/recovery permanecem semanticamente separados;
+- sucesso com barramento não liberado ou controller não quiescente é convertido para `CONTROLLER_ERROR`;
+- suíte completa, grafo modular, build nativo, ISO e provas QEMU permaneceram verdes;
+- nenhum backend físico, callback obrigatório, MMIO, PCI, DMA, IRQ, GPIO ou mudança em LangSotlas foi introduzido.
+
+---
+
+## 2026-09-13 — I2C-1c / protocol state machine + logical recovery
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende de CI + SMP + NVMe-only + HID Dual-device no mesmo SHA.**
+
+Contrato:
+
+```text
+I2cBackendRequest certificado
+→ I2cProtocolMachine
+→ START → ADDRESS → DATA
+→ REPEATED_START → ADDRESS → DATA ...
+→ STOP
+→ I2cBackendCompletion
+
+qualquer erro
+→ preservar primeira causa
+→ RECOVER no máximo uma vez se necessário
+→ FAILED sem retry implícito
+```
+
+Escopo:
+
+- ações abstratas `START`, `ADDRESS`, `WRITE_BYTE`, `READ_BYTE`, `REPEATED_START`, `STOP` e `RECOVER`;
+- a máquina só emite uma nova ação depois de receber evento para a ação anterior (`awaiting_event`);
+- progresso é bounded por `message_count`, comprimento da mensagem e `total_bytes` do plano certificado;
+- `ADDRESS_NACK` só é aceito em `ADDRESS`; `DATA_NACK` só é aceito em `WRITE_BYTE`;
+- READ solicita ACK após cada byte exceto o último byte de cada mensagem;
+- fronteiras entre mensagens emitem repeated START sem STOP intermediário;
+- o restart interno necessário ao address phase de uma primeira leitura 10-bit é sinalizado por `address_phase_restart` na ação `ADDRESS` e permanece responsabilidade do backend físico futuro;
+- falhas preservam `completed_messages`, `transferred_bytes` e mensagem da primeira falha;
+- nenhuma falha reinicia `message_index`/`byte_index`, portanto não há replay silencioso de writes;
+- recovery lógico é emitido no máximo uma vez quando bus ownership/controller quiescence não foram restabelecidos;
+- falha do recovery não sobrescreve a causa original e fica indicada separadamente por `recovery_failed`;
+- `i2c_protocol_completion` adapta estado terminal para `I2cBackendCompletion`, recebendo `elapsed_us` de fora sem ler clock/timer.
+
+Invariantes:
+
+- zero `static mut`;
+- zero MMIO/PCI/DMA/PMM/IRQ/GPIO/xHCI;
+- zero timer read, sleep, busy-wait ou polling;
+- zero execução AML/HID;
+- zero retry automático;
+- zero suposição sobre registradores Intel/AMD/DesignWare;
+- buffers continuam borrowed pelo `I2cBackendRequest`; a state machine não assume ownership;
+- LangSotlas não deve ser alterado para este corte.
+
+Se este SHA fechar 4/4, o próximo microcorte será **I2C-1d — controller instance/backend contract + auditoria do controlador físico alvo**. Nenhum backend de silício será inventado antes de haver evidência concreta no PCI/ACPI ou no hardware alvo. Se qualquer gate falhar, `main` congela e a próxima mudança será correction-only.

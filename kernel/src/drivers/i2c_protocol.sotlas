@@ -1,0 +1,491 @@
+// Baken OS — I2C-1c: state machine genérica do protocolo e recovery lógico.
+//
+// Esta camada converte um I2cBackendRequest certificado em ações abstratas. O
+// backend físico futuro executa cada ação e devolve um evento normalizado. Não há
+// MMIO, IRQ, DMA, timer, polling, retry implícito ou conhecimento de registradores.
+module kernel::drivers::i2c_protocol;
+
+import kernel::drivers::i2c_core::*;
+import kernel::drivers::i2c_executor::*;
+
+pub const I2C_PROTOCOL_STATE_NEED_START: u8 = 0;
+pub const I2C_PROTOCOL_STATE_NEED_ADDRESS: u8 = 1;
+pub const I2C_PROTOCOL_STATE_NEED_DATA: u8 = 2;
+pub const I2C_PROTOCOL_STATE_NEED_RESTART: u8 = 3;
+pub const I2C_PROTOCOL_STATE_NEED_STOP: u8 = 4;
+pub const I2C_PROTOCOL_STATE_NEED_RECOVERY: u8 = 5;
+pub const I2C_PROTOCOL_STATE_DONE: u8 = 6;
+pub const I2C_PROTOCOL_STATE_FAILED: u8 = 7;
+
+pub const I2C_PROTOCOL_ACTION_NONE: u8 = 0;
+pub const I2C_PROTOCOL_ACTION_START: u8 = 1;
+pub const I2C_PROTOCOL_ACTION_ADDRESS: u8 = 2;
+pub const I2C_PROTOCOL_ACTION_WRITE_BYTE: u8 = 3;
+pub const I2C_PROTOCOL_ACTION_READ_BYTE: u8 = 4;
+pub const I2C_PROTOCOL_ACTION_REPEATED_START: u8 = 5;
+pub const I2C_PROTOCOL_ACTION_STOP: u8 = 6;
+pub const I2C_PROTOCOL_ACTION_RECOVER: u8 = 7;
+
+pub struct I2cProtocolAction {
+    pub kind: u8;
+    pub address: u16;
+    pub ten_bit_addressing: bool;
+    pub direction: u8;
+    pub message_index: usize;
+    pub byte_index: usize;
+    // Para READ: true em todos os bytes exceto o último byte da mensagem.
+    pub ack_after_read: bool;
+    // O address phase 10-bit de uma leitura pode exigir restart interno. O backend
+    // físico implementa essa sequência sem duplicar a state machine genérica.
+    pub address_phase_restart: bool;
+    pub valid: bool;
+}
+
+pub struct I2cProtocolEvent {
+    pub status: u8;
+    pub bus_ownership_released: bool;
+    pub controller_quiesced: bool;
+    pub valid: bool;
+}
+
+pub struct I2cProtocolMachine {
+    // Borrow original do I2C-1b; buffers continuam pertencendo ao chamador.
+    pub transaction: *const I2cTransaction;
+    pub plan: I2cTransferPlan;
+    pub state: u8;
+    pub last_action: u8;
+    pub message_index: usize;
+    pub byte_index: usize;
+    pub completed_messages: usize;
+    pub transferred_bytes: usize;
+    pub failed_message_index: usize;
+    // Primeira causa terminal. Recovery nunca sobrescreve a causa original.
+    pub terminal_status: u8;
+    pub bus_ownership_released: bool;
+    pub controller_quiesced: bool;
+    pub recovery_attempted: bool;
+    pub recovery_failed: bool;
+    pub awaiting_event: bool;
+    pub valid: bool;
+}
+
+@system
+fn i2c_protocol_action_invalid() -> I2cProtocolAction {
+    return I2cProtocolAction {
+        kind: I2C_PROTOCOL_ACTION_NONE,
+        address: 0,
+        ten_bit_addressing: false,
+        direction: I2C_DIRECTION_WRITE,
+        message_index: I2C_INVALID_MESSAGE_INDEX,
+        byte_index: 0,
+        ack_after_read: false,
+        address_phase_restart: false,
+        valid: false
+    };
+}
+
+@system
+fn i2c_protocol_machine_invalid() -> I2cProtocolMachine {
+    return I2cProtocolMachine {
+        transaction: null as *const I2cTransaction,
+        plan: I2cTransferPlan {
+            address: 0,
+            ten_bit_addressing: false,
+            bus_speed_hz: 0,
+            timeout_us: 0,
+            message_count: 0,
+            total_bytes: 0,
+            largest_message_bytes: 0,
+            write_message_count: 0,
+            read_message_count: 0,
+            repeated_start_count: 0,
+            ten_bit_read_address_restart: false,
+            valid: false
+        },
+        state: I2C_PROTOCOL_STATE_FAILED,
+        last_action: I2C_PROTOCOL_ACTION_NONE,
+        message_index: 0,
+        byte_index: 0,
+        completed_messages: 0,
+        transferred_bytes: 0,
+        failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+        terminal_status: I2C_STATUS_INVALID,
+        bus_ownership_released: true,
+        controller_quiesced: true,
+        recovery_attempted: false,
+        recovery_failed: false,
+        awaiting_event: false,
+        valid: false
+    };
+}
+
+@system
+fn i2c_protocol_completion_invalid() -> I2cBackendCompletion {
+    return I2cBackendCompletion {
+        status: I2C_STATUS_INVALID,
+        completed_messages: 0,
+        transferred_bytes: 0,
+        failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+        elapsed_us: 0,
+        bus_ownership_released: false,
+        controller_quiesced: false,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_protocol_state_terminal(state: u8) -> bool {
+    return state == I2C_PROTOCOL_STATE_DONE || state == I2C_PROTOCOL_STATE_FAILED;
+}
+
+@system
+pub fn i2c_protocol_begin(request: *const I2cBackendRequest) -> I2cProtocolMachine {
+    if !i2c_backend_request_ready(request) { return i2c_protocol_machine_invalid(); }
+    unsafe {
+        return I2cProtocolMachine {
+            transaction: (*request).transaction,
+            plan: (*request).plan,
+            state: I2C_PROTOCOL_STATE_NEED_START,
+            last_action: I2C_PROTOCOL_ACTION_NONE,
+            message_index: 0,
+            byte_index: 0,
+            completed_messages: 0,
+            transferred_bytes: 0,
+            failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+            terminal_status: I2C_STATUS_OK,
+            bus_ownership_released: true,
+            controller_quiesced: true,
+            recovery_attempted: false,
+            recovery_failed: false,
+            awaiting_event: false,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn i2c_protocol_machine_consistent(machine: *const I2cProtocolMachine) -> bool {
+    if machine == (null as *const I2cProtocolMachine) { return false; }
+    unsafe {
+        if !(*machine).valid || !(*machine).plan.valid ||
+           (*machine).transaction == (null as *const I2cTransaction) ||
+           (*machine).state > I2C_PROTOCOL_STATE_FAILED ||
+           (*machine).completed_messages > (*machine).plan.message_count ||
+           (*machine).transferred_bytes > (*machine).plan.total_bytes ||
+           (*machine).message_index > (*machine).plan.message_count ||
+           !i2c_status_valid((*machine).terminal_status) {
+            return false;
+        }
+        if (*machine).awaiting_event && (*machine).last_action == I2C_PROTOCOL_ACTION_NONE {
+            return false;
+        }
+        if (*machine).state == I2C_PROTOCOL_STATE_DONE {
+            return !(*machine).awaiting_event &&
+                (*machine).terminal_status == I2C_STATUS_OK &&
+                (*machine).completed_messages == (*machine).plan.message_count &&
+                (*machine).transferred_bytes == (*machine).plan.total_bytes &&
+                (*machine).bus_ownership_released && (*machine).controller_quiesced;
+        }
+        if (*machine).state == I2C_PROTOCOL_STATE_FAILED {
+            return !(*machine).awaiting_event &&
+                (*machine).terminal_status != I2C_STATUS_OK &&
+                (*machine).terminal_status != I2C_STATUS_INVALID;
+        }
+    }
+    return true;
+}
+
+@system
+fn i2c_protocol_status_allowed_for_action(action: u8, status: u8) -> bool {
+    if !i2c_status_valid(status) || status == I2C_STATUS_INVALID ||
+       status == I2C_STATUS_UNSUPPORTED {
+        return false;
+    }
+    if status == I2C_STATUS_ADDRESS_NACK {
+        return action == I2C_PROTOCOL_ACTION_ADDRESS;
+    }
+    if status == I2C_STATUS_DATA_NACK {
+        return action == I2C_PROTOCOL_ACTION_WRITE_BYTE;
+    }
+    return action >= I2C_PROTOCOL_ACTION_START && action <= I2C_PROTOCOL_ACTION_RECOVER;
+}
+
+@system
+fn i2c_protocol_failure_index(machine: *const I2cProtocolMachine,
+                              action: u8) -> usize {
+    if machine == (null as *const I2cProtocolMachine) { return I2C_INVALID_MESSAGE_INDEX; }
+    unsafe {
+        if (*machine).message_index >= (*machine).plan.message_count {
+            return I2C_INVALID_MESSAGE_INDEX;
+        }
+        if action == I2C_PROTOCOL_ACTION_START ||
+           action == I2C_PROTOCOL_ACTION_ADDRESS ||
+           action == I2C_PROTOCOL_ACTION_WRITE_BYTE ||
+           action == I2C_PROTOCOL_ACTION_READ_BYTE ||
+           action == I2C_PROTOCOL_ACTION_REPEATED_START {
+            return (*machine).message_index;
+        }
+    }
+    return I2C_INVALID_MESSAGE_INDEX;
+}
+
+@system
+pub fn i2c_protocol_issue(machine: *mut I2cProtocolMachine) -> I2cProtocolAction {
+    if machine == (null as *mut I2cProtocolMachine) ||
+       !i2c_protocol_machine_consistent(machine as *const I2cProtocolMachine) {
+        return i2c_protocol_action_invalid();
+    }
+    unsafe {
+        if (*machine).awaiting_event || i2c_protocol_state_terminal((*machine).state) {
+            return i2c_protocol_action_invalid();
+        }
+
+        let mut action = i2c_protocol_action_invalid();
+        if (*machine).state == I2C_PROTOCOL_STATE_NEED_START {
+            action = I2cProtocolAction {
+                kind: I2C_PROTOCOL_ACTION_START,
+                address: (*machine).plan.address,
+                ten_bit_addressing: (*machine).plan.ten_bit_addressing,
+                direction: I2C_DIRECTION_WRITE,
+                message_index: 0,
+                byte_index: 0,
+                ack_after_read: false,
+                address_phase_restart: false,
+                valid: true
+            };
+        } else if (*machine).state == I2C_PROTOCOL_STATE_NEED_ADDRESS {
+            if (*machine).message_index >= (*machine).plan.message_count {
+                return i2c_protocol_action_invalid();
+            }
+            let transaction = (*machine).transaction;
+            let direction = (*transaction).messages[(*machine).message_index].direction;
+            action = I2cProtocolAction {
+                kind: I2C_PROTOCOL_ACTION_ADDRESS,
+                address: (*machine).plan.address,
+                ten_bit_addressing: (*machine).plan.ten_bit_addressing,
+                direction: direction,
+                message_index: (*machine).message_index,
+                byte_index: 0,
+                ack_after_read: false,
+                address_phase_restart: (*machine).plan.ten_bit_read_address_restart &&
+                    (*machine).message_index == 0 && direction == I2C_DIRECTION_READ,
+                valid: true
+            };
+        } else if (*machine).state == I2C_PROTOCOL_STATE_NEED_DATA {
+            if (*machine).message_index >= (*machine).plan.message_count {
+                return i2c_protocol_action_invalid();
+            }
+            let transaction = (*machine).transaction;
+            let direction = (*transaction).messages[(*machine).message_index].direction;
+            let length = (*transaction).messages[(*machine).message_index].length;
+            if (*machine).byte_index >= length { return i2c_protocol_action_invalid(); }
+            action = I2cProtocolAction {
+                kind: if direction == I2C_DIRECTION_READ {
+                    I2C_PROTOCOL_ACTION_READ_BYTE
+                } else {
+                    I2C_PROTOCOL_ACTION_WRITE_BYTE
+                },
+                address: (*machine).plan.address,
+                ten_bit_addressing: (*machine).plan.ten_bit_addressing,
+                direction: direction,
+                message_index: (*machine).message_index,
+                byte_index: (*machine).byte_index,
+                ack_after_read: direction == I2C_DIRECTION_READ &&
+                    ((*machine).byte_index + 1) < length,
+                address_phase_restart: false,
+                valid: true
+            };
+        } else if (*machine).state == I2C_PROTOCOL_STATE_NEED_RESTART {
+            action = I2cProtocolAction {
+                kind: I2C_PROTOCOL_ACTION_REPEATED_START,
+                address: (*machine).plan.address,
+                ten_bit_addressing: (*machine).plan.ten_bit_addressing,
+                direction: I2C_DIRECTION_WRITE,
+                message_index: (*machine).message_index,
+                byte_index: 0,
+                ack_after_read: false,
+                address_phase_restart: false,
+                valid: true
+            };
+        } else if (*machine).state == I2C_PROTOCOL_STATE_NEED_STOP {
+            action = I2cProtocolAction {
+                kind: I2C_PROTOCOL_ACTION_STOP,
+                address: (*machine).plan.address,
+                ten_bit_addressing: (*machine).plan.ten_bit_addressing,
+                direction: I2C_DIRECTION_WRITE,
+                message_index: I2C_INVALID_MESSAGE_INDEX,
+                byte_index: 0,
+                ack_after_read: false,
+                address_phase_restart: false,
+                valid: true
+            };
+        } else if (*machine).state == I2C_PROTOCOL_STATE_NEED_RECOVERY {
+            if (*machine).recovery_attempted { return i2c_protocol_action_invalid(); }
+            action = I2cProtocolAction {
+                kind: I2C_PROTOCOL_ACTION_RECOVER,
+                address: (*machine).plan.address,
+                ten_bit_addressing: (*machine).plan.ten_bit_addressing,
+                direction: I2C_DIRECTION_WRITE,
+                message_index: (*machine).failed_message_index,
+                byte_index: 0,
+                ack_after_read: false,
+                address_phase_restart: false,
+                valid: true
+            };
+            (*machine).recovery_attempted = true;
+        }
+
+        if !action.valid { return action; }
+        (*machine).last_action = action.kind;
+        (*machine).awaiting_event = true;
+        return action;
+    }
+}
+
+@system
+fn i2c_protocol_record_failure(machine: *mut I2cProtocolMachine,
+                               status: u8,
+                               bus_released: bool,
+                               quiesced: bool) -> bool {
+    if machine == (null as *mut I2cProtocolMachine) { return false; }
+    unsafe {
+        if (*machine).terminal_status == I2C_STATUS_OK {
+            (*machine).terminal_status = status;
+            (*machine).failed_message_index = i2c_protocol_failure_index(
+                machine as *const I2cProtocolMachine,
+                (*machine).last_action
+            );
+        }
+        (*machine).bus_ownership_released = bus_released;
+        (*machine).controller_quiesced = quiesced;
+        if (*machine).last_action == I2C_PROTOCOL_ACTION_RECOVER {
+            if !bus_released || !quiesced || status != I2C_STATUS_OK {
+                (*machine).recovery_failed = true;
+            }
+            (*machine).state = I2C_PROTOCOL_STATE_FAILED;
+            return true;
+        }
+        if bus_released && quiesced {
+            (*machine).state = I2C_PROTOCOL_STATE_FAILED;
+        } else {
+            (*machine).state = I2C_PROTOCOL_STATE_NEED_RECOVERY;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn i2c_protocol_accept_event(machine: *mut I2cProtocolMachine,
+                                 event: *const I2cProtocolEvent) -> bool {
+    if machine == (null as *mut I2cProtocolMachine) ||
+       event == (null as *const I2cProtocolEvent) ||
+       !i2c_protocol_machine_consistent(machine as *const I2cProtocolMachine) {
+        return false;
+    }
+
+    unsafe {
+        if !(*machine).awaiting_event || !(*event).valid ||
+           !i2c_protocol_status_allowed_for_action((*machine).last_action, (*event).status) {
+            return false;
+        }
+
+        (*machine).awaiting_event = false;
+        (*machine).bus_ownership_released = (*event).bus_ownership_released;
+        (*machine).controller_quiesced = (*event).controller_quiesced;
+
+        if (*event).status != I2C_STATUS_OK {
+            return i2c_protocol_record_failure(
+                machine,
+                (*event).status,
+                (*event).bus_ownership_released,
+                (*event).controller_quiesced
+            );
+        }
+
+        if (*machine).last_action == I2C_PROTOCOL_ACTION_START ||
+           (*machine).last_action == I2C_PROTOCOL_ACTION_REPEATED_START {
+            (*machine).state = I2C_PROTOCOL_STATE_NEED_ADDRESS;
+            return true;
+        }
+
+        if (*machine).last_action == I2C_PROTOCOL_ACTION_ADDRESS {
+            (*machine).state = I2C_PROTOCOL_STATE_NEED_DATA;
+            return true;
+        }
+
+        if (*machine).last_action == I2C_PROTOCOL_ACTION_WRITE_BYTE ||
+           (*machine).last_action == I2C_PROTOCOL_ACTION_READ_BYTE {
+            if (*machine).message_index >= (*machine).plan.message_count {
+                return false;
+            }
+            let transaction = (*machine).transaction;
+            let length = (*transaction).messages[(*machine).message_index].length;
+            (*machine).transferred_bytes += 1;
+            (*machine).byte_index += 1;
+            if (*machine).byte_index >= length {
+                (*machine).completed_messages += 1;
+                (*machine).message_index += 1;
+                (*machine).byte_index = 0;
+                if (*machine).message_index < (*machine).plan.message_count {
+                    (*machine).state = I2C_PROTOCOL_STATE_NEED_RESTART;
+                } else {
+                    (*machine).state = I2C_PROTOCOL_STATE_NEED_STOP;
+                }
+            }
+            return true;
+        }
+
+        if (*machine).last_action == I2C_PROTOCOL_ACTION_STOP {
+            if (*event).bus_ownership_released && (*event).controller_quiesced {
+                (*machine).terminal_status = I2C_STATUS_OK;
+                (*machine).failed_message_index = I2C_INVALID_MESSAGE_INDEX;
+                (*machine).state = I2C_PROTOCOL_STATE_DONE;
+            } else {
+                (*machine).terminal_status = I2C_STATUS_CONTROLLER_ERROR;
+                (*machine).failed_message_index = I2C_INVALID_MESSAGE_INDEX;
+                (*machine).state = I2C_PROTOCOL_STATE_NEED_RECOVERY;
+            }
+            return true;
+        }
+
+        if (*machine).last_action == I2C_PROTOCOL_ACTION_RECOVER {
+            if !(*event).bus_ownership_released || !(*event).controller_quiesced {
+                (*machine).recovery_failed = true;
+            }
+            if (*machine).terminal_status == I2C_STATUS_OK {
+                (*machine).terminal_status = I2C_STATUS_CONTROLLER_ERROR;
+            }
+            (*machine).state = I2C_PROTOCOL_STATE_FAILED;
+            return true;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn i2c_protocol_completion(machine: *const I2cProtocolMachine,
+                               elapsed_us: u64) -> I2cBackendCompletion {
+    if !i2c_protocol_machine_consistent(machine) {
+        return i2c_protocol_completion_invalid();
+    }
+    unsafe {
+        if !i2c_protocol_state_terminal((*machine).state) || (*machine).awaiting_event {
+            return i2c_protocol_completion_invalid();
+        }
+        let status = if (*machine).state == I2C_PROTOCOL_STATE_DONE {
+            I2C_STATUS_OK
+        } else {
+            (*machine).terminal_status
+        };
+        return I2cBackendCompletion {
+            status: status,
+            completed_messages: (*machine).completed_messages,
+            transferred_bytes: (*machine).transferred_bytes,
+            failed_message_index: (*machine).failed_message_index,
+            elapsed_us: elapsed_us,
+            bus_ownership_released: (*machine).bus_ownership_released,
+            controller_quiesced: (*machine).controller_quiesced,
+            valid: true
+        };
+    }
+}

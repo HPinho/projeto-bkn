@@ -261,3 +261,72 @@ I2C-1b ainda **não** contém:
 - HID-I2C.
 
 Se este candidato fechar 4/4, o próximo microcorte será **I2C-1c — controller/backend protocol state machine + recuperação lógica**, ainda sem escolher prematuramente Intel/AMD/DesignWare. Qualquer gate vermelho congela `main` e exige correction-only.
+
+---
+
+# Atualização operacional — 2026-09-13 / I2C-1b certificado
+
+O executor/backend boundary fechou **4/4** no mesmo SHA:
+
+```text
+71a1ed495d02520ad8430bc13366707b9efda885
+feat(i2c): add executor backend boundary
+```
+
+Status final:
+
+- CI #1217 ✅;
+- SMP #320 ✅;
+- NVMe-only #417 ✅;
+- HID Dual-device #76 ✅.
+
+A suíte completa, o grafo modular, build nativo Sotlas, ISO e provas QEMU permaneceram verdes. Não houve correction-only nem alteração em LangSotlas.
+
+# Novo candidato — I2C-1c / protocol state machine + logical recovery
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Arquivos funcionais deste microcorte:
+
+- `kernel/src/drivers/i2c_protocol.sotlas`
+  - importa explicitamente `i2c_core` e `i2c_executor`;
+  - define estados `NEED_START/ADDRESS/DATA/RESTART/STOP/RECOVERY/DONE/FAILED`;
+  - define ações abstratas `START`, `ADDRESS`, `WRITE_BYTE`, `READ_BYTE`, `REPEATED_START`, `STOP` e `RECOVER`;
+  - conserva o borrow da transação e copia somente o plano certificado;
+  - emite uma ação por vez e bloqueia nova emissão enquanto `awaiting_event` estiver ativo;
+  - restringe `ADDRESS_NACK` à fase ADDRESS e `DATA_NACK` a WRITE_BYTE;
+  - avança bytes/mensagens somente após evento `OK`;
+  - emite repeated START entre mensagens, sem STOP intermediário;
+  - marca `ack_after_read=false` no último byte de cada leitura;
+  - sinaliza `address_phase_restart` para primeira leitura 10-bit, deixando a sequência elétrica ao backend físico;
+  - preserva a primeira causa de falha e o progresso parcial;
+  - solicita `RECOVER` no máximo uma vez quando ownership/quiescence não foram restaurados;
+  - nunca reinicia índices nem faz retry implícito;
+  - produz `I2cBackendCompletion` somente em estado terminal, recebendo `elapsed_us` externamente.
+- `kernel/src/main.sotlas`
+  - importa `i2c_protocol` imediatamente após `i2c_executor`.
+- `tests/test_i2c_protocol.py`
+  - guardrails de ordem de estados/ações, borrow, ACK/NACK de leitura, repeated-start, NACK action-scoped, progresso bounded e recovery único;
+  - proíbe hardware físico, timer/sleep/polling, AML/HID e retries ocultos.
+
+## Fronteira deliberada
+
+I2C-1c **não** implementa:
+
+- controller discovery ou registry;
+- registradores I2C concretos;
+- MMIO/PCI/DMA/IRQ;
+- GPIO routing;
+- clock source ou espera ativa;
+- reset físico de controller/bus;
+- política de retry;
+- AML evaluator;
+- HID-I2C.
+
+O `RECOVER` deste estágio é uma ação abstrata; o backend físico futuro decidirá como restaurar o controlador/barramento. Falha de recovery é registrada, mas não substitui o erro que originou a recuperação.
+
+## Próxima continuação após 4/4
+
+**I2C-1d — controller instance/backend contract + auditoria do controlador físico alvo**. Primeiro identificar evidência concreta em PCI/ACPI/hardware; somente depois implementar um backend de silício. Não assumir DesignWare/Intel/AMD por conveniência.
+
+Qualquer gate vermelho congela `main` no SHA I2C-1c e exige correction-only antes de continuar.
