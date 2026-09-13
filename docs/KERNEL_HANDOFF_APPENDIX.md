@@ -373,3 +373,61 @@ Nenhum ajuste de parser, lexer, semântica ou lowering em `HPinho/LangSotlas` fo
 ## Continuação depois deste gate
 
 Se o novo SHA fechar 4/4, o próximo passo é **auditar e fechar o owner HID Report Descriptor / Report DMA em FAILED** antes de liberar HID Transfer Ring ou a arena Device/Input Context. Se qualquer gate falhar, congelar `main`, registrar SHA + workflow/step + causa e fazer somente a correção no próximo commit.
+
+---
+
+# Atualização operacional — 2026-09-13 / Configure Endpoint FAILED certificado
+
+O microcorte Configure Endpoint fechou **4/4** no mesmo SHA:
+
+```text
+da3c8ac27e6d9545609d801ca95839e62102116e
+fix(xhci): quiesce failed configure endpoint state by epoch
+```
+
+Status final:
+
+- CI #1212 ✅;
+- SMP #315 ✅;
+- NVMe #412 ✅;
+- HID Dual-device #71 ✅.
+
+O escopo certificado é estritamente lógico: exact `FAILED + slot_id + epoch`, neutralização de `READY/DROPPED/DCI/active slot`, preservação do epoch e ausência completa de Drop Endpoint físico, Input/Output Context access, command xHCI, DMA ou free. O lifecycle normal de `DETACH_PENDING` permanece separado. LangSotlas continuou inalterado.
+
+## Novo candidato — FAILED Transfer mailbox/result cleanup
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Mudanças planejadas/aplicadas neste microcorte:
+
+- `kernel/src/drivers/xhci_transfer.sotlas`
+  - adiciona gate próprio `FAILED + slot_id + epoch`;
+  - reconhece estado completamente neutro como idempotente;
+  - aceita para mutação somente mailbox/result cujos epochs sejam `0` ou o epoch FAILED atual;
+  - qualquer epoch estrangeiro falha fechado;
+  - limpa apenas `XHCI_TRANSFER_PENDING_EVENTS`, `XHCI_TRANSFER_RESULTS` e seleção `ACTIVE_SLOT_ID`;
+  - não consome Event Ring, não faz MMIO e não toca DMA/rings/contexts.
+- `kernel/src/drivers/xhci_hid_enumeration.sotlas`
+  - chama o cleanup Transfer imediatamente depois da Command Completion de `Disable Slot` e antes dos releases de descriptors;
+  - retorno passa a exigir `transfer_released`.
+- `tests/test_xhci_failed_transfer_cleanup.py`
+  - prova exact-epoch + `FAILED`;
+  - prova fail-closed para epoch estrangeiro;
+  - prova neutralização completa dos campos de correlação;
+  - prova que o Command waiter roteia Transfer Events enquanto aguarda Command Completion;
+  - prova a ordem `Disable Slot → Transfer logical cleanup → descriptors → demais estados`;
+  - usa inspeção robusta da expressão final de retorno.
+
+### Fronteira física usada
+
+`xhci_command_wait_completion()` já roteia qualquer Transfer Event observado antes da própria Command Completion para a mailbox de `xhci_transfer`. Portanto, depois da completion de `Disable Slot`, o recovery pode neutralizar essa mailbox/result do epoch sem reabrir polling ou consumir Event Ring. Slot ID/porta continuam reservados, impedindo reuse enquanto os owners físicos restantes não forem fechados.
+
+### Próxima sequência se 4/4 verde
+
+1. HID Report Descriptor DMA FAILED;
+2. HID Report DMA FAILED;
+3. HID Transfer Ring;
+4. arena Device/Input Context + EP0 Ring;
+5. barrier final e release Device Table / Slot ID / associação da porta.
+
+Nenhum desses owners físicos é liberado neste microcorte Transfer.

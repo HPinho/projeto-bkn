@@ -99,6 +99,89 @@ fn xhci_transfer_clear_pending_index(index: usize) -> bool {
     return true;
 }
 
+// Recovery FAILED após Disable Slot confirmado. O Command waiter roteia qualquer
+// Transfer Event observado antes da Command Completion para esta mailbox; depois
+// da fronteira física o slot não pode mais consumir TDs daquele epoch. Este helper
+// só neutraliza mailbox/result de software e nunca consome Event Ring nem toca DMA.
+@system
+fn xhci_transfer_failed_slot_matches(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn xhci_transfer_failed_state_empty_for(index: usize, slot_id: u8) -> bool {
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+    unsafe {
+        return !XHCI_TRANSFER_PENDING_EVENTS[index].valid &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].epoch == 0 &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].endpoint_id == 0 &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].trb_pointer == 0 &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].residual_length == 0 &&
+               XHCI_TRANSFER_PENDING_EVENTS[index].completion_code == 0 &&
+               !XHCI_TRANSFER_RESULTS[index].valid &&
+               XHCI_TRANSFER_RESULTS[index].epoch == 0 &&
+               XHCI_TRANSFER_RESULTS[index].endpoint_id == 0 &&
+               XHCI_TRANSFER_RESULTS[index].residual_length == 0 &&
+               XHCI_TRANSFER_RESULTS[index].completion_code == 0 &&
+               XHCI_TRANSFER_ACTIVE_SLOT_ID != slot_id;
+    }
+}
+
+@system
+fn xhci_transfer_failed_state_owned_by_epoch(index: usize, epoch: u32) -> bool {
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY || epoch == 0 { return false; }
+    unsafe {
+        if XHCI_TRANSFER_PENDING_EVENTS[index].epoch != 0 &&
+           XHCI_TRANSFER_PENDING_EVENTS[index].epoch != epoch {
+            return false;
+        }
+        if XHCI_TRANSFER_RESULTS[index].epoch != 0 &&
+           XHCI_TRANSFER_RESULTS[index].epoch != epoch {
+            return false;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn xhci_transfer_release_failed_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_transfer_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+    if xhci_transfer_failed_state_empty_for(index, slot_id) { return true; }
+    if !xhci_transfer_failed_state_owned_by_epoch(index, epoch) { return false; }
+
+    if !xhci_transfer_clear_pending_index(index) { return false; }
+    if !xhci_transfer_failed_slot_matches(slot_id, epoch) { return false; }
+
+    unsafe {
+        XHCI_TRANSFER_RESULTS[index].valid = false;
+        XHCI_TRANSFER_RESULTS[index].epoch = 0;
+        XHCI_TRANSFER_RESULTS[index].endpoint_id = 0;
+        XHCI_TRANSFER_RESULTS[index].residual_length = 0;
+        XHCI_TRANSFER_RESULTS[index].completion_code = 0;
+        if XHCI_TRANSFER_ACTIVE_SLOT_ID == slot_id {
+            XHCI_TRANSFER_ACTIVE_SLOT_ID = 0;
+        }
+    }
+    return xhci_transfer_failed_release_complete_for(slot_id, epoch);
+}
+
+@system
+pub fn xhci_transfer_failed_release_complete_for(slot_id: u8, epoch: u32) -> bool {
+    if !xhci_transfer_failed_slot_matches(slot_id, epoch) { return false; }
+    let index = xhci_transfer_index(slot_id);
+    if index >= XHCI_TRANSFER_SLOT_CAPACITY { return false; }
+    return xhci_transfer_failed_state_empty_for(index, slot_id);
+}
+
 // HID-4d.3b: gate exato para limpar somente estado lógico de transfer após
 // Stop Endpoint + drain. O caller de lifecycle ainda é responsável por provar
 // endpoint_stopped/quiescence; este módulo não importa o lifecycle para manter

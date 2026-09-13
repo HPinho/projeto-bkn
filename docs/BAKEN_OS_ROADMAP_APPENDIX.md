@@ -361,3 +361,65 @@ Invariantes:
 - novo guardrail específico prova exact-epoch + FAILED, estado neutro, ausência de operação física e ordem do orquestrador.
 
 Se este candidato fechar 4/4, o próximo microcorte deve começar por uma auditoria do owner **HID Report Descriptor / Report DMA** no caminho FAILED antes de liberar qualquer Transfer Ring ou arena Device/Input Context. Qualquer gate vermelho congela a `main` e exige correção-only registrada antes de novo avanço.
+
+---
+
+## 2026-09-13 — fechamento do gate Configure Endpoint lógico FAILED
+
+**✅ CERTIFICADO 4/4 — nenhuma correção intermediária necessária.**
+
+```text
+da3c8ac27e6d9545609d801ca95839e62102116e
+fix(xhci): quiesce failed configure endpoint state by epoch
+```
+
+Provas no mesmo SHA:
+
+- CI #1212 ✅;
+- SMP #315 ✅;
+- NVMe #412 ✅;
+- HID Dual-device #71 ✅.
+
+Resultado certificado:
+
+- `FAILED + slot_id + epoch` exatos são obrigatórios para o cleanup Configure Endpoint;
+- stale epoch só é aceito quando `ready=false`, `dropped=false`, `dci=0` e o slot não é o ativo;
+- `dropped=false` permanece bookkeeping neutro e não simula Drop Endpoint físico;
+- nenhum Output/Input Context, command xHCI, direct-map, DMA, ring ou context físico foi tocado pelo release FAILED;
+- a primitiva física `xhci_configure_endpoint_drop_hid_for_slot()` permanece separada para o lifecycle normal;
+- a suíte completa, grafo Sotlas, build nativo, QEMU principal, SMP, NVMe-only e HID dual-device fecharam verdes;
+- LangSotlas permaneceu inalterado.
+
+---
+
+## 2026-09-13 — recovery de enumeração FAILED / Transfer mailbox-result lógico
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende dos quatro gates no novo SHA.**
+
+Contrato do corte:
+
+```text
+FAILED + slot_id + epoch exatos
+→ Disable Slot Command Completion
+→ Transfer mailbox/result do mesmo epoch neutralizados
+→ Configuration Descriptor recovery
+→ Device Descriptor recovery
+→ SET_CONFIGURATION lógico
+→ Configure Endpoint lógico
+→ Evaluate Context lógico
+→ EP0 lógico
+→ Address lógico
+```
+
+Invariantes:
+
+- durante a espera de `Disable Slot`, `xhci_command_wait_completion()` roteia Transfer Events anteriores à Command Completion para a mailbox per-slot;
+- após a Command Completion, o helper FAILED não consome Event Ring e não espera novos events;
+- mailbox/result só podem ser apagados quando seus epochs são `0` ou exatamente o epoch FAILED atual; vestígio de outro epoch falha fechado;
+- o estado neutro exige todos os campos de correlação zerados e `ACTIVE_SLOT_ID != slot_id`;
+- nenhum `dma_release`, `dma_unshare_from_device`, MMIO, ring, context, command submission ou free físico ocorre neste helper;
+- o caminho `DETACH_PENDING` continua separado em `xhci_transfer_clear_slot_state_for_epoch()`;
+- este microcorte deliberadamente **não libera** HID Report Descriptor DMA, HID Report DMA, HID Transfer Ring, Device/Input Context, EP0 Ring, Device Table, Slot ID ou porta;
+- o novo guardrail prova também a relação `Transfer Event routing → Disable Slot completion → FAILED transfer cleanup → descriptor recovery` e usa inspeção robusta do `return`, sem adjacency frágil.
+
+Se este candidato fechar 4/4, o próximo owner físico a fechar será **HID Report Descriptor DMA em FAILED**, seguido do **HID Report DMA**, antes do HID Transfer Ring e da arena Device/Input Context.
