@@ -187,3 +187,70 @@ Invariantes:
 - nenhum ajuste em LangSotlas é esperado.
 
 Se I2C-1a fechar 4/4, o próximo microcorte será **I2C-1b — executor/backend interface + deadline/error propagation**, ainda desacoplado de um controlador físico específico. Qualquer gate vermelho congela `main` e exige correction-only antes de continuar.
+
+---
+
+## 2026-09-13 — fechamento I2C-1a / generic transaction contract
+
+**✅ CERTIFICADO 4/4 — sem correction-only intermediário.**
+
+```text
+3bff745182da4324c03b146a9b48c578e44440e9
+feat(i2c): add generic transaction contract
+```
+
+Provas no mesmo SHA:
+
+- CI #1216 ✅
+- SMP #319 ✅
+- NVMe-only #416 ✅
+- HID Dual-device #75 ✅
+
+Resultado certificado:
+
+- `I2cMessage`, `I2cTransaction`, `I2cTransferPlan`, `I2cControllerCapabilities` e `I2cTransferResult` pertencem ao grafo Sotlas nativo;
+- write/read combinado, repeated START, leitura 10-bit, bounds de mensagens/bytes, capabilities e resultados normalizados compilam no lowering real;
+- suíte completa, grafo modular, builds nativos, ISO e provas QEMU dos quatro gates permaneceram verdes;
+- nenhum backend físico, MMIO, PCI, DMA, IRQ, GPIO, AML evaluation ou HID-I2C runtime foi introduzido;
+- LangSotlas permaneceu inalterado.
+
+---
+
+## 2026-09-13 — I2C-1b / executor + backend boundary
+
+**⏳ CANDIDATO DESTE MICROCORTE — certificação depende dos mesmos quatro gates no mesmo SHA.**
+
+Contrato:
+
+```text
+I2cTransaction + I2cControllerCapabilities
+→ i2c_executor_prepare
+→ I2cBackendRequest borrowed/bounded
+→ backend físico futuro
+→ I2cBackendCompletion
+→ i2c_executor_finish
+→ I2cExecutionOutcome + I2cTransferResult
+```
+
+Escopo:
+
+- `I2cBackendRequest` preserva o borrow da transação e o plano certificado; o backend futuro nunca recebe ownership do buffer;
+- preflight inválido falha fechado; capability insuficiente retorna `UNSUPPORTED` sem executar backend;
+- `I2cBackendCompletion` carrega status, progresso, mensagem da falha, tempo decorrido e prova de liberação do barramento/quiescência;
+- completion é bounded pelo `I2cTransferPlan` que originou o request;
+- deadline excedido promove o resultado para `TIMEOUT`;
+- sucesso declarado enquanto o backend ainda controla o barramento ou não está quiescente é promovido para `CONTROLLER_ERROR`;
+- `recovery_required` permanece separado de `deadline_exceeded`, permitindo ao backend físico futuro decidir recuperação sem esconder a causa lógica;
+- a fronteira é data-oriented; não depende de function pointers/callbacks cuja cadeia parser→lowering→codegen ainda não foi usada como contrato do kernel.
+
+Invariantes:
+
+- zero `static mut`;
+- zero MMIO/PCI/DMA/PMM/IRQ/GPIO/xHCI;
+- zero timer read, sleep ou polling no executor;
+- zero execução AML/HID;
+- nenhum registry ou controller físico;
+- nenhum retry implícito: um backend futuro não poderá duplicar writes não idempotentes silenciosamente;
+- LangSotlas não deve ser alterado para este corte.
+
+Se este SHA fechar 4/4, o próximo microcorte será **I2C-1c — controller/backend protocol state machine + recuperação lógica**, ainda separando a máquina de estados genérica do primeiro backend físico específico. Se qualquer gate falhar, `main` congela e a próxima mudança será correction-only.

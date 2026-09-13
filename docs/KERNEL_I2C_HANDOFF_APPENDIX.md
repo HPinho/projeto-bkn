@@ -199,3 +199,65 @@ Política de endereços reservados/general-call também fica fora deste recorte;
 - nenhuma suposição de DesignWare/Intel/AMD até a interface genérica estar certificada.
 
 Se qualquer gate do I2C-1a falhar, `main` deve congelar no SHA reprovado e o próximo commit será exclusivamente correction-only.
+
+---
+
+# Atualização operacional — 2026-09-13 / I2C-1a certificado
+
+O contrato genérico de transação fechou **4/4** no mesmo SHA:
+
+```text
+3bff745182da4324c03b146a9b48c578e44440e9
+feat(i2c): add generic transaction contract
+```
+
+Status final:
+
+- CI #1216 ✅;
+- SMP #319 ✅;
+- NVMe-only #416 ✅;
+- HID Dual-device #75 ✅.
+
+A suíte completa, o grafo modular, o build nativo Sotlas, a ISO e as provas QEMU permaneceram verdes. Não houve correction-only nem alteração em LangSotlas.
+
+# Novo candidato — I2C-1b / executor + backend boundary
+
+Estado: **⏳ aguardando certificação 4/4 no novo SHA**.
+
+Arquivos funcionais deste microcorte:
+
+- `kernel/src/drivers/i2c_executor.sotlas`
+  - importa somente `i2c_core`;
+  - define `I2cBackendRequest`, `I2cBackendCompletion` e `I2cExecutionOutcome`;
+  - prepara request apenas depois de planner + capability gate certificados;
+  - mantém `transaction` como borrow durante a execução, sem transferência de ownership;
+  - retorna `UNSUPPORTED` imediatamente quando o plano é válido mas o controller não suporta suas capacidades;
+  - valida completion contra message_count/total_bytes/failed_message_index do plano;
+  - converte deadline excedido em `TIMEOUT`;
+  - marca `recovery_required` quando o barramento não foi liberado ou o controller não ficou quiescente;
+  - não aceita sucesso terminal com ownership de barramento ainda ativo: converte para `CONTROLLER_ERROR`;
+  - reaproveita `i2c_result_success`, `i2c_result_error` e `i2c_result_consistent` do I2C-1a.
+- `kernel/src/main.sotlas`
+  - importa `i2c_executor` logo após `i2c_core`.
+- `tests/test_i2c_executor.py`
+  - prova a fronteira data-oriented, borrow, preflight, bounds de completion, deadline/recovery e retorno imediato `UNSUPPORTED`;
+  - proíbe `static mut`, MMIO/PCI/DMA/PMM/IRQ/GPIO/xHCI, timer/sleep/polling e AML execution.
+
+## Decisão de arquitetura
+
+A especificação da LangSotlas contém `FunctionType`, mas não usamos function pointers/callbacks como dependência deste corte porque essa cadeia ainda não foi necessária como contrato do kernel. O I2C-1b usa request/completion data-oriented e evita introduzir mudança de linguagem sem necessidade real.
+
+## Fronteira deliberada
+
+I2C-1b ainda **não** contém:
+
+- dispatch para um controller real;
+- state machine de protocolo físico;
+- leitura/escrita de registradores;
+- timer source ou busy-wait;
+- IRQ/DMA;
+- registry generation-safe;
+- reset/recovery físico do barramento;
+- HID-I2C.
+
+Se este candidato fechar 4/4, o próximo microcorte será **I2C-1c — controller/backend protocol state machine + recuperação lógica**, ainda sem escolher prematuramente Intel/AMD/DesignWare. Qualquer gate vermelho congela `main` e exige correction-only.

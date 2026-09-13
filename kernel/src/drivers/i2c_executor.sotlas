@@ -1,0 +1,222 @@
+// Baken OS — I2C-1b: executor stateless e fronteira data-oriented de backend.
+//
+// O core prepara um request somente depois de validar o plano/capabilities. Um
+// backend físico futuro consome o request e devolve uma completion normalizada.
+// Este módulo não registra controller, não chama callback e não toca hardware.
+module kernel::drivers::i2c_executor;
+
+import kernel::drivers::i2c_core::*;
+
+pub struct I2cBackendRequest {
+    // Borrow válido durante toda a execução. WRITE é lido pelo backend; READ é
+    // escrito pelo backend. O backend nunca passa a ser dono do buffer.
+    pub transaction: *const I2cTransaction;
+    pub plan: I2cTransferPlan;
+    pub timeout_budget_us: u64;
+    // OK => pode ser entregue ao backend; UNSUPPORTED => preflight válido, mas
+    // o controller não possui capacidade suficiente; INVALID => rejeitado.
+    pub status: u8;
+    pub valid: bool;
+}
+
+pub struct I2cBackendCompletion {
+    pub status: u8;
+    pub completed_messages: usize;
+    pub transferred_bytes: usize;
+    pub failed_message_index: usize;
+    pub elapsed_us: u64;
+    // Terminal não significa necessariamente sucesso. Estes bits dizem se o
+    // backend deixou de dirigir o barramento e retornou a um estado quiescente.
+    pub bus_ownership_released: bool;
+    pub controller_quiesced: bool;
+    pub valid: bool;
+}
+
+pub struct I2cExecutionOutcome {
+    pub result: I2cTransferResult;
+    pub deadline_exceeded: bool;
+    pub recovery_required: bool;
+    pub valid: bool;
+}
+
+@system
+fn i2c_backend_request_invalid() -> I2cBackendRequest {
+    return I2cBackendRequest {
+        transaction: null as *const I2cTransaction,
+        plan: I2cTransferPlan {
+            address: 0,
+            ten_bit_addressing: false,
+            bus_speed_hz: 0,
+            timeout_us: 0,
+            message_count: 0,
+            total_bytes: 0,
+            largest_message_bytes: 0,
+            write_message_count: 0,
+            read_message_count: 0,
+            repeated_start_count: 0,
+            ten_bit_read_address_restart: false,
+            valid: false
+        },
+        timeout_budget_us: 0,
+        status: I2C_STATUS_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn i2c_execution_outcome_invalid() -> I2cExecutionOutcome {
+    return I2cExecutionOutcome {
+        result: I2cTransferResult {
+            status: I2C_STATUS_INVALID,
+            completed_messages: 0,
+            transferred_bytes: 0,
+            failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+            valid: false
+        },
+        deadline_exceeded: false,
+        recovery_required: false,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_backend_request_ready(request: *const I2cBackendRequest) -> bool {
+    if request == (null as *const I2cBackendRequest) { return false; }
+    unsafe {
+        return (*request).valid && (*request).status == I2C_STATUS_OK &&
+            (*request).transaction != (null as *const I2cTransaction) &&
+            (*request).plan.valid && (*request).timeout_budget_us != 0 &&
+            (*request).timeout_budget_us == (*request).plan.timeout_us;
+    }
+}
+
+@system
+pub fn i2c_executor_prepare(transaction: *const I2cTransaction,
+                            caps: *const I2cControllerCapabilities) -> I2cBackendRequest {
+    if transaction == (null as *const I2cTransaction) ||
+       !i2c_controller_capabilities_valid(caps) {
+        return i2c_backend_request_invalid();
+    }
+
+    let plan = i2c_plan_transaction(transaction);
+    if !plan.valid { return i2c_backend_request_invalid(); }
+
+    if !i2c_plan_supported_by(&plan, caps) {
+        return I2cBackendRequest {
+            transaction: transaction,
+            timeout_budget_us: plan.timeout_us,
+            plan: plan,
+            status: I2C_STATUS_UNSUPPORTED,
+            valid: true
+        };
+    }
+
+    return I2cBackendRequest {
+        transaction: transaction,
+        timeout_budget_us: plan.timeout_us,
+        plan: plan,
+        status: I2C_STATUS_OK,
+        valid: true
+    };
+}
+
+@system
+pub fn i2c_backend_completion_valid(request: *const I2cBackendRequest,
+                                    completion: *const I2cBackendCompletion) -> bool {
+    if !i2c_backend_request_ready(request) ||
+       completion == (null as *const I2cBackendCompletion) {
+        return false;
+    }
+    unsafe {
+        if !(*completion).valid || !i2c_status_valid((*completion).status) ||
+           (*completion).status == I2C_STATUS_INVALID ||
+           (*completion).completed_messages > (*request).plan.message_count ||
+           (*completion).transferred_bytes > (*request).plan.total_bytes ||
+           ((*completion).failed_message_index != I2C_INVALID_MESSAGE_INDEX &&
+            (*completion).failed_message_index >= (*request).plan.message_count) {
+            return false;
+        }
+        if (*completion).status == I2C_STATUS_OK {
+            return (*completion).completed_messages == (*request).plan.message_count &&
+                (*completion).transferred_bytes == (*request).plan.total_bytes &&
+                (*completion).failed_message_index == I2C_INVALID_MESSAGE_INDEX;
+        }
+        return true;
+    }
+}
+
+@system
+pub fn i2c_executor_finish(request: *const I2cBackendRequest,
+                           completion: *const I2cBackendCompletion) -> I2cExecutionOutcome {
+    if !i2c_backend_completion_valid(request, completion) {
+        return i2c_execution_outcome_invalid();
+    }
+
+    unsafe {
+        let deadline_exceeded = (*completion).elapsed_us > (*request).timeout_budget_us;
+        let recovery_required = !(*completion).bus_ownership_released ||
+            !(*completion).controller_quiesced;
+        let mut status = (*completion).status;
+        if deadline_exceeded { status = I2C_STATUS_TIMEOUT; }
+
+        // Um backend não pode publicar sucesso enquanto ainda dirige o barramento
+        // ou mantém o controller ativo. Esse caso é promovido a erro do controller.
+        if status == I2C_STATUS_OK && recovery_required {
+            status = I2C_STATUS_CONTROLLER_ERROR;
+        }
+
+        let result = if status == I2C_STATUS_OK {
+            i2c_result_success(&(*request).plan)
+        } else {
+            i2c_result_error(
+                &(*request).plan,
+                status,
+                (*completion).completed_messages,
+                (*completion).transferred_bytes,
+                (*completion).failed_message_index
+            )
+        };
+        if !result.valid || !i2c_result_consistent(&(*request).plan, &result) {
+            return i2c_execution_outcome_invalid();
+        }
+
+        return I2cExecutionOutcome {
+            result: result,
+            deadline_exceeded: deadline_exceeded,
+            recovery_required: recovery_required,
+            valid: true
+        };
+    }
+}
+
+@system
+pub fn i2c_executor_immediate_result(request: *const I2cBackendRequest) -> I2cTransferResult {
+    if request == (null as *const I2cBackendRequest) {
+        return I2cTransferResult {
+            status: I2C_STATUS_INVALID,
+            completed_messages: 0,
+            transferred_bytes: 0,
+            failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+            valid: false
+        };
+    }
+    unsafe {
+        if !(*request).valid || (*request).status != I2C_STATUS_UNSUPPORTED ||
+           !(*request).plan.valid {
+            return I2cTransferResult {
+                status: I2C_STATUS_INVALID,
+                completed_messages: 0,
+                transferred_bytes: 0,
+                failed_message_index: I2C_INVALID_MESSAGE_INDEX,
+                valid: false
+            };
+        }
+        return i2c_result_error(
+            &(*request).plan,
+            I2C_STATUS_UNSUPPORTED,
+            0,
+            0,
+            I2C_INVALID_MESSAGE_INDEX
+        );
+    }
+}
