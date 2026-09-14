@@ -9,6 +9,7 @@ module kernel::drivers::gpio_physical;
 
 import kernel::drivers::gpio_core::*;
 import kernel::drivers::intel_tigerlake_gpio::*;
+import kernel::drivers::amd_gpio::*;
 
 static mut GPIO_PHYSICAL_READY: bool = false;
 static mut GPIO_PHYSICAL_BACKEND_COUNT: usize = 0;
@@ -21,6 +22,7 @@ pub fn gpio_physical_probe_all() -> usize {
 
     let mut count: usize = 0;
     count += intel_tigerlake_gpio_probe();
+    count += amd_gpio_probe();
 
     unsafe {
         GPIO_PHYSICAL_BACKEND_COUNT = count;
@@ -37,6 +39,7 @@ pub fn gpio_physical_arm_connection(connection_id: u32, generation: u32) -> bool
     // Backends are intentionally isolated. A backend must only mutate hardware after
     // proving that it owns connection.controller_namespace_index.
     if intel_tigerlake_gpio_arm_connection(connection_id, generation) { return true; }
+    if amd_gpio_arm_connection(connection_id, generation) { return true; }
 
     return false;
 }
@@ -50,6 +53,7 @@ pub fn gpio_physical_disarm_connection(connection_id: u32, generation: u32) -> b
     }
 
     if intel_tigerlake_gpio_disarm_connection(connection_id, generation) { return true; }
+    if amd_gpio_disarm_connection(connection_id, generation) { return true; }
 
     return false;
 }
@@ -58,6 +62,7 @@ pub fn gpio_physical_disarm_connection(connection_id: u32, generation: u32) -> b
 pub fn gpio_physical_irq_dispatch() -> usize {
     let mut handled: usize = 0;
     handled += intel_tigerlake_gpio_irq_dispatch();
+    handled += amd_gpio_irq_dispatch();
     return handled;
 }
 

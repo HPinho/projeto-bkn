@@ -1,0 +1,135 @@
+// Baken OS — bounded resource view over static and evaluator-backed _CRS.
+//
+// ACPI requires _CRS to evaluate to the same ResourceTemplate byte stream used
+// by static Name(_CRS, ...). Consumers must not care which AML form produced it.
+
+module kernel::acpi::aml_runtime_resources;
+
+import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_dynamic_discovery::*;
+
+@system
+fn aml_runtime_invalid_resource() -> AmlResourceDescriptor {
+    return AmlResourceDescriptor {
+        device_slot: AML_DISCOVERY_MAX_DEVICES, offset: 0,
+        kind: 0, item_name: 0, payload: null as *const u8,
+        payload_length: 0, valid: false
+    };
+}
+
+@system
+fn aml_runtime_dynamic_device(device_slot: usize) -> *const AmlDynamicDevice {
+    if !aml_dynamic_discovery_is_ready() ||
+       device_slot >= aml_dynamic_discovery_device_count() { return null as *const AmlDynamicDevice; }
+    let source = aml_discovery_device(device_slot);
+    let dynamic = aml_dynamic_discovery_device(device_slot);
+    unsafe {
+        if source == (null as *const AmlDiscoveredDevice) ||
+           dynamic == (null as *const AmlDynamicDevice) || !(*dynamic).valid ||
+           (*dynamic).namespace_index != (*source).namespace_index ||
+           !(*dynamic).crs_resolved || (*dynamic).crs_data == (null as *const u8) ||
+           (*dynamic).crs_length < 2 { return null as *const AmlDynamicDevice; }
+    }
+    return dynamic;
+}
+
+@system
+fn aml_runtime_dynamic_resource_at(device_slot: usize, ordinal: usize) -> AmlResourceDescriptor {
+    let dynamic = aml_runtime_dynamic_device(device_slot);
+    if dynamic == (null as *const AmlDynamicDevice) { return aml_runtime_invalid_resource(); }
+    unsafe {
+        let data = (*dynamic).crs_data;
+        let length = (*dynamic).crs_length;
+        let mut offset: usize = 0;
+        let mut current: usize = 0;
+        while offset < length {
+            let header = data[offset];
+            let mut kind = AML_RESOURCE_KIND_SMALL;
+            let mut item_name = (header >> 3) & 0x0F;
+            let mut header_length: usize = 1;
+            let mut payload_length = (header & 0x07) as usize;
+            if (header & 0x80) != 0 {
+                if offset + 3 < offset || offset + 3 > length { return aml_runtime_invalid_resource(); }
+                kind = AML_RESOURCE_KIND_LARGE;
+                item_name = header & 0x7F;
+                header_length = 3;
+                payload_length = (data[offset + 1] as usize) |
+                                 ((data[offset + 2] as usize) << 8);
+            }
+            let payload_offset = offset + header_length;
+            let next = payload_offset + payload_length;
+            if payload_offset < offset || next < payload_offset || next > length {
+                return aml_runtime_invalid_resource();
+            }
+            if kind == AML_RESOURCE_KIND_SMALL &&
+               item_name == AML_RESOURCE_END_TAG_NAME {
+                if payload_length != AML_RESOURCE_END_TAG_LENGTH || next != length {
+                    return aml_runtime_invalid_resource();
+                }
+                return aml_runtime_invalid_resource();
+            }
+            if current == ordinal {
+                return AmlResourceDescriptor {
+                    device_slot: device_slot, offset: offset, kind: kind,
+                    item_name: item_name, payload: data + payload_offset,
+                    payload_length: payload_length, valid: true
+                };
+            }
+            current += 1;
+            offset = next;
+        }
+    }
+    return aml_runtime_invalid_resource();
+}
+
+@system
+pub fn aml_runtime_resource_count(device_slot: usize) -> usize {
+    let source = aml_discovery_device(device_slot);
+    if source == (null as *const AmlDiscoveredDevice) { return 0; }
+    unsafe {
+        if (*source).crs_static && !(*source).crs_requires_evaluator {
+            return (*source).resource_count;
+        }
+    }
+    let dynamic = aml_runtime_dynamic_device(device_slot);
+    if dynamic == (null as *const AmlDynamicDevice) { return 0; }
+    let mut count: usize = 0;
+    while count < AML_DYNAMIC_MAX_RESOURCE_DESCRIPTORS {
+        let resource = aml_runtime_dynamic_resource_at(device_slot, count);
+        if !resource.valid { return count; }
+        count += 1;
+    }
+    return 0;
+}
+
+@system
+pub fn aml_runtime_resource_at(device_slot: usize, ordinal: usize) -> AmlResourceDescriptor {
+    let source = aml_discovery_device(device_slot);
+    if source == (null as *const AmlDiscoveredDevice) { return aml_runtime_invalid_resource(); }
+    unsafe {
+        if (*source).crs_static && !(*source).crs_requires_evaluator {
+            if ordinal >= (*source).resource_count { return aml_runtime_invalid_resource(); }
+            let index = (*source).resource_start + ordinal;
+            if index < (*source).resource_start || index >= aml_discovery_resource_count() {
+                return aml_runtime_invalid_resource();
+            }
+            let resource = aml_discovery_resource(index);
+            if resource == (null as *const AmlResourceDescriptor) ||
+               !(*resource).valid || (*resource).device_slot != device_slot {
+                return aml_runtime_invalid_resource();
+            }
+            return *resource;
+        }
+    }
+    return aml_runtime_dynamic_resource_at(device_slot, ordinal);
+}
+
+@system
+pub fn aml_runtime_resources_are_dynamic(device_slot: usize) -> bool {
+    let source = aml_discovery_device(device_slot);
+    if source == (null as *const AmlDiscoveredDevice) { return false; }
+    unsafe {
+        if (*source).crs_static && !(*source).crs_requires_evaluator { return false; }
+    }
+    return aml_runtime_dynamic_device(device_slot) != (null as *const AmlDynamicDevice);
+}

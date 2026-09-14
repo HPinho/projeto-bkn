@@ -12,6 +12,8 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::memory::active_page_tables::*;
 import kernel::acpi::aml_namespace::*;
 import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_dynamic_discovery::*;
+import kernel::acpi::aml_runtime_resources::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
@@ -141,15 +143,23 @@ fn intel_tgl_hid_equal(data: *const u8, length: usize,
 }
 
 @system
-fn intel_tgl_family(device: *const AmlDiscoveredDevice) -> u8 {
+fn intel_tgl_family(device_slot: usize, device: *const AmlDiscoveredDevice) -> u8 {
     if device == (null as *const AmlDiscoveredDevice) { return INTEL_TGL_FAMILY_NONE; }
     unsafe {
-        if !(*device).valid || (*device).hid_requires_evaluator ||
-           (*device).hid_kind != AML_DISCOVERY_ID_STRING || (*device).hid_data == (null as *const u8) {
+        if !(*device).valid { return INTEL_TGL_FAMILY_NONE; }
+        let mut p = (*device).hid_data;
+        let mut n = (*device).hid_length;
+        if (*device).hid_requires_evaluator {
+            let dynamic = aml_dynamic_discovery_device(device_slot);
+            if dynamic == (null as *const AmlDynamicDevice) || !(*dynamic).valid ||
+               !(*dynamic).hid_resolved || (*dynamic).hid_kind != AML_DYNAMIC_ID_STRING {
+                return INTEL_TGL_FAMILY_NONE;
+            }
+            p = (*dynamic).hid_data;
+            n = (*dynamic).hid_length;
+        } else if (*device).hid_kind != AML_DISCOVERY_ID_STRING {
             return INTEL_TGL_FAMILY_NONE;
         }
-        let p = (*device).hid_data;
-        let n = (*device).hid_length;
         if intel_tgl_hid_equal(p, n, 73,78,84,51,52,67,53,0) ||
            intel_tgl_hid_equal(p, n, 73,78,84,67,49,48,53,53) {
             return INTEL_TGL_FAMILY_LP;
@@ -318,38 +328,36 @@ fn intel_tgl_prepare_community(controller_slot: usize, family: u8,
 fn intel_tgl_probe_device(device_slot: usize) -> bool {
     if device_slot >= aml_discovery_device_count() { return false; }
     let device = aml_discovery_device(device_slot);
-    let family = intel_tgl_family(device);
+    let family = intel_tgl_family(device_slot, device);
     if family == INTEL_TGL_FAMILY_NONE { return false; }
     unsafe {
-        if device == (null as *const AmlDiscoveredDevice) || !(*device).crs_static ||
-           (*device).crs_requires_evaluator || (*device).resource_count == 0 ||
+        if device == (null as *const AmlDiscoveredDevice) ||
            INTEL_TGL_CONTROLLER_COUNT >= INTEL_TGL_MAX_CONTROLLERS { return false; }
         let controller_slot = INTEL_TGL_CONTROLLER_COUNT;
         let expected = intel_tgl_expected_communities(family) as usize;
-        let start = (*device).resource_start;
-        let count = (*device).resource_count;
-        if start + count < start || start + count > aml_discovery_resource_count() { return false; }
+        let count = aml_runtime_resource_count(device_slot);
+        if count == 0 { return false; }
         let mut memory_index: usize = 0;
         let mut irq_seen = false;
         let mut gsi: u32 = 0;
         let mut active_low = false;
         let mut level_triggered = false;
-        let mut index = start;
-        while index < start + count {
-            let resource = aml_discovery_resource(index);
-            if resource == (null as *const AmlResourceDescriptor) || !(*resource).valid || (*resource).device_slot != device_slot { return false; }
-            if (*resource).kind == AML_RESOURCE_KIND_LARGE && (*resource).item_name == INTEL_TGL_ACPI_FIXED_MEMORY32 {
-                if (*resource).payload == (null as *const u8) || (*resource).payload_length != 9 { return false; }
-                let base = intel_tgl_read_u32((*resource).payload, 1) as u64;
-                let length = intel_tgl_read_u32((*resource).payload, 5);
+        let mut index: usize = 0;
+        while index < count {
+            let resource = aml_runtime_resource_at(device_slot, index);
+            if !resource.valid || resource.device_slot != device_slot { return false; }
+            if resource.kind == AML_RESOURCE_KIND_LARGE && resource.item_name == INTEL_TGL_ACPI_FIXED_MEMORY32 {
+                if resource.payload == (null as *const u8) || resource.payload_length != 9 { return false; }
+                let base = intel_tgl_read_u32(resource.payload, 1) as u64;
+                let length = intel_tgl_read_u32(resource.payload, 5);
                 if memory_index < expected && !intel_tgl_prepare_community(controller_slot, family, memory_index as u8, base, length) { return false; }
                 memory_index += 1;
-            } else if (*resource).kind == AML_RESOURCE_KIND_LARGE && (*resource).item_name == INTEL_TGL_ACPI_EXTENDED_IRQ {
-                if irq_seen || (*resource).payload == (null as *const u8) || (*resource).payload_length < 6 { return false; }
-                let flags = (*resource).payload[0];
-                let interrupt_count = (*resource).payload[1];
+            } else if resource.kind == AML_RESOURCE_KIND_LARGE && resource.item_name == INTEL_TGL_ACPI_EXTENDED_IRQ {
+                if irq_seen || resource.payload == (null as *const u8) || resource.payload_length < 6 { return false; }
+                let flags = resource.payload[0];
+                let interrupt_count = resource.payload[1];
                 if (flags & 0xE0) != 0 || (flags & 0x01) == 0 || interrupt_count != 1 { return false; }
-                gsi = intel_tgl_read_u32((*resource).payload, 2);
+                gsi = intel_tgl_read_u32(resource.payload, 2);
                 if gsi == 0 { return false; }
                 level_triggered = (flags & 0x02) == 0;
                 active_low = (flags & 0x04) != 0;

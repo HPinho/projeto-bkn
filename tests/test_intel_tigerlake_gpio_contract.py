@@ -69,10 +69,10 @@ class IntelTigerLakeGpioPhys0ContractTests(unittest.TestCase):
         self.assertIn("73,78,84,67,49,48,53,53", self.tgl)  # INTC1055
         self.assertIn("73,78,84,51,52,67,54", self.tgl)  # INT34C6
 
-    def test_probe_uses_static_acpi_crs_and_real_mmio(self):
+    def test_probe_uses_validated_runtime_crs_and_real_mmio(self):
         for token in (
-            "crs_static",
-            "crs_requires_evaluator",
+            "aml_runtime_resource_count(device_slot)",
+            "aml_runtime_resource_at(device_slot, index)",
             "AML_RESOURCE_KIND_LARGE",
             "INTEL_TGL_ACPI_FIXED_MEMORY32",
             "INTEL_TGL_ACPI_EXTENDED_IRQ",

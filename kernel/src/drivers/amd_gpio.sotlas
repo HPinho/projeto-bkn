@@ -1,0 +1,436 @@
+// Baken OS — AMD x86-64 GPIO physical interrupt backend.
+//
+// Scope is deliberately bounded to ACPI AMDI0030 / AMDIF031. MMIO and GSI are
+// accepted only from the controller's validated runtime _CRS. Existing IRQ
+// ownership is never stolen; unsupported layouts fail without touching hardware.
+
+module kernel::drivers::amd_gpio;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_dynamic_discovery::*;
+import kernel::acpi::aml_runtime_resources::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::ioapic::*;
+import kernel::interrupts::route::*;
+import kernel::drivers::gpio_core::*;
+
+pub const AMD_GPIO_IRQ_VECTOR: u16 = 0x46;
+pub const AMD_GPIO_MAX_CONTROLLERS: usize = 4;
+pub const AMD_GPIO_MAX_ARMED: usize = GPIO_MAX_CONNECTIONS;
+pub const AMD_GPIO_MAX_PINS: usize = 256;
+pub const AMD_GPIO_MIN_MMIO_BYTES: u32 = 0x300;
+pub const AMD_GPIO_MAX_MMIO_BYTES: u32 = 0x10000;
+
+pub const AMD_GPIO_WAKE_INT_MASTER: u64 = 0x0FC;
+pub const AMD_GPIO_WAKE_STATUS0: u64 = 0x2F8;
+pub const AMD_GPIO_WAKE_STATUS1: u64 = 0x2FC;
+pub const AMD_GPIO_MASTER_EOI: u32 = 0x20000000;
+
+pub const AMD_GPIO_LEVEL_TRIGGER: u32 = 0x00000100;
+pub const AMD_GPIO_ACTIVE_LEVEL_MASK: u32 = 0x00000600;
+pub const AMD_GPIO_ACTIVE_LOW: u32 = 0x00000200;
+pub const AMD_GPIO_ACTIVE_BOTH: u32 = 0x00000400;
+pub const AMD_GPIO_INTERRUPT_ENABLE: u32 = 0x00000800;
+pub const AMD_GPIO_INTERRUPT_UNMASK: u32 = 0x00001000;
+pub const AMD_GPIO_OUTPUT_ENABLE: u32 = 0x00800000;
+pub const AMD_GPIO_INTERRUPT_STATUS: u32 = 0x10000000;
+pub const AMD_GPIO_WAKE_STATUS: u32 = 0x20000000;
+pub const AMD_GPIO_IRQ_CONTROL_MASK: u32 = 0x00001F00;
+pub const AMD_GPIO_IRQ_PENDING: u32 = AMD_GPIO_INTERRUPT_STATUS | AMD_GPIO_WAKE_STATUS;
+
+pub const AMD_GPIO_ACPI_FIXED_MEMORY32: u8 = 0x06;
+pub const AMD_GPIO_ACPI_EXTENDED_IRQ: u8 = 0x09;
+pub const AMD_GPIO_ACPI_SMALL_IRQ: u8 = 0x04;
+
+@repr(C)
+pub struct AmdGpioController {
+    pub namespace_index: usize;
+    pub base: u64;
+    pub length: u32;
+    pub gsi: u32;
+    pub active_low: bool;
+    pub level_triggered: bool;
+    pub backend_instance: u32;
+    pub route_live: bool;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct AmdGpioArmedConnection {
+    pub connection_id: u32;
+    pub generation: u32;
+    pub controller_slot: usize;
+    pub pin: u16;
+    pub original_register: u32;
+    pub valid: bool;
+}
+
+static mut AMD_GPIO_CONTROLLERS: [AmdGpioController; AMD_GPIO_MAX_CONTROLLERS] = [
+    AmdGpioController {
+        namespace_index: AML_NAMESPACE_INVALID_INDEX, base: 0, length: 0, gsi: 0,
+        active_low: false, level_triggered: false, backend_instance: 0,
+        route_live: false, valid: false
+    }; AMD_GPIO_MAX_CONTROLLERS
+];
+static mut AMD_GPIO_ARMED: [AmdGpioArmedConnection; AMD_GPIO_MAX_ARMED] = [
+    AmdGpioArmedConnection {
+        connection_id: 0, generation: 0, controller_slot: AMD_GPIO_MAX_CONTROLLERS,
+        pin: 0, original_register: 0, valid: false
+    }; AMD_GPIO_MAX_ARMED
+];
+static mut AMD_GPIO_CONTROLLER_COUNT: usize = 0;
+static mut AMD_GPIO_READY: bool = false;
+
+@system
+fn amd_gpio_read_u16(data: *const u8, offset: usize) -> u16 {
+    unsafe { return (data[offset] as u16) | ((data[offset + 1] as u16) << 8); }
+}
+
+@system
+fn amd_gpio_read_u32(data: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (data[offset] as u32) | ((data[offset + 1] as u32) << 8) |
+               ((data[offset + 2] as u32) << 16) | ((data[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn amd_gpio_hid_equal(data: *const u8, length: usize,
+                      a: u8, b: u8, c: u8, d: u8,
+                      e: u8, f: u8, g: u8, h: u8) -> bool {
+    if data == (null as *const u8) { return false; }
+    if length == 7 {
+        unsafe { return data[0] == a && data[1] == b && data[2] == c && data[3] == d && data[4] == e && data[5] == f && data[6] == g; }
+    }
+    if length == 8 {
+        unsafe { return data[0] == a && data[1] == b && data[2] == c && data[3] == d && data[4] == e && data[5] == f && data[6] == g && data[7] == h; }
+    }
+    return false;
+}
+
+@system
+fn amd_gpio_supported_device(device_slot: usize, device: *const AmlDiscoveredDevice) -> bool {
+    if device == (null as *const AmlDiscoveredDevice) { return false; }
+    unsafe {
+        if !(*device).valid { return false; }
+        let mut data = (*device).hid_data;
+        let mut length = (*device).hid_length;
+        if (*device).hid_requires_evaluator {
+            let dynamic = aml_dynamic_discovery_device(device_slot);
+            if dynamic == (null as *const AmlDynamicDevice) || !(*dynamic).valid ||
+               !(*dynamic).hid_resolved || (*dynamic).hid_kind != AML_DYNAMIC_ID_STRING {
+                return false;
+            }
+            data = (*dynamic).hid_data;
+            length = (*dynamic).hid_length;
+        } else if (*device).hid_kind != AML_DISCOVERY_ID_STRING {
+            return false;
+        }
+        // AMDI0030 and AMDIF031.
+        return amd_gpio_hid_equal(data, length, 65,77,68,73,48,48,51,48) ||
+               amd_gpio_hid_equal(data, length, 65,77,68,73,70,48,51,49);
+    }
+}
+
+@system
+fn amd_gpio_map_resource(base: u64, length: u32) -> bool {
+    if base == 0 || (base & 0xFFF) != 0 || length < AMD_GPIO_MIN_MMIO_BYTES ||
+       length > AMD_GPIO_MAX_MMIO_BYTES { return false; }
+    let mut offset: u32 = 0;
+    while offset < length {
+        if !active_page_tables_map_mmio_identity_4k(base + offset as u64) { return false; }
+        if offset > 0xFFFFEFFF { return false; }
+        offset += 0x1000;
+    }
+    return true;
+}
+
+@system
+fn amd_gpio_decode_small_irq(payload: *const u8, length: usize,
+                             out_gsi: *mut u32) -> bool {
+    if payload == (null as *const u8) || out_gsi == (null as *mut u32) ||
+       (length != 2 && length != 3) { return false; }
+    let mask = amd_gpio_read_u16(payload, 0);
+    if mask == 0 || (mask & (mask - 1)) != 0 { return false; }
+    let mut irq: u32 = 0;
+    while irq < 16 {
+        if (mask & ((1 as u16) << irq)) != 0 { unsafe { *out_gsi = irq; } return true; }
+        irq += 1;
+    }
+    return false;
+}
+
+@system
+fn amd_gpio_probe_device(device_slot: usize) -> bool {
+    let device = aml_discovery_device(device_slot);
+    if !amd_gpio_supported_device(device_slot, device) ||
+       unsafe { AMD_GPIO_CONTROLLER_COUNT >= AMD_GPIO_MAX_CONTROLLERS } { return false; }
+    let count = aml_runtime_resource_count(device_slot);
+    if count == 0 { return false; }
+    let mut base: u64 = 0;
+    let mut length: u32 = 0;
+    let mut gsi: u32 = 0;
+    let mut irq_seen = false;
+    let mut active_low = false;
+    let mut level_triggered = false;
+    let mut index: usize = 0;
+    while index < count {
+        let resource = aml_runtime_resource_at(device_slot, index);
+        if !resource.valid || resource.device_slot != device_slot { return false; }
+        if resource.kind == AML_RESOURCE_KIND_LARGE &&
+           resource.item_name == AMD_GPIO_ACPI_FIXED_MEMORY32 {
+            if base != 0 || resource.payload == (null as *const u8) ||
+               resource.payload_length != 9 { return false; }
+            base = amd_gpio_read_u32(resource.payload, 1) as u64;
+            length = amd_gpio_read_u32(resource.payload, 5);
+        } else if resource.kind == AML_RESOURCE_KIND_LARGE &&
+                  resource.item_name == AMD_GPIO_ACPI_EXTENDED_IRQ {
+            if irq_seen || resource.payload == (null as *const u8) ||
+               resource.payload_length < 6 || unsafe { resource.payload[1] } != 1 { return false; }
+            let flags = unsafe { resource.payload[0] };
+            if (flags & 0xE0) != 0 || (flags & 0x01) == 0 { return false; }
+            gsi = amd_gpio_read_u32(resource.payload, 2);
+            level_triggered = (flags & 0x02) == 0;
+            active_low = (flags & 0x04) != 0;
+            irq_seen = gsi != 0;
+        } else if resource.kind == AML_RESOURCE_KIND_SMALL &&
+                  resource.item_name == AMD_GPIO_ACPI_SMALL_IRQ {
+            if irq_seen || !amd_gpio_decode_small_irq(resource.payload, resource.payload_length, &mut gsi) {
+                return false;
+            }
+            // IRQ descriptor defaults are edge/high when flags are omitted.
+            if resource.payload_length == 3 {
+                let flags = unsafe { resource.payload[2] };
+                level_triggered = (flags & 0x01) != 0;
+                active_low = (flags & 0x08) != 0;
+            }
+            irq_seen = true;
+        }
+        index += 1;
+    }
+    if base == 0 || !irq_seen || !amd_gpio_map_resource(base, length) ||
+       length <= AMD_GPIO_WAKE_STATUS1 as u32 { return false; }
+    if x86_mmio_read32(base + AMD_GPIO_WAKE_INT_MASTER) == 0xFFFFFFFF { return false; }
+    let route = InterruptRoute {
+        source_irq: 0xFF, gsi: gsi, vector: AMD_GPIO_IRQ_VECTOR,
+        active_low: active_low, level_triggered: level_triggered, valid: true
+    };
+    let flags = x86_irq_save_disable();
+    let route_ok = ioapic_program_route_masked(&route, lapic_id());
+    x86_irq_restore(flags);
+    if !route_ok { return false; }
+    unsafe {
+        let slot = AMD_GPIO_CONTROLLER_COUNT;
+        let backend = 0x414D0000 | ((slot + 1) as u32);
+        if !gpio_physical_backend_register((*device).namespace_index, backend) { return false; }
+        AMD_GPIO_CONTROLLERS[slot] = AmdGpioController {
+            namespace_index: (*device).namespace_index, base: base, length: length,
+            gsi: gsi, active_low: active_low, level_triggered: level_triggered,
+            backend_instance: backend, route_live: false, valid: true
+        };
+        AMD_GPIO_CONTROLLER_COUNT += 1;
+    }
+    return true;
+}
+
+@system
+pub fn amd_gpio_probe() -> usize {
+    unsafe { if AMD_GPIO_READY { return AMD_GPIO_CONTROLLER_COUNT; } }
+    if !aml_discovery_is_ready() || !active_page_tables_is_ready() ||
+       !ioapic_is_ready() || !lapic_is_ready() || !gpio_core_init() { return 0; }
+    unsafe {
+        let mut i: usize = 0;
+        while i < AMD_GPIO_MAX_CONTROLLERS { AMD_GPIO_CONTROLLERS[i].valid = false; i += 1; }
+        i = 0;
+        while i < AMD_GPIO_MAX_ARMED { AMD_GPIO_ARMED[i].valid = false; i += 1; }
+        AMD_GPIO_CONTROLLER_COUNT = 0;
+    }
+    let count = aml_discovery_device_count();
+    let mut device_slot: usize = 0;
+    while device_slot < count {
+        amd_gpio_probe_device(device_slot);
+        device_slot += 1;
+    }
+    unsafe { AMD_GPIO_READY = true; return AMD_GPIO_CONTROLLER_COUNT; }
+}
+
+@system
+fn amd_gpio_controller_slot(namespace_index: usize) -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < AMD_GPIO_CONTROLLER_COUNT {
+            if AMD_GPIO_CONTROLLERS[slot].valid &&
+               AMD_GPIO_CONTROLLERS[slot].namespace_index == namespace_index { return slot; }
+            slot += 1;
+        }
+    }
+    return AMD_GPIO_MAX_CONTROLLERS;
+}
+
+@system
+fn amd_gpio_controller_has_armed(controller_slot: usize) -> bool {
+    unsafe {
+        let mut i: usize = 0;
+        while i < AMD_GPIO_MAX_ARMED {
+            if AMD_GPIO_ARMED[i].valid && AMD_GPIO_ARMED[i].controller_slot == controller_slot { return true; }
+            i += 1;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn amd_gpio_arm_connection(connection_id: u32, generation: u32) -> bool {
+    unsafe { if !AMD_GPIO_READY { amd_gpio_probe(); } }
+    let connection = gpio_connection_query(connection_id, generation);
+    if !connection.valid || connection.state != GPIO_PIN_STATE_CONFIGURED ||
+       connection.pin_number as usize >= AMD_GPIO_MAX_PINS { return false; }
+    let controller_slot = amd_gpio_controller_slot(connection.controller_namespace_index);
+    if controller_slot >= AMD_GPIO_MAX_CONTROLLERS { return false; }
+    let controller = unsafe { AMD_GPIO_CONTROLLERS[controller_slot] };
+    let pin_offset = connection.pin_number as u64 * 4;
+    if pin_offset + 4 > controller.length as u64 { return false; }
+    let mut free_slot = AMD_GPIO_MAX_ARMED;
+    unsafe {
+        let mut i: usize = 0;
+        while i < AMD_GPIO_MAX_ARMED {
+            if AMD_GPIO_ARMED[i].valid && AMD_GPIO_ARMED[i].controller_slot == controller_slot &&
+               AMD_GPIO_ARMED[i].pin == connection.pin_number { return false; }
+            if !AMD_GPIO_ARMED[i].valid && free_slot == AMD_GPIO_MAX_ARMED { free_slot = i; }
+            i += 1;
+        }
+    }
+    if free_slot >= AMD_GPIO_MAX_ARMED { return false; }
+    let flags = x86_irq_save_disable();
+    let address = controller.base + pin_offset;
+    let original = x86_mmio_read32(address);
+    if original == 0xFFFFFFFF || (original & (AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK)) != 0 ||
+       (original & AMD_GPIO_OUTPUT_ENABLE) != 0 {
+        x86_irq_restore(flags); return false;
+    }
+    let mut configured = original & (0xFFFFFFFF - AMD_GPIO_IRQ_CONTROL_MASK);
+    if connection.trigger == GPIO_TRIGGER_LEVEL { configured |= AMD_GPIO_LEVEL_TRIGGER; }
+    if connection.polarity == GPIO_POLARITY_ACTIVE_LOW { configured |= AMD_GPIO_ACTIVE_LOW; }
+    else if connection.polarity == GPIO_POLARITY_ACTIVE_BOTH {
+        if connection.trigger != GPIO_TRIGGER_EDGE { x86_irq_restore(flags); return false; }
+        configured |= AMD_GPIO_ACTIVE_BOTH;
+    }
+    configured |= AMD_GPIO_INTERRUPT_STATUS;
+    x86_mmio_write32(address, configured);
+    configured = (configured & (0xFFFFFFFF - AMD_GPIO_IRQ_PENDING)) |
+                 AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK;
+    x86_mmio_write32(address, configured);
+    let observed = x86_mmio_read32(address);
+    if (observed & (AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK)) !=
+       (AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK) {
+        x86_mmio_write32(address, original); x86_irq_restore(flags); return false;
+    }
+    if !gpio_connection_activate(connection_id, generation) {
+        x86_mmio_write32(address, original); x86_irq_restore(flags); return false;
+    }
+    unsafe {
+        AMD_GPIO_ARMED[free_slot] = AmdGpioArmedConnection {
+            connection_id: connection_id, generation: generation,
+            controller_slot: controller_slot, pin: connection.pin_number,
+            original_register: original, valid: true
+        };
+    }
+    let route = InterruptRoute {
+        source_irq: 0xFF, gsi: controller.gsi, vector: AMD_GPIO_IRQ_VECTOR,
+        active_low: controller.active_low, level_triggered: controller.level_triggered, valid: true
+    };
+    let mut route_ok = true;
+    if !controller.route_live { route_ok = ioapic_program_route_unmasked(&route, lapic_id()); }
+    if !route_ok {
+        unsafe { AMD_GPIO_ARMED[free_slot].valid = false; }
+        gpio_connection_deactivate(connection_id, generation);
+        x86_mmio_write32(address, original);
+        x86_irq_restore(flags);
+        return false;
+    }
+    unsafe { AMD_GPIO_CONTROLLERS[controller_slot].route_live = true; }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn amd_gpio_disarm_connection(connection_id: u32, generation: u32) -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        let mut i: usize = 0;
+        while i < AMD_GPIO_MAX_ARMED {
+            if AMD_GPIO_ARMED[i].valid && AMD_GPIO_ARMED[i].connection_id == connection_id &&
+               AMD_GPIO_ARMED[i].generation == generation {
+                let armed = AMD_GPIO_ARMED[i];
+                let controller = AMD_GPIO_CONTROLLERS[armed.controller_slot];
+                let address = controller.base + armed.pin as u64 * 4;
+                let current = x86_mmio_read32(address);
+                x86_mmio_write32(address, (current & (0xFFFFFFFF - (AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK))) |
+                                           AMD_GPIO_INTERRUPT_STATUS);
+                if !gpio_connection_deactivate(connection_id, generation) {
+                    x86_irq_restore(flags); return false;
+                }
+                x86_mmio_write32(address, armed.original_register);
+                AMD_GPIO_ARMED[i].valid = false;
+                if !amd_gpio_controller_has_armed(armed.controller_slot) {
+                    let route = InterruptRoute {
+                        source_irq: 0xFF, gsi: controller.gsi, vector: AMD_GPIO_IRQ_VECTOR,
+                        active_low: controller.active_low, level_triggered: controller.level_triggered, valid: true
+                    };
+                    if !ioapic_program_route_masked(&route, lapic_id()) {
+                        x86_irq_restore(flags); return false;
+                    }
+                    AMD_GPIO_CONTROLLERS[armed.controller_slot].route_live = false;
+                }
+                x86_irq_restore(flags);
+                return true;
+            }
+            i += 1;
+        }
+    }
+    x86_irq_restore(flags);
+    return false;
+}
+
+@system
+pub fn amd_gpio_irq_dispatch() -> usize {
+    let mut handled: usize = 0;
+    let mut controller_seen: [bool; AMD_GPIO_MAX_CONTROLLERS] = [false; AMD_GPIO_MAX_CONTROLLERS];
+    unsafe {
+        let mut i: usize = 0;
+        while i < AMD_GPIO_MAX_ARMED {
+            if AMD_GPIO_ARMED[i].valid {
+                let armed = AMD_GPIO_ARMED[i];
+                let controller = AMD_GPIO_CONTROLLERS[armed.controller_slot];
+                let value = x86_mmio_read32(controller.base + armed.pin as u64 * 4);
+                if (value & AMD_GPIO_IRQ_PENDING) != 0 &&
+                   (value & (AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK)) ==
+                   (AMD_GPIO_INTERRUPT_ENABLE | AMD_GPIO_INTERRUPT_UNMASK) {
+                    if gpio_connection_signal(armed.connection_id) { handled += 1; }
+                    x86_mmio_write32(controller.base + armed.pin as u64 * 4, value);
+                    controller_seen[armed.controller_slot] = true;
+                }
+            }
+            i += 1;
+        }
+        let mut controller_slot: usize = 0;
+        while controller_slot < AMD_GPIO_CONTROLLER_COUNT {
+            if controller_seen[controller_slot] {
+                let controller = AMD_GPIO_CONTROLLERS[controller_slot];
+                let master = x86_mmio_read32(controller.base + AMD_GPIO_WAKE_INT_MASTER);
+                x86_mmio_write32(controller.base + AMD_GPIO_WAKE_INT_MASTER, master | AMD_GPIO_MASTER_EOI);
+            }
+            controller_slot += 1;
+        }
+    }
+    return handled;
+}
+
+@system
+pub fn amd_gpio_controller_count() -> usize { unsafe { return AMD_GPIO_CONTROLLER_COUNT; } }
+
+@system
+pub fn amd_gpio_is_ready() -> bool { unsafe { return AMD_GPIO_READY; } }
