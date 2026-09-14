@@ -1,0 +1,260 @@
+// Baken OS — I2C-5b & I2C-5c: Driver de Silício Synopsys DesignWare APB / Intel LPSS.
+//
+// Manipulação direta de registradores MMIO, controle de FIFOs de TX e RX,
+// detecção de causas de TX_ABRT (NACK de endereço/dados, perda de arbitragem),
+// polling síncrono calibrado e gravação física de bytes em buffers do chamador.
+
+module kernel::drivers::i2c_designware;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::drivers::i2c_core::*;
+
+pub const DW_IC_CON: u64 = 0x00;
+pub const DW_IC_TAR: u64 = 0x04;
+pub const DW_IC_DATA_CMD: u64 = 0x10;
+pub const DW_IC_SS_SCL_HCNT: u64 = 0x14;
+pub const DW_IC_SS_SCL_LCNT: u64 = 0x18;
+pub const DW_IC_FS_SCL_HCNT: u64 = 0x1C;
+pub const DW_IC_FS_SCL_LCNT: u64 = 0x20;
+pub const DW_IC_INTR_STAT: u64 = 0x2C;
+pub const DW_IC_INTR_MASK: u64 = 0x30;
+pub const DW_IC_RAW_INTR_STAT: u64 = 0x34;
+pub const DW_IC_RX_TL: u64 = 0x38;
+pub const DW_IC_TX_TL: u64 = 0x3C;
+pub const DW_IC_CLR_INTR: u64 = 0x40;
+pub const DW_IC_CLR_TX_ABRT: u64 = 0x54;
+pub const DW_IC_ENABLE: u64 = 0x6C;
+pub const DW_IC_STATUS: u64 = 0x70;
+pub const DW_IC_TXFLR: u64 = 0x74;
+pub const DW_IC_RXFLR: u64 = 0x78;
+pub const DW_IC_TX_ABRT_SOURCE: u64 = 0x80;
+pub const DW_IC_ENABLE_STATUS: u64 = 0x9C;
+
+pub const DW_IC_CON_MASTER_MODE: u32 = 1 << 0;
+pub const DW_IC_CON_SPEED_STD: u32 = 1 << 1;
+pub const DW_IC_CON_SPEED_FAST: u32 = 2 << 1;
+pub const DW_IC_CON_10BITADDR_MASTER: u32 = 1 << 4;
+pub const DW_IC_CON_RESTART_EN: u32 = 1 << 5;
+pub const DW_IC_CON_SLAVE_DISABLE: u32 = 1 << 6;
+
+pub const DW_IC_STATUS_ACTIVITY: u32 = 1 << 0;
+pub const DW_IC_STATUS_TFNF: u32 = 1 << 1; // Transmit FIFO Not Full
+pub const DW_IC_STATUS_TFE: u32 = 1 << 2;  // Transmit FIFO Empty
+pub const DW_IC_STATUS_RFNE: u32 = 1 << 3; // Receive FIFO Not Empty
+pub const DW_IC_STATUS_RFE: u32 = 1 << 4;  // Receive FIFO Empty
+
+pub const DW_IC_RAW_INTR_TX_ABRT: u32 = 1 << 6;
+pub const DW_IC_RAW_INTR_STOP_DET: u32 = 1 << 9;
+
+pub const DW_IC_CMD_READ: u32 = 1 << 8;
+pub const DW_IC_CMD_STOP: u32 = 1 << 9;
+pub const DW_IC_CMD_RESTART: u32 = 1 << 10;
+
+pub const DW_ABRT_7B_ADDR_NOACK: u32 = 1 << 0;
+pub const DW_ABRT_10ADDR1_NOACK: u32 = 1 << 1;
+pub const DW_ABRT_10ADDR2_NOACK: u32 = 1 << 2;
+pub const DW_ABRT_TXDATA_NOACK: u32 = 1 << 3;
+pub const DW_ABRT_ARB_LOST: u32 = 1 << 12;
+
+pub const DW_POLL_TIMEOUT_CYCLES: u32 = 200000;
+
+@system
+pub fn i2c_dw_read32(base: u64, offset: u64) -> u32 {
+    return x86_mmio_read32(base + offset);
+}
+
+@system
+pub fn i2c_dw_write32(base: u64, offset: u64, value: u32) -> void {
+    x86_mmio_write32(base + offset, value);
+}
+
+@system
+pub fn i2c_dw_enable(base: u64, enable: bool) -> bool {
+    let target = if enable { 1 } else { 0 };
+    i2c_dw_write32(base, DW_IC_ENABLE, target);
+
+    let mut timeout = DW_POLL_TIMEOUT_CYCLES;
+    while timeout > 0 {
+        let status = i2c_dw_read32(base, DW_IC_ENABLE_STATUS);
+        if (status & 1) == target { return true; }
+        x86_cpu_pause();
+        timeout -= 1;
+    }
+    return false;
+}
+
+@system
+pub fn i2c_dw_init(base: u64, speed_hz: u32) -> bool {
+    if base == 0 { return false; }
+
+    // 1. Desabilita o controlador para configurar registradores
+    if !i2c_dw_enable(base, false) {
+        // Tenta forçar abort se travado
+        i2c_dw_write32(base, DW_IC_ENABLE, 2); // bit 1 = abort
+    }
+
+    let speed_bits = if speed_hz >= 400000 {
+        DW_IC_CON_SPEED_FAST
+    } else {
+        DW_IC_CON_SPEED_STD
+    };
+
+    let con_val: u32 = DW_IC_CON_MASTER_MODE |
+        speed_bits |
+        DW_IC_CON_RESTART_EN |
+        DW_IC_CON_SLAVE_DISABLE;
+
+    i2c_dw_write32(base, DW_IC_CON, con_val);
+
+    // 2. Configura timings SCL para clock de barramento padrão (100 MHz clock de entrada)
+    // Standard-mode: 100 kHz
+    i2c_dw_write32(base, DW_IC_SS_SCL_HCNT, 400);
+    i2c_dw_write32(base, DW_IC_SS_SCL_LCNT, 470);
+    // Fast-mode: 400 kHz
+    i2c_dw_write32(base, DW_IC_FS_SCL_HCNT, 90);
+    i2c_dw_write32(base, DW_IC_FS_SCL_LCNT, 160);
+
+    // 3. Mascara todas as interrupções para o modo polling inicial
+    i2c_dw_write32(base, DW_IC_INTR_MASK, 0);
+
+    // 4. Configura thresholds de FIFO
+    i2c_dw_write32(base, DW_IC_TX_TL, 0);
+    i2c_dw_write32(base, DW_IC_RX_TL, 0);
+
+    // 5. Limpa interrupções residuais
+    i2c_dw_read32(base, DW_IC_CLR_INTR);
+
+    // 6. Habilita o controlador
+    return i2c_dw_enable(base, true);
+}
+
+@system
+pub fn i2c_dw_check_abort(base: u64) -> u8 {
+    let raw_intr = i2c_dw_read32(base, DW_IC_RAW_INTR_STAT);
+    if (raw_intr & DW_IC_RAW_INTR_TX_ABRT) != 0 {
+        let abort_src = i2c_dw_read32(base, DW_IC_TX_ABRT_SOURCE);
+        i2c_dw_read32(base, DW_IC_CLR_TX_ABRT);
+
+        if (abort_src & (DW_ABRT_7B_ADDR_NOACK | DW_ABRT_10ADDR1_NOACK | DW_ABRT_10ADDR2_NOACK)) != 0 {
+            return I2C_STATUS_ADDRESS_NACK;
+        }
+        if (abort_src & DW_ABRT_TXDATA_NOACK) != 0 {
+            return I2C_STATUS_DATA_NACK;
+        }
+        if (abort_src & DW_ABRT_ARB_LOST) != 0 {
+            return I2C_STATUS_ARBITRATION_LOST;
+        }
+        return I2C_STATUS_CONTROLLER_ERROR;
+    }
+    return I2C_STATUS_OK;
+}
+
+@system
+pub fn i2c_dw_transfer(base: u64, transaction: *const I2cTransaction) -> u8 {
+    if base == 0 || transaction == (null as *const I2cTransaction) {
+        return I2C_STATUS_INVALID;
+    }
+
+    let msg_count = unsafe { (*transaction).message_count };
+    if msg_count == 0 || msg_count > I2C_MAX_MESSAGES {
+        return I2C_STATUS_INVALID;
+    }
+
+    let addr = unsafe { (*transaction).address };
+    let ten_bit = unsafe { (*transaction).ten_bit_addressing };
+
+    // Desabilita para trocar o target address se necessário
+    let current_tar = i2c_dw_read32(base, DW_IC_TAR) & 0x3FF;
+    if current_tar != (addr as u32) {
+        i2c_dw_enable(base, false);
+        let mut tar_val = (addr & 0x3FF) as u32;
+        if ten_bit { tar_val |= (1 << 12); }
+        i2c_dw_write32(base, DW_IC_TAR, tar_val);
+        i2c_dw_enable(base, true);
+    }
+
+    let mut msg_idx: usize = 0;
+    while msg_idx < msg_count {
+        let direction = unsafe { (*transaction).messages[msg_idx].direction };
+        let buf = unsafe { (*transaction).messages[msg_idx].data };
+        let len = unsafe { (*transaction).messages[msg_idx].length };
+        let is_last_msg = (msg_idx + 1) == msg_count;
+
+        if buf == (null as *mut u8) || len == 0 {
+            return I2C_STATUS_INVALID;
+        }
+
+        let mut byte_idx: usize = 0;
+        while byte_idx < len {
+            let is_first_byte = (msg_idx > 0) && (byte_idx == 0);
+            let is_last_byte = is_last_msg && ((byte_idx + 1) == len);
+
+            // Aguarda Transmit FIFO Not Full
+            let mut timeout = DW_POLL_TIMEOUT_CYCLES;
+            while timeout > 0 {
+                let status = i2c_dw_read32(base, DW_IC_STATUS);
+                if (status & DW_IC_STATUS_TFNF) != 0 { break; }
+                x86_cpu_pause();
+                timeout -= 1;
+            }
+            if timeout == 0 { return I2C_STATUS_TIMEOUT; }
+
+            // Verifica abort anterior
+            let abort_status = i2c_dw_check_abort(base);
+            if abort_status != I2C_STATUS_OK { return abort_status; }
+
+            let mut cmd: u32 = 0;
+            if is_first_byte { cmd |= DW_IC_CMD_RESTART; }
+            if is_last_byte { cmd |= DW_IC_CMD_STOP; }
+
+            if direction == I2C_DIRECTION_READ {
+                cmd |= DW_IC_CMD_READ;
+                i2c_dw_write32(base, DW_IC_DATA_CMD, cmd);
+
+                // Aguarda Receive FIFO Not Empty
+                let mut rx_timeout = DW_POLL_TIMEOUT_CYCLES;
+                while rx_timeout > 0 {
+                    let rx_status = i2c_dw_read32(base, DW_IC_STATUS);
+                    if (rx_status & DW_IC_STATUS_RFNE) != 0 { break; }
+                    let abrt = i2c_dw_check_abort(base);
+                    if abrt != I2C_STATUS_OK { return abrt; }
+                    x86_cpu_pause();
+                    rx_timeout -= 1;
+                }
+                if rx_timeout == 0 { return I2C_STATUS_TIMEOUT; }
+
+                let received_byte = (i2c_dw_read32(base, DW_IC_DATA_CMD) & 0xFF) as u8;
+                // GRAVAÇÃO FÍSICA REAL NO BUFFER DO CHAMADOR!
+                unsafe {
+                    *buf.add(byte_idx) = received_byte;
+                }
+            } else {
+                let byte_to_write = unsafe { *buf.add(byte_idx) };
+                cmd |= (byte_to_write as u32) & 0xFF;
+                i2c_dw_write32(base, DW_IC_DATA_CMD, cmd);
+
+                let abrt = i2c_dw_check_abort(base);
+                if abrt != I2C_STATUS_OK { return abrt; }
+            }
+
+            byte_idx += 1;
+        }
+        msg_idx += 1;
+    }
+
+    // Aguarda o TX FIFO ficar completamente vazio e a atividade cessar
+    let mut drain_timeout = DW_POLL_TIMEOUT_CYCLES;
+    while drain_timeout > 0 {
+        let status = i2c_dw_read32(base, DW_IC_STATUS);
+        if (status & DW_IC_STATUS_TFE) != 0 && (status & DW_IC_STATUS_ACTIVITY) == 0 {
+            break;
+        }
+        let abrt = i2c_dw_check_abort(base);
+        if abrt != I2C_STATUS_OK { return abrt; }
+        x86_cpu_pause();
+        drain_timeout -= 1;
+    }
+    if drain_timeout == 0 { return I2C_STATUS_BUS_BUSY; }
+
+    return I2C_STATUS_OK;
+}
