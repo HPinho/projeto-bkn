@@ -412,10 +412,10 @@ pub fn i2c_device_execute_transaction(device_id: u32,
     if desc.backend_ready && desc.backend_instance != 0 {
         let mmio_base = i2c_physical_get_mmio_base(desc.backend_instance);
         if mmio_base != 0 {
-            // Serialização SMP por controlador com irq_save
-            let irq_flags = i2c_physical_lock_controller(desc.backend_instance);
+            // Serialização SMP por controlador (sem mascaramento prolongado de interrupções)
+            i2c_physical_lock_controller(desc.backend_instance);
             let hw_status = i2c_dw_transfer(mmio_base, transaction);
-            i2c_physical_unlock_controller(desc.backend_instance, irq_flags);
+            i2c_physical_unlock_controller(desc.backend_instance);
 
             let slot = i2c_device_slot(device_id);
             let flags = x86_irq_save_disable();

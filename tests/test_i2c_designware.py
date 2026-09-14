@@ -43,8 +43,12 @@ class I2cDesignWareContractTests(unittest.TestCase):
             "pub const INTEL_LPSS_PRIV_OFFSET: u64 = 0x200",
             "pub const INTEL_LPSS_PRIV_SIZE: u64 = 0x100",
             "pub const INTEL_LPSS_IDMA64_OFFSET: u64 = 0x800",
+            "pub const LPSS_PRIV_REMAP_ADDR: u64 = 0x00",
             "pub const LPSS_PRIV_RESETS: u64 = 0x04",
-            "pub fn i2c_lpss_reset_release(base: u64) -> void",
+            "pub const LPSS_PRIV_RESETS_FUNC: u32 = 0x03",
+            "pub const LPSS_PRIV_RESETS_IDMA: u32 = 1 << 2",
+            "pub const LPSS_PRIV_RESETS_BOTH: u32 = 0x07",
+            "pub fn i2c_lpss_reset_release(base: u64, physical_address: u64) -> void",
         ):
             self.assertIn(token, self.text)
 
@@ -53,6 +57,7 @@ class I2cDesignWareContractTests(unittest.TestCase):
             "pub const DW_IC_CON_MASTER_MODE: u32 = 1 << 0",
             "pub const DW_IC_CON_SPEED_STD: u32 = 1 << 1",
             "pub const DW_IC_CON_SPEED_FAST: u32 = 2 << 1",
+            "pub const DW_IC_CON_10BITADDR_MASTER: u32 = 1 << 4",
             "pub const DW_IC_CON_RESTART_EN: u32 = 1 << 5",
             "pub const DW_IC_CON_SLAVE_DISABLE: u32 = 1 << 6",
             "pub const DW_IC_STATUS_TFNF: u32 = 1 << 1",
@@ -106,6 +111,7 @@ class I2cDesignWareContractTests(unittest.TestCase):
         self.assertIn("x86_timer_cycles_per_us()", self.text)
         self.assertIn("x86_timer_read_tsc()", self.text)
         self.assertIn("timeout_cycles", self.text)
+        self.assertIn("deadline_tsc", self.text)
 
     def test_designware_transfer_writes_directly_to_buffer(self):
         self.assertIn("pub fn i2c_dw_transfer", self.text)

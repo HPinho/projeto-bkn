@@ -37,6 +37,8 @@ import kernel::platform::device_catalog::*;
 import kernel::platform::storage_binding::*;
 import kernel::platform::hid_late_attach::*;
 import kernel::platform::hid_hotplug::*;
+import kernel::drivers::i2c_discovery_bridge::*;
+import kernel::drivers::i2c_physical_discovery::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -217,6 +219,11 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if platform_storage_binding_required() {
         if !platform_storage_bind_active_driver() || !platform_storage_emit_bound_marker() { loop {} }
     }
+
+    // Inicialização oportunista da plataforma I2C (controladores ACPI e backends físicos PCI).
+    // O escaneamento é não-bloqueante e fail-safe: plataformas sem hardware I2C continuam normalmente.
+    i2c_discovery_scan_acpi_controllers();
+    i2c_physical_probe_pci();
 
     // APs chegam ate runtime per-CPU com IF=0 e permanecem estacionados.
     if !smp_initialize_base() || !smp_emit_ready_markers() { loop {} }

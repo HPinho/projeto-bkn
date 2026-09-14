@@ -6,7 +6,7 @@ SMOKE = ROOT / "tools/scripts/verify_kernel_smoke.py"
 DISCOVERY = ROOT / "kernel/src/drivers/i2c_physical_discovery.sotlas"
 DESIGNWARE = ROOT / "kernel/src/drivers/i2c_designware.sotlas"
 DEVICE = ROOT / "kernel/src/drivers/i2c_device.sotlas"
-MAIN = ROOT / "kernel/src/main.sotlas"
+RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
 
 
 class I2c5RuntimeContractTests(unittest.TestCase):
@@ -18,8 +18,8 @@ class I2c5RuntimeContractTests(unittest.TestCase):
         self.assertNotIn("alloc(", text)
         self.assertIn("pub const I2C_MAX_PHYSICAL_CONTROLLERS: usize = 8;", text)
         self.assertIn("pci_probe_bar(", text)
-        self.assertIn("pci_enable_device(", text)
-        self.assertIn("active_page_tables_map_mmio_identity_4k(", text)
+        self.assertIn("pci_enable_command_bits(bus, slot, func, PCI_COMMAND_MEMORY_SPACE);", text)
+        self.assertIn("if !active_page_tables_map_mmio_identity_4k(page_aligned)", text)
 
     def test_i2c5a_pci_class_and_hardware_filter_fail_closed(self):
         text = DISCOVERY.read_text(encoding="utf-8")
@@ -34,9 +34,13 @@ class I2c5RuntimeContractTests(unittest.TestCase):
 
     def test_i2c5a_acpi_pci_binding_and_registry_activation(self):
         text = DISCOVERY.read_text(encoding="utf-8")
-        # Associação com _ADR do ACPI
+        # Associação com _ADR do ACPI restrita ao root bus 0
         self.assertIn("pub fn i2c_physical_find_acpi_namespace", text)
-        # Ativação do backend no registry
+        self.assertIn("if bus != 0 { return AML_NAMESPACE_INVALID_INDEX; }", text)
+        # Ativação do backend no registry estritamente após init_ok com 10-bit false
+        self.assertIn("let init_ok = i2c_dw_init_with_clock(phys_base, 400000, input_clock);", text)
+        self.assertIn("if !init_ok {", text)
+        self.assertIn("let handle = i2c_discovery_register_controller(acpi_ns, 400000, false);", text)
         self.assertIn("i2c_controller_registry_publish_backend(", text)
         self.assertIn("i2c_controller_registry_activate(", text)
 
@@ -58,11 +62,17 @@ class I2c5RuntimeContractTests(unittest.TestCase):
 
     def test_i2c5b_lpss_wrapper_and_dynamic_clock_calculations(self):
         text = DESIGNWARE.read_text(encoding="utf-8")
+        disc_text = DISCOVERY.read_text(encoding="utf-8")
         self.assertIn("pub const INTEL_LPSS_DEV_OFFSET: u64 = 0x000;", text)
         self.assertIn("pub const INTEL_LPSS_PRIV_OFFSET: u64 = 0x200;", text)
+        self.assertIn("pub const LPSS_PRIV_REMAP_ADDR: u64 = 0x00;", text)
+        self.assertIn("pub const LPSS_PRIV_RESETS_FUNC: u32 = 0x03;", text)
+        self.assertIn("pub const LPSS_PRIV_RESETS_IDMA: u32 = 1 << 2;", text)
+        self.assertIn("pub const LPSS_PRIV_RESETS_BOTH: u32 = 0x07;", text)
         self.assertIn("pub fn i2c_lpss_reset_release", text)
         self.assertIn("pub fn i2c_dw_calc_scl_hcnt", text)
         self.assertIn("pub fn i2c_dw_calc_scl_lcnt", text)
+        self.assertIn("pub fn i2c_physical_clock_for_device", disc_text)
 
     def test_i2c5c_synchronous_fifo_and_real_buffer_mutation_contract(self):
         text = DESIGNWARE.read_text(encoding="utf-8")
@@ -97,11 +107,17 @@ class I2c5RuntimeContractTests(unittest.TestCase):
         # Deadline temporal real baseado no timer
         self.assertIn("x86_timer_is_calibrated()", text)
         self.assertIn("x86_timer_read_tsc()", text)
+        self.assertIn("deadline_tsc", text)
+
+    def test_canonical_boot_route_invokes_i2c_discovery(self):
+        rt_text = RUNTIME.read_text(encoding="utf-8")
+        self.assertIn("i2c_discovery_scan_acpi_controllers();", rt_text)
+        self.assertIn("i2c_physical_probe_pci();", rt_text)
 
     def test_main_modular_kernel_graph_contract(self):
-        text = MAIN.read_text(encoding="utf-8")
-        self.assertIn("import kernel::drivers::i2c_physical_discovery::*;", text)
-        self.assertIn("import kernel::drivers::i2c_designware::*;", text)
+        main_text = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::i2c_physical_discovery::*;", main_text)
+        self.assertIn("import kernel::drivers::i2c_designware::*;", main_text)
 
     def test_qemu_smoke_gate_invariants_preserved(self):
         smoke_text = SMOKE.read_text(encoding="utf-8")
