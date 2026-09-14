@@ -256,7 +256,7 @@ pub fn gpio_connection_register_from_acpi(resource_index: usize, target_device_i
     let mut pin_number: u16 = 0;
     unsafe { pin_number = (gpio.pin_table[0] as u16) | ((gpio.pin_table[1] as u16) << 8); }
     let controller = aml_i2c_resolve_resource_source(gpio.device_slot, gpio.controller_source, gpio.controller_source_length);
-    if controller == AML_NAMESPACE_INVALID_INDEX { return gpio_pin_invalid_handle(); }
+    if controller == AML_NAMESPACE_INVALID_INDEX || !gpio_physical_backend_available(controller) { return gpio_pin_invalid_handle(); }
     let mut trigger = GPIO_TRIGGER_LEVEL;
     if gpio.edge_triggered { trigger = GPIO_TRIGGER_EDGE; }
     let mut polarity = GPIO_POLARITY_ACTIVE_HIGH;
