@@ -1,10 +1,8 @@
-// Baken OS — I2C-5a: Descoberta e Mapeamento Físico de Controladores I2C (PCI/ACPI/MMIO).
+// Baken OS — I2C-5a/5G: descoberta e mapeamento físico de controladores I2C (PCI/ACPI/MMIO).
 //
-// Varre o barramento PCI com filtro estrito de classe (Serial Bus 0x0C, subclasses 0x80/0x05)
-// e IDs de hardware homologados Intel LPSS / Synopsys DesignWare. Mapeia MMIO na VMM,
-// inicializa o controlador físico com clock sensível à plataforma, vincula ao controlador
-// lógico ACPI (_ADR / Bus 0) de forma estritamente fail-closed e fornece serialização SMP
-// sem mascaramento prolongado de interrupções.
+// O discovery é fail-closed: primeiro resolve um controller lógico ACPI único, depois valida
+// o ID PCI homologado, mapeia MMIO, inicializa o silício e somente então publica o backend.
+// Nenhum dispositivo PCI sem correspondência ACPI exata é tocado pelo driver físico.
 
 module kernel::drivers::i2c_physical_discovery;
 
@@ -14,6 +12,7 @@ import kernel::drivers::pci_bus::*;
 import kernel::memory::active_page_tables::*;
 import kernel::acpi::aml_discovery::*;
 import kernel::acpi::aml_namespace::*;
+import kernel::drivers::i2c_core::*;
 import kernel::drivers::i2c_controller::*;
 import kernel::drivers::i2c_controller_registry::*;
 import kernel::drivers::i2c_discovery_bridge::*;
@@ -96,77 +95,81 @@ pub fn i2c_physical_invalid_controller() -> I2cPhysicalController {
     };
 }
 
+// Tabela fail-closed de clocks baseada nas famílias Intel LPSS homologadas pelo backend.
+// IDs ausentes retornam 0 e portanto NÃO são tratados como I2C físico suportado.
 @system
-pub fn i2c_physical_identify_hardware(vendor_id: u16, device_id: u16, class_code: u8, subclass: u8) -> u8 {
-    // 1. Verificação estrita de classe PCI: apenas controladores da classe Serial Bus (0x0C)
-    //    com subclasses Other (0x80) ou SMBus (0x05) podem ser controladores I2C.
-    //    Dispositivos de vídeo (0x03), armazenamento (0x01), rede (0x02), ou USB (0x0C, subclass 0x03)
-    //    são REJEITADOS IMEDIATAMENTE.
-    let is_valid_pci_serial_class = class_code == PCI_CLASS_SERIAL_BUS &&
-        (subclass == PCI_SUBCLASS_SERIAL_OTHER || subclass == PCI_SUBCLASS_SMBUS);
+pub fn i2c_physical_clock_for_device(vendor_id: u16, device_id: u16) -> u32 {
+    if vendor_id == 0x16C3 { return 100000000; }
+    if vendor_id != 0x8086 { return 0; }
 
-    if vendor_id == 0x8086 {
-        // IDs exatos dos controladores I2C Intel LPSS homologados:
-        // - SunrisePoint-LP / Kaby Lake: 0x9D60..0x9D65
-        // - SunrisePoint-H: 0xA160..0xA162
-        // - Broxton / Apollo Lake: 0x5AAC, 0x5AAE, 0x5AB0, 0x5AB2, 0x5AB4, 0x5AB6, 0x5AB8, 0x5ABA
-        // - Gemini Lake: 0x31AC, 0x31AE, 0x31B0, 0x31B2, 0x31B4, 0x31B6, 0x31B8, 0x31BA
-        // - Cannon Lake / Comet Lake: 0x02E8..0x02EB, 0x06E8..0x06EB
-        // - Ice Lake: 0x34E8..0x34EB
-        // - Tiger Lake: 0xA0C5..0xA0C7, 0xA0D8..0xA0D9, 0xA0E8..0xA0EB
-        // - Alder Lake / Raptor Lake: 0x51E8..0x51EB, 0x7A4C..0x7A4E, 0x7E50..0x7E55
-        // - Elkhart Lake: 0x4B78..0x4B7B
-        // - Meteor Lake: 0x7E78..0x7E7B
-        let is_exact_lpss_id =
-            (device_id >= 0x9D60 && device_id <= 0x9D65) ||
-            (device_id >= 0xA160 && device_id <= 0xA162) ||
-            (device_id >= 0x02E8 && device_id <= 0x02EB) ||
-            (device_id >= 0x06E8 && device_id <= 0x06EB) ||
-            (device_id >= 0x34E8 && device_id <= 0x34EB) ||
-            (device_id >= 0xA0C5 && device_id <= 0xA0C7) ||
-            (device_id >= 0xA0D8 && device_id <= 0xA0D9) ||
-            (device_id >= 0xA0E8 && device_id <= 0xA0EB) ||
-            (device_id >= 0x4B78 && device_id <= 0x4B7B) ||
-            (device_id >= 0x51E8 && device_id <= 0x51EB) ||
-            (device_id >= 0x7A4C && device_id <= 0x7A4E) ||
-            (device_id >= 0x7E50 && device_id <= 0x7E55) ||
-            (device_id >= 0x7E78 && device_id <= 0x7E7B) ||
-            (device_id >= 0x9DA0 && device_id <= 0x9DA5) ||
-            (device_id == 0x5AAC || device_id == 0x5AAE || device_id == 0x5AB0 || device_id == 0x5AB2 ||
-             device_id == 0x5AB4 || device_id == 0x5AB6 || device_id == 0x5AB8 || device_id == 0x5ABA) ||
-            (device_id == 0x31AC || device_id == 0x31AE || device_id == 0x31B0 || device_id == 0x31B2 ||
-             device_id == 0x31B4 || device_id == 0x31B6 || device_id == 0x31B8 || device_id == 0x31BA);
-
-        if is_exact_lpss_id && is_valid_pci_serial_class {
-            return I2C_HARDWARE_TYPE_INTEL_LPSS;
-        }
-
-        // QUALQUER OUTRO DISPOSITIVO INTEL (NICs, xHCI, NVMe, SATA, GPU, etc.) É UNKNOWN!
-        return I2C_HARDWARE_TYPE_UNKNOWN;
+    // Sunrise Point / Kaby Lake e Tiger Lake-LP usam a plataforma SPT: 120 MHz.
+    if (device_id >= 0x9D60 && device_id <= 0x9D65) ||
+       (device_id >= 0xA160 && device_id <= 0xA162) ||
+       (device_id >= 0xA0C5 && device_id <= 0xA0C6) ||
+       (device_id >= 0xA0D8 && device_id <= 0xA0D9) ||
+       (device_id >= 0xA0E8 && device_id <= 0xA0EB) {
+        return 120000000;
     }
 
-    if vendor_id == 0x16C3 {
-        // Synopsys DesignWare IP Core FPGA / Test chip
-        if is_valid_pci_serial_class {
-            return I2C_HARDWARE_TYPE_DESIGNWARE;
-        }
+    // Cannon/Comet Lake usam a plataforma CNL: 216 MHz.
+    if (device_id >= 0x02C5 && device_id <= 0x02C6) ||
+       (device_id >= 0x02E8 && device_id <= 0x02EB) ||
+       (device_id >= 0x06E8 && device_id <= 0x06EB) ||
+       (device_id >= 0x9DC5 && device_id <= 0x9DC6) ||
+       (device_id >= 0x9DE8 && device_id <= 0x9DEB) {
+        return 216000000;
     }
 
-    // Dispositivo desconhecido / não-I2C
-    return I2C_HARDWARE_TYPE_UNKNOWN;
+    // Elkhart Lake usa 100 MHz.
+    if (device_id >= 0x4B44 && device_id <= 0x4B45) ||
+       (device_id >= 0x4B4B && device_id <= 0x4B4C) ||
+       (device_id >= 0x4B78 && device_id <= 0x4B7B) {
+        return 100000000;
+    }
+
+    // Plataformas BXT/APL/GLK/ICL e gerações posteriores com bxt_i2c_info: 133 MHz.
+    if device_id == 0x5AAC || device_id == 0x5AAE || device_id == 0x5AB0 || device_id == 0x5AB2 ||
+       device_id == 0x5AB4 || device_id == 0x5AB6 || device_id == 0x5AB8 || device_id == 0x5ABA ||
+       device_id == 0x31AC || device_id == 0x31AE || device_id == 0x31B0 || device_id == 0x31B2 ||
+       device_id == 0x31B4 || device_id == 0x31B6 || device_id == 0x31B8 || device_id == 0x31BA ||
+       (device_id >= 0x34C5 && device_id <= 0x34C6) ||
+       (device_id >= 0x34E8 && device_id <= 0x34EB) ||
+       (device_id >= 0x43AD && device_id <= 0x43AE) || device_id == 0x43D8 ||
+       (device_id >= 0x43E8 && device_id <= 0x43EB) ||
+       (device_id >= 0x51C5 && device_id <= 0x51C6) ||
+       (device_id >= 0x51D8 && device_id <= 0x51D9) ||
+       (device_id >= 0x51E8 && device_id <= 0x51EB) ||
+       (device_id >= 0x54C5 && device_id <= 0x54C6) ||
+       (device_id >= 0x54E8 && device_id <= 0x54EB) ||
+       (device_id >= 0x7A4C && device_id <= 0x7A4F) ||
+       (device_id >= 0x7A7C && device_id <= 0x7A7D) ||
+       (device_id >= 0x7ACC && device_id <= 0x7ACF) ||
+       (device_id >= 0x7AFC && device_id <= 0x7AFD) ||
+       (device_id >= 0x7E50 && device_id <= 0x7E51) ||
+       (device_id >= 0x7E78 && device_id <= 0x7E7B) ||
+       (device_id >= 0x98C5 && device_id <= 0x98C6) ||
+       (device_id >= 0x98E8 && device_id <= 0x98EB) {
+        return 133000000;
+    }
+
+    return 0;
 }
 
 @system
-pub fn i2c_physical_clock_for_device(vendor_id: u16, device_id: u16) -> u32 {
+pub fn i2c_physical_identify_hardware(vendor_id: u16, device_id: u16, class_code: u8, subclass: u8) -> u8 {
+    let is_valid_pci_serial_class = class_code == PCI_CLASS_SERIAL_BUS &&
+        (subclass == PCI_SUBCLASS_SERIAL_OTHER || subclass == PCI_SUBCLASS_SMBUS);
+    if !is_valid_pci_serial_class { return I2C_HARDWARE_TYPE_UNKNOWN; }
+
     if vendor_id == 0x8086 {
-        // Skylake / Kaby Lake / SunrisePoint usam 120 MHz
-        if (device_id >= 0x9D60 && device_id <= 0x9D65) || (device_id >= 0xA160 && device_id <= 0xA162) {
-            return 120000000;
+        if i2c_physical_clock_for_device(vendor_id, device_id) != 0 {
+            return I2C_HARDWARE_TYPE_INTEL_LPSS;
         }
-        // Apollo Lake, Gemini Lake, Tiger Lake, Alder Lake usam tipicamente 133 MHz
-        return 133333333;
+        return I2C_HARDWARE_TYPE_UNKNOWN;
     }
-    return 100000000; // Padrão 100 MHz para DesignWare genérico
+
+    if vendor_id == 0x16C3 { return I2C_HARDWARE_TYPE_DESIGNWARE; }
+    return I2C_HARDWARE_TYPE_UNKNOWN;
 }
 
 @system
@@ -180,7 +183,10 @@ pub fn i2c_physical_discovery_init() -> bool {
             }
             let mut l_idx: usize = 0;
             while l_idx < I2C_MAX_PHYSICAL_CONTROLLERS {
-                spinlock_init(&mut I2C_PHYSICAL_CONTROLLER_LOCKS[l_idx]);
+                if !spinlock_init(&mut I2C_PHYSICAL_CONTROLLER_LOCKS[l_idx]) {
+                    x86_irq_restore(flags);
+                    return false;
+                }
                 l_idx += 1;
             }
             I2C_PHYSICAL_LOCK_READY = true;
@@ -208,55 +214,72 @@ pub fn i2c_physical_discovery_init() -> bool {
     return true;
 }
 
+// Pareamento estrito para Bus 0. Apenas namespaces já reconhecidos pela bridge lógica
+// são elegíveis e qualquer ambiguidade de _ADR é rejeitada.
 @system
 pub fn i2c_physical_find_acpi_namespace(bus: u8, slot: u8, func: u8) -> usize {
-    if !aml_discovery_is_ready() { return AML_NAMESPACE_INVALID_INDEX; }
-    // Controladores Intel LPSS I2C residem exclusivamente no barramento raiz PCI (Bus 0)
-    if bus != 0 { return AML_NAMESPACE_INVALID_INDEX; }
+    if !aml_discovery_is_ready() || bus != 0 { return AML_NAMESPACE_INVALID_INDEX; }
 
     let count = aml_discovery_device_count();
     let target_adr = ((slot as u64) << 16) | (func as u64);
+    let mut found = AML_NAMESPACE_INVALID_INDEX;
     let mut i: usize = 0;
+
     while i < count {
         let dev = aml_discovery_device(i);
-        let mut matches = false;
         let mut ns_index = AML_NAMESPACE_INVALID_INDEX;
         unsafe {
             if dev != (null as *const AmlDiscoveredDevice) &&
                (*dev).valid && (*dev).has_adr && (*dev).adr == target_adr {
-                matches = true;
                 ns_index = (*dev).namespace_index;
             }
         }
-        if matches {
-            return ns_index;
+
+        if ns_index != AML_NAMESPACE_INVALID_INDEX {
+            let logical = i2c_discovery_bridge_find_by_namespace(ns_index);
+            if i2c_controller_handle_valid(&logical) {
+                if found != AML_NAMESPACE_INVALID_INDEX && found != ns_index {
+                    return AML_NAMESPACE_INVALID_INDEX;
+                }
+                found = ns_index;
+            }
         }
         i += 1;
     }
-    return AML_NAMESPACE_INVALID_INDEX;
+
+    return found;
 }
 
-// Serialização SMP de transações por controlador sem mascarar interrupções durante o polling
 @system
 pub fn i2c_physical_lock_controller(backend_instance: u32) -> bool {
-    if backend_instance == 0 || backend_instance > (I2C_MAX_PHYSICAL_CONTROLLERS as u32) {
-        return false;
-    }
+    if backend_instance == 0 || backend_instance > (I2C_MAX_PHYSICAL_CONTROLLERS as u32) { return false; }
     let idx = (backend_instance - 1) as usize;
-    unsafe {
-        return spinlock_lock(&mut I2C_PHYSICAL_CONTROLLER_LOCKS[idx]);
-    }
+    unsafe { return spinlock_lock(&mut I2C_PHYSICAL_CONTROLLER_LOCKS[idx]); }
 }
 
 @system
 pub fn i2c_physical_unlock_controller(backend_instance: u32) -> void {
-    if backend_instance == 0 || backend_instance > (I2C_MAX_PHYSICAL_CONTROLLERS as u32) {
-        return;
-    }
+    if backend_instance == 0 || backend_instance > (I2C_MAX_PHYSICAL_CONTROLLERS as u32) { return; }
     let idx = (backend_instance - 1) as usize;
+    unsafe { spinlock_unlock(&mut I2C_PHYSICAL_CONTROLLER_LOCKS[idx]); }
+}
+
+@system
+fn i2c_physical_rollback_last(slot_idx: usize) -> void {
+    if slot_idx >= I2C_MAX_PHYSICAL_CONTROLLERS { return; }
+    let flags = x86_irq_save_disable();
     unsafe {
-        spinlock_unlock(&mut I2C_PHYSICAL_CONTROLLER_LOCKS[idx]);
+        if I2C_PHYSICAL_LOCK_READY && spinlock_lock(&mut I2C_PHYSICAL_LOCK) {
+            if I2C_PHYSICAL_READY && I2C_PHYSICAL_CONTROLLERS[slot_idx].valid {
+                I2C_PHYSICAL_CONTROLLERS[slot_idx] = i2c_physical_invalid_controller();
+                if I2C_PHYSICAL_COUNT == slot_idx + 1 && I2C_PHYSICAL_COUNT != 0 {
+                    I2C_PHYSICAL_COUNT -= 1;
+                }
+            }
+            spinlock_unlock(&mut I2C_PHYSICAL_LOCK);
+        }
     }
+    x86_irq_restore(flags);
 }
 
 @system
@@ -278,10 +301,37 @@ pub fn i2c_physical_probe_pci() -> usize {
             let class_code = unsafe { (*dev_ptr).class_code };
             let subclass = unsafe { (*dev_ptr).subclass };
 
-            // Filtro seguro: apenas controladores I2C verificados são aceitos
             let hw_type = i2c_physical_identify_hardware(vendor_id, device_id, class_code, subclass);
-
             if hw_type != I2C_HARDWARE_TYPE_UNKNOWN {
+                // Resolve e valida o controller lógico ANTES de habilitar PCI ou tocar MMIO.
+                let acpi_ns = i2c_physical_find_acpi_namespace(bus, slot, func);
+                if acpi_ns == AML_NAMESPACE_INVALID_INDEX {
+                    i += 1;
+                    continue;
+                }
+                let logical_handle = i2c_discovery_bridge_find_by_namespace(acpi_ns);
+                if !i2c_controller_handle_valid(&logical_handle) {
+                    i += 1;
+                    continue;
+                }
+                // Probe repetido é idempotente: só ATTACHED e sem backend pode avançar.
+                let logical_record = i2c_controller_registry_snapshot(
+                    logical_handle.controller_id,
+                    logical_handle.generation
+                );
+                if !logical_record.valid ||
+                   logical_record.state != I2C_CONTROLLER_STATE_ATTACHED ||
+                   logical_record.backend_ready {
+                    i += 1;
+                    continue;
+                }
+
+                let input_clock = i2c_physical_clock_for_device(vendor_id, device_id);
+                if input_clock == 0 {
+                    i += 1;
+                    continue;
+                }
+
                 let mut bar0 = PciBar {
                     base_address: 0,
                     size: 0,
@@ -290,31 +340,24 @@ pub fn i2c_physical_probe_pci() -> usize {
                     is_prefetchable: false
                 };
 
+                // pci_probe_bar retorna o avanço do BAR (1/2); base_address é o critério de validade.
                 let bar_step = pci_probe_bar(bus, slot, func, 0, &mut bar0);
                 if bar_step >= 1 && bar0.base_address != 0 && !bar0.is_io {
-                    // Habilita apenas Memory Space (PIO/polling inicial; Bus Master não é necessário aqui)
                     pci_enable_command_bits(bus, slot, func, PCI_COMMAND_MEMORY_SPACE);
 
                     let phys_base = bar0.base_address;
                     let page_aligned = phys_base & 0xFFFFFFFFFFFFF000;
                     if !active_page_tables_map_mmio_identity_4k(page_aligned) {
-                        // Falha ao mapear página MMIO: descarta para evitar page fault
                         i += 1;
                         continue;
                     }
 
-                    // Se for Intel LPSS, tira o módulo e IDMA do reset e programa o remap
                     if hw_type == I2C_HARDWARE_TYPE_INTEL_LPSS {
                         i2c_lpss_reset_release(phys_base, phys_base);
                     }
 
-                    // Determina o clock de entrada correto para a geração de hardware
-                    let input_clock = i2c_physical_clock_for_device(vendor_id, device_id);
-
-                    // Inicializa o hardware físico Synopsys DesignWare
-                    let init_ok = i2c_dw_init_with_clock(phys_base, 400000, input_clock);
+                    let init_ok = i2c_dw_init_with_clock(phys_base, DW_SUPPORTED_FAST_SPEED_HZ, input_clock);
                     if !init_ok {
-                        // Hardware com falha na inicialização dos registradores: NÃO ativa!
                         i += 1;
                         continue;
                     }
@@ -325,8 +368,6 @@ pub fn i2c_physical_probe_pci() -> usize {
                         if I2C_PHYSICAL_LOCK_READY && spinlock_lock(&mut I2C_PHYSICAL_LOCK) {
                             if I2C_PHYSICAL_READY && I2C_PHYSICAL_COUNT < I2C_MAX_PHYSICAL_CONTROLLERS {
                                 slot_idx = I2C_PHYSICAL_COUNT;
-                                let acpi_ns = i2c_physical_find_acpi_namespace(bus, slot, func);
-
                                 I2C_PHYSICAL_CONTROLLERS[slot_idx] = I2cPhysicalController {
                                     bus: bus,
                                     slot: slot,
@@ -344,34 +385,58 @@ pub fn i2c_physical_probe_pci() -> usize {
                                     valid: true
                                 };
                                 I2C_PHYSICAL_COUNT += 1;
-                                discovered += 1;
                             }
                             spinlock_unlock(&mut I2C_PHYSICAL_LOCK);
                         }
                     }
                     x86_irq_restore(flags);
 
-                    // Se foi catalogado e possui correspondência ACPI exata, publica no registry
-                    if slot_idx < I2C_MAX_PHYSICAL_CONTROLLERS {
-                        let backend_instance = (slot_idx + 1) as u32;
-                        let acpi_ns = unsafe { I2C_PHYSICAL_CONTROLLERS[slot_idx].acpi_namespace_index };
-
-                        // Fail-closed estrito: apenas associa se o dispositivo ACPI for exatamente encontrado
-                        if acpi_ns != AML_NAMESPACE_INVALID_INDEX {
-                            let handle = i2c_discovery_register_controller(acpi_ns, 400000, false);
-                            if i2c_controller_handle_valid(&handle) {
-                                i2c_controller_registry_publish_backend(
-                                    handle.controller_id,
-                                    handle.generation,
-                                    backend_instance
-                                );
-                                i2c_controller_registry_activate(
-                                    handle.controller_id,
-                                    handle.generation
-                                );
-                            }
-                        }
+                    if slot_idx >= I2C_MAX_PHYSICAL_CONTROLLERS {
+                        i2c_dw_enable(phys_base, false);
+                        i += 1;
+                        continue;
                     }
+
+                    let backend_instance = (slot_idx + 1) as u32;
+                    let physical_caps = i2c_discovery_default_capabilities(DW_SUPPORTED_FAST_SPEED_HZ, false);
+
+                    if !i2c_controller_registry_update_capabilities(
+                        logical_handle.controller_id,
+                        logical_handle.generation,
+                        &physical_caps
+                    ) {
+                        i2c_physical_rollback_last(slot_idx);
+                        i2c_dw_enable(phys_base, false);
+                        i += 1;
+                        continue;
+                    }
+
+                    if !i2c_controller_registry_publish_backend(
+                        logical_handle.controller_id,
+                        logical_handle.generation,
+                        backend_instance
+                    ) {
+                        i2c_physical_rollback_last(slot_idx);
+                        i2c_dw_enable(phys_base, false);
+                        i += 1;
+                        continue;
+                    }
+
+                    if !i2c_controller_registry_activate(
+                        logical_handle.controller_id,
+                        logical_handle.generation
+                    ) {
+                        i2c_controller_registry_mark_failed(
+                            logical_handle.controller_id,
+                            logical_handle.generation
+                        );
+                        i2c_physical_rollback_last(slot_idx);
+                        i2c_dw_enable(phys_base, false);
+                        i += 1;
+                        continue;
+                    }
+
+                    discovered += 1;
                 }
             }
         }
@@ -400,14 +465,10 @@ pub fn i2c_physical_controller_get(index: usize) -> I2cPhysicalController {
 
 @system
 pub fn i2c_physical_get_mmio_base(backend_instance: u32) -> u64 {
-    if backend_instance == 0 || backend_instance > (I2C_MAX_PHYSICAL_CONTROLLERS as u32) {
-        return 0;
-    }
+    if backend_instance == 0 || backend_instance > (I2C_MAX_PHYSICAL_CONTROLLERS as u32) { return 0; }
     let index = (backend_instance - 1) as usize;
     let controller = i2c_physical_controller_get(index);
-    if controller.valid {
-        return controller.virtual_base;
-    }
+    if controller.valid && controller.initialized { return controller.virtual_base; }
     return 0;
 }
 

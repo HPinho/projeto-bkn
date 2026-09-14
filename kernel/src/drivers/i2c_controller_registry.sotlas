@@ -178,7 +178,6 @@ pub fn i2c_controller_registry_attach(acpi_namespace_index: usize,
             return result;
         }
 
-        // Um node ACPI possui no maximo um owner logico vivo no registry.
         let mut duplicate: usize = 0;
         while duplicate < I2C_CONTROLLER_CAPACITY {
             if I2C_CONTROLLER_RECORDS[duplicate].valid &&
@@ -222,6 +221,51 @@ pub fn i2c_controller_registry_attach(acpi_namespace_index: usize,
     }
     x86_irq_restore(flags);
     return result;
+}
+
+// O discovery lógico pode criar o controller antes de o silício ser conhecido.
+// Antes de publicar um backend físico, este gate substitui as capacidades inferidas
+// por ACPI pelas capacidades realmente certificadas pelo backend naquela generation.
+@system
+pub fn i2c_controller_registry_update_capabilities(controller_id: u32,
+                                                    generation: u32,
+                                                    capabilities: *const I2cControllerCapabilities) -> bool {
+    if generation == I2C_CONTROLLER_GENERATION_INVALID ||
+       !i2c_controller_capabilities_valid(capabilities) {
+        return false;
+    }
+    let slot = i2c_controller_registry_slot(controller_id);
+    if slot >= I2C_CONTROLLER_CAPACITY { return false; }
+
+    let flags = x86_irq_save_disable();
+    let mut updated = false;
+    unsafe {
+        if !I2C_CONTROLLER_REGISTRY_LOCK_READY ||
+           !spinlock_lock(&mut I2C_CONTROLLER_REGISTRY_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_CONTROLLER_REGISTRY_READY &&
+           I2C_CONTROLLER_RECORDS[slot].valid &&
+           I2C_CONTROLLER_RECORDS[slot].controller_id == controller_id &&
+           I2C_CONTROLLER_RECORDS[slot].generation == generation &&
+           I2C_CONTROLLER_RECORDS[slot].state == I2C_CONTROLLER_STATE_ATTACHED &&
+           !I2C_CONTROLLER_RECORDS[slot].backend_ready &&
+           I2C_CONTROLLER_RECORDS[slot].backend_instance == I2C_CONTROLLER_BACKEND_INSTANCE_NONE {
+            I2C_CONTROLLER_RECORDS[slot].capabilities.supports_7bit = (*capabilities).supports_7bit;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.supports_10bit = (*capabilities).supports_10bit;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.supports_repeated_start = (*capabilities).supports_repeated_start;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.max_messages = (*capabilities).max_messages;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.max_message_bytes = (*capabilities).max_message_bytes;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.max_transaction_bytes = (*capabilities).max_transaction_bytes;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.max_speed_hz = (*capabilities).max_speed_hz;
+            I2C_CONTROLLER_RECORDS[slot].capabilities.valid = true;
+            updated = true;
+        }
+        spinlock_unlock(&mut I2C_CONTROLLER_REGISTRY_LOCK);
+    }
+    x86_irq_restore(flags);
+    return updated;
 }
 
 @system
@@ -316,7 +360,6 @@ pub fn i2c_controller_registry_mark_failed(controller_id: u32, generation: u32) 
                 I2C_CONTROLLER_ACTIVE_COUNT -= 1;
             }
             I2C_CONTROLLER_RECORDS[slot].state = I2C_CONTROLLER_STATE_FAILED;
-            // FAILED revoga a autorizacao do backend na mesma generation.
             I2C_CONTROLLER_RECORDS[slot].backend_instance = I2C_CONTROLLER_BACKEND_INSTANCE_NONE;
             I2C_CONTROLLER_RECORDS[slot].backend_ready = false;
             changed = true;

@@ -36,27 +36,32 @@ class I2cDesignWareContractTests(unittest.TestCase):
         ):
             self.assertIn(token, self.text)
 
-    def test_lpss_private_wrapper_offsets_and_reset(self):
+    def test_lpss_private_wrapper_offsets_and_64bit_remap(self):
         for token in (
             "pub const INTEL_LPSS_DEV_OFFSET: u64 = 0x000",
             "pub const INTEL_LPSS_DEV_SIZE: u64 = 0x200",
             "pub const INTEL_LPSS_PRIV_OFFSET: u64 = 0x200",
             "pub const INTEL_LPSS_PRIV_SIZE: u64 = 0x100",
             "pub const INTEL_LPSS_IDMA64_OFFSET: u64 = 0x800",
-            "pub const LPSS_PRIV_REMAP_ADDR: u64 = 0x00",
+            "pub const LPSS_PRIV_REMAP_ADDR: u64 = 0x40",
+            "pub const LPSS_PRIV_REMAP_ADDR_HIGH: u64 = 0x44",
             "pub const LPSS_PRIV_RESETS: u64 = 0x04",
             "pub const LPSS_PRIV_RESETS_FUNC: u32 = 0x03",
             "pub const LPSS_PRIV_RESETS_IDMA: u32 = 1 << 2",
             "pub const LPSS_PRIV_RESETS_BOTH: u32 = 0x07",
             "pub fn i2c_lpss_reset_release(base: u64, physical_address: u64) -> void",
+            "let high_addr = ((physical_address >> 32) & 0xFFFFFFFF) as u32;",
+            "x86_mmio_write32(priv_base + LPSS_PRIV_REMAP_ADDR_HIGH, high_addr);",
         ):
             self.assertIn(token, self.text)
+        self.assertNotIn("pub const LPSS_PRIV_REMAP_ADDR: u64 = 0x00", self.text)
 
     def test_designware_control_and_status_bits(self):
         for token in (
             "pub const DW_IC_CON_MASTER_MODE: u32 = 1 << 0",
             "pub const DW_IC_CON_SPEED_STD: u32 = 1 << 1",
             "pub const DW_IC_CON_SPEED_FAST: u32 = 2 << 1",
+            "pub const DW_IC_CON_SPEED_MASK: u32 = 3 << 1",
             "pub const DW_IC_CON_10BITADDR_MASTER: u32 = 1 << 4",
             "pub const DW_IC_CON_RESTART_EN: u32 = 1 << 5",
             "pub const DW_IC_CON_SLAVE_DISABLE: u32 = 1 << 6",
@@ -86,7 +91,6 @@ class I2cDesignWareContractTests(unittest.TestCase):
         self.assertIn("pub fn i2c_dw_calc_scl_lcnt", self.text)
         self.assertIn("pub fn i2c_dw_init_with_clock", self.text)
 
-        # Validação algorítmica exata das fórmulas de timing
         def calc_hcnt(clk, target, fast):
             period = clk // target
             return (period * 36) // 100 if fast else (period * 45) // 100
@@ -95,23 +99,34 @@ class I2cDesignWareContractTests(unittest.TestCase):
             period = clk // target
             return (period * 64) // 100 if fast else (period * 55) // 100
 
-        # Standard mode 100 kHz em 100 MHz
         self.assertEqual(calc_hcnt(100_000_000, 100_000, False), 450)
         self.assertEqual(calc_lcnt(100_000_000, 100_000, False), 550)
-        # Fast mode 400 kHz em 100 MHz
         self.assertEqual(calc_hcnt(100_000_000, 400_000, True), 90)
         self.assertEqual(calc_lcnt(100_000_000, 400_000, True), 160)
-        # Fast mode 400 kHz em 133 MHz (Intel LPSS)
-        self.assertEqual(calc_hcnt(133_333_333, 400_000, True), 119)
-        self.assertEqual(calc_lcnt(133_333_333, 400_000, True), 213)
+        self.assertEqual(calc_hcnt(133_000_000, 400_000, True), 119)
+        self.assertEqual(calc_lcnt(133_000_000, 400_000, True), 212)
+        self.assertEqual(calc_hcnt(216_000_000, 400_000, True), 194)
+        self.assertEqual(calc_lcnt(216_000_000, 400_000, True), 345)
 
-    def test_deadline_temporal_timeout(self):
-        # Invariante temporal: medição com base no timer do kernel, não spin loop cego
-        self.assertIn("x86_timer_is_calibrated()", self.text)
-        self.assertIn("x86_timer_cycles_per_us()", self.text)
-        self.assertIn("x86_timer_read_tsc()", self.text)
-        self.assertIn("timeout_cycles", self.text)
+    def test_transfer_honors_only_certified_bus_speeds(self):
+        self.assertIn("pub const DW_SUPPORTED_STANDARD_SPEED_HZ: u32 = 100000", self.text)
+        self.assertIn("pub const DW_SUPPORTED_FAST_SPEED_HZ: u32 = 400000", self.text)
+        self.assertIn("pub fn i2c_dw_speed_supported", self.text)
+        self.assertIn("let bus_speed_hz = unsafe { (*transaction).bus_speed_hz };", self.text)
+        self.assertIn("if !i2c_dw_speed_supported(bus_speed_hz)", self.text)
+        self.assertIn("return I2C_STATUS_UNSUPPORTED;", self.text)
+        self.assertIn("current_speed_bits != desired_speed_bits", self.text)
+
+    def test_deadline_includes_enable_disable_reconfiguration_and_enable_recovery(self):
+        self.assertIn("fn i2c_dw_enable_until", self.text)
         self.assertIn("deadline_tsc", self.text)
+        self.assertIn("let enable_status = i2c_dw_read32(base, DW_IC_ENABLE_STATUS);", self.text)
+        self.assertIn("let is_enabled = (enable_status & 1) != 0;", self.text)
+        self.assertIn("current_speed_bits != desired_speed_bits ||", self.text)
+        self.assertIn("!is_enabled", self.text)
+        self.assertIn("is_enabled && !i2c_dw_enable_until(base, false, deadline_tsc, timeout_cycles)", self.text)
+        self.assertIn("i2c_dw_enable_until(base, true, deadline_tsc, timeout_cycles)", self.text)
+        self.assertNotIn("i2c_dw_enable(base, false);", self.text)
 
     def test_designware_transfer_writes_directly_to_buffer(self):
         self.assertIn("pub fn i2c_dw_transfer", self.text)
