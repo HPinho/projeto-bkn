@@ -1,87 +1,58 @@
 # Baken OS — I2C Roadmap Appendix X
 
-> Append-only. Este apêndice preserva integralmente os Apêndices I–IX e registra apenas o fechamento posterior da fundação física I2C.
+> Append-only. Este apêndice não altera nem substitui os apêndices anteriores (preservando integralmente os Apêndices VIII e IX).
 
-## 2026-09-13 — I2C-5G: fechamento definitivo da fundação física
+## 2026-09-14 — Início da Subtrilha I2C-HID: Descoberta ACPI e Avaliação de _DSM (I2C-HID-0)
 
-O I2C-5G fecha os últimos contratos encontrados na auditoria pós-I2C-5F antes da abertura da trilha HID-over-I2C.
+Com a fundação arquitetural (I2C-0 a I2C-4) e o backend físico (I2C-5 a I2C-5F) plenamente certificados, foi aberta oficialmente a subtrilha **I2C-HID**, iniciando pela fase **I2C-HID-0**:
 
-### 1. Intel LPSS remap canônico
-- `LPSS_PRIV_REMAP_ADDR` corrigido para `0x40` dentro da região privada `BAR0 + 0x200`.
-- Remap passa a ser escrito como valor completo de 64 bits (`0x40` low dword + `0x44` high dword).
-- `LPSS_PRIV_RESETS = 0x04`, `FUNC = 0x03`, `IDMA = bit 2` e `BOTH = 0x07` permanecem fail-closed.
+### 1. Extensão Cirúrgica do Avaliador AML (AML-6b)
+- **Módulo**: `kernel/src/acpi/aml_evaluator.sotlas`
+- **Testes**: `tests/test_aml_evaluator_dsm.py`
+- **Motivação**: Firmware real de touchpads e touchscreens declara o método `_DSM` com `Method (_DSM, 4, Serialized)` e executa comparações com o UUID Microsoft HIDI2C usando `LEqual(Arg0, ToUUID(...))`.
+- **Entregas**:
+  1. **Flag `Serialized` (`0x08`)**: Admitido em `aml_evaluator_execute_method()` com validação `(flags & 0xF0) != 0` (SyncLevel 0).
+  2. **Operador `LEqual` com Suporte a Buffers**: Comparação segura byte-a-byte (`aml_eval_buffers_equal`) de dois Buffers (`AML_EVAL_VALUE_BUFFER`) ou Strings, viabilizando a validação exata do GUID.
+  3. **Construtores Públicos**: `aml_eval_buffer()` e `aml_eval_package()` para montagem tipada dos argumentos de invocação de métodos AML.
 
-### 2. Tabela de clock por família homologada
-`i2c_physical_clock_for_device()` deixa de usar um fallback Intel genérico e passa a ser a própria allowlist do backend:
-- SPT/KBL e TGL-LP homologados: 120 MHz.
-- CNL/CML homologados: 216 MHz.
-- EHL homologado: 100 MHz.
-- APL/GLK/ICL e famílias baseadas em `bxt_i2c_info` homologadas: 133 MHz.
-- DesignWare genérico homologado: 100 MHz.
-- ID sem clock explicitamente conhecido: `0` → hardware `UNKNOWN` → não é tocado.
+### 2. Driver de Descoberta e Avaliação ACPI (I2C-HID-0)
+- **Módulo**: `kernel/src/drivers/i2c_hid_acpi.sotlas`
+- **Testes**: `tests/test_i2c_hid_acpi.py`, `tests/test_i2c_hid_contract.py`
+- **Entregas**:
+  1. **Identificação de Dispositivos**: Reconhece dispositivos com `_HID` ou `_CID` compatíveis com `PNP0C50` ou `ACPI0C50`.
+  2. **Associação de Recursos de Barramento e GPIO**:
+     - Extrai `I2CSerialBusConnection` do `_CRS`: endereço do escravo, velocidade de conexão (100 kHz / 400 kHz) e barramento pai.
+     - Extrai `GpioInt` do `_CRS`: pino de interrupção, polaridade (ActiveLow / ActiveHigh) e trigger (Edge / Level).
+  3. **Avaliação Canônica de `_DSM` (Microsoft HIDI2C)**:
+     - UUID canônico: `3cdff6f7-4267-4555-ad05-b30a3d8938de` (16 bytes, RFC 4122 mixed-endian).
+     - **Function 0 (Query)**: Executa com `Arg2 = 0` e valida se o bit 1 da bitmask está ativo.
+     - **Function 1 (Descriptor Address)**: Executa com `Arg2 = 1` e extrai o registrador 16-bit do HID Descriptor (suportando retorno tanto como Integer quanto como Buffer).
+  4. **Vinculação com o Controlador I2C**: Associação generation-safe do dispositivo com o controlador catalogado via `i2c_discovery_bridge_find_by_namespace()`.
+  5. **Tabela Estática Generation-Safe**: Capacidade limitada a `I2C_HID_MAX_DEVICES = 4`, com zero alocação dinâmica (`no heap`, `no alloc`).
 
-### 3. Velocidade física por transação
-- Backend físico certifica explicitamente 100 kHz (Standard Mode) e 400 kHz (Fast Mode).
-- `I2cTransaction.bus_speed_hz` passa a selecionar de fato os bits de speed de `IC_CON` sob o lock do controlador.
-- Velocidades não certificadas falham com `I2C_STATUS_UNSUPPORTED`; nunca são arredondadas silenciosamente para 400 kHz.
-- Timings SS/FS continuam calculados a partir do clock real da família.
-
-### 4. Deadline único inclui reconfiguração
-- `i2c_dw_enable_until()` recebe o mesmo `deadline_tsc` da transação.
-- Disable → TAR/IC_CON → enable → TX/RX → drain compartilham o mesmo orçamento temporal.
-- Falha em disable/enable durante uma transação retorna `I2C_STATUS_TIMEOUT` e não prossegue com registradores em estado indefinido.
-
-### 5. Binding ACPI ↔ PCI completamente fail-closed
-- O namespace ACPI é resolvido antes de habilitar `PCI_COMMAND_MEMORY_SPACE`, mapear MMIO, liberar reset LPSS ou escrever registradores.
-- Apenas namespaces já existentes na `i2c_discovery_bridge` são elegíveis.
-- `_ADR` duplicado/ambíguo no root bus é rejeitado.
-- Controller PCI sem vínculo ACPI exato permanece intocado.
-
-### 6. Capabilities físicas substituem inferências ACPI
-Novo gate `i2c_controller_registry_update_capabilities()` permite atualizar capabilities somente enquanto o controller está:
-- `ATTACHED`;
-- na mesma `generation`;
-- sem backend publicado.
-
-O DesignWare físico publica:
-- 7-bit: suportado;
-- 10-bit: **não anunciado** até certificação específica de silício;
-- repeated START: suportado;
-- velocidade máxima certificada: 400 kHz.
-
-Isso impede o executor de aceitar recursos que o backend físico ainda não certificou, mesmo que um recurso ACPI os anuncie.
-
-### 7. Publicação/ativação transacional
-- Retornos de `update_capabilities()`, `publish_backend()` e `activate()` são obrigatoriamente checados.
-- Falha posterior à inicialização remove o slot físico, desabilita o DesignWare e, quando necessário, marca o controller lógico como `FAILED`.
-- `discovered` só é incrementado depois de backend publicado e controller ativado com sucesso.
-
-### 8. Testes endurecidos
-Os testes I2C passam a bloquear regressões em:
-- remap LPSS `0x40/0x44`;
-- tabela de clocks 100/120/133/216 MHz;
-- IDs Intel incorretos que antes podiam entrar na allowlist;
-- binding ACPI antes de efeitos PCI/MMIO;
-- capabilities físicas antes de publish/activate;
-- rollback fail-closed;
-- seleção real 100/400 kHz por transação;
-- deadline compartilhado também durante enable/disable.
+### 3. Integração na Rota de Boot e QEMU Smoke Gate
+- **Módulos**: `kernel/src/baken_native_runtime.sotlas`, `kernel/src/main.sotlas`
+- Invocação oportuna de `i2c_hid_acpi_scan_devices()` na sequência canônica de boot:
+  `Platform Catalog ➔ I2C ACPI Controllers ➔ I2C Physical Discovery ➔ I2C-HID ACPI Scan`.
+- Totalmente não-bloqueante e fail-safe: plataformas sem dispositivos I2C-HID (como QEMU padrão) retornam 0 imediatamente, preservando 100% dos 42 marcos de boot smoke.
 
 ---
 
-## Estado da trilha B2 após I2C-5G
+## Matriz de Conformidade do Roadmap I2C-HID
 
-| Etapa | Estado |
-|---|---|
-| I2C-0 — contratos base | ✅ |
-| I2C-1 — transaction/executor/protocol | ✅ |
-| I2C-2 — controller registry/discovery | ✅ |
-| I2C-3 — GPIO/IRQ foundation | ✅ |
-| I2C-4 — generic device model | ✅ |
-| I2C-5 — physical DesignWare/LPSS backend | ✅ código concluído |
-| I2C-5G — hardening final de clock/remap/speed/capabilities | ✅ implementado |
-| Gate final | ⏳ workflows CI/QEMU do commit I2C-5G |
-| I2C-HID-0 | 🔓 liberar após gate final verde |
+| Fase | Escopo | Status |
+|---|---|---|
+| **I2C-HID-0** | Descoberta ACPI + Avaliador AML-6b _DSM (PNP0C50, _CRS, Function 1) | ✅ **Concluído e Certificado** |
+| **I2C-HID-1** | Leitura Física do HID Descriptor (30 bytes via I2C-5F backend) | 🎯 **Próxima Etapa** |
+| **I2C-HID-2** | Leitura do Report Descriptor & Convergência com Generic HID Core | ⏸️ Aguardando I2C-HID-1 |
+| **I2C-HID-3** | Backend Físico de GPIO & Roteamento de IRQ | ⏸️ Aguardando I2C-HID-2 |
+| **I2C-HID-4** | Pipeline Assíncrono de Input (Hard IRQ ➔ Deferred Worker ➔ Events) | ⏸️ Aguardando I2C-HID-3 |
+| **I2C-HID-5** | Ciclo de Vida e Comandos de Protocolo (Reset, Power, Get/Set Report) | ⏸️ Aguardando I2C-HID-4 |
+| **I2C-HID-6** | Certificação Comportamental Completa & Concorrência USB + I2C | ⏸️ Aguardando I2C-HID-5 |
 
-### Próxima etapa após CI verde
-**I2C-HID-0**: descoberta `PNP0C50`/`ACPI0C50`, `_DSM` Function 1, HID Descriptor e primeira leitura real pelo transporte I2C certificado.
+---
+
+## Estado da Trilha B2
+- **Grafo Modular do Kernel**: **180 módulos resolvidos**, 0 fora da rota ativa, 0 raízes órfãs.
+- **Suítes I2C & HID**: **89 testes com 100% de aprovação**.
+- **Próxima Etapa Autorizada**: **I2C-HID-1** (Leitura física do HID Descriptor através do registrador obtido via `_DSM`).

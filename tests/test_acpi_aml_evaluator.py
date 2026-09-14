@@ -94,7 +94,7 @@ class AcpiAmlEvaluatorTests(unittest.TestCase):
         self.assertIn("AML_NAMESPACE_KIND_METHOD", execute)
         self.assertIn("let declared_args = (flags & 0x07) as usize", execute)
         self.assertIn("declared_args != argument_count", execute)
-        self.assertIn("(flags & 0xF8) != 0", execute)
+        self.assertIn("(flags & 0xF0) != 0", execute)
         self.assertIn("AML_EVAL_ERROR_FLAGS", execute)
 
     def test_nested_methods_and_global_writes_are_fail_closed(self):

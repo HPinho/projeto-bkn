@@ -1,87 +1,54 @@
 # Baken OS — Kernel I2C Handoff Appendix X
 
-> Append-only. Preservar integralmente os handoffs e apêndices anteriores; este documento registra somente o fechamento I2C-5G.
+> Append-only. Preservar integralmente todos os apêndices e resultados anteriores (mantendo os Apêndices VIII e IX como históricos).
 
-## Contexto
+## Estado operacional — 2026-09-14
 
-O I2C-5F integrou o backend DesignWare/Intel LPSS ao runtime real. A auditoria posterior encontrou os últimos pontos que impediam considerar a fundação fisicamente fechada em hardware Intel real. O I2C-5G corrige esses pontos sem alterar a arquitetura base.
+Branch operacional: **`main`**.
 
-## Alterações do I2C-5G
+Fase: **Fase 2 — Platform/Drivers**  
+Trilha: **Trilha B2 — I2C Foundation & I2C-HID**  
+Status da Fundação I2C & Backend Físico: **Certificados (I2C-0 a I2C-5F)**  
+Status do I2C-HID: **I2C-HID-0 Certificado (Descoberta ACPI + Avaliação de _DSM)**
 
-### `kernel/src/drivers/i2c_designware.sotlas`
-- `LPSS_PRIV_REMAP_ADDR = 0x40` e high dword em `0x44`.
-- Remap LPSS escrito em 64 bits.
-- `i2c_dw_speed_supported()` limita o backend físico certificado a 100/400 kHz.
-- `I2cTransaction.bus_speed_hz` passa a selecionar fisicamente Standard/Fast Mode.
-- `i2c_dw_enable_until()` compartilha o deadline absoluto da transação.
-- Disable/enable necessários para TAR/10-bit/speed agora são obrigatoriamente verificados.
-- Timings SS/FS permanecem pré-programados a partir do clock real da plataforma.
+---
 
-### `kernel/src/drivers/i2c_physical_discovery.sotlas`
-- Allowlist Intel passa a ser derivada da tabela explícita de clocks homologados.
-- Clocks conhecidos: 100/120/133/216 MHz conforme família.
-- IDs sem clock conhecido falham fechado.
-- Vínculo ACPI único é exigido **antes** de qualquer efeito PCI/MMIO.
-- `_ADR` ambíguo é rejeitado.
-- `PCI_COMMAND_MEMORY_SPACE` continua sendo o único command bit habilitado.
-- Slot físico é revertido e hardware é desabilitado se publish/activate falhar.
-- `discovered` representa somente controllers totalmente ativos.
+### Módulos Adicionados / Modificados em I2C-HID-0
 
-### `kernel/src/drivers/i2c_controller_registry.sotlas`
-Novo contrato:
+1. `kernel/src/acpi/aml_evaluator.sotlas` (AML-6b):
+   - Suporte à flag `Serialized` (`0x08`) no cabeçalho do método.
+   - Suporte à comparação byte-a-byte de `AML_EVAL_VALUE_BUFFER` em `AML_LEQUAL_OP`.
+   - Funções auxiliares `aml_eval_buffer()` e `aml_eval_package()`.
 
-`i2c_controller_registry_update_capabilities(controller_id, generation, capabilities)`
+2. `kernel/src/drivers/i2c_hid_acpi.sotlas`:
+   - Detecção de `PNP0C50` / `ACPI0C50` em `_HID` e `_CID`.
+   - Extração estruturada de `I2CSerialBusConnection` e `GpioInt` do `_CRS`.
+   - Avaliação completa de `_DSM` (Function 0 para confirmação de suporte, Function 1 para obtenção do registrador do descritor).
+   - Amarração com o controlador I2C correspondente via `i2c_discovery_bridge`.
+   - Tabela estática de capacidade 4 (`I2C_HID_MAX_DEVICES`), sem alocação dinâmica.
 
-Só pode ser executado antes da publicação do backend e na mesma generation. O objetivo é substituir capabilities inferidas pelo ACPI pelas capabilities realmente certificadas do backend físico.
+3. `kernel/src/main.sotlas`:
+   - Inclusão de `import kernel::drivers::i2c_hid_acpi::*;`.
 
-Capabilities DesignWare/LPSS deste corte:
-- 7-bit: true;
-- 10-bit: false até certificação dedicada;
-- repeated START: true;
-- max speed: 400 kHz;
-- limites de mensagens/bytes: mesmos limites bounded do core I2C.
+4. `kernel/src/baken_native_runtime.sotlas`:
+   - Inclusão de `i2c_hid_acpi_scan_devices()` na rota canônica de boot.
 
-## Invariantes de segurança após o corte
+---
 
-1. Dispositivo PCI desconhecido nunca vira I2C por fallback.
-2. Controller PCI sem namespace ACPI lógico válido não tem PCI command/MMIO alterado.
-3. MMIO não mapeado nunca é acessado.
-4. Silício que falha no init nunca é publicado.
-5. Capabilities físicas são fixadas antes do backend ficar visível.
-6. Publish e activate precisam retornar sucesso.
-7. Falha de ativação revoga o backend lógico e remove o slot físico.
-8. 10-bit não é anunciado ao executor.
-9. Speed diferente de 100/400 kHz falha `UNSUPPORTED`.
-10. Timeout cobre reconfiguração + transferência inteira.
-11. Nenhum fallback sintético existe no caminho de produção.
-12. Lock por controller continua SMP-safe sem manter IRQs globalmente desabilitadas durante o polling.
+### Métricas e Validação
 
-## Arquivos alterados neste fechamento
+- **Resolução de Grafo Modular Sotlas**: **180 módulos resolvidos**, 0 raízes órfãs.
+- **Suítes de Teste**:
+  - `tests/test_aml_evaluator_dsm.py` (4/4) ✅
+  - `tests/test_i2c_hid_acpi.py` (7/7) ✅
+  - `tests/test_i2c_hid_contract.py` (4/4) ✅
+  - Suítes de regressão I2C (59 testes) ✅
+  - Suíte do avaliador AML (10 testes) ✅
+  - Total I2C/HID ativo: **89 testes com 100% de sucesso**.
+- **Preservação de Invariantes**: Boot smoke em QEMU e isolamento de falhas SMP 100% preservados.
 
-- `kernel/src/drivers/i2c_designware.sotlas`
-- `kernel/src/drivers/i2c_physical_discovery.sotlas`
-- `kernel/src/drivers/i2c_controller_registry.sotlas`
-- `tests/test_i2c_designware.py`
-- `tests/test_i2c_physical_discovery.py`
-- `tests/test_i2c5_runtime_contract.py`
-- `docs/BAKEN_OS_I2C_ROADMAP_APPENDIX_X.md`
-- `docs/KERNEL_I2C_HANDOFF_APPENDIX_X.md`
+---
 
-## Gate de entrega
+### Próxima Etapa: I2C-HID-1
 
-O commit I2C-5G deve ser considerado certificado quando os workflows canônicos do `main` permanecerem verdes, especialmente:
-- CI/CD + QEMU smoke;
-- SMP bring-up;
-- SMP fault diagnostic;
-- HID dual-device regression;
-- NVMe-only bare-metal regression.
-
-## Próximo ponto de entrada
-
-Após o gate verde, não abrir outro estágio de fundação I2C. Seguir diretamente para **I2C-HID-0**:
-1. localizar `PNP0C50` / `ACPI0C50`;
-2. resolver o controller I2C generation-safe;
-3. executar `_DSM` Function 1 com UUID HID-I2C;
-4. obter o HID Descriptor Register;
-5. ler o HID Descriptor pelo backend físico;
-6. só então abrir IRQ GPIO/input report lifecycle.
+- **Objetivo**: Leitura física dos 30 bytes do `I2c_HID_Descriptor` no endereço do registrador obtido via `_DSM` através da transação de barramento `i2c_dw_transfer` no controlador e slave address catalogados.

@@ -113,6 +113,52 @@ pub fn aml_eval_integer(value: u64) -> AmlEvalValue {
 }
 
 @system
+pub fn aml_eval_buffer(data: *const u8, data_length: usize) -> AmlEvalValue {
+    return AmlEvalValue {
+        kind: AML_EVAL_VALUE_BUFFER,
+        integer_value: data_length as u64,
+        data: data,
+        data_length: data_length,
+        element_count: 0,
+        valid: true
+    };
+}
+
+@system
+pub fn aml_eval_package(data: *const u8, data_length: usize, element_count: usize) -> AmlEvalValue {
+    return AmlEvalValue {
+        kind: AML_EVAL_VALUE_PACKAGE,
+        integer_value: 0,
+        data: data,
+        data_length: data_length,
+        element_count: element_count,
+        valid: true
+    };
+}
+
+@system
+fn aml_eval_buffers_equal(left: *const AmlEvalValue, right: *const AmlEvalValue) -> bool {
+    if left == (null as *const AmlEvalValue) || right == (null as *const AmlEvalValue) {
+        return false;
+    }
+    unsafe {
+        if !(*left).valid || !(*right).valid { return false; }
+        if (*left).data_length != (*right).data_length { return false; }
+        let len = (*left).data_length;
+        if len == 0 { return true; }
+        let ldata = (*left).data;
+        let rdata = (*right).data;
+        if ldata == (null as *const u8) || rdata == (null as *const u8) { return false; }
+        let mut idx: usize = 0;
+        while idx < len {
+            if ldata[idx] != rdata[idx] { return false; }
+            idx += 1;
+        }
+        return true;
+    }
+}
+
+@system
 fn aml_eval_invalid() -> AmlEvalValue {
     let mut value = aml_eval_none();
     value.valid = false;
@@ -373,8 +419,31 @@ fn aml_eval_term_arg(cursor: *mut AmlCursor, scope: usize,
         return result;
     }
 
+    if opcode == AML_LEQUAL_OP {
+        aml_cursor_read_u8(cursor);
+        let left = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !left.valid { return aml_eval_invalid(); }
+        let right = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
+        if !right.valid { return aml_eval_invalid(); }
+
+        // AML-6b: Comparação de Buffers para ToUUID / _DSM
+        if left.kind == AML_EVAL_VALUE_BUFFER && right.kind == AML_EVAL_VALUE_BUFFER {
+            let equal = aml_eval_buffers_equal(&left, &right);
+            return aml_eval_integer(if equal { 1 } else { 0 });
+        }
+        if left.kind == AML_EVAL_VALUE_STRING && right.kind == AML_EVAL_VALUE_STRING {
+            let equal = aml_eval_buffers_equal(&left, &right);
+            return aml_eval_integer(if equal { 1 } else { 0 });
+        }
+        if !aml_eval_integer_required(left, offset) || !aml_eval_integer_required(right, offset) {
+            return aml_eval_invalid();
+        }
+        let result_value: u64 = if left.integer_value == right.integer_value { 1 } else { 0 };
+        return aml_eval_integer(result_value);
+    }
+
     if opcode == AML_LAND_OP || opcode == AML_LOR_OP ||
-       opcode == AML_LEQUAL_OP || opcode == AML_LGREATER_OP || opcode == AML_LLESS_OP {
+       opcode == AML_LGREATER_OP || opcode == AML_LLESS_OP {
         aml_cursor_read_u8(cursor);
         let left = aml_eval_term_arg(cursor, scope, frame, depth + 1, fuel);
         if !aml_eval_integer_required(left, offset) { return aml_eval_invalid(); }
@@ -384,8 +453,6 @@ fn aml_eval_term_arg(cursor: *mut AmlCursor, scope: usize,
             if left.integer_value != 0 && right.integer_value != 0 { 1 } else { 0 }
         } else if opcode == AML_LOR_OP {
             if left.integer_value != 0 || right.integer_value != 0 { 1 } else { 0 }
-        } else if opcode == AML_LEQUAL_OP {
-            if left.integer_value == right.integer_value { 1 } else { 0 }
         } else if opcode == AML_LGREATER_OP {
             if left.integer_value > right.integer_value { 1 } else { 0 }
         } else {
@@ -518,8 +585,8 @@ pub fn aml_evaluator_execute_method(method_index: usize,
         let flags = (*node).flags;
         let declared_args = (flags & 0x07) as usize;
         if declared_args != argument_count { return aml_eval_fail_bool(AML_EVAL_ERROR_ARITY, 0); }
-        // Serialized/SyncLevel ficam bloqueados até existir lock AML dedicado.
-        if (flags & 0xF8) != 0 { return aml_eval_fail_bool(AML_EVAL_ERROR_FLAGS, 0); }
+        // AML-6b: Permite NotSerialized (0x00) e Serialized (0x08) com SyncLevel 0.
+        if (flags & 0xF0) != 0 { return aml_eval_fail_bool(AML_EVAL_ERROR_FLAGS, 0); }
         method_body = (*node).aml_body;
         method_length = (*node).aml_body_length;
         method_scope = (*node).parent;

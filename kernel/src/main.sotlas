@@ -53,6 +53,7 @@ import kernel::drivers::gpio_core::*;
 import kernel::drivers::i2c_device::*;
 import kernel::drivers::i2c_physical_discovery::*;
 import kernel::drivers::i2c_designware::*;
+import kernel::drivers::i2c_hid_acpi::*;
 import kernel::drivers::xhci_discovery::*;
 import kernel::drivers::xhci_ring::*;
 import kernel::drivers::xhci_trb::*;

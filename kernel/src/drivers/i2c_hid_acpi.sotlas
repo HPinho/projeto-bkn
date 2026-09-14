@@ -1,0 +1,396 @@
+// Baken OS — I2C-HID-0: Descoberta ACPI e Avaliação de _DSM para HID-over-I2C.
+//
+// Identifica dispositivos com compatibilidade PNP0C50/ACPI0C50 (_HID ou _CID),
+// amarra os recursos I2CSerialBusConnection e GpioInt do _CRS, e avalia o método
+// _DSM usando o GUID Microsoft HIDI2C (3cdff6f7-4267-4555-ad05-b30a3d8938de).
+// Obtém o endereço de registrador do HID Descriptor para preparação do backend físico.
+
+module kernel::drivers::i2c_hid_acpi;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::acpi::aml_decoder::*;
+import kernel::acpi::aml_data::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_evaluator::*;
+import kernel::acpi::aml_i2c_resources::*;
+import kernel::acpi::aml_i2c_binding::*;
+import kernel::drivers::i2c_controller::*;
+import kernel::drivers::i2c_controller_registry::*;
+import kernel::drivers::i2c_discovery_bridge::*;
+
+pub const I2C_HID_MAX_DEVICES: usize = 4;
+pub const I2C_HID_INVALID_DEVICE_INDEX: usize = I2C_HID_MAX_DEVICES;
+pub const I2C_HID_DSM_GUID_LENGTH: usize = 16;
+
+// UUID Microsoft HID-over-I2C: 3cdff6f7-4267-4555-ad05-b30a3d8938de
+// Representação em bytes RFC 4122 (mixed-endian conforme especificação ACPI ToUUID)
+static I2C_HID_DSM_UUID: [u8; 16] = [
+    0xF7, 0xF6, 0xDF, 0x3C,
+    0x67, 0x42,
+    0x55, 0x45,
+    0xAD, 0x05, 0xB3, 0x0A, 0x3D, 0x89, 0x38, 0xDE
+];
+
+pub const I2C_HID_DSM_FUNCTION_QUERY: u64 = 0;
+pub const I2C_HID_DSM_FUNCTION_DESCRIPTOR_ADDRESS: u64 = 1;
+pub const I2C_HID_DSM_REVISION: u64 = 1;
+
+@repr(C)
+pub struct I2cHidAcpiDescriptor {
+    pub device_slot: usize;
+    pub namespace_index: usize;
+    pub controller_namespace_index: usize;
+    pub controller_id: u32;
+    pub controller_generation: u32;
+    pub slave_address: u16;
+    pub bus_speed_hz: u32;
+    pub ten_bit_addressing: bool;
+    pub hid_descriptor_register: u16;
+    pub gpio_resource_index: usize;
+    pub gpio_controller_namespace_index: usize;
+    pub gpio_pin: u16;
+    pub gpio_polarity: u8;
+    pub gpio_trigger: u8;
+    pub dsm_evaluated: bool;
+    pub valid: bool;
+}
+
+static mut I2C_HID_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut I2C_HID_LOCK_READY: bool = false;
+static mut I2C_HID_READY: bool = false;
+static mut I2C_HID_DEVICES: [I2cHidAcpiDescriptor; I2C_HID_MAX_DEVICES] = [
+    I2cHidAcpiDescriptor {
+        device_slot: 0,
+        namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        controller_id: I2C_CONTROLLER_ID_NONE,
+        controller_generation: I2C_CONTROLLER_GENERATION_INVALID,
+        slave_address: 0,
+        bus_speed_hz: 0,
+        ten_bit_addressing: false,
+        hid_descriptor_register: 0,
+        gpio_resource_index: AML_I2C_INVALID_RESOURCE_INDEX,
+        gpio_controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        gpio_pin: 0,
+        gpio_polarity: 0,
+        gpio_trigger: 0,
+        dsm_evaluated: false,
+        valid: false
+    }; I2C_HID_MAX_DEVICES
+];
+static mut I2C_HID_DEVICE_COUNT: usize = 0;
+
+@system
+pub fn i2c_hid_invalid_descriptor() -> I2cHidAcpiDescriptor {
+    return I2cHidAcpiDescriptor {
+        device_slot: 0,
+        namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        controller_id: I2C_CONTROLLER_ID_NONE,
+        controller_generation: I2C_CONTROLLER_GENERATION_INVALID,
+        slave_address: 0,
+        bus_speed_hz: 0,
+        ten_bit_addressing: false,
+        hid_descriptor_register: 0,
+        gpio_resource_index: AML_I2C_INVALID_RESOURCE_INDEX,
+        gpio_controller_namespace_index: AML_NAMESPACE_INVALID_INDEX,
+        gpio_pin: 0,
+        gpio_polarity: 0,
+        gpio_trigger: 0,
+        dsm_evaluated: false,
+        valid: false
+    };
+}
+
+@system
+pub fn i2c_hid_acpi_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !I2C_HID_LOCK_READY {
+            spinlock_init(&mut I2C_HID_LOCK);
+            I2C_HID_LOCK_READY = true;
+        }
+        if !I2C_HID_READY {
+            let mut i: usize = 0;
+            while i < I2C_HID_MAX_DEVICES {
+                I2C_HID_DEVICES[i] = i2c_hid_invalid_descriptor();
+                i += 1;
+            }
+            I2C_HID_DEVICE_COUNT = 0;
+            __dma_fence();
+            I2C_HID_READY = true;
+        }
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+fn i2c_hid_bytes_equal_ascii(src: *const u8, src_len: usize, target: *const u8, target_len: usize) -> bool {
+    if src == (null as *const u8) || target == (null as *const u8) || src_len != target_len {
+        return false;
+    }
+    unsafe {
+        let mut idx: usize = 0;
+        while idx < src_len {
+            if src[idx] != target[idx] { return false; }
+            idx += 1;
+        }
+    }
+    return true;
+}
+
+@system
+pub fn i2c_hid_device_is_pnp0c50(device_slot: usize) -> bool {
+    let dev = aml_discovery_device(device_slot);
+    if dev == (null as *const AmlDiscoveredDevice) { return false; }
+    unsafe {
+        if !(*dev).valid { return false; }
+        // Verifica _HID em string
+        if (*dev).hid_kind == AML_DISCOVERY_ID_STRING {
+            let pnp: [u8; 7] = ['P' as u8, 'N' as u8, 'P' as u8, '0' as u8, 'C' as u8, '5' as u8, '0' as u8];
+            let acpi: [u8; 8] = ['A' as u8, 'C' as u8, 'P' as u8, 'I' as u8, '0' as u8, 'C' as u8, '5' as u8, '0' as u8];
+            if i2c_hid_bytes_equal_ascii((*dev).hid_data, (*dev).hid_length, &pnp[0], 7) ||
+               i2c_hid_bytes_equal_ascii((*dev).hid_data, (*dev).hid_length, &acpi[0], 8) {
+                return true;
+            }
+        }
+        // Verifica _CID através da infraestrutura de binding existente
+        return aml_i2c_device_has_static_pnp0c50(device_slot);
+    }
+}
+
+@system
+pub fn i2c_hid_evaluate_dsm(dsm_method_index: usize,
+                           function_index: u64,
+                           result: *mut AmlEvalValue) -> bool {
+    if dsm_method_index == AML_NAMESPACE_INVALID_INDEX || result == (null as *mut AmlEvalValue) {
+        return false;
+    }
+    if !aml_evaluator_is_ready() { return false; }
+
+    let empty_pkg = aml_eval_package(null as *const u8, 0, 0);
+    let mut args: [AmlEvalValue; 4] = [
+        aml_eval_buffer(&I2C_HID_DSM_UUID[0], 16),
+        aml_eval_integer(I2C_HID_DSM_REVISION),
+        aml_eval_integer(function_index),
+        empty_pkg
+    ];
+
+    return aml_evaluator_execute_method(dsm_method_index, &args[0], 4, result);
+}
+
+@system
+pub fn i2c_hid_evaluate_descriptor_register(dsm_method_index: usize,
+                                            out_register: *mut u16) -> bool {
+    if dsm_method_index == AML_NAMESPACE_INVALID_INDEX || out_register == (null as *mut u16) {
+        return false;
+    }
+
+    // 1. Function 0: Query Functions (bitmask de funções suportadas)
+    let mut query_res = AmlEvalValue {
+        kind: AML_EVAL_VALUE_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0, element_count: 0, valid: false
+    };
+    if !i2c_hid_evaluate_dsm(dsm_method_index, I2C_HID_DSM_FUNCTION_QUERY, &mut query_res) {
+        return false;
+    }
+    if !query_res.valid || query_res.kind != AML_EVAL_VALUE_BUFFER ||
+       query_res.data_length == 0 || query_res.data == (null as *const u8) {
+        return false;
+    }
+    let query_mask = unsafe { *query_res.data };
+    // Bit 1: Function 1 (HID Descriptor Address) suportada
+    if (query_mask & 0x02) == 0 {
+        return false;
+    }
+
+    // 2. Function 1: Retorna o endereço do registrador do HID Descriptor (16-bit)
+    let mut desc_res = AmlEvalValue {
+        kind: AML_EVAL_VALUE_NONE, integer_value: 0,
+        data: null as *const u8, data_length: 0, element_count: 0, valid: false
+    };
+    if !i2c_hid_evaluate_dsm(dsm_method_index, I2C_HID_DSM_FUNCTION_DESCRIPTOR_ADDRESS, &mut desc_res) {
+        return false;
+    }
+    if !desc_res.valid { return false; }
+
+    if desc_res.kind == AML_EVAL_VALUE_INTEGER {
+        unsafe { *out_register = (desc_res.integer_value & 0xFFFF) as u16; }
+        return true;
+    }
+    if desc_res.kind == AML_EVAL_VALUE_BUFFER && desc_res.data_length >= 2 &&
+       desc_res.data != (null as *const u8) {
+        unsafe {
+            *out_register = (desc_res.data[0] as u16) | ((desc_res.data[1] as u16) << 8);
+        }
+        return true;
+    }
+
+    return false;
+}
+
+@system
+pub fn i2c_hid_acpi_probe_device(device_slot: usize) -> bool {
+    let dev = aml_discovery_device(device_slot);
+    if dev == (null as *const AmlDiscoveredDevice) { return false; }
+    unsafe { if !(*dev).valid { return false; } }
+
+    if !i2c_hid_device_is_pnp0c50(device_slot) { return false; }
+
+    let mut resource_start: usize = 0;
+    let mut resource_count: usize = 0;
+    let mut ns_index: usize = 0;
+    unsafe {
+        resource_start = (*dev).resource_start;
+        resource_count = (*dev).resource_count;
+        ns_index = (*dev).namespace_index;
+    }
+
+    let total_resources = aml_discovery_resource_count();
+    if resource_start > total_resources || resource_count > total_resources - resource_start {
+        return false;
+    }
+
+    // Busca o recurso I2CSerialBusConnection no _CRS do dispositivo
+    let mut serial_res_index: usize = AML_I2C_INVALID_RESOURCE_INDEX;
+    let mut idx: usize = resource_start;
+    let end = resource_start + resource_count;
+    while idx < end {
+        let serial = aml_i2c_decode_serial_bus(idx);
+        if serial.valid && serial.consumer {
+            serial_res_index = idx;
+            idx = end; // Encerra no primeiro serial bus
+        } else {
+            idx += 1;
+        }
+    }
+    if serial_res_index == AML_I2C_INVALID_RESOURCE_INDEX { return false; }
+
+    // Utiliza o binding para validar ResourceSource e amarrações
+    let binding = aml_i2c_binding_for_resource(serial_res_index);
+    if !binding.valid || !binding.dsm_method_present { return false; }
+
+    // Extrai propriedades de GPIO
+    let mut gpio_pin: u16 = 0;
+    let mut gpio_polarity: u8 = 0;
+    let mut gpio_trigger: u8 = 0;
+    if binding.gpio_resource_index != AML_I2C_INVALID_RESOURCE_INDEX {
+        let gpio = aml_i2c_decode_gpio_int(binding.gpio_resource_index);
+        if gpio.valid {
+            gpio_polarity = gpio.polarity;
+            gpio_trigger = if gpio.edge_triggered { 1 } else { 0 };
+            if gpio.pin_count >= 1 && gpio.pin_table != (null as *const u8) {
+                gpio_pin = unsafe {
+                    (gpio.pin_table[0] as u16) | ((gpio.pin_table[1] as u16) << 8)
+                };
+            }
+        }
+    }
+
+    // Avalia o método _DSM para obter o registrador do descritor HID
+    let mut hid_desc_reg: u16 = 0;
+    let dsm_ok = i2c_hid_evaluate_descriptor_register(binding.dsm_method_index, &mut hid_desc_reg);
+    if !dsm_ok {
+        return false;
+    }
+
+    // Busca controlador I2C registrado para associação no registry
+    let mut controller_id = I2C_CONTROLLER_ID_NONE;
+    let mut controller_gen = I2C_CONTROLLER_GENERATION_INVALID;
+    let bridge_handle = i2c_discovery_bridge_find_by_namespace(binding.controller_namespace_index);
+    if i2c_controller_handle_valid(&bridge_handle) {
+        controller_id = bridge_handle.controller_id;
+        controller_gen = bridge_handle.generation;
+    }
+
+    let flags = x86_irq_save_disable();
+    let mut enrolled = false;
+    unsafe {
+        if I2C_HID_LOCK_READY && spinlock_lock(&mut I2C_HID_LOCK) {
+            if I2C_HID_READY && I2C_HID_DEVICE_COUNT < I2C_HID_MAX_DEVICES {
+                let slot = I2C_HID_DEVICE_COUNT;
+                I2C_HID_DEVICES[slot] = I2cHidAcpiDescriptor {
+                    device_slot: device_slot,
+                    namespace_index: ns_index,
+                    controller_namespace_index: binding.controller_namespace_index,
+                    controller_id: controller_id,
+                    controller_generation: controller_gen,
+                    slave_address: binding.slave_address,
+                    bus_speed_hz: binding.connection_speed_hz,
+                    ten_bit_addressing: binding.ten_bit_addressing,
+                    hid_descriptor_register: hid_desc_reg,
+                    gpio_resource_index: binding.gpio_resource_index,
+                    gpio_controller_namespace_index: binding.gpio_controller_namespace_index,
+                    gpio_pin: gpio_pin,
+                    gpio_polarity: gpio_polarity,
+                    gpio_trigger: gpio_trigger,
+                    dsm_evaluated: true,
+                    valid: true
+                };
+                I2C_HID_DEVICE_COUNT += 1;
+                enrolled = true;
+            }
+            spinlock_unlock(&mut I2C_HID_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+
+    return enrolled;
+}
+
+@system
+pub fn i2c_hid_acpi_scan_devices() -> usize {
+    if !i2c_hid_acpi_init() { return 0; }
+    if !aml_discovery_is_ready() || !aml_evaluator_is_ready() { return 0; }
+
+    let total = aml_discovery_device_count();
+    let mut discovered: usize = 0;
+    let mut slot: usize = 0;
+
+    while slot < total {
+        if i2c_hid_device_is_pnp0c50(slot) {
+            if i2c_hid_acpi_probe_device(slot) {
+                discovered += 1;
+            }
+        }
+        slot += 1;
+    }
+
+    return discovered;
+}
+
+@system
+pub fn i2c_hid_acpi_device_count() -> usize {
+    let flags = x86_irq_save_disable();
+    let mut count: usize = 0;
+    unsafe {
+        if !I2C_HID_LOCK_READY || !spinlock_lock(&mut I2C_HID_LOCK) {
+            x86_irq_restore(flags);
+            return 0;
+        }
+        if I2C_HID_READY { count = I2C_HID_DEVICE_COUNT; }
+        spinlock_unlock(&mut I2C_HID_LOCK);
+    }
+    x86_irq_restore(flags);
+    return count;
+}
+
+@system
+pub fn i2c_hid_acpi_get_device(index: usize) -> I2cHidAcpiDescriptor {
+    if index >= I2C_HID_MAX_DEVICES { return i2c_hid_invalid_descriptor(); }
+    let flags = x86_irq_save_disable();
+    let mut result = i2c_hid_invalid_descriptor();
+    unsafe {
+        if I2C_HID_LOCK_READY && spinlock_lock(&mut I2C_HID_LOCK) {
+            if I2C_HID_READY && I2C_HID_DEVICES[index].valid {
+                result = I2C_HID_DEVICES[index];
+            }
+            spinlock_unlock(&mut I2C_HID_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+    return result;
+}
