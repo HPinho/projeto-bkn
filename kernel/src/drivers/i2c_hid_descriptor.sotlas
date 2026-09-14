@@ -1,0 +1,196 @@
+// Baken OS — I2C-HID-1 & I2C-HID-2: Descodificação de Descritor e Leitura Física HID-over-I2C.
+//
+// Implementa a estrutura canônica de 30 bytes da especificação Microsoft HID-over-I2C v1.00,
+// validação de integridade do descritor de dispositivo e integração com o parser genérico
+// de Report Descriptor (hid_report_descriptor).
+
+module kernel::drivers::i2c_hid_descriptor;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+import kernel::drivers::i2c_core::*;
+import kernel::drivers::i2c_device::*;
+import kernel::drivers::hid_report_descriptor::*;
+
+pub const I2C_HID_DESC_LENGTH: usize = 30;
+pub const I2C_HID_BCD_VERSION_1_00: u16 = 0x0100;
+pub const I2C_HID_MAX_REPORT_DESC_LENGTH: usize = 4096;
+
+@repr(C)
+pub struct I2cHidDescriptor {
+    pub w_hid_desc_length: u16;
+    pub bcd_version: u16;
+    pub w_report_desc_length: u16;
+    pub w_report_desc_register: u16;
+    pub w_input_register: u16;
+    pub w_max_input_length: u16;
+    pub w_output_register: u16;
+    pub w_max_output_length: u16;
+    pub w_command_register: u16;
+    pub w_data_register: u16;
+    pub w_vendor_id: u16;
+    pub w_product_id: u16;
+    pub w_version_id: u16;
+    pub reserved: u32;
+    pub valid: bool;
+}
+
+@system
+pub fn i2c_hid_descriptor_invalid() -> I2cHidDescriptor {
+    return I2cHidDescriptor {
+        w_hid_desc_length: 0,
+        bcd_version: 0,
+        w_report_desc_length: 0,
+        w_report_desc_register: 0,
+        w_input_register: 0,
+        w_max_input_length: 0,
+        w_output_register: 0,
+        w_max_output_length: 0,
+        w_command_register: 0,
+        w_data_register: 0,
+        w_vendor_id: 0,
+        w_product_id: 0,
+        w_version_id: 0,
+        reserved: 0,
+        valid: false
+    };
+}
+
+@system
+fn i2c_hid_read_u16(buf: *const u8, offset: usize) -> u16 {
+    unsafe {
+        return (buf[offset] as u16) | ((buf[offset + 1] as u16) << 8);
+    }
+}
+
+@system
+fn i2c_hid_read_u32(buf: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (buf[offset] as u32) |
+               ((buf[offset + 1] as u32) << 8) |
+               ((buf[offset + 2] as u32) << 16) |
+               ((buf[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+pub fn i2c_hid_descriptor_decode(buf: *const u8,
+                                 length: usize,
+                                 out_desc: *mut I2cHidDescriptor) -> bool {
+    if buf == (null as *const u8) || length < I2C_HID_DESC_LENGTH || out_desc == (null as *mut I2cHidDescriptor) {
+        return false;
+    }
+
+    let hid_len = i2c_hid_read_u16(buf, 0);
+    let bcd_ver = i2c_hid_read_u16(buf, 2);
+    let report_len = i2c_hid_read_u16(buf, 4);
+    let report_reg = i2c_hid_read_u16(buf, 6);
+    let input_reg = i2c_hid_read_u16(buf, 8);
+    let max_input_len = i2c_hid_read_u16(buf, 10);
+    let output_reg = i2c_hid_read_u16(buf, 12);
+    let max_output_len = i2c_hid_read_u16(buf, 14);
+    let cmd_reg = i2c_hid_read_u16(buf, 16);
+    let data_reg = i2c_hid_read_u16(buf, 18);
+    let vendor_id = i2c_hid_read_u16(buf, 20);
+    let product_id = i2c_hid_read_u16(buf, 22);
+    let version_id = i2c_hid_read_u16(buf, 24);
+    let reserved = i2c_hid_read_u32(buf, 26);
+
+    // Validações estritas de conformidade Microsoft HID-over-I2C v1.00
+    if hid_len != 30 { return false; }
+    if bcd_ver != I2C_HID_BCD_VERSION_1_00 { return false; }
+    if report_len == 0 || (report_len as usize) > I2C_HID_MAX_REPORT_DESC_LENGTH { return false; }
+    if max_input_len < 2 { return false; }
+    if cmd_reg == 0 { return false; }
+
+    unsafe {
+        (*out_desc).w_hid_desc_length = hid_len;
+        (*out_desc).bcd_version = bcd_ver;
+        (*out_desc).w_report_desc_length = report_len;
+        (*out_desc).w_report_desc_register = report_reg;
+        (*out_desc).w_input_register = input_reg;
+        (*out_desc).w_max_input_length = max_input_len;
+        (*out_desc).w_output_register = output_reg;
+        (*out_desc).w_max_output_length = max_output_len;
+        (*out_desc).w_command_register = cmd_reg;
+        (*out_desc).w_data_register = data_reg;
+        (*out_desc).w_vendor_id = vendor_id;
+        (*out_desc).w_product_id = product_id;
+        (*out_desc).w_version_id = version_id;
+        (*out_desc).reserved = reserved;
+        (*out_desc).valid = true;
+    }
+
+    return true;
+}
+
+@system
+pub fn i2c_hid_read_descriptor_physical(device_id: u32,
+                                        generation: u32,
+                                        desc_register: u16,
+                                        out_desc: *mut I2cHidDescriptor) -> u8 {
+    if out_desc == (null as *mut I2cHidDescriptor) { return I2C_STATUS_INVALID; }
+    unsafe { *out_desc = i2c_hid_descriptor_invalid(); }
+
+    let mut reg_bytes: [u8; 2] = [0; 2];
+    reg_bytes[0] = (desc_register & 0xFF) as u8;
+    reg_bytes[1] = ((desc_register >> 8) & 0xFF) as u8;
+    let mut raw_buf: [u8; I2C_HID_DESC_LENGTH] = [0; I2C_HID_DESC_LENGTH];
+
+    // Transação de escrita de 2 bytes (endereço do registrador) seguida de leitura de 30 bytes
+    let status = i2c_device_write_read(
+        device_id,
+        generation,
+        &reg_bytes[0],
+        2,
+        &mut raw_buf[0],
+        I2C_HID_DESC_LENGTH
+    );
+
+    if status != I2C_STATUS_OK {
+        return status;
+    }
+
+    if !i2c_hid_descriptor_decode(&raw_buf[0], I2C_HID_DESC_LENGTH, out_desc) {
+        return I2C_STATUS_INVALID;
+    }
+
+    return I2C_STATUS_OK;
+}
+
+@system
+pub fn i2c_hid_read_report_descriptor_physical(device_id: u32,
+                                               generation: u32,
+                                               report_desc_register: u16,
+                                               length: usize,
+                                               out_buf: *mut u8) -> u8 {
+    if out_buf == (null as *mut u8) || length == 0 || length > I2C_HID_MAX_REPORT_DESC_LENGTH {
+        return I2C_STATUS_INVALID;
+    }
+
+    let mut reg_bytes: [u8; 2] = [0; 2];
+    reg_bytes[0] = (report_desc_register & 0xFF) as u8;
+    reg_bytes[1] = ((report_desc_register >> 8) & 0xFF) as u8;
+
+    return i2c_device_write_read(
+        device_id,
+        generation,
+        &reg_bytes[0],
+        2,
+        out_buf,
+        length
+    );
+}
+
+@system
+pub fn i2c_hid_parse_report_descriptor(buf: *const u8,
+                                       length: usize,
+                                       out_info: *mut HidReportDescriptorInfo) -> bool {
+    if buf == (null as *const u8) || length == 0 || out_info == (null as *mut HidReportDescriptorInfo) {
+        return false;
+    }
+    let info = hid_report_descriptor_parse(buf, length);
+    if !info.valid { return false; }
+    unsafe { *out_info = info; }
+    return true;
+}

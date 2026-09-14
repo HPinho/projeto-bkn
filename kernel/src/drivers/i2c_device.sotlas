@@ -106,6 +106,16 @@ pub fn i2c_device_invalid_handle() -> I2cDeviceHandle {
 }
 
 @system
+pub fn i2c_device_handle_valid(handle: *const I2cDeviceHandle) -> bool {
+    if handle == (null as *const I2cDeviceHandle) { return false; }
+    unsafe {
+        return (*handle).valid &&
+               (*handle).device_id != I2C_DEVICE_ID_NONE &&
+               (*handle).generation != I2C_DEVICE_GENERATION_INVALID;
+    }
+}
+
+@system
 pub fn i2c_device_invalid_record() -> I2cDeviceRecord {
     return I2cDeviceRecord {
         device_id: I2C_DEVICE_ID_NONE,

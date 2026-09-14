@@ -1,0 +1,58 @@
+// Baken OS — I2C-HID-5: Protocolo de Comandos e Ciclo de Vida HID-over-I2C.
+//
+// Implementa os comandos obrigatórios da especificação Microsoft HID-over-I2C:
+// RESET (0x01), SET_POWER (0x08), GET_REPORT (0x02) e SET_REPORT (0x03).
+
+module kernel::drivers::i2c_hid_command;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::drivers::i2c_core::*;
+import kernel::drivers::i2c_device::*;
+
+pub const I2C_HID_CMD_RESET: u8 = 0x01;
+pub const I2C_HID_CMD_GET_REPORT: u8 = 0x02;
+pub const I2C_HID_CMD_SET_REPORT: u8 = 0x03;
+pub const I2C_HID_CMD_GET_IDLE: u8 = 0x04;
+pub const I2C_HID_CMD_SET_IDLE: u8 = 0x05;
+pub const I2C_HID_CMD_GET_PROTOCOL: u8 = 0x06;
+pub const I2C_HID_CMD_SET_PROTOCOL: u8 = 0x07;
+pub const I2C_HID_CMD_SET_POWER: u8 = 0x08;
+
+pub const I2C_HID_POWER_ON: u8 = 0x00;
+pub const I2C_HID_POWER_SLEEP: u8 = 0x01;
+
+pub const I2C_HID_REPORT_TYPE_OTHER: u8 = 0x00;
+pub const I2C_HID_REPORT_TYPE_INPUT: u8 = 0x01;
+pub const I2C_HID_REPORT_TYPE_OUTPUT: u8 = 0x02;
+pub const I2C_HID_REPORT_TYPE_FEATURE: u8 = 0x03;
+
+@system
+pub fn i2c_hid_command_reset(device_id: u32,
+                             generation: u32,
+                             command_register: u16) -> u8 {
+    if command_register == 0 { return I2C_STATUS_INVALID; }
+
+    let mut payload: [u8; 4] = [0; 4];
+    payload[0] = (command_register & 0xFF) as u8;
+    payload[1] = ((command_register >> 8) & 0xFF) as u8;
+    payload[2] = 0x00;
+    payload[3] = I2C_HID_CMD_RESET;
+
+    return i2c_device_write(device_id, generation, &payload[0], 4);
+}
+
+@system
+pub fn i2c_hid_command_set_power(device_id: u32,
+                                 generation: u32,
+                                 command_register: u16,
+                                 power_state: u8) -> u8 {
+    if command_register == 0 { return I2C_STATUS_INVALID; }
+
+    let mut payload: [u8; 4] = [0; 4];
+    payload[0] = (command_register & 0xFF) as u8;
+    payload[1] = ((command_register >> 8) & 0xFF) as u8;
+    payload[2] = power_state & 0x0F;
+    payload[3] = I2C_HID_CMD_SET_POWER;
+
+    return i2c_device_write(device_id, generation, &payload[0], 4);
+}
