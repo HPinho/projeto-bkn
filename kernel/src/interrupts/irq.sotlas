@@ -11,6 +11,7 @@ import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
 import kernel::drivers::i8042::*;
+import kernel::drivers::gpio_physical::*;
 import kernel::memory::tlb_shootdown::*;
 import kernel::scheduler::core::*;
 import kernel::scheduler::sleep::*;
@@ -22,6 +23,7 @@ pub const IRQ_VECTOR_MOUSE: u16 = 0x42;
 pub const IRQ_VECTOR_RESCHEDULE: u16 = 0x43;
 pub const IRQ_VECTOR_RESCHEDULE_IPI: u16 = 0x44;
 pub const IRQ_VECTOR_TLB_SHOOTDOWN_IPI: u16 = 0x45;
+pub const IRQ_VECTOR_GPIO: u16 = 0x46;
 pub const IRQ_VECTOR_SPURIOUS: u16 = 0xFF;
 
 static mut IRQ_IDT_READY: bool = false;
@@ -30,6 +32,7 @@ static mut IRQ_TIMER_COUNT: u64 = 0;
 static mut IRQ_CPU_TIMER_COUNT: [u64; SCHEDULER_CPU_SLOT_COUNT] = [0; SCHEDULER_CPU_SLOT_COUNT];
 static mut IRQ_KEYBOARD_COUNT: u64 = 0;
 static mut IRQ_MOUSE_COUNT: u64 = 0;
+static mut IRQ_GPIO_COUNT: u64 = 0;
 static mut IRQ_SPURIOUS_COUNT: u64 = 0;
 static mut IRQ_RESCHEDULE_IPI_COUNT: u64 = 0;
 static mut IRQ_TLB_SHOOTDOWN_IPI_COUNT: u64 = 0;
@@ -58,6 +61,7 @@ pub fn irq_prepare_idt() -> bool {
     if !irq_install_user_gate(IRQ_VECTOR_RESCHEDULE) { return false; }
     if !irq_install_gate(IRQ_VECTOR_RESCHEDULE_IPI) { return false; }
     if !irq_install_gate(IRQ_VECTOR_TLB_SHOOTDOWN_IPI) { return false; }
+    if !irq_install_gate(IRQ_VECTOR_GPIO) { return false; }
     if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
     unsafe { IRQ_IDT_READY = true; }
     return true;
@@ -89,6 +93,7 @@ pub fn irq_timer_count_for_cpu(cpu_slot: usize) -> u64 {
 }
 @system pub fn irq_keyboard_count() -> u64 { unsafe { return IRQ_KEYBOARD_COUNT; } }
 @system pub fn irq_mouse_count() -> u64 { unsafe { return IRQ_MOUSE_COUNT; } }
+@system pub fn irq_gpio_count() -> u64 { unsafe { return IRQ_GPIO_COUNT; } }
 @system pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
 @system pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_COUNT; } }
 @system pub fn irq_tlb_shootdown_ipi_count() -> u64 { unsafe { return IRQ_TLB_SHOOTDOWN_IPI_COUNT; } }
@@ -212,6 +217,12 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
     if vector == IRQ_VECTOR_MOUSE as u64 {
         i8042_drain_irq_output();
         unsafe { IRQ_MOUSE_COUNT += 1; }
+        lapic_eoi();
+        return frame_address;
+    }
+    if vector == IRQ_VECTOR_GPIO as u64 {
+        let handled = gpio_physical_irq_dispatch();
+        unsafe { IRQ_GPIO_COUNT += handled as u64; }
         lapic_eoi();
         return frame_address;
     }

@@ -1,0 +1,75 @@
+// Baken OS — vendor-neutral physical GPIO dispatcher.
+//
+// Consumers depend on this layer, never on a silicon-specific backend. Each hardware
+// family lives in its own module and must fail without side effects when it does not
+// own the logical ACPI GPIO controller. New AMD, Intel, ARM/SoC, Qualcomm, MediaTek,
+// NVIDIA/Tegra and other backends are added here without changing gpio_core or HID.
+
+module kernel::drivers::gpio_physical;
+
+import kernel::drivers::gpio_core::*;
+import kernel::drivers::intel_tigerlake_gpio::*;
+
+static mut GPIO_PHYSICAL_READY: bool = false;
+static mut GPIO_PHYSICAL_BACKEND_COUNT: usize = 0;
+
+@system
+pub fn gpio_physical_probe_all() -> usize {
+    unsafe {
+        if GPIO_PHYSICAL_READY { return GPIO_PHYSICAL_BACKEND_COUNT; }
+    }
+
+    let mut count: usize = 0;
+    count += intel_tigerlake_gpio_probe();
+
+    unsafe {
+        GPIO_PHYSICAL_BACKEND_COUNT = count;
+        GPIO_PHYSICAL_READY = true;
+    }
+    return count;
+}
+
+@system
+pub fn gpio_physical_arm_connection(connection_id: u32, generation: u32) -> bool {
+    let connection = gpio_connection_query(connection_id, generation);
+    if !connection.valid || connection.state != GPIO_PIN_STATE_CONFIGURED { return false; }
+
+    // Backends are intentionally isolated. A backend must only mutate hardware after
+    // proving that it owns connection.controller_namespace_index.
+    if intel_tigerlake_gpio_arm_connection(connection_id, generation) { return true; }
+
+    return false;
+}
+
+@system
+pub fn gpio_physical_disarm_connection(connection_id: u32, generation: u32) -> bool {
+    let connection = gpio_connection_query(connection_id, generation);
+    if !connection.valid ||
+       (connection.state != GPIO_PIN_STATE_ACTIVE && connection.state != GPIO_PIN_STATE_MASKED) {
+        return false;
+    }
+
+    if intel_tigerlake_gpio_disarm_connection(connection_id, generation) { return true; }
+
+    return false;
+}
+
+@system
+pub fn gpio_physical_irq_dispatch() -> usize {
+    let mut handled: usize = 0;
+    handled += intel_tigerlake_gpio_irq_dispatch();
+    return handled;
+}
+
+@system
+pub fn gpio_physical_is_ready() -> bool {
+    unsafe { return GPIO_PHYSICAL_READY; }
+}
+
+@system
+pub fn gpio_physical_backend_count() -> usize {
+    unsafe {
+        if !GPIO_PHYSICAL_READY { return 0; }
+        return GPIO_PHYSICAL_BACKEND_COUNT;
+    }
+}

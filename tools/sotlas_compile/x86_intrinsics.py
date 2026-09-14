@@ -165,6 +165,7 @@ SOTLAS_X86_IRQ_STUB(66)
 SOTLAS_X86_IRQ_STUB(67)
 SOTLAS_X86_IRQ_STUB(68)
 SOTLAS_X86_IRQ_STUB(69)
+SOTLAS_X86_IRQ_STUB(70)
 SOTLAS_X86_IRQ_STUB(255)
 #undef SOTLAS_X86_IRQ_STUB
 static inline uint64_t __irq_stub_address(uint16_t vector) {
@@ -175,6 +176,7 @@ static inline uint64_t __irq_stub_address(uint16_t vector) {
         case 67:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_67;
         case 68:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_68;
         case 69:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_69;
+        case 70:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_70;
         case 255:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_255;
         default:return 0;
     }

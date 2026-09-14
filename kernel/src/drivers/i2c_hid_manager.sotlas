@@ -8,6 +8,7 @@ import kernel::drivers::i2c_core::*;
 import kernel::drivers::i2c_controller::*;
 import kernel::drivers::i2c_device::*;
 import kernel::drivers::gpio_core::*;
+import kernel::drivers::gpio_physical::*;
 import kernel::drivers::input_device::*;
 import kernel::drivers::input_event::*;
 import kernel::drivers::hid_input_device_map::*;
@@ -120,10 +121,22 @@ fn i2c_hid_manager_rollback(device_id: u32,
         hid_input_device_map_unbind(input_device_id, input_device_generation);
         input_device_detach(input_device_id, input_device_generation);
     }
+
+    let mut gpio_safe = true;
     if gpio_connection_id != GPIO_CONNECTION_ID_NONE && gpio_generation != GPIO_GENERATION_INVALID {
-        gpio_connection_unregister(gpio_connection_id, gpio_generation);
+        let gpio = gpio_connection_query(gpio_connection_id, gpio_generation);
+        if gpio.valid && (gpio.state == GPIO_PIN_STATE_ACTIVE || gpio.state == GPIO_PIN_STATE_MASKED) {
+            gpio_safe = gpio_physical_disarm_connection(gpio_connection_id, gpio_generation);
+        }
+        if gpio_safe && gpio.valid {
+            gpio_safe = gpio_connection_unregister(gpio_connection_id, gpio_generation);
+        }
     }
-    if device_id != 0 && generation != 0 { i2c_device_detach(device_id, generation); }
+
+    // Never detach the target device while a physical GPIO connection may still
+    // deliver interrupts to its generation. A teardown failure therefore leaks safe
+    // state rather than creating a use-after-detach route.
+    if gpio_safe && device_id != 0 && generation != 0 { i2c_device_detach(device_id, generation); }
 }
 
 @system
@@ -131,6 +144,9 @@ pub fn i2c_hid_manager_init() -> usize {
     let mut dev_count = i2c_hid_acpi_device_count();
     if dev_count == 0 { dev_count = i2c_hid_acpi_scan_devices(); }
     if dev_count == 0 { return 0; }
+
+    // Probe physical GPIO backends independently of HID. Consumers remain vendor-neutral.
+    gpio_physical_probe_all();
 
     input_device_registry_init();
     hid_input_device_map_initialize();
@@ -166,6 +182,7 @@ pub fn i2c_hid_manager_init() -> usize {
             let handle = i2c_device_attach(&cfg);
             if handle.valid && i2c_device_activate(handle.device_id, handle.generation) {
                 let mut gpio_handle = gpio_pin_invalid_handle();
+                let mut gpio_ready = false;
                 let mut input_index = I2C_HID_INPUT_INVALID_INDEX;
                 let mut inp_handle = input_device_invalid_handle();
                 let mut desc = i2c_hid_descriptor_invalid();
@@ -179,9 +196,13 @@ pub fn i2c_hid_manager_init() -> usize {
                     gpio_handle = gpio_connection_register_from_acpi(acpi_dev.gpio_resource_index, handle.device_id, handle.generation);
                 }
 
-                // GPIO must be physically backed. No synthetic/polled IRQ fallback.
                 if gpio_handle.valid {
-                    i2c_device_set_gpio(handle.device_id, handle.generation, gpio_handle.connection_id, gpio_handle.generation);
+                    gpio_ready = gpio_physical_arm_connection(gpio_handle.connection_id, gpio_handle.generation);
+                }
+
+                // GPIO must be physically armed. No synthetic/polled IRQ fallback.
+                if gpio_handle.valid && gpio_ready &&
+                   i2c_device_set_gpio(handle.device_id, handle.generation, gpio_handle.connection_id, gpio_handle.generation) {
                     let desc_status = i2c_hid_read_descriptor_physical(handle.device_id, handle.generation, acpi_dev.hid_descriptor_register, &mut desc);
                     if desc_status == I2C_STATUS_OK && desc.valid && desc.w_max_input_length >= 2 && desc.w_max_input_length as usize <= I2C_HID_MAX_INPUT_BUFFER_BYTES {
                         let pwr_status = i2c_hid_command_set_power(handle.device_id, handle.generation, desc.w_command_register, I2C_HID_POWER_ON);

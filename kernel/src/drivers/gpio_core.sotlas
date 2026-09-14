@@ -1,8 +1,10 @@
 // Baken OS — GPIO & IRQ Foundation.
 //
-// Logical ACPI GpioInt connections are only publishable when an explicit physical
-// GPIO backend owns the resolved controller namespace. This keeps HID-over-I2C
-// fail-closed until a real PCH/GPIO driver registers hardware ownership.
+// Logical ACPI GpioInt connections are vendor-neutral. Registration only creates a
+// CONFIGURED logical connection. A physical backend that owns the resolved ACPI
+// controller must explicitly activate it after the real pad and interrupt route are
+// armed. This keeps consumers fail-closed and prevents hardware-specific policy
+// from leaking into the GPIO core.
 
 module kernel::drivers::gpio_core;
 
@@ -82,7 +84,7 @@ static mut GPIO_PHYSICAL_BACKENDS: [GpioPhysicalBackend; GPIO_MAX_PHYSICAL_BACKE
 static mut GPIO_CORE_READY: bool = false;
 static mut GPIO_CORE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 static mut GPIO_CORE_LOCK_READY: bool = false;
-static mut GPIO_ACTIVE_CONNECTIONS: usize = 0;
+static mut GPIO_CONNECTION_COUNT: usize = 0;
 
 @system
 pub fn gpio_pin_invalid_handle() -> GpioPinHandle {
@@ -114,6 +116,21 @@ fn gpio_generation_next(current: u32) -> u32 {
 }
 
 @system
+fn gpio_backend_present_locked(controller_namespace_index: usize) -> bool {
+    let mut index: usize = 0;
+    unsafe {
+        while index < GPIO_MAX_PHYSICAL_BACKENDS {
+            if GPIO_PHYSICAL_BACKENDS[index].active &&
+               GPIO_PHYSICAL_BACKENDS[index].controller_namespace_index == controller_namespace_index {
+                return true;
+            }
+            index += 1;
+        }
+    }
+    return false;
+}
+
+@system
 pub fn gpio_core_init() -> bool {
     let flags = x86_irq_save_disable();
     unsafe {
@@ -141,7 +158,7 @@ pub fn gpio_core_init() -> bool {
             GPIO_PHYSICAL_BACKENDS[index].active = false;
             index += 1;
         }
-        GPIO_ACTIVE_CONNECTIONS = 0;
+        GPIO_CONNECTION_COUNT = 0;
         GPIO_CORE_READY = true;
         spinlock_unlock(&mut GPIO_CORE_LOCK);
     }
@@ -224,14 +241,7 @@ pub fn gpio_physical_backend_available(controller_namespace_index: usize) -> boo
     let mut available = false;
     unsafe {
         if GPIO_CORE_LOCK_READY && spinlock_lock(&mut GPIO_CORE_LOCK) {
-            let mut index: usize = 0;
-            while index < GPIO_MAX_PHYSICAL_BACKENDS {
-                if GPIO_PHYSICAL_BACKENDS[index].active && GPIO_PHYSICAL_BACKENDS[index].controller_namespace_index == controller_namespace_index {
-                    available = true;
-                    break;
-                }
-                index += 1;
-            }
+            available = gpio_backend_present_locked(controller_namespace_index);
             spinlock_unlock(&mut GPIO_CORE_LOCK);
         }
     }
@@ -242,20 +252,21 @@ pub fn gpio_physical_backend_available(controller_namespace_index: usize) -> boo
 @system
 pub fn gpio_connection_register_from_acpi(resource_index: usize, target_device_id: u32, target_generation: u32) -> GpioPinHandle {
     let gpio = aml_i2c_decode_gpio_int(resource_index);
-    if !gpio.valid || gpio.pin_count == 0 || gpio.pin_table == (null as *const u8) { return gpio_pin_invalid_handle(); }
+    if !gpio.valid || gpio.pin_count != 1 || gpio.pin_table == (null as *const u8) { return gpio_pin_invalid_handle(); }
     let mut pin_number: u16 = 0;
     unsafe { pin_number = (gpio.pin_table[0] as u16) | ((gpio.pin_table[1] as u16) << 8); }
     let controller = aml_i2c_resolve_resource_source(gpio.device_slot, gpio.controller_source, gpio.controller_source_length);
-    if controller == AML_NAMESPACE_INVALID_INDEX || !gpio_physical_backend_available(controller) { return gpio_pin_invalid_handle(); }
+    if controller == AML_NAMESPACE_INVALID_INDEX { return gpio_pin_invalid_handle(); }
     let mut trigger = GPIO_TRIGGER_LEVEL;
     if gpio.edge_triggered { trigger = GPIO_TRIGGER_EDGE; }
     let mut polarity = GPIO_POLARITY_ACTIVE_HIGH;
-    if gpio.polarity == 1 { polarity = GPIO_POLARITY_ACTIVE_LOW; } else if gpio.polarity == 2 { polarity = GPIO_POLARITY_ACTIVE_BOTH; }
+    if gpio.polarity == 1 { polarity = GPIO_POLARITY_ACTIVE_LOW; }
+    else if gpio.polarity == 2 { polarity = GPIO_POLARITY_ACTIVE_BOTH; }
     let flags = x86_irq_save_disable();
     let mut result = gpio_pin_invalid_handle();
     unsafe {
         if !GPIO_CORE_LOCK_READY || !spinlock_lock(&mut GPIO_CORE_LOCK) { x86_irq_restore(flags); return result; }
-        if GPIO_CORE_READY {
+        if GPIO_CORE_READY && gpio_backend_present_locked(controller) {
             let mut index: usize = 0;
             while index < GPIO_MAX_CONNECTIONS {
                 if GPIO_CONNECTIONS[index].state == GPIO_PIN_STATE_FREE {
@@ -263,13 +274,13 @@ pub fn gpio_connection_register_from_acpi(resource_index: usize, target_device_i
                     GPIO_CONNECTIONS[index].controller_namespace_index = controller;
                     GPIO_CONNECTIONS[index].target_device_id = target_device_id;
                     GPIO_CONNECTIONS[index].target_generation = target_generation;
-                    GPIO_CONNECTIONS[index].state = GPIO_PIN_STATE_ACTIVE;
+                    GPIO_CONNECTIONS[index].state = GPIO_PIN_STATE_CONFIGURED;
                     GPIO_CONNECTIONS[index].polarity = polarity;
                     GPIO_CONNECTIONS[index].trigger = trigger;
                     GPIO_CONNECTIONS[index].interrupt_count = 0;
                     GPIO_CONNECTIONS[index].pending = false;
                     GPIO_CONNECTIONS[index].valid = true;
-                    GPIO_ACTIVE_CONNECTIONS += 1;
+                    GPIO_CONNECTION_COUNT += 1;
                     result.connection_id = GPIO_CONNECTIONS[index].connection_id;
                     result.generation = GPIO_CONNECTIONS[index].generation;
                     result.valid = true;
@@ -285,6 +296,51 @@ pub fn gpio_connection_register_from_acpi(resource_index: usize, target_device_i
 }
 
 @system
+pub fn gpio_connection_activate(connection_id: u32, generation: u32) -> bool {
+    let slot = gpio_connection_slot(connection_id);
+    if slot >= GPIO_MAX_CONNECTIONS || generation == GPIO_GENERATION_INVALID { return false; }
+    let flags = x86_irq_save_disable();
+    let mut activated = false;
+    unsafe {
+        if !GPIO_CORE_LOCK_READY || !spinlock_lock(&mut GPIO_CORE_LOCK) { x86_irq_restore(flags); return false; }
+        if GPIO_CORE_READY && GPIO_CONNECTIONS[slot].valid &&
+           GPIO_CONNECTIONS[slot].connection_id == connection_id &&
+           GPIO_CONNECTIONS[slot].generation == generation &&
+           GPIO_CONNECTIONS[slot].state == GPIO_PIN_STATE_CONFIGURED &&
+           gpio_backend_present_locked(GPIO_CONNECTIONS[slot].controller_namespace_index) {
+            GPIO_CONNECTIONS[slot].pending = false;
+            GPIO_CONNECTIONS[slot].state = GPIO_PIN_STATE_ACTIVE;
+            activated = true;
+        }
+        spinlock_unlock(&mut GPIO_CORE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return activated;
+}
+
+@system
+pub fn gpio_connection_deactivate(connection_id: u32, generation: u32) -> bool {
+    let slot = gpio_connection_slot(connection_id);
+    if slot >= GPIO_MAX_CONNECTIONS || generation == GPIO_GENERATION_INVALID { return false; }
+    let flags = x86_irq_save_disable();
+    let mut deactivated = false;
+    unsafe {
+        if !GPIO_CORE_LOCK_READY || !spinlock_lock(&mut GPIO_CORE_LOCK) { x86_irq_restore(flags); return false; }
+        if GPIO_CORE_READY && GPIO_CONNECTIONS[slot].valid &&
+           GPIO_CONNECTIONS[slot].connection_id == connection_id &&
+           GPIO_CONNECTIONS[slot].generation == generation &&
+           (GPIO_CONNECTIONS[slot].state == GPIO_PIN_STATE_ACTIVE || GPIO_CONNECTIONS[slot].state == GPIO_PIN_STATE_MASKED) {
+            GPIO_CONNECTIONS[slot].pending = false;
+            GPIO_CONNECTIONS[slot].state = GPIO_PIN_STATE_CONFIGURED;
+            deactivated = true;
+        }
+        spinlock_unlock(&mut GPIO_CORE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return deactivated;
+}
+
+@system
 pub fn gpio_connection_unregister(connection_id: u32, generation: u32) -> bool {
     let slot = gpio_connection_slot(connection_id);
     if slot >= GPIO_MAX_CONNECTIONS || generation == GPIO_GENERATION_INVALID { return false; }
@@ -292,14 +348,20 @@ pub fn gpio_connection_unregister(connection_id: u32, generation: u32) -> bool {
     let mut unregistered = false;
     unsafe {
         if !GPIO_CORE_LOCK_READY || !spinlock_lock(&mut GPIO_CORE_LOCK) { x86_irq_restore(flags); return false; }
-        if GPIO_CORE_READY && GPIO_CONNECTIONS[slot].valid && GPIO_CONNECTIONS[slot].connection_id == connection_id && GPIO_CONNECTIONS[slot].generation == generation {
-            if GPIO_CONNECTIONS[slot].state != GPIO_PIN_STATE_FREE && GPIO_ACTIVE_CONNECTIONS != 0 { GPIO_ACTIVE_CONNECTIONS -= 1; }
+        if GPIO_CORE_READY && GPIO_CONNECTIONS[slot].valid &&
+           GPIO_CONNECTIONS[slot].connection_id == connection_id &&
+           GPIO_CONNECTIONS[slot].generation == generation &&
+           (GPIO_CONNECTIONS[slot].state == GPIO_PIN_STATE_CONFIGURED || GPIO_CONNECTIONS[slot].state == GPIO_PIN_STATE_DETACHED) {
             GPIO_CONNECTIONS[slot].state = GPIO_PIN_STATE_FREE;
+            GPIO_CONNECTIONS[slot].pin_number = 0;
+            GPIO_CONNECTIONS[slot].controller_namespace_index = AML_NAMESPACE_INVALID_INDEX;
             GPIO_CONNECTIONS[slot].target_device_id = 0;
             GPIO_CONNECTIONS[slot].target_generation = 0;
+            GPIO_CONNECTIONS[slot].interrupt_count = 0;
             GPIO_CONNECTIONS[slot].pending = false;
             GPIO_CONNECTIONS[slot].valid = false;
             GPIO_CONNECTIONS[slot].generation = gpio_generation_next(generation);
+            if GPIO_CONNECTION_COUNT != 0 { GPIO_CONNECTION_COUNT -= 1; }
             unregistered = true;
         }
         spinlock_unlock(&mut GPIO_CORE_LOCK);
@@ -417,7 +479,7 @@ pub fn gpio_connection_count() -> usize {
     let mut count: usize = 0;
     unsafe {
         if !GPIO_CORE_LOCK_READY || !spinlock_lock(&mut GPIO_CORE_LOCK) { x86_irq_restore(flags); return 0; }
-        if GPIO_CORE_READY { count = GPIO_ACTIVE_CONNECTIONS; }
+        if GPIO_CORE_READY { count = GPIO_CONNECTION_COUNT; }
         spinlock_unlock(&mut GPIO_CORE_LOCK);
     }
     x86_irq_restore(flags);

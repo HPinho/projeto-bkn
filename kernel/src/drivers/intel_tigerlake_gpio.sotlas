@@ -1,0 +1,762 @@
+// Baken OS — GPIO-PHYS-0: Intel Tiger Lake PCH GPIO physical backend.
+//
+// Initial support is deliberately fail-closed and limited to the upstream-verified
+// ACPI identities INT34C5 / INTC1055 (Tiger Lake-LP) and INT34C6 (Tiger Lake-H).
+// MMIO bases and controller GSI come only from the controller's static _CRS.
+// HOSTSW_OWN is never written: firmware must already have granted host software
+// ownership before a logical GpioInt may transition CONFIGURED -> ACTIVE.
+
+module kernel::drivers::intel_tigerlake_gpio;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::memory::active_page_tables::*;
+import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_discovery::*;
+import kernel::interrupts::lapic::*;
+import kernel::interrupts::ioapic::*;
+import kernel::interrupts::route::*;
+import kernel::drivers::gpio_core::*;
+
+pub const INTEL_TGL_FAMILY_NONE: u8 = 0;
+pub const INTEL_TGL_FAMILY_LP: u8 = 1;
+pub const INTEL_TGL_FAMILY_H: u8 = 2;
+pub const INTEL_TGL_IRQ_VECTOR: u16 = 0x46;
+pub const INTEL_TGL_MAX_CONTROLLERS: usize = 4;
+pub const INTEL_TGL_MAX_COMMUNITIES: usize = 5;
+pub const INTEL_TGL_MAX_ARMED: usize = GPIO_MAX_CONNECTIONS;
+pub const INTEL_TGL_MAX_MMIO_BYTES: u32 = 0x00010000;
+
+pub const INTEL_TGL_REVID: u64 = 0x000;
+pub const INTEL_TGL_PADBAR: u64 = 0x00C;
+pub const INTEL_TGL_PAD_OWN: u64 = 0x020;
+pub const INTEL_TGL_LP_PADCFGLOCK: u64 = 0x080;
+pub const INTEL_TGL_LP_HOSTSW_OWN: u64 = 0x0B0;
+pub const INTEL_TGL_H_PADCFGLOCK: u64 = 0x090;
+pub const INTEL_TGL_H_HOSTSW_OWN: u64 = 0x0C0;
+pub const INTEL_TGL_GPI_IS: u64 = 0x100;
+pub const INTEL_TGL_GPI_IE: u64 = 0x120;
+
+pub const INTEL_TGL_PADCFG0_RXEVCFG_MASK: u32 = 0x06000000;
+pub const INTEL_TGL_PADCFG0_RXEVCFG_LEVEL: u32 = 0x00000000;
+pub const INTEL_TGL_PADCFG0_RXEVCFG_EDGE: u32 = 0x02000000;
+pub const INTEL_TGL_PADCFG0_RXEVCFG_EDGE_BOTH: u32 = 0x06000000;
+pub const INTEL_TGL_PADCFG0_RXINV: u32 = 0x00800000;
+pub const INTEL_TGL_PADCFG0_GPIROUTIOXAPIC: u32 = 0x00100000;
+pub const INTEL_TGL_PADCFG0_GPIROUTSCI: u32 = 0x00080000;
+pub const INTEL_TGL_PADCFG0_GPIROUTSMI: u32 = 0x00040000;
+pub const INTEL_TGL_PADCFG0_GPIROUTNMI: u32 = 0x00020000;
+pub const INTEL_TGL_PADCFG0_PMODE_MASK: u32 = 0x00003C00;
+pub const INTEL_TGL_PADCFG0_GPIORXDIS: u32 = 0x00000200;
+pub const INTEL_TGL_PADCFG0_CONTROL_MASK: u32 = 0x069E0000;
+pub const INTEL_TGL_PADCFG0_CONTROL_KEEP: u32 = 0xF961FFFF;
+
+pub const INTEL_TGL_ACPI_FIXED_MEMORY32: u8 = 0x06;
+pub const INTEL_TGL_ACPI_EXTENDED_IRQ: u8 = 0x09;
+
+@repr(C)
+pub struct IntelTglController {
+    pub namespace_index: usize;
+    pub family: u8;
+    pub community_count: u8;
+    pub gsi: u32;
+    pub active_low: bool;
+    pub level_triggered: bool;
+    pub backend_instance: u32;
+    pub route_live: bool;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct IntelTglPadRoute {
+    pub physical_pin: u16;
+    pub community: u8;
+    pub reg_num: u8;
+    pub group_base: u16;
+    pub group_size: u8;
+    pub padown_num: u8;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct IntelTglArmedConnection {
+    pub connection_id: u32;
+    pub generation: u32;
+    pub controller_slot: usize;
+    pub community: u8;
+    pub reg_num: u8;
+    pub gpi_bit: u32;
+    pub padcfg_address: u64;
+    pub original_padcfg0: u32;
+    pub valid: bool;
+}
+
+static mut INTEL_TGL_CONTROLLERS: [IntelTglController; INTEL_TGL_MAX_CONTROLLERS] = [
+    IntelTglController {
+        namespace_index: AML_NAMESPACE_INVALID_INDEX, family: INTEL_TGL_FAMILY_NONE,
+        community_count: 0, gsi: 0, active_low: false, level_triggered: false,
+        backend_instance: 0, route_live: false, valid: false
+    }; INTEL_TGL_MAX_CONTROLLERS
+];
+static mut INTEL_TGL_COMMUNITY_BASE: [u64; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES] = [0; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES];
+static mut INTEL_TGL_COMMUNITY_LENGTH: [u32; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES] = [0; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES];
+static mut INTEL_TGL_COMMUNITY_PADBAR: [u32; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES] = [0; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES];
+static mut INTEL_TGL_COMMUNITY_STRIDE: [u8; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES] = [0; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES];
+static mut INTEL_TGL_COMMUNITY_REVISION: [u16; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES] = [0; INTEL_TGL_MAX_CONTROLLERS * INTEL_TGL_MAX_COMMUNITIES];
+static mut INTEL_TGL_ARMED: [IntelTglArmedConnection; INTEL_TGL_MAX_ARMED] = [
+    IntelTglArmedConnection {
+        connection_id: 0, generation: 0, controller_slot: INTEL_TGL_MAX_CONTROLLERS,
+        community: 0, reg_num: 0, gpi_bit: 0, padcfg_address: 0,
+        original_padcfg0: 0, valid: false
+    }; INTEL_TGL_MAX_ARMED
+];
+static mut INTEL_TGL_CONTROLLER_COUNT: usize = 0;
+static mut INTEL_TGL_READY: bool = false;
+
+@system
+fn intel_tgl_flat(controller_slot: usize, community: usize) -> usize {
+    return controller_slot * INTEL_TGL_MAX_COMMUNITIES + community;
+}
+
+@system
+fn intel_tgl_read_u32(data: *const u8, offset: usize) -> u32 {
+    unsafe {
+        return (data[offset] as u32) | ((data[offset + 1] as u32) << 8) |
+            ((data[offset + 2] as u32) << 16) | ((data[offset + 3] as u32) << 24);
+    }
+}
+
+@system
+fn intel_tgl_hid_equal(data: *const u8, length: usize,
+                       a: u8, b: u8, c: u8, d: u8,
+                       e: u8, f: u8, g: u8, h: u8) -> bool {
+    if data == (null as *const u8) { return false; }
+    if length == 7 {
+        unsafe { return data[0] == a && data[1] == b && data[2] == c && data[3] == d && data[4] == e && data[5] == f && data[6] == g; }
+    }
+    if length == 8 {
+        unsafe { return data[0] == a && data[1] == b && data[2] == c && data[3] == d && data[4] == e && data[5] == f && data[6] == g && data[7] == h; }
+    }
+    return false;
+}
+
+@system
+fn intel_tgl_family(device: *const AmlDiscoveredDevice) -> u8 {
+    if device == (null as *const AmlDiscoveredDevice) { return INTEL_TGL_FAMILY_NONE; }
+    unsafe {
+        if !(*device).valid || (*device).hid_requires_evaluator ||
+           (*device).hid_kind != AML_DISCOVERY_ID_STRING || (*device).hid_data == (null as *const u8) {
+            return INTEL_TGL_FAMILY_NONE;
+        }
+        let p = (*device).hid_data;
+        let n = (*device).hid_length;
+        if intel_tgl_hid_equal(p, n, 73,78,84,51,52,67,53,0) ||
+           intel_tgl_hid_equal(p, n, 73,78,84,67,49,48,53,53) {
+            return INTEL_TGL_FAMILY_LP;
+        }
+        if intel_tgl_hid_equal(p, n, 73,78,84,51,52,67,54,0) {
+            return INTEL_TGL_FAMILY_H;
+        }
+    }
+    return INTEL_TGL_FAMILY_NONE;
+}
+
+@system
+fn intel_tgl_expected_communities(family: u8) -> u8 {
+    if family == INTEL_TGL_FAMILY_LP { return 4; }
+    if family == INTEL_TGL_FAMILY_H { return 5; }
+    return 0;
+}
+
+@system
+fn intel_tgl_community_pin_base(family: u8, community: u8) -> u16 {
+    if family == INTEL_TGL_FAMILY_LP {
+        if community == 0 { return 0; }
+        if community == 1 { return 67; }
+        if community == 2 { return 171; }
+        if community == 3 { return 260; }
+    } else if family == INTEL_TGL_FAMILY_H {
+        if community == 0 { return 0; }
+        if community == 1 { return 79; }
+        if community == 2 { return 181; }
+        if community == 3 { return 218; }
+        if community == 4 { return 267; }
+    }
+    return 0xFFFF;
+}
+
+@system
+fn intel_tgl_community_pin_count(family: u8, community: u8) -> u16 {
+    if family == INTEL_TGL_FAMILY_LP {
+        if community == 0 { return 67; }
+        if community == 1 { return 104; }
+        if community == 2 { return 89; }
+        if community == 3 { return 17; }
+    } else if family == INTEL_TGL_FAMILY_H {
+        if community == 0 { return 79; }
+        if community == 1 { return 102; }
+        if community == 2 { return 37; }
+        if community == 3 { return 49; }
+        if community == 4 { return 24; }
+    }
+    return 0;
+}
+
+@system
+fn intel_tgl_community_group_count(family: u8, community: u8) -> u8 {
+    if family == INTEL_TGL_FAMILY_LP {
+        if community == 0 { return 3; }
+        if community == 1 { return 5; }
+        if community == 2 { return 5; }
+        if community == 3 { return 2; }
+    } else if family == INTEL_TGL_FAMILY_H {
+        if community == 0 { return 4; }
+        if community == 1 { return 5; }
+        if community == 2 { return 2; }
+        if community == 3 { return 3; }
+        if community == 4 { return 2; }
+    }
+    return 0;
+}
+
+@system
+fn intel_tgl_pad_invalid() -> IntelTglPadRoute {
+    return IntelTglPadRoute { physical_pin: 0, community: 0, reg_num: 0, group_base: 0, group_size: 0, padown_num: 0, valid: false };
+}
+
+@system
+fn intel_tgl_pad_route_make(gpio: u16, gpio_base: u16, physical_base: u16,
+                            size: u8, community: u8, reg_num: u8,
+                            padown_num: u8) -> IntelTglPadRoute {
+    if gpio < gpio_base || gpio as u32 >= gpio_base as u32 + size as u32 { return intel_tgl_pad_invalid(); }
+    let offset = gpio - gpio_base;
+    return IntelTglPadRoute {
+        physical_pin: physical_base + offset, community: community, reg_num: reg_num,
+        group_base: physical_base, group_size: size, padown_num: padown_num, valid: true
+    };
+}
+
+@system
+fn intel_tgl_resolve_gpio(family: u8, gpio: u16) -> IntelTglPadRoute {
+    if family == INTEL_TGL_FAMILY_LP {
+        if gpio <= 25 { return intel_tgl_pad_route_make(gpio, 0, 0, 26, 0, 0, 0); }
+        if gpio >= 32 && gpio <= 47 { return intel_tgl_pad_route_make(gpio, 32, 26, 16, 0, 1, 4); }
+        if gpio >= 64 && gpio <= 88 { return intel_tgl_pad_route_make(gpio, 64, 42, 25, 0, 2, 6); }
+        if gpio >= 96 && gpio <= 103 { return intel_tgl_pad_route_make(gpio, 96, 67, 8, 1, 0, 0); }
+        if gpio >= 128 && gpio <= 151 { return intel_tgl_pad_route_make(gpio, 128, 75, 24, 1, 1, 1); }
+        if gpio >= 160 && gpio <= 180 { return intel_tgl_pad_route_make(gpio, 160, 99, 21, 1, 2, 4); }
+        if gpio >= 192 && gpio <= 215 { return intel_tgl_pad_route_make(gpio, 192, 120, 24, 1, 3, 7); }
+        if gpio >= 224 && gpio <= 250 { return intel_tgl_pad_route_make(gpio, 224, 144, 27, 1, 4, 10); }
+        if gpio >= 256 && gpio <= 279 { return intel_tgl_pad_route_make(gpio, 256, 171, 24, 2, 0, 0); }
+        if gpio >= 288 && gpio <= 312 { return intel_tgl_pad_route_make(gpio, 288, 195, 25, 2, 1, 3); }
+        if gpio >= 320 && gpio <= 344 { return intel_tgl_pad_route_make(gpio, 320, 226, 25, 2, 3, 8); }
+        if gpio >= 352 && gpio <= 359 { return intel_tgl_pad_route_make(gpio, 352, 260, 8, 3, 0, 0); }
+        return intel_tgl_pad_invalid();
+    }
+    if family == INTEL_TGL_FAMILY_H {
+        if gpio <= 24 { return intel_tgl_pad_route_make(gpio, 0, 0, 25, 0, 0, 0); }
+        if gpio >= 32 && gpio <= 51 { return intel_tgl_pad_route_make(gpio, 32, 25, 20, 0, 1, 4); }
+        if gpio >= 64 && gpio <= 89 { return intel_tgl_pad_route_make(gpio, 64, 45, 26, 0, 2, 7); }
+        if gpio >= 96 && gpio <= 103 { return intel_tgl_pad_route_make(gpio, 96, 71, 8, 0, 3, 11); }
+        if gpio >= 128 && gpio <= 153 { return intel_tgl_pad_route_make(gpio, 128, 79, 26, 1, 0, 0); }
+        if gpio >= 160 && gpio <= 183 { return intel_tgl_pad_route_make(gpio, 160, 105, 24, 1, 1, 4); }
+        if gpio >= 192 && gpio <= 199 { return intel_tgl_pad_route_make(gpio, 192, 129, 8, 1, 2, 7); }
+        if gpio >= 224 && gpio <= 240 { return intel_tgl_pad_route_make(gpio, 224, 137, 17, 1, 3, 8); }
+        if gpio >= 256 && gpio <= 282 { return intel_tgl_pad_route_make(gpio, 256, 154, 27, 1, 4, 11); }
+        if gpio >= 288 && gpio <= 300 { return intel_tgl_pad_route_make(gpio, 288, 181, 13, 2, 0, 0); }
+        if gpio >= 320 && gpio <= 343 { return intel_tgl_pad_route_make(gpio, 320, 194, 24, 2, 1, 2); }
+        if gpio >= 352 && gpio <= 375 { return intel_tgl_pad_route_make(gpio, 352, 218, 24, 3, 0, 0); }
+        if gpio >= 384 && gpio <= 393 { return intel_tgl_pad_route_make(gpio, 384, 242, 10, 3, 1, 3); }
+        if gpio >= 416 && gpio <= 430 { return intel_tgl_pad_route_make(gpio, 416, 252, 15, 3, 2, 5); }
+        if gpio >= 448 && gpio <= 462 { return intel_tgl_pad_route_make(gpio, 448, 267, 15, 4, 0, 0); }
+    }
+    return intel_tgl_pad_invalid();
+}
+
+@system
+fn intel_tgl_map_resource(base: u64, length: u32) -> bool {
+    if base == 0 || (base & 0xFFF) != 0 || length < 4096 ||
+       length > INTEL_TGL_MAX_MMIO_BYTES || (length & 0xFFF) != 0 { return false; }
+    let mut offset: u32 = 0;
+    while offset < length {
+        if !active_page_tables_map_mmio_identity_4k(base + offset as u64) { return false; }
+        offset += 4096;
+    }
+    return true;
+}
+
+@system
+fn intel_tgl_prepare_community(controller_slot: usize, family: u8,
+                               community: u8, base: u64, length: u32) -> bool {
+    if controller_slot >= INTEL_TGL_MAX_CONTROLLERS || community as usize >= INTEL_TGL_MAX_COMMUNITIES ||
+       !intel_tgl_map_resource(base, length) { return false; }
+    let raw_revision = x86_mmio_read32(base + INTEL_TGL_REVID);
+    if raw_revision == 0xFFFFFFFF { return false; }
+    let revision = ((raw_revision >> 16) & 0xFFFF) as u16;
+    let mut stride: u8 = 8;
+    if revision >= 0x0092 { stride = 16; }
+    let padbar = x86_mmio_read32(base + INTEL_TGL_PADBAR);
+    let pin_count = intel_tgl_community_pin_count(family, community);
+    let group_count = intel_tgl_community_group_count(family, community);
+    if pin_count == 0 || group_count == 0 || (padbar & 3) != 0 { return false; }
+    let minimum_padbar = INTEL_TGL_GPI_IE as u32 + (group_count as u32 * 4);
+    if padbar < minimum_padbar { return false; }
+    let last = padbar as u64 + ((pin_count as u64 - 1) * stride as u64) + 4;
+    if last > length as u64 { return false; }
+    let flat = intel_tgl_flat(controller_slot, community as usize);
+    unsafe {
+        INTEL_TGL_COMMUNITY_BASE[flat] = base;
+        INTEL_TGL_COMMUNITY_LENGTH[flat] = length;
+        INTEL_TGL_COMMUNITY_PADBAR[flat] = padbar;
+        INTEL_TGL_COMMUNITY_STRIDE[flat] = stride;
+        INTEL_TGL_COMMUNITY_REVISION[flat] = revision;
+    }
+    return true;
+}
+
+@system
+fn intel_tgl_probe_device(device_slot: usize) -> bool {
+    if device_slot >= aml_discovery_device_count() { return false; }
+    let device = aml_discovery_device(device_slot);
+    let family = intel_tgl_family(device);
+    if family == INTEL_TGL_FAMILY_NONE { return false; }
+    unsafe {
+        if device == (null as *const AmlDiscoveredDevice) || !(*device).crs_static ||
+           (*device).crs_requires_evaluator || (*device).resource_count == 0 ||
+           INTEL_TGL_CONTROLLER_COUNT >= INTEL_TGL_MAX_CONTROLLERS { return false; }
+        let controller_slot = INTEL_TGL_CONTROLLER_COUNT;
+        let expected = intel_tgl_expected_communities(family) as usize;
+        let start = (*device).resource_start;
+        let count = (*device).resource_count;
+        if start + count < start || start + count > aml_discovery_resource_count() { return false; }
+        let mut memory_index: usize = 0;
+        let mut irq_seen = false;
+        let mut gsi: u32 = 0;
+        let mut active_low = false;
+        let mut level_triggered = false;
+        let mut index = start;
+        while index < start + count {
+            let resource = aml_discovery_resource(index);
+            if resource == (null as *const AmlResourceDescriptor) || !(*resource).valid || (*resource).device_slot != device_slot { return false; }
+            if (*resource).kind == AML_RESOURCE_KIND_LARGE && (*resource).item_name == INTEL_TGL_ACPI_FIXED_MEMORY32 {
+                if (*resource).payload == (null as *const u8) || (*resource).payload_length != 9 { return false; }
+                let base = intel_tgl_read_u32((*resource).payload, 1) as u64;
+                let length = intel_tgl_read_u32((*resource).payload, 5);
+                if memory_index < expected && !intel_tgl_prepare_community(controller_slot, family, memory_index as u8, base, length) { return false; }
+                memory_index += 1;
+            } else if (*resource).kind == AML_RESOURCE_KIND_LARGE && (*resource).item_name == INTEL_TGL_ACPI_EXTENDED_IRQ {
+                if irq_seen || (*resource).payload == (null as *const u8) || (*resource).payload_length < 6 { return false; }
+                let flags = (*resource).payload[0];
+                let interrupt_count = (*resource).payload[1];
+                if (flags & 0xE0) != 0 || (flags & 0x01) == 0 || interrupt_count != 1 { return false; }
+                gsi = intel_tgl_read_u32((*resource).payload, 2);
+                if gsi == 0 { return false; }
+                level_triggered = (flags & 0x02) == 0;
+                active_low = (flags & 0x04) != 0;
+                irq_seen = true;
+            }
+            index += 1;
+        }
+        if memory_index != expected || !irq_seen { return false; }
+        let route = InterruptRoute {
+            source_irq: 0xFF, gsi: gsi, vector: INTEL_TGL_IRQ_VECTOR,
+            active_low: active_low, level_triggered: level_triggered, valid: true
+        };
+        let irq_flags = x86_irq_save_disable();
+        let route_ok = ioapic_program_route_masked(&route, lapic_id());
+        x86_irq_restore(irq_flags);
+        if !route_ok { return false; }
+        let backend_instance = 0x54470000 | ((controller_slot + 1) as u32);
+        if !gpio_physical_backend_register((*device).namespace_index, backend_instance) { return false; }
+        INTEL_TGL_CONTROLLERS[controller_slot] = IntelTglController {
+            namespace_index: (*device).namespace_index, family: family,
+            community_count: expected as u8, gsi: gsi, active_low: active_low,
+            level_triggered: level_triggered, backend_instance: backend_instance,
+            route_live: false, valid: true
+        };
+        INTEL_TGL_CONTROLLER_COUNT += 1;
+        return true;
+    }
+}
+
+@system
+pub fn intel_tigerlake_gpio_probe() -> usize {
+    let mut already_ready = false;
+    unsafe { already_ready = INTEL_TGL_READY; }
+    if already_ready { unsafe { return INTEL_TGL_CONTROLLER_COUNT; } }
+    if !aml_discovery_is_ready() || !active_page_tables_is_ready() ||
+       !ioapic_is_ready() || !lapic_is_ready() || !gpio_core_init() { return 0; }
+    unsafe {
+        let mut i: usize = 0;
+        while i < INTEL_TGL_MAX_CONTROLLERS {
+            INTEL_TGL_CONTROLLERS[i].valid = false;
+            i += 1;
+        }
+        i = 0;
+        while i < INTEL_TGL_MAX_ARMED { INTEL_TGL_ARMED[i].valid = false; i += 1; }
+        INTEL_TGL_CONTROLLER_COUNT = 0;
+    }
+    let count = aml_discovery_device_count();
+    let mut device_slot: usize = 0;
+    while device_slot < count {
+        intel_tgl_probe_device(device_slot);
+        device_slot += 1;
+    }
+    unsafe { INTEL_TGL_READY = true; return INTEL_TGL_CONTROLLER_COUNT; }
+}
+
+@system
+fn intel_tgl_controller_slot(namespace_index: usize) -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < INTEL_TGL_CONTROLLER_COUNT {
+            if INTEL_TGL_CONTROLLERS[slot].valid && INTEL_TGL_CONTROLLERS[slot].namespace_index == namespace_index { return slot; }
+            slot += 1;
+        }
+    }
+    return INTEL_TGL_MAX_CONTROLLERS;
+}
+
+@system
+fn intel_tgl_lock_offset(family: u8) -> u64 {
+    if family == INTEL_TGL_FAMILY_LP { return INTEL_TGL_LP_PADCFGLOCK; }
+    if family == INTEL_TGL_FAMILY_H { return INTEL_TGL_H_PADCFGLOCK; }
+    return 0;
+}
+
+@system
+fn intel_tgl_hostown_offset(family: u8) -> u64 {
+    if family == INTEL_TGL_FAMILY_LP { return INTEL_TGL_LP_HOSTSW_OWN; }
+    if family == INTEL_TGL_FAMILY_H { return INTEL_TGL_H_HOSTSW_OWN; }
+    return 0;
+}
+
+@system
+fn intel_tgl_pad_owned_by_host(controller_slot: usize, route: *const IntelTglPadRoute) -> bool {
+    if route == (null as *const IntelTglPadRoute) { return false; }
+    unsafe {
+        if controller_slot >= INTEL_TGL_CONTROLLER_COUNT || !(*route).valid { return false; }
+        let controller = INTEL_TGL_CONTROLLERS[controller_slot];
+        let flat = intel_tgl_flat(controller_slot, (*route).community as usize);
+        let base = INTEL_TGL_COMMUNITY_BASE[flat];
+        let revision = INTEL_TGL_COMMUNITY_REVISION[flat];
+        let community_pin_base = intel_tgl_community_pin_base(controller.family, (*route).community);
+        if base == 0 || community_pin_base == 0xFFFF || (*route).physical_pin < community_pin_base { return false; }
+        let padno = (*route).physical_pin - community_pin_base;
+        if revision >= 0x0110 {
+            let value = x86_mmio_read32(base + INTEL_TGL_PAD_OWN + (padno as u64 * 4));
+            return (value & 0x7) == 0;
+        }
+        let group_offset = (*route).physical_pin - (*route).group_base;
+        let word = group_offset / 8;
+        let shift = (group_offset % 8) * 4;
+        let value = x86_mmio_read32(base + INTEL_TGL_PAD_OWN + ((*route).padown_num as u64 * 4) + (word as u64 * 4));
+        return (value & (0xF << shift)) == 0;
+    }
+}
+
+@system
+fn intel_tgl_pad_unlocked_and_hostsw(controller_slot: usize, route: *const IntelTglPadRoute) -> bool {
+    if route == (null as *const IntelTglPadRoute) { return false; }
+    unsafe {
+        if controller_slot >= INTEL_TGL_CONTROLLER_COUNT || !(*route).valid { return false; }
+        let controller = INTEL_TGL_CONTROLLERS[controller_slot];
+        let flat = intel_tgl_flat(controller_slot, (*route).community as usize);
+        let base = INTEL_TGL_COMMUNITY_BASE[flat];
+        let group_offset = (*route).physical_pin - (*route).group_base;
+        if group_offset >= 32 { return false; }
+        let bit = (1 as u32) << group_offset;
+        let lock_offset = intel_tgl_lock_offset(controller.family) + ((*route).reg_num as u64 * 8);
+        let lock = x86_mmio_read32(base + lock_offset);
+        let lock_tx = x86_mmio_read32(base + lock_offset + 4);
+        if (lock & bit) != 0 || (lock_tx & bit) != 0 { return false; }
+        let hostown = x86_mmio_read32(base + intel_tgl_hostown_offset(controller.family) + ((*route).reg_num as u64 * 4));
+        return (hostown & bit) != 0;
+    }
+}
+
+@system
+fn intel_tgl_padcfg_address(controller_slot: usize, route: *const IntelTglPadRoute) -> u64 {
+    if route == (null as *const IntelTglPadRoute) { return 0; }
+    unsafe {
+        if controller_slot >= INTEL_TGL_CONTROLLER_COUNT || !(*route).valid { return 0; }
+        let controller = INTEL_TGL_CONTROLLERS[controller_slot];
+        let flat = intel_tgl_flat(controller_slot, (*route).community as usize);
+        let base = INTEL_TGL_COMMUNITY_BASE[flat];
+        let length = INTEL_TGL_COMMUNITY_LENGTH[flat] as u64;
+        let padbar = INTEL_TGL_COMMUNITY_PADBAR[flat] as u64;
+        let stride = INTEL_TGL_COMMUNITY_STRIDE[flat] as u64;
+        let community_base = intel_tgl_community_pin_base(controller.family, (*route).community);
+        if base == 0 || stride == 0 || community_base == 0xFFFF || (*route).physical_pin < community_base { return 0; }
+        let padno = (*route).physical_pin - community_base;
+        let offset = padbar + padno as u64 * stride;
+        if offset + 4 > length { return 0; }
+        return base + offset;
+    }
+}
+
+@system
+fn intel_tgl_program_pad(connection: *const GpioInterruptConnection,
+                         controller_slot: usize, route: *const IntelTglPadRoute,
+                         original: *mut u32) -> bool {
+    if connection == (null as *const GpioInterruptConnection) || route == (null as *const IntelTglPadRoute) || original == (null as *mut u32) { return false; }
+    if !intel_tgl_pad_owned_by_host(controller_slot, route) || !intel_tgl_pad_unlocked_and_hostsw(controller_slot, route) { return false; }
+    let address = intel_tgl_padcfg_address(controller_slot, route);
+    if address == 0 { return false; }
+    let current = x86_mmio_read32(address);
+    if (current & INTEL_TGL_PADCFG0_PMODE_MASK) != 0 || (current & INTEL_TGL_PADCFG0_GPIORXDIS) != 0 { return false; }
+    unsafe { *original = current; }
+    let mut desired = current & INTEL_TGL_PADCFG0_CONTROL_KEEP;
+    desired |= INTEL_TGL_PADCFG0_GPIROUTIOXAPIC;
+    unsafe {
+        if (*connection).trigger == GPIO_TRIGGER_EDGE {
+            if (*connection).polarity == GPIO_POLARITY_ACTIVE_BOTH { desired |= INTEL_TGL_PADCFG0_RXEVCFG_EDGE_BOTH; }
+            else { desired |= INTEL_TGL_PADCFG0_RXEVCFG_EDGE; }
+        } else {
+            if (*connection).polarity == GPIO_POLARITY_ACTIVE_BOTH { return false; }
+            desired |= INTEL_TGL_PADCFG0_RXEVCFG_LEVEL;
+        }
+        if (*connection).polarity == GPIO_POLARITY_ACTIVE_LOW { desired |= INTEL_TGL_PADCFG0_RXINV; }
+    }
+    x86_mmio_write32(address, desired);
+    return (x86_mmio_read32(address) & INTEL_TGL_PADCFG0_CONTROL_MASK) == (desired & INTEL_TGL_PADCFG0_CONTROL_MASK);
+}
+
+@system
+fn intel_tgl_restore_pad(address: u64, original: u32) -> void {
+    if address == 0 { return; }
+    let current = x86_mmio_read32(address);
+    let restored = (current & INTEL_TGL_PADCFG0_CONTROL_KEEP) | (original & INTEL_TGL_PADCFG0_CONTROL_MASK);
+    x86_mmio_write32(address, restored);
+}
+
+@system
+fn intel_tgl_gpi_addresses(controller_slot: usize, route: *const IntelTglPadRoute,
+                           is_address: *mut u64, ie_address: *mut u64, bit: *mut u32) -> bool {
+    if route == (null as *const IntelTglPadRoute) || is_address == (null as *mut u64) ||
+       ie_address == (null as *mut u64) || bit == (null as *mut u32) { return false; }
+    unsafe {
+        let flat = intel_tgl_flat(controller_slot, (*route).community as usize);
+        let base = INTEL_TGL_COMMUNITY_BASE[flat];
+        let length = INTEL_TGL_COMMUNITY_LENGTH[flat] as u64;
+        let offset = (*route).physical_pin - (*route).group_base;
+        if offset >= 32 { return false; }
+        let is_off = INTEL_TGL_GPI_IS + ((*route).reg_num as u64 * 4);
+        let ie_off = INTEL_TGL_GPI_IE + ((*route).reg_num as u64 * 4);
+        if ie_off + 4 > length { return false; }
+        *is_address = base + is_off;
+        *ie_address = base + ie_off;
+        *bit = (1 as u32) << offset;
+        return true;
+    }
+}
+
+@system
+fn intel_tgl_owned_ie_mask(controller_slot: usize, community: u8, reg_num: u8) -> u32 {
+    let mut mask: u32 = 0;
+    unsafe {
+        let mut i: usize = 0;
+        while i < INTEL_TGL_MAX_ARMED {
+            if INTEL_TGL_ARMED[i].valid && INTEL_TGL_ARMED[i].controller_slot == controller_slot &&
+               INTEL_TGL_ARMED[i].community == community && INTEL_TGL_ARMED[i].reg_num == reg_num {
+                mask |= INTEL_TGL_ARMED[i].gpi_bit;
+            }
+            i += 1;
+        }
+    }
+    return mask;
+}
+
+@system
+fn intel_tgl_controller_ie_is_owned(controller_slot: usize) -> bool {
+    unsafe {
+        if controller_slot >= INTEL_TGL_CONTROLLER_COUNT || !INTEL_TGL_CONTROLLERS[controller_slot].valid { return false; }
+        let controller = INTEL_TGL_CONTROLLERS[controller_slot];
+        let mut community: u8 = 0;
+        while community < controller.community_count {
+            let flat = intel_tgl_flat(controller_slot, community as usize);
+            let base = INTEL_TGL_COMMUNITY_BASE[flat];
+            let groups = intel_tgl_community_group_count(controller.family, community);
+            let mut reg_num: u8 = 0;
+            while reg_num < groups {
+                let actual = x86_mmio_read32(base + INTEL_TGL_GPI_IE + reg_num as u64 * 4);
+                let owned = intel_tgl_owned_ie_mask(controller_slot, community, reg_num);
+                if actual != owned { return false; }
+                reg_num += 1;
+            }
+            community += 1;
+        }
+    }
+    return true;
+}
+
+@system
+fn intel_tgl_controller_has_armed(controller_slot: usize) -> bool {
+    unsafe {
+        let mut i: usize = 0;
+        while i < INTEL_TGL_MAX_ARMED {
+            if INTEL_TGL_ARMED[i].valid && INTEL_TGL_ARMED[i].controller_slot == controller_slot { return true; }
+            i += 1;
+        }
+    }
+    return false;
+}
+
+@system
+pub fn intel_tigerlake_gpio_arm_connection(connection_id: u32, generation: u32) -> bool {
+    let mut ready = false;
+    unsafe { ready = INTEL_TGL_READY; }
+    if !ready { intel_tigerlake_gpio_probe(); }
+    let connection = gpio_connection_query(connection_id, generation);
+    if !connection.valid || connection.state != GPIO_PIN_STATE_CONFIGURED { return false; }
+    let controller_slot = intel_tgl_controller_slot(connection.controller_namespace_index);
+    if controller_slot >= INTEL_TGL_MAX_CONTROLLERS { return false; }
+    let controller = unsafe { INTEL_TGL_CONTROLLERS[controller_slot] };
+    let route = intel_tgl_resolve_gpio(controller.family, connection.pin_number);
+    if !route.valid { return false; }
+    let mut free_slot = INTEL_TGL_MAX_ARMED;
+    unsafe {
+        let mut i: usize = 0;
+        while i < INTEL_TGL_MAX_ARMED {
+            if INTEL_TGL_ARMED[i].valid &&
+               INTEL_TGL_ARMED[i].controller_slot == controller_slot &&
+               INTEL_TGL_ARMED[i].community == route.community &&
+               INTEL_TGL_ARMED[i].reg_num == route.reg_num {
+                let existing_offset = INTEL_TGL_ARMED[i].gpi_bit;
+                let mut is_address: u64 = 0;
+                let mut ie_address: u64 = 0;
+                let mut candidate_bit: u32 = 0;
+                if !intel_tgl_gpi_addresses(controller_slot, &route, &mut is_address, &mut ie_address, &mut candidate_bit) { return false; }
+                if existing_offset == candidate_bit { return false; }
+            }
+            if !INTEL_TGL_ARMED[i].valid && free_slot == INTEL_TGL_MAX_ARMED { free_slot = i; }
+            i += 1;
+        }
+    }
+    if free_slot >= INTEL_TGL_MAX_ARMED { return false; }
+
+    let irq_flags = x86_irq_save_disable();
+    if !intel_tgl_controller_ie_is_owned(controller_slot) { x86_irq_restore(irq_flags); return false; }
+    let mut original: u32 = 0;
+    if !intel_tgl_program_pad(&connection, controller_slot, &route, &mut original) {
+        x86_irq_restore(irq_flags); return false;
+    }
+    let padcfg = intel_tgl_padcfg_address(controller_slot, &route);
+    let mut is_address: u64 = 0;
+    let mut ie_address: u64 = 0;
+    let mut bit: u32 = 0;
+    if !intel_tgl_gpi_addresses(controller_slot, &route, &mut is_address, &mut ie_address, &mut bit) {
+        intel_tgl_restore_pad(padcfg, original); x86_irq_restore(irq_flags); return false;
+    }
+    x86_mmio_write32(is_address, bit);
+    let enabled = x86_mmio_read32(ie_address) | bit;
+    x86_mmio_write32(ie_address, enabled);
+    if (x86_mmio_read32(ie_address) & bit) == 0 {
+        intel_tgl_restore_pad(padcfg, original); x86_irq_restore(irq_flags); return false;
+    }
+    if !gpio_connection_activate(connection_id, generation) {
+        x86_mmio_write32(ie_address, x86_mmio_read32(ie_address) & (0xFFFFFFFF - bit));
+        x86_mmio_write32(is_address, bit);
+        intel_tgl_restore_pad(padcfg, original);
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+    unsafe {
+        INTEL_TGL_ARMED[free_slot] = IntelTglArmedConnection {
+            connection_id: connection_id, generation: generation, controller_slot: controller_slot,
+            community: route.community, reg_num: route.reg_num, gpi_bit: bit,
+            padcfg_address: padcfg, original_padcfg0: original, valid: true
+        };
+    }
+    let route_desc = InterruptRoute {
+        source_irq: 0xFF, gsi: controller.gsi, vector: INTEL_TGL_IRQ_VECTOR,
+        active_low: controller.active_low, level_triggered: controller.level_triggered, valid: true
+    };
+    let mut route_ok = true;
+    if !controller.route_live { route_ok = ioapic_program_route_unmasked(&route_desc, lapic_id()); }
+    if !route_ok {
+        unsafe { INTEL_TGL_ARMED[free_slot].valid = false; }
+        gpio_connection_deactivate(connection_id, generation);
+        x86_mmio_write32(ie_address, x86_mmio_read32(ie_address) & (0xFFFFFFFF - bit));
+        x86_mmio_write32(is_address, bit);
+        intel_tgl_restore_pad(padcfg, original);
+        x86_irq_restore(irq_flags);
+        return false;
+    }
+    unsafe { INTEL_TGL_CONTROLLERS[controller_slot].route_live = true; }
+    x86_irq_restore(irq_flags);
+    return true;
+}
+
+@system
+pub fn intel_tigerlake_gpio_disarm_connection(connection_id: u32, generation: u32) -> bool {
+    let irq_flags = x86_irq_save_disable();
+    unsafe {
+        let mut i: usize = 0;
+        while i < INTEL_TGL_MAX_ARMED {
+            if INTEL_TGL_ARMED[i].valid && INTEL_TGL_ARMED[i].connection_id == connection_id && INTEL_TGL_ARMED[i].generation == generation {
+                let armed = INTEL_TGL_ARMED[i];
+                let flat = intel_tgl_flat(armed.controller_slot, armed.community as usize);
+                let base = INTEL_TGL_COMMUNITY_BASE[flat];
+                let ie = base + INTEL_TGL_GPI_IE + armed.reg_num as u64 * 4;
+                let isr = base + INTEL_TGL_GPI_IS + armed.reg_num as u64 * 4;
+                x86_mmio_write32(ie, x86_mmio_read32(ie) & (0xFFFFFFFF - armed.gpi_bit));
+                x86_mmio_write32(isr, armed.gpi_bit);
+                if !gpio_connection_deactivate(connection_id, generation) {
+                    x86_irq_restore(irq_flags); return false;
+                }
+                intel_tgl_restore_pad(armed.padcfg_address, armed.original_padcfg0);
+                INTEL_TGL_ARMED[i].valid = false;
+                if !intel_tgl_controller_has_armed(armed.controller_slot) {
+                    let controller = INTEL_TGL_CONTROLLERS[armed.controller_slot];
+                    let route_desc = InterruptRoute {
+                        source_irq: 0xFF, gsi: controller.gsi, vector: INTEL_TGL_IRQ_VECTOR,
+                        active_low: controller.active_low, level_triggered: controller.level_triggered, valid: true
+                    };
+                    if !ioapic_program_route_masked(&route_desc, lapic_id()) {
+                        x86_irq_restore(irq_flags); return false;
+                    }
+                    INTEL_TGL_CONTROLLERS[armed.controller_slot].route_live = false;
+                }
+                x86_irq_restore(irq_flags);
+                return true;
+            }
+            i += 1;
+        }
+    }
+    x86_irq_restore(irq_flags);
+    return false;
+}
+
+@system
+pub fn intel_tigerlake_gpio_irq_dispatch() -> usize {
+    let mut handled: usize = 0;
+    unsafe {
+        let mut i: usize = 0;
+        while i < INTEL_TGL_MAX_ARMED {
+            if INTEL_TGL_ARMED[i].valid {
+                let armed = INTEL_TGL_ARMED[i];
+                let flat = intel_tgl_flat(armed.controller_slot, armed.community as usize);
+                let base = INTEL_TGL_COMMUNITY_BASE[flat];
+                let is_addr = base + INTEL_TGL_GPI_IS + armed.reg_num as u64 * 4;
+                let ie_addr = base + INTEL_TGL_GPI_IE + armed.reg_num as u64 * 4;
+                let pending = x86_mmio_read32(is_addr) & x86_mmio_read32(ie_addr) & armed.gpi_bit;
+                if pending != 0 {
+                    if gpio_connection_signal(armed.connection_id) { handled += 1; }
+                    x86_mmio_write32(is_addr, pending);
+                }
+            }
+            i += 1;
+        }
+    }
+    return handled;
+}
+
+@system
+pub fn intel_tigerlake_gpio_controller_count() -> usize {
+    unsafe { return INTEL_TGL_CONTROLLER_COUNT; }
+}
+
+@system
+pub fn intel_tigerlake_gpio_is_ready() -> bool {
+    unsafe { return INTEL_TGL_READY; }
+}

@@ -50,6 +50,8 @@ import kernel::drivers::i2c_controller::*;
 import kernel::drivers::i2c_controller_registry::*;
 import kernel::drivers::i2c_discovery_bridge::*;
 import kernel::drivers::gpio_core::*;
+import kernel::drivers::gpio_physical::*;
+import kernel::drivers::intel_tigerlake_gpio::*;
 import kernel::drivers::i2c_device::*;
 import kernel::drivers::i2c_physical_discovery::*;
 import kernel::drivers::i2c_designware::*;
