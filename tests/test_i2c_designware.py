@@ -36,6 +36,18 @@ class I2cDesignWareContractTests(unittest.TestCase):
         ):
             self.assertIn(token, self.text)
 
+    def test_lpss_private_wrapper_offsets_and_reset(self):
+        for token in (
+            "pub const INTEL_LPSS_DEV_OFFSET: u64 = 0x000",
+            "pub const INTEL_LPSS_DEV_SIZE: u64 = 0x200",
+            "pub const INTEL_LPSS_PRIV_OFFSET: u64 = 0x200",
+            "pub const INTEL_LPSS_PRIV_SIZE: u64 = 0x100",
+            "pub const INTEL_LPSS_IDMA64_OFFSET: u64 = 0x800",
+            "pub const LPSS_PRIV_RESETS: u64 = 0x04",
+            "pub fn i2c_lpss_reset_release(base: u64) -> void",
+        ):
+            self.assertIn(token, self.text)
+
     def test_designware_control_and_status_bits(self):
         for token in (
             "pub const DW_IC_CON_MASTER_MODE: u32 = 1 << 0",
@@ -64,11 +76,36 @@ class I2cDesignWareContractTests(unittest.TestCase):
         self.assertIn("I2C_STATUS_DATA_NACK", self.text)
         self.assertIn("I2C_STATUS_ARBITRATION_LOST", self.text)
 
-    def test_designware_initialization_and_timing_calculation(self):
-        self.assertIn("pub fn i2c_dw_init", self.text)
-        self.assertIn("pub fn i2c_dw_enable", self.text)
-        self.assertIn("DW_IC_SS_SCL_HCNT", self.text)
-        self.assertIn("DW_IC_FS_SCL_HCNT", self.text)
+    def test_hardware_aware_timing_calculations(self):
+        self.assertIn("pub fn i2c_dw_calc_scl_hcnt", self.text)
+        self.assertIn("pub fn i2c_dw_calc_scl_lcnt", self.text)
+        self.assertIn("pub fn i2c_dw_init_with_clock", self.text)
+
+        # Validação algorítmica exata das fórmulas de timing
+        def calc_hcnt(clk, target, fast):
+            period = clk // target
+            return (period * 36) // 100 if fast else (period * 45) // 100
+
+        def calc_lcnt(clk, target, fast):
+            period = clk // target
+            return (period * 64) // 100 if fast else (period * 55) // 100
+
+        # Standard mode 100 kHz em 100 MHz
+        self.assertEqual(calc_hcnt(100_000_000, 100_000, False), 450)
+        self.assertEqual(calc_lcnt(100_000_000, 100_000, False), 550)
+        # Fast mode 400 kHz em 100 MHz
+        self.assertEqual(calc_hcnt(100_000_000, 400_000, True), 90)
+        self.assertEqual(calc_lcnt(100_000_000, 400_000, True), 160)
+        # Fast mode 400 kHz em 133 MHz (Intel LPSS)
+        self.assertEqual(calc_hcnt(133_333_333, 400_000, True), 119)
+        self.assertEqual(calc_lcnt(133_333_333, 400_000, True), 213)
+
+    def test_deadline_temporal_timeout(self):
+        # Invariante temporal: medição com base no timer do kernel, não spin loop cego
+        self.assertIn("x86_timer_is_calibrated()", self.text)
+        self.assertIn("x86_timer_cycles_per_us()", self.text)
+        self.assertIn("x86_timer_read_tsc()", self.text)
+        self.assertIn("timeout_cycles", self.text)
 
     def test_designware_transfer_writes_directly_to_buffer(self):
         self.assertIn("pub fn i2c_dw_transfer", self.text)

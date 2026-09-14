@@ -28,26 +28,35 @@ class I2cPhysicalDiscoveryContractTests(unittest.TestCase):
         ):
             self.assertIn(token, self.text)
 
-    def test_hardware_identification_intel_lpss(self):
-        self.assertIn("pub fn i2c_physical_identify_hardware", self.text)
-        self.assertIn("0x9D60", self.text)
-        self.assertIn("0xA0C5", self.text)
-        self.assertIn("I2C_HARDWARE_TYPE_INTEL_LPSS", self.text)
-        self.assertIn("I2C_HARDWARE_TYPE_DESIGNWARE", self.text)
+    def test_hardware_filter_rejects_non_i2c_intel_devices(self):
+        # Invariante crítica P0: Intel NICs, GPUs, SATA, NVMe e xHCI NUNCA podem ser tratados como I2C
+        self.assertIn("pub fn i2c_physical_identify_hardware(vendor_id: u16, device_id: u16, class_code: u8, subclass: u8) -> u8", self.text)
+        self.assertIn("let is_valid_pci_serial_class = class_code == PCI_CLASS_SERIAL_BUS", self.text)
+        self.assertIn("subclass == PCI_SUBCLASS_SERIAL_OTHER || subclass == PCI_SUBCLASS_SMBUS", self.text)
+        self.assertIn("return I2C_HARDWARE_TYPE_UNKNOWN;", self.text)
 
-    def test_pci_probing_and_vmm_mapping(self):
-        self.assertIn("pub fn i2c_physical_probe_pci", self.text)
-        self.assertIn("pci_get_device_count()", self.text)
-        self.assertIn("pci_probe_bar", self.text)
-        self.assertIn("pci_enable_device", self.text)
-        self.assertIn("active_page_tables_map_mmio_identity_4k", self.text)
+    def test_pci_probing_checks_valid_bar_step(self):
+        # Invariante crítica P0: pci_probe_bar retorna 1 (32-bit) ou 2 (64-bit)
+        self.assertIn("let bar_step = pci_probe_bar(bus, slot, func, 0, &mut bar0);", self.text)
+        self.assertIn("if bar_step >= 1 && bar0.base_address != 0 && !bar0.is_io", self.text)
 
-    def test_thread_safety_and_mmio_getter(self):
-        self.assertIn("pub fn i2c_physical_get_mmio_base", self.text)
-        self.assertIn("x86_irq_save_disable()", self.text)
-        self.assertIn("x86_irq_restore(flags)", self.text)
-        self.assertIn("spinlock_lock(&mut I2C_PHYSICAL_LOCK)", self.text)
-        self.assertIn("spinlock_unlock(&mut I2C_PHYSICAL_LOCK)", self.text)
+    def test_hardware_initialization_and_backend_activation(self):
+        # Invariante P0: driver inicializa o hardware e ativa o controlador no registry
+        self.assertIn("i2c_dw_init(phys_base, 400000)", self.text)
+        self.assertIn("i2c_controller_registry_publish_backend(", self.text)
+        self.assertIn("i2c_controller_registry_activate(", self.text)
+        self.assertIn("i2c_lpss_reset_release(phys_base)", self.text)
+
+    def test_acpi_adr_matching(self):
+        # Invariante P0: associação do PCI físico com o namespace ACPI via _ADR
+        self.assertIn("pub fn i2c_physical_find_acpi_namespace(slot: u8, func: u8) -> usize", self.text)
+        self.assertIn("let target_adr = ((slot as u64) << 16) | (func as u64);", self.text)
+
+    def test_smp_per_controller_locking(self):
+        # Invariante SMP: serialização exclusiva da transação por controlador físico
+        self.assertIn("pub fn i2c_physical_lock_controller(backend_instance: u32) -> u64", self.text)
+        self.assertIn("pub fn i2c_physical_unlock_controller(backend_instance: u32, flags: u64) -> void", self.text)
+        self.assertIn("I2C_PHYSICAL_CONTROLLER_LOCKS", self.text)
 
 
 if __name__ == "__main__":

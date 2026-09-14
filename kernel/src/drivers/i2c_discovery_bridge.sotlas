@@ -298,3 +298,32 @@ pub fn i2c_discovery_bridge_count() -> usize {
     x86_irq_restore(flags);
     return count;
 }
+
+@system
+pub fn i2c_discovery_find_unbound_controller() -> I2cControllerHandle {
+    let flags = x86_irq_save_disable();
+    let mut handle = i2c_controller_invalid_handle();
+    unsafe {
+        if !I2C_BRIDGE_LOCK_READY || !spinlock_lock(&mut I2C_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return handle;
+        }
+        if I2C_BRIDGE_READY {
+            let mut index: usize = 0;
+            while index < I2C_BRIDGE_CAPACITY {
+                if I2C_BRIDGE_CONTROLLERS[index].valid {
+                    let h = I2C_BRIDGE_CONTROLLERS[index].handle;
+                    let desc = i2c_controller_registry_descriptor(h.controller_id, h.generation);
+                    if desc.valid && !desc.backend_ready {
+                        handle = h;
+                        break;
+                    }
+                }
+                index += 1;
+            }
+        }
+        spinlock_unlock(&mut I2C_BRIDGE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return handle;
+}
