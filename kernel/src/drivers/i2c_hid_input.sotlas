@@ -10,6 +10,7 @@ import kernel::sync::spinlock::*;
 import kernel::drivers::i2c_core::*;
 import kernel::drivers::i2c_device::*;
 import kernel::drivers::hid_report_descriptor::*;
+import kernel::drivers::hid_input_events::*;
 
 pub const I2C_HID_MAX_INPUT_DEVICES: usize = 4;
 pub const I2C_HID_MAX_INPUT_BUFFER_BYTES: usize = 256;
@@ -22,6 +23,10 @@ pub struct I2cHidInputDevice {
     pub input_register: u16;
     pub max_input_length: u16;
     pub gpio_pin: u16;
+    pub gpio_connection_id: u32;
+    pub gpio_generation: u32;
+    pub input_device_id: u32;
+    pub input_device_generation: u32;
     pub is_mouse: bool;
     pub is_touchpad: bool;
     pub is_keyboard: bool;
@@ -41,6 +46,10 @@ static mut I2C_HID_INPUT_DEVICES: [I2cHidInputDevice; I2C_HID_MAX_INPUT_DEVICES]
         input_register: 0,
         max_input_length: 0,
         gpio_pin: 0,
+        gpio_connection_id: 0,
+        gpio_generation: 0,
+        input_device_id: 0,
+        input_device_generation: 0,
         is_mouse: false,
         is_touchpad: false,
         is_keyboard: false,
@@ -94,6 +103,10 @@ pub fn i2c_hid_input_register_device(device_slot: usize,
                                      input_register: u16,
                                      max_input_length: u16,
                                      gpio_pin: u16,
+                                     gpio_connection_id: u32,
+                                     gpio_generation: u32,
+                                     input_device_id: u32,
+                                     input_device_generation: u32,
                                      is_mouse: bool,
                                      is_touchpad: bool,
                                      is_keyboard: bool) -> bool {
@@ -113,6 +126,10 @@ pub fn i2c_hid_input_register_device(device_slot: usize,
                     input_register: input_register,
                     max_input_length: max_input_length,
                     gpio_pin: gpio_pin,
+                    gpio_connection_id: gpio_connection_id,
+                    gpio_generation: gpio_generation,
+                    input_device_id: input_device_id,
+                    input_device_generation: input_device_generation,
                     is_mouse: is_mouse,
                     is_touchpad: is_touchpad,
                     is_keyboard: is_keyboard,
@@ -165,14 +182,15 @@ pub fn i2c_hid_input_fetch_report(device_index: usize,
     let flags = x86_irq_save_disable();
     let mut dev = I2cHidInputDevice {
         device_slot: 0, i2c_device_id: 0, i2c_generation: 0, input_register: 0,
-        max_input_length: 0, gpio_pin: 0, is_mouse: false, is_touchpad: false,
-        is_keyboard: false, pending_irq: false, reports_received: 0, valid: false
+        max_input_length: 0, gpio_pin: 0, gpio_connection_id: 0, gpio_generation: 0,
+        input_device_id: 0, input_device_generation: 0, is_mouse: false,
+        is_touchpad: false, is_keyboard: false, pending_irq: false,
+        reports_received: 0, valid: false
     };
     unsafe {
         if I2C_HID_INPUT_LOCK_READY && spinlock_lock(&mut I2C_HID_INPUT_LOCK) {
             if I2C_HID_INPUT_READY && I2C_HID_INPUT_DEVICES[device_index].valid {
                 dev = I2C_HID_INPUT_DEVICES[device_index];
-                I2C_HID_INPUT_DEVICES[device_index].pending_irq = false;
             }
             spinlock_unlock(&mut I2C_HID_INPUT_LOCK);
         }
@@ -185,15 +203,11 @@ pub fn i2c_hid_input_fetch_report(device_index: usize,
     if read_len > buf_capacity { read_len = buf_capacity; }
     if read_len < 2 { read_len = 2; }
 
-    let mut reg_bytes: [u8; 2] = [0; 2];
-    reg_bytes[0] = (dev.input_register & 0xFF) as u8;
-    reg_bytes[1] = ((dev.input_register >> 8) & 0xFF) as u8;
-
-    let status = i2c_device_write_read(
+    // No protocolo HID-over-I2C de referência (Linux), o serviço de IRQ realiza
+    // uma transação READ pura diretamente no endereço do escravo.
+    let status = i2c_device_read(
         dev.i2c_device_id,
         dev.i2c_generation,
-        &reg_bytes[0],
-        2,
         out_buf,
         read_len
     );
@@ -207,22 +221,103 @@ pub fn i2c_hid_input_fetch_report(device_index: usize,
         (out_buf[0] as usize) | ((out_buf[1] as usize) << 8)
     };
 
-    if wire_length < 2 || wire_length > read_len {
-        return I2C_STATUS_OK; // Relatório vazio ou nulo
+    if wire_length == 0 {
+        // Handshake de confirmação de RESET ou frame nulo
+        let clear_flags = x86_irq_save_disable();
+        unsafe {
+            if I2C_HID_INPUT_LOCK_READY && spinlock_lock(&mut I2C_HID_INPUT_LOCK) {
+                if I2C_HID_INPUT_READY && I2C_HID_INPUT_DEVICES[device_index].valid {
+                    I2C_HID_INPUT_DEVICES[device_index].pending_irq = false;
+                }
+                spinlock_unlock(&mut I2C_HID_INPUT_LOCK);
+            }
+        }
+        x86_irq_restore(clear_flags);
+        return I2C_STATUS_OK;
+    }
+
+    if wire_length == 1 || wire_length > read_len {
+        return I2C_STATUS_INVALID;
     }
 
     let payload_len = wire_length - 2;
     unsafe {
         *out_report_len = payload_len;
+        let finish_flags = x86_irq_save_disable();
         if I2C_HID_INPUT_LOCK_READY && spinlock_lock(&mut I2C_HID_INPUT_LOCK) {
             if I2C_HID_INPUT_READY && I2C_HID_INPUT_DEVICES[device_index].valid {
+                I2C_HID_INPUT_DEVICES[device_index].pending_irq = false;
                 I2C_HID_INPUT_DEVICES[device_index].reports_received += 1;
             }
             spinlock_unlock(&mut I2C_HID_INPUT_LOCK);
         }
+        x86_irq_restore(finish_flags);
+    }
+
+    if payload_len > 0 && dev.input_device_id != 0 && dev.input_device_generation != 0 {
+        unsafe {
+            let report_ptr = ((out_buf as usize) + 2) as *const u8;
+            hid_input_events_process_report_for_device(
+                dev.input_device_id,
+                dev.input_device_generation,
+                report_ptr,
+                payload_len
+            );
+        }
     }
 
     return I2C_STATUS_OK;
+}
+
+@system
+pub fn i2c_hid_input_has_pending_irq(device_index: usize) -> bool {
+    if device_index >= I2C_HID_MAX_INPUT_DEVICES { return false; }
+    let flags = x86_irq_save_disable();
+    let mut pending = false;
+    unsafe {
+        if I2C_HID_INPUT_LOCK_READY && spinlock_lock(&mut I2C_HID_INPUT_LOCK) {
+            if I2C_HID_INPUT_READY && I2C_HID_INPUT_DEVICES[device_index].valid {
+                pending = I2C_HID_INPUT_DEVICES[device_index].pending_irq;
+            }
+            spinlock_unlock(&mut I2C_HID_INPUT_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+    return pending;
+}
+
+@system
+pub fn i2c_hid_input_get_input_device_id(device_index: usize) -> u32 {
+    if device_index >= I2C_HID_MAX_INPUT_DEVICES { return 0; }
+    let flags = x86_irq_save_disable();
+    let mut dev_id: u32 = 0;
+    unsafe {
+        if I2C_HID_INPUT_LOCK_READY && spinlock_lock(&mut I2C_HID_INPUT_LOCK) {
+            if I2C_HID_INPUT_READY && I2C_HID_INPUT_DEVICES[device_index].valid {
+                dev_id = I2C_HID_INPUT_DEVICES[device_index].input_device_id;
+            }
+            spinlock_unlock(&mut I2C_HID_INPUT_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+    return dev_id;
+}
+
+@system
+pub fn i2c_hid_input_get_input_device_generation(device_index: usize) -> u32 {
+    if device_index >= I2C_HID_MAX_INPUT_DEVICES { return 0; }
+    let flags = x86_irq_save_disable();
+    let mut gen: u32 = 0;
+    unsafe {
+        if I2C_HID_INPUT_LOCK_READY && spinlock_lock(&mut I2C_HID_INPUT_LOCK) {
+            if I2C_HID_INPUT_READY && I2C_HID_INPUT_DEVICES[device_index].valid {
+                gen = I2C_HID_INPUT_DEVICES[device_index].input_device_generation;
+            }
+            spinlock_unlock(&mut I2C_HID_INPUT_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+    return gen;
 }
 
 @system

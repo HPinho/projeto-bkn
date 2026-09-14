@@ -67,7 +67,8 @@ static mut XHCI_HID_DESCRIPTOR_STATES: [XhciHidDescriptorState; XHCI_HID_DESCRIP
             feature_bits: 0,
             has_report_ids: false,
             has_keyboard_application: false,
-            has_mouse_application: false
+            has_mouse_application: false,
+            has_touchpad_application: false
         }
     };
     XHCI_HID_DESCRIPTOR_SLOT_CAPACITY

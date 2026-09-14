@@ -183,6 +183,14 @@ class I2cHidDescriptorTests(unittest.TestCase):
         raw = build_canonical_hid_desc(command_reg=0)
         self.assertIsNone(decode_hid_descriptor(raw))
 
+    def test_touchpad_and_digitizer_usage_support(self):
+        # Verifica suporte a Digitizer e Touchpad no parser de descritor HID
+        rep_desc_text = (ROOT / "kernel/src/drivers/hid_report_descriptor.sotlas").read_text(encoding="utf-8")
+        self.assertIn("pub const HID_USAGE_PAGE_DIGITIZER: u32 = 0x0D;", rep_desc_text)
+        self.assertIn("pub const HID_USAGE_DIGITIZER_TOUCH_PAD: u32 = 0x05;", rep_desc_text)
+        self.assertIn("pub has_touchpad_application: bool;", rep_desc_text)
+
 
 if __name__ == "__main__":
     unittest.main()
+

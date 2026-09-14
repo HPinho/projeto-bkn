@@ -47,6 +47,10 @@ pub fn i2c_hid_command_set_power(device_id: u32,
                                  command_register: u16,
                                  power_state: u8) -> u8 {
     if command_register == 0 { return I2C_STATUS_INVALID; }
+    // Validação estrita: somente ON (0x00) ou SLEEP (0x01)
+    if power_state != I2C_HID_POWER_ON && power_state != I2C_HID_POWER_SLEEP {
+        return I2C_STATUS_INVALID;
+    }
 
     let mut payload: [u8; 4] = [0; 4];
     payload[0] = (command_register & 0xFF) as u8;
@@ -55,4 +59,114 @@ pub fn i2c_hid_command_set_power(device_id: u32,
     payload[3] = I2C_HID_CMD_SET_POWER;
 
     return i2c_device_write(device_id, generation, &payload[0], 4);
+}
+
+@system
+pub fn i2c_hid_command_get_report(device_id: u32,
+                                  generation: u32,
+                                  command_register: u16,
+                                  data_register: u16,
+                                  report_type: u8,
+                                  report_id: u8,
+                                  out_buf: *mut u8,
+                                  buf_capacity: usize,
+                                  out_len: *mut usize) -> u8 {
+    if command_register == 0 || out_buf == (null as *mut u8) ||
+       out_len == (null as *mut usize) || buf_capacity < 2 {
+        return I2C_STATUS_INVALID;
+    }
+    unsafe { *out_len = 0; }
+
+    let mut cmd: [u8; 6] = [0; 6];
+    cmd[0] = (command_register & 0xFF) as u8;
+    cmd[1] = ((command_register >> 8) & 0xFF) as u8;
+
+    let mut cmd_len: usize = 4;
+    let r_type = report_type & 0x03;
+    if report_id < 15 {
+        cmd[2] = (r_type << 4) | (report_id & 0x0F);
+        cmd[3] = I2C_HID_CMD_GET_REPORT;
+    } else {
+        cmd[2] = (r_type << 4) | 0x0F;
+        cmd[3] = report_id;
+        cmd[4] = I2C_HID_CMD_GET_REPORT;
+        cmd_len = 5;
+    }
+
+    let write_status = i2c_device_write(device_id, generation, &cmd[0], cmd_len);
+    if write_status != I2C_STATUS_OK { return write_status; }
+
+    // Lê dados de resposta a partir de data_register
+    if data_register != 0 {
+        let mut reg_bytes: [u8; 2] = [0; 2];
+        reg_bytes[0] = (data_register & 0xFF) as u8;
+        reg_bytes[1] = ((data_register >> 8) & 0xFF) as u8;
+        let read_status = i2c_device_write_read(
+            device_id, generation, &reg_bytes[0], 2, out_buf, buf_capacity
+        );
+        if read_status != I2C_STATUS_OK { return read_status; }
+    } else {
+        let read_status = i2c_device_read(device_id, generation, out_buf, buf_capacity);
+        if read_status != I2C_STATUS_OK { return read_status; }
+    }
+
+    let total_len = unsafe {
+        (out_buf[0] as usize) | ((out_buf[1] as usize) << 8)
+    };
+    if total_len < 2 || total_len > buf_capacity {
+        return I2C_STATUS_INVALID;
+    }
+    unsafe { *out_len = total_len - 2; }
+    return I2C_STATUS_OK;
+}
+
+@system
+pub fn i2c_hid_command_set_report(device_id: u32,
+                                  generation: u32,
+                                  command_register: u16,
+                                  data_register: u16,
+                                  report_type: u8,
+                                  report_id: u8,
+                                  report_data: *const u8,
+                                  report_length: usize) -> u8 {
+    if command_register == 0 || (report_length > 0 && report_data == (null as *const u8)) ||
+       report_length > 256 {
+        return I2C_STATUS_INVALID;
+    }
+
+    let mut cmd: [u8; 6] = [0; 6];
+    cmd[0] = (command_register & 0xFF) as u8;
+    cmd[1] = ((command_register >> 8) & 0xFF) as u8;
+
+    let mut cmd_len: usize = 4;
+    let r_type = report_type & 0x03;
+    if report_id < 15 {
+        cmd[2] = (r_type << 4) | (report_id & 0x0F);
+        cmd[3] = I2C_HID_CMD_SET_REPORT;
+    } else {
+        cmd[2] = (r_type << 4) | 0x0F;
+        cmd[3] = report_id;
+        cmd[4] = I2C_HID_CMD_SET_REPORT;
+        cmd_len = 5;
+    }
+
+    let write_status = i2c_device_write(device_id, generation, &cmd[0], cmd_len);
+    if write_status != I2C_STATUS_OK { return write_status; }
+
+    if data_register != 0 && report_length > 0 {
+        let total_wire_len = report_length + 2;
+        let mut send_buf: [u8; 260] = [0; 260];
+        send_buf[0] = (data_register & 0xFF) as u8;
+        send_buf[1] = ((data_register >> 8) & 0xFF) as u8;
+        send_buf[2] = (total_wire_len & 0xFF) as u8;
+        send_buf[3] = ((total_wire_len >> 8) & 0xFF) as u8;
+        let mut i: usize = 0;
+        while i < report_length {
+            unsafe { send_buf[4 + i] = report_data[i]; }
+            i += 1;
+        }
+        return i2c_device_write(device_id, generation, &send_buf[0], 4 + report_length);
+    }
+
+    return I2C_STATUS_OK;
 }

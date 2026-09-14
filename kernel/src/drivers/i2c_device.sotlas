@@ -595,3 +595,29 @@ pub fn i2c_device_active_count() -> usize {
     x86_irq_restore(flags);
     return count;
 }
+
+@system
+pub fn i2c_device_set_gpio(device_id: u32, generation: u32, gpio_connection_id: u32, gpio_generation: u32) -> bool {
+    let slot = i2c_device_slot(device_id);
+    if slot >= I2C_DEVICE_CAPACITY || generation == I2C_DEVICE_GENERATION_INVALID {
+        return false;
+    }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !I2C_DEVICE_LOCK_READY || !spinlock_lock(&mut I2C_DEVICE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if I2C_DEVICE_READY && I2C_DEVICES[slot].valid && I2C_DEVICES[slot].generation == generation {
+            I2C_DEVICES[slot].config.gpio_connection_id = gpio_connection_id;
+            I2C_DEVICES[slot].config.gpio_generation = gpio_generation;
+            spinlock_unlock(&mut I2C_DEVICE_LOCK);
+            x86_irq_restore(flags);
+            return true;
+        }
+        spinlock_unlock(&mut I2C_DEVICE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return false;
+}
+

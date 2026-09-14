@@ -43,6 +43,21 @@ class I2cHidInputTests(unittest.TestCase):
         self.assertIn("pub struct I2cHidInputDevice", self.text)
         self.assertIn("static mut I2C_HID_INPUT_DEVICES: [I2cHidInputDevice; I2C_HID_MAX_INPUT_DEVICES]", self.text)
 
+    def test_pure_read_transaction_used(self):
+        # O serviço de input deve usar READ puro do escravo, sem escrever wInputRegister antes
+        self.assertIn("i2c_device_read(", self.text)
+        self.assertNotIn("i2c_device_write_read(", self.text)
+
+    def test_wlength_validation_and_reset_ack(self):
+        # Trata wLength == 0 como confirmação de reset ou frame nulo
+        self.assertIn("wire_length == 0", self.text)
+        # Rejeita wLength malformado (1 ou maior que recebido)
+        self.assertIn("wire_length == 1 || wire_length > read_len", self.text)
+
+    def test_shared_hid_pipeline_dispatch(self):
+        # Despacha relatório desembrulhado para o decodificador HID genérico
+        self.assertIn("hid_input_events_process_report_for_device(", self.text)
+
     def test_spinlock_thread_safety(self):
         self.assertIn("static mut I2C_HID_INPUT_LOCK: SpinLock", self.text)
         self.assertIn("x86_irq_save_disable()", self.text)

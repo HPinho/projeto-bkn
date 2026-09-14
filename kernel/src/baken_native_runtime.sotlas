@@ -150,6 +150,7 @@ pub fn baken_native_runtime_run(width: u32, height: u32) -> ! {
         // HID-4d.6 é oportunista: falha/transiente em um frame é retomado pelos
         // tombstones no próximo, sem transformar ausência de xHCI em falha do UI.
         platform_hid_hotplug_service_once();
+        i2c_hid_manager_service_once();
         let mut scancode: u16 = 0;
         let mut unicode: u16 = 0;
         while ps2_keyboard_poll(&mut scancode, &mut unicode) == 1 {

@@ -39,6 +39,7 @@ class I2cHidAcpiContractTests(unittest.TestCase):
             "pub slave_address: u16;",
             "pub bus_speed_hz: u32;",
             "pub hid_descriptor_register: u16;",
+            "pub gpio_resource_index: usize;",
             "pub gpio_pin: u16;",
             "pub gpio_polarity: u8;",
             "pub gpio_trigger: u8;",
@@ -59,6 +60,16 @@ class I2cHidAcpiContractTests(unittest.TestCase):
         self.assertIn("I2C_HID_DSM_FUNCTION_DESCRIPTOR_ADDRESS", self.text)
         # Bit 1 na máscara da Function 0
         self.assertIn("(query_mask & 0x02) == 0", self.text)
+
+    def test_strict_integer_only_dsm_function_1(self):
+        # Padrão fail-closed de referência: Function 1 deve aceitar apenas Integer (ACPI_TYPE_INTEGER)
+        self.assertIn("desc_res.kind == AML_EVAL_VALUE_INTEGER", self.text)
+
+    def test_scan_is_idempotent_and_device_count_safe(self):
+        # Varredura idempotente com guarda I2C_HID_SCANNED e deduplicação por namespace
+        self.assertIn("static mut I2C_HID_SCANNED: bool", self.text)
+        self.assertIn("already_enrolled", self.text)
+        self.assertIn("pub fn i2c_hid_acpi_device_count() -> usize", self.text)
 
     def test_crs_extracts_serial_bus_and_gpio_resources(self):
         # Invariante I2C-HID-0: extração do I2CSerialBusConnection e GpioInt

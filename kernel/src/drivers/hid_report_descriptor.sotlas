@@ -40,6 +40,9 @@ pub const HID_LOCAL_USAGE: u8 = 0;
 pub const HID_USAGE_PAGE_GENERIC_DESKTOP: u32 = 0x01;
 pub const HID_USAGE_KEYBOARD: u32 = 0x06;
 pub const HID_USAGE_MOUSE: u32 = 0x02;
+pub const HID_USAGE_PAGE_DIGITIZER: u32 = 0x0D;
+pub const HID_USAGE_DIGITIZER_TOUCH_SCREEN: u32 = 0x04;
+pub const HID_USAGE_DIGITIZER_TOUCH_PAD: u32 = 0x05;
 
 pub struct HidReportDescriptorInfo {
     pub valid: bool;
@@ -52,6 +55,7 @@ pub struct HidReportDescriptorInfo {
     pub has_report_ids: bool;
     pub has_keyboard_application: bool;
     pub has_mouse_application: bool;
+    pub has_touchpad_application: bool;
 }
 
 @system
@@ -66,7 +70,8 @@ pub fn hid_report_descriptor_invalid() -> HidReportDescriptorInfo {
         feature_bits: 0,
         has_report_ids: false,
         has_keyboard_application: false,
-        has_mouse_application: false
+        has_mouse_application: false,
+        has_touchpad_application: false
     };
 }
 
@@ -137,6 +142,7 @@ pub fn hid_report_descriptor_parse(base: *const u8,
     let mut has_report_ids: bool = false;
     let mut keyboard_application: bool = false;
     let mut mouse_application: bool = false;
+    let mut touchpad_application: bool = false;
 
     while offset < length {
         if items >= HID_REPORT_DESCRIPTOR_MAX_ITEMS { return result; }
@@ -189,10 +195,16 @@ pub fn hid_report_descriptor_parse(base: *const u8,
                 if size == 0 || collection_depth >= HID_REPORT_MAX_COLLECTION_DEPTH {
                     return result;
                 }
-                if value == HID_COLLECTION_APPLICATION && local_usage_valid &&
-                   local_usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP {
-                    if local_usage == HID_USAGE_KEYBOARD { keyboard_application = true; }
-                    if local_usage == HID_USAGE_MOUSE { mouse_application = true; }
+                if value == HID_COLLECTION_APPLICATION && local_usage_valid {
+                    if local_usage_page == HID_USAGE_PAGE_GENERIC_DESKTOP {
+                        if local_usage == HID_USAGE_KEYBOARD { keyboard_application = true; }
+                        if local_usage == HID_USAGE_MOUSE { mouse_application = true; }
+                    } else if local_usage_page == HID_USAGE_PAGE_DIGITIZER {
+                        if local_usage == HID_USAGE_DIGITIZER_TOUCH_PAD ||
+                           local_usage == HID_USAGE_DIGITIZER_TOUCH_SCREEN {
+                            touchpad_application = true;
+                        }
+                    }
                 }
                 collection_depth += 1;
                 collections += 1;
@@ -234,6 +246,7 @@ pub fn hid_report_descriptor_parse(base: *const u8,
     result.has_report_ids = has_report_ids;
     result.has_keyboard_application = keyboard_application;
     result.has_mouse_application = mouse_application;
+    result.has_touchpad_application = touchpad_application;
     return result;
 }
 

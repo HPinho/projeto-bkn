@@ -20,6 +20,8 @@ def encode_reset_command(cmd_reg: int) -> bytes:
 def encode_set_power_command(cmd_reg: int, power_state: int) -> bytes:
     if cmd_reg == 0:
         raise ValueError("Invalid command register")
+    if power_state not in (0, 1):
+        raise ValueError("Invalid power state: must be ON (0) or SLEEP (1)")
     return bytes([
         cmd_reg & 0xFF,
         (cmd_reg >> 8) & 0xFF,
@@ -28,8 +30,28 @@ def encode_set_power_command(cmd_reg: int, power_state: int) -> bytes:
     ])
 
 
+def encode_get_report_command(cmd_reg: int, report_type: int, report_id: int) -> bytes:
+    if cmd_reg == 0:
+        raise ValueError("Invalid command register")
+    if report_id < 15:
+        return bytes([
+            cmd_reg & 0xFF,
+            (cmd_reg >> 8) & 0xFF,
+            ((report_type & 0x03) << 4) | (report_id & 0x0F),
+            0x02,  # I2C_HID_CMD_GET_REPORT
+        ])
+    else:
+        return bytes([
+            cmd_reg & 0xFF,
+            (cmd_reg >> 8) & 0xFF,
+            ((report_type & 0x03) << 4) | 0x0F,
+            0x02,  # I2C_HID_CMD_GET_REPORT
+            report_id & 0xFF,
+        ])
+
+
 class I2cHidCommandTests(unittest.TestCase):
-    """Testes dos comandos do protocolo HID-over-I2C v1.00 (Reset, Set Power, etc.)."""
+    """Testes dos comandos do protocolo HID-over-I2C v1.00 (Reset, Set Power, Get/Set Report)."""
 
     @classmethod
     def setUpClass(cls):
@@ -51,6 +73,20 @@ class I2cHidCommandTests(unittest.TestCase):
         self.assertIn("pub const I2C_HID_CMD_SET_POWER: u8 = 0x08;", self.text)
         self.assertIn("pub const I2C_HID_POWER_ON: u8 = 0x00;", self.text)
         self.assertIn("pub const I2C_HID_POWER_SLEEP: u8 = 0x01;", self.text)
+
+    def test_strict_set_power_validation(self):
+        # Validação estrita: rejeita estados diferentes de ON (0) ou SLEEP (1)
+        self.assertIn("power_state != I2C_HID_POWER_ON && power_state != I2C_HID_POWER_SLEEP", self.text)
+
+    def test_get_report_framing_standard(self):
+        self.assertIn("pub fn i2c_hid_command_get_report(", self.text)
+        # Framing para report_id < 15 e report_id >= 15
+        self.assertIn("report_id < 15", self.text)
+        self.assertIn("0x0F", self.text)
+
+    def test_set_report_framing_standard(self):
+        self.assertIn("pub fn i2c_hid_command_set_report(", self.text)
+        self.assertIn("data_register", self.text)
 
     def test_reset_command_payload_structure(self):
         cmd_reg = 0x0023
@@ -79,11 +115,30 @@ class I2cHidCommandTests(unittest.TestCase):
         self.assertEqual(payload_sleep[2], 0x01)  # Power SLEEP
         self.assertEqual(payload_sleep[3], 0x08)  # Opcode SET_POWER
 
-    def test_reject_zero_command_register(self):
+    def test_get_report_payload_structure(self):
+        cmd_reg = 0x0030
+        # Report ID < 15 (ex: ID 3, tipo Input = 1)
+        payload_small = encode_get_report_command(cmd_reg, 1, 3)
+        self.assertEqual(len(payload_small), 4)
+        self.assertEqual(payload_small[2], (1 << 4) | 3)
+        self.assertEqual(payload_small[3], 0x02)
+
+        # Report ID >= 15 (ex: ID 20, tipo Feature = 3)
+        payload_large = encode_get_report_command(cmd_reg, 3, 20)
+        self.assertEqual(len(payload_large), 5)
+        self.assertEqual(payload_large[2], (3 << 4) | 0x0F)
+        self.assertEqual(payload_large[3], 0x02)
+        self.assertEqual(payload_large[4], 20)
+
+    def test_reject_invalid_parameters(self):
         with self.assertRaises(ValueError):
             encode_reset_command(0)
         with self.assertRaises(ValueError):
             encode_set_power_command(0, 0)
+        with self.assertRaises(ValueError):
+            encode_set_power_command(0x20, 2)  # Invalid power state
+        with self.assertRaises(ValueError):
+            encode_get_report_command(0, 1, 0)
 
 
 if __name__ == "__main__":

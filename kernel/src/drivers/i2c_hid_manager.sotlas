@@ -1,15 +1,22 @@
 // Baken OS — I2C-HID Manager: Orquestração do Ciclo de Vida e Integração de Subsistemas.
 //
 // Conecta a descoberta ACPI (I2C-HID-0), leitura do descritor (I2C-HID-1), parsing de
-// relatórios (I2C-HID-2), comandos de energia/reset (I2C-HID-5) e fila de input (I2C-HID-4).
+// relatórios (I2C-HID-2), comandos de energia/reset com handshake (I2C-HID-5),
+// conexões de interrupção GPIO físicas (I2C-HID-3) e fila convergente de input (I2C-HID-4).
 
 module kernel::drivers::i2c_hid_manager;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
+import kernel::acpi::aml_namespace::*;
 import kernel::drivers::i2c_core::*;
 import kernel::drivers::i2c_controller::*;
 import kernel::drivers::i2c_device::*;
+import kernel::drivers::gpio_core::*;
+import kernel::drivers::input_device::*;
+import kernel::drivers::input_event::*;
+import kernel::drivers::hid_input_device_map::*;
+import kernel::drivers::hid_input_events::*;
 import kernel::drivers::i2c_hid_acpi::*;
 import kernel::drivers::i2c_hid_descriptor::*;
 import kernel::drivers::i2c_hid_command::*;
@@ -17,12 +24,18 @@ import kernel::drivers::i2c_hid_input::*;
 import kernel::drivers::hid_report_descriptor::*;
 
 pub const I2C_HID_MANAGER_MAX_MANAGED: usize = I2C_HID_MAX_DEVICES;
+pub const I2C_HID_CERTIFIED_REPORT_MAX: usize = 2048;
 
 @repr(C)
 pub struct I2cHidManagedDevice {
     pub device_slot: usize;
     pub i2c_device_id: u32;
     pub i2c_generation: u32;
+    pub gpio_connection_id: u32;
+    pub gpio_generation: u32;
+    pub gpio_pin: u16;
+    pub input_device_id: u32;
+    pub input_device_generation: u32;
     pub descriptor: I2cHidDescriptor;
     pub report_info: HidReportDescriptorInfo;
     pub is_mouse: bool;
@@ -37,6 +50,11 @@ static mut I2C_HID_MANAGED_DEVICES: [I2cHidManagedDevice; I2C_HID_MANAGER_MAX_MA
         device_slot: 0,
         i2c_device_id: 0,
         i2c_generation: 0,
+        gpio_connection_id: 0,
+        gpio_generation: 0,
+        gpio_pin: 0,
+        input_device_id: 0,
+        input_device_generation: 0,
         descriptor: I2cHidDescriptor {
             w_hid_desc_length: 0, bcd_version: 0, w_report_desc_length: 0,
             w_report_desc_register: 0, w_input_register: 0, w_max_input_length: 0,
@@ -47,7 +65,8 @@ static mut I2C_HID_MANAGED_DEVICES: [I2cHidManagedDevice; I2C_HID_MANAGER_MAX_MA
         report_info: HidReportDescriptorInfo {
             valid: false, descriptor_length: 0, item_count: 0, collection_count: 0,
             input_bits: 0, output_bits: 0, feature_bits: 0, has_report_ids: false,
-            has_keyboard_application: false, has_mouse_application: false
+            has_keyboard_application: false, has_mouse_application: false,
+            has_touchpad_application: false
         },
         is_mouse: false,
         is_touchpad: false,
@@ -56,14 +75,24 @@ static mut I2C_HID_MANAGED_DEVICES: [I2cHidManagedDevice; I2C_HID_MANAGER_MAX_MA
         valid: false
     }; I2C_HID_MANAGER_MAX_MANAGED
 ];
+
+static mut I2C_HID_REPORT_SCRATCH: [u8; I2C_HID_CERTIFIED_REPORT_MAX] = [0; I2C_HID_CERTIFIED_REPORT_MAX];
+static mut I2C_HID_SERVICE_BUFFER: [u8; 512] = [0; 512];
 static mut I2C_HID_MANAGED_COUNT: usize = 0;
 static mut I2C_HID_MANAGER_READY: bool = false;
 
 @system
 pub fn i2c_hid_manager_init() -> usize {
-    let dev_count = i2c_hid_acpi_scan_devices();
+    // Consulta o número de dispositivos descobertos sem varredura duplicada
+    let mut dev_count = i2c_hid_acpi_device_count();
+    if dev_count == 0 {
+        dev_count = i2c_hid_acpi_scan_devices();
+    }
     if dev_count == 0 { return 0; }
 
+    input_device_registry_init();
+    hid_input_device_map_initialize();
+    hid_input_events_initialize();
     i2c_hid_input_init();
 
     let mut configured: usize = 0;
@@ -88,6 +117,24 @@ pub fn i2c_hid_manager_init() -> usize {
             let handle = i2c_device_attach(&cfg);
             if handle.valid {
                 if i2c_device_activate(handle.device_id, handle.generation) {
+                    // Se houver recurso GPIO ACPI, registra conexão de interrupção
+                    let mut gpio_handle = gpio_pin_invalid_handle();
+                    if acpi_dev.gpio_resource_index != AML_NAMESPACE_INVALID_INDEX {
+                        gpio_handle = gpio_connection_register_from_acpi(
+                            acpi_dev.gpio_resource_index,
+                            handle.device_id,
+                            handle.generation
+                        );
+                        if gpio_handle.valid {
+                            i2c_device_set_gpio(
+                                handle.device_id,
+                                handle.generation,
+                                gpio_handle.connection_id,
+                                gpio_handle.generation
+                            );
+                        }
+                    }
+
                     // Tenta leitura física do descritor HID
                     let mut desc = i2c_hid_descriptor_invalid();
                     let desc_status = i2c_hid_read_descriptor_physical(
@@ -99,48 +146,130 @@ pub fn i2c_hid_manager_init() -> usize {
 
                     let mut operational = false;
                     let mut report_info = hid_report_descriptor_invalid();
-                    let mut is_mouse_dev = true;
+                    let mut is_mouse_dev = false;
                     let mut is_touchpad_dev = false;
                     let mut is_keyboard_dev = false;
+                    let mut inp_handle = input_device_invalid_handle();
 
                     if desc_status == I2C_STATUS_OK && desc.valid {
-                        // Comandos iniciais: Power On e Reset
-                        i2c_hid_command_set_power(handle.device_id, handle.generation, desc.w_command_register, I2C_HID_POWER_ON);
-                        i2c_hid_command_reset(handle.device_id, handle.generation, desc.w_command_register);
+                        // Comandos de ciclo de vida com verificação estrita de status
+                        let pwr_status = i2c_hid_command_set_power(
+                            handle.device_id,
+                            handle.generation,
+                            desc.w_command_register,
+                            I2C_HID_POWER_ON
+                        );
+                        let rst_status = i2c_hid_command_reset(
+                            handle.device_id,
+                            handle.generation,
+                            desc.w_command_register
+                        );
 
-                        // Lê e decodifica o Report Descriptor se disponível
-                        if desc.w_report_desc_length > 0 && desc.w_report_desc_register != 0 {
-                            let mut report_buf: [u8; 512] = [0; 512];
-                            let mut read_len = desc.w_report_desc_length as usize;
-                            if read_len > 512 { read_len = 512; }
-                            let rep_status = i2c_hid_read_report_descriptor_physical(
-                                handle.device_id,
-                                handle.generation,
-                                desc.w_report_desc_register,
-                                read_len,
-                                &mut report_buf[0]
-                            );
-                            if rep_status == I2C_STATUS_OK {
-                                if i2c_hid_parse_report_descriptor(&report_buf[0], read_len, &mut report_info) {
-                                    is_mouse_dev = report_info.has_mouse_application;
-                                    is_keyboard_dev = report_info.has_keyboard_application;
+                        // Handshake de reset: dispositivo deve sinalizar 00 00 (wLength == 0)
+                        let mut reset_ack = false;
+                        if pwr_status == I2C_STATUS_OK && rst_status == I2C_STATUS_OK {
+                            let mut ack_buf: [u8; 4] = [0; 4];
+                            let mut poll_step: usize = 0;
+                            while poll_step < 50 {
+                                ack_buf[0] = 0xFF;
+                                ack_buf[1] = 0xFF;
+                                let rd_st = i2c_device_read(
+                                    handle.device_id,
+                                    handle.generation,
+                                    &mut ack_buf[0],
+                                    2
+                                );
+                                if rd_st == I2C_STATUS_OK {
+                                    let wire_len = (ack_buf[0] as usize) | ((ack_buf[1] as usize) << 8);
+                                    if wire_len == 0 {
+                                        reset_ack = true;
+                                        break;
+                                    }
                                 }
+                                x86_cpu_pause();
+                                poll_step += 1;
                             }
                         }
 
-                        // Registra no subsistema de input
-                        i2c_hid_input_register_device(
-                            acpi_dev.device_slot,
-                            handle.device_id,
-                            handle.generation,
-                            desc.w_input_register,
-                            desc.w_max_input_length,
-                            acpi_dev.gpio_pin,
-                            is_mouse_dev,
-                            is_touchpad_dev,
-                            is_keyboard_dev
-                        );
-                        operational = true;
+                        // Apenas prossegue se o reset foi confirmado e o report descriptor é bounded
+                        let desc_rep_len = desc.w_report_desc_length as usize;
+                        if reset_ack && desc_rep_len > 0 &&
+                           desc_rep_len <= I2C_HID_CERTIFIED_REPORT_MAX &&
+                           desc.w_report_desc_register != 0 {
+                            let rep_status = unsafe {
+                                i2c_hid_read_report_descriptor_physical(
+                                    handle.device_id,
+                                    handle.generation,
+                                    desc.w_report_desc_register,
+                                    desc_rep_len,
+                                    &mut I2C_HID_REPORT_SCRATCH[0]
+                                )
+                            };
+                            if rep_status == I2C_STATUS_OK {
+                                let parsed = unsafe {
+                                    i2c_hid_parse_report_descriptor(
+                                        &I2C_HID_REPORT_SCRATCH[0],
+                                        desc_rep_len,
+                                        &mut report_info
+                                    )
+                                };
+                                if parsed {
+                                    is_mouse_dev = report_info.has_mouse_application;
+                                    is_keyboard_dev = report_info.has_keyboard_application;
+                                    is_touchpad_dev = report_info.has_touchpad_application;
+                                }
+                            }
+
+                            // Se reconhecido, conecta ao subsistema genérico de input
+                            if is_mouse_dev || is_touchpad_dev || is_keyboard_dev {
+                                let mut dev_class = INPUT_DEVICE_CLASS_GENERIC;
+                                if is_touchpad_dev {
+                                    dev_class = INPUT_DEVICE_CLASS_TOUCH;
+                                } else if is_mouse_dev {
+                                    dev_class = INPUT_DEVICE_CLASS_POINTER;
+                                } else if is_keyboard_dev {
+                                    dev_class = INPUT_DEVICE_CLASS_KEYBOARD;
+                                }
+
+                                inp_handle = input_device_attach(
+                                    dev_class,
+                                    INPUT_TRANSPORT_I2C,
+                                    acpi_dev.controller_id,
+                                    acpi_dev.slave_address as u32,
+                                    0
+                                );
+                                if inp_handle.valid {
+                                    if input_device_activate(inp_handle.device_id, inp_handle.generation) {
+                                        unsafe {
+                                            hid_input_device_map_build(
+                                                inp_handle.device_id,
+                                                inp_handle.generation,
+                                                &I2C_HID_REPORT_SCRATCH[0],
+                                                desc_rep_len
+                                            );
+                                        }
+                                        hid_input_events_bind_device(inp_handle.device_id, inp_handle.generation);
+
+                                        i2c_hid_input_register_device(
+                                            acpi_dev.device_slot,
+                                            handle.device_id,
+                                            handle.generation,
+                                            desc.w_input_register,
+                                            desc.w_max_input_length,
+                                            gpio_handle.connection_id,
+                                            gpio_handle.generation,
+                                            acpi_dev.gpio_pin,
+                                            inp_handle.device_id,
+                                            inp_handle.generation,
+                                            is_mouse_dev,
+                                            is_touchpad_dev,
+                                            is_keyboard_dev
+                                        );
+                                        operational = true;
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     unsafe {
@@ -148,6 +277,11 @@ pub fn i2c_hid_manager_init() -> usize {
                             device_slot: acpi_dev.device_slot,
                             i2c_device_id: handle.device_id,
                             i2c_generation: handle.generation,
+                            gpio_connection_id: gpio_handle.connection_id,
+                            gpio_generation: gpio_handle.generation,
+                            gpio_pin: acpi_dev.gpio_pin,
+                            input_device_id: inp_handle.device_id,
+                            input_device_generation: inp_handle.generation,
                             descriptor: desc,
                             report_info: report_info,
                             is_mouse: is_mouse_dev,
@@ -170,6 +304,55 @@ pub fn i2c_hid_manager_init() -> usize {
     }
 
     return configured;
+}
+
+@system
+pub fn i2c_hid_manager_service_once() -> usize {
+    unsafe {
+        if !I2C_HID_MANAGER_READY { return 0; }
+    }
+    let mut serviced: usize = 0;
+    let mut i: usize = 0;
+    let dev_count = i2c_hid_manager_device_count();
+    while i < dev_count && i < I2C_HID_MANAGER_MAX_MANAGED {
+        let mut dev = I2cHidManagedDevice {
+            device_slot: 0, i2c_device_id: 0, i2c_generation: 0,
+            gpio_connection_id: 0, gpio_generation: 0, gpio_pin: 0,
+            input_device_id: 0, input_device_generation: 0,
+            descriptor: i2c_hid_descriptor_invalid(),
+            report_info: hid_report_descriptor_invalid(),
+            is_mouse: false, is_touchpad: false, is_keyboard: false,
+            operational: false, valid: false
+        };
+        unsafe {
+            if I2C_HID_MANAGED_DEVICES[i].valid && I2C_HID_MANAGED_DEVICES[i].operational {
+                dev = I2C_HID_MANAGED_DEVICES[i];
+            }
+        }
+        if dev.valid && dev.operational {
+            if dev.gpio_connection_id != 0 {
+                if gpio_connection_consume_pending(dev.gpio_connection_id, dev.gpio_generation) {
+                    i2c_hid_input_notify_irq(dev.gpio_pin);
+                }
+            }
+            if i2c_hid_input_has_pending_irq(dev.device_slot) {
+                let mut report_len: usize = 0;
+                let status = unsafe {
+                    i2c_hid_input_fetch_report(
+                        dev.device_slot,
+                        &mut I2C_HID_SERVICE_BUFFER[0],
+                        512,
+                        &mut report_len
+                    )
+                };
+                if status == I2C_STATUS_OK {
+                    serviced += 1;
+                }
+            }
+        }
+        i += 1;
+    }
+    return serviced;
 }
 
 @system
