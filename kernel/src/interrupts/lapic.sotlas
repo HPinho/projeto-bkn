@@ -1,8 +1,11 @@
-// Baken OS — Local APIC xAPIC pos-cutover.
+// Baken OS — Local APIC pos-cutover com backend xAPIC/x2APIC.
 //
-// So opera depois que a pagina MMIO indicada pela MADT foi mapeada UC. O modo
-// x2APIC e recusado nesta fase. Alem de EOI/LVT e ICR INIT/SIPI, APs podem
-// preparar o proprio Local APIC e receber IPIs arquiteturais dedicados.
+// Em xAPIC os registradores sao acessados por MMIO na base publicada pela
+// MADT. Quando o firmware deixa IA32_APIC_BASE em x2APIC, os mesmos registros
+// sao acessados pelos MSRs arquiteturais 0x800 + (offset >> 4). O ICR x2APIC
+// e tratado separadamente porque destino e comando formam um unico MSR de 64
+// bits. IDs continuam limitados a <=255 enquanto o IOAPIC usar destino fisico
+// de 8 bits sem interrupt remapping.
 
 module kernel::interrupts::lapic;
 
@@ -14,6 +17,11 @@ pub const IA32_APIC_BASE_MSR: u32 = 0x1B;
 pub const IA32_APIC_BASE_ENABLE: u64 = 1 << 11;
 pub const IA32_APIC_BASE_X2APIC: u64 = 1 << 10;
 pub const IA32_APIC_BASE_ADDRESS_MASK: u64 = 0x000FFFFFFFFFF000;
+
+pub const X2APIC_MSR_BASE: u32 = 0x800;
+pub const X2APIC_MSR_ID: u32 = 0x802;
+pub const X2APIC_MSR_VERSION: u32 = 0x803;
+pub const X2APIC_MSR_ICR: u32 = 0x830;
 
 pub const LAPIC_REG_ID: u64 = 0x020;
 pub const LAPIC_REG_VERSION: u64 = 0x030;
@@ -43,11 +51,20 @@ static mut LAPIC_READY: bool = false;
 static mut LAPIC_BASE: u64 = 0;
 static mut LAPIC_VERSION: u32 = 0;
 static mut LAPIC_ID: u8 = 0;
+static mut LAPIC_X2APIC_MODE: bool = false;
+
+@system
+fn lapic_x2apic_msr(offset: u64) -> u32 {
+    return X2APIC_MSR_BASE + ((offset >> 4) as u32);
+}
 
 @system
 fn lapic_read(offset: u64) -> u32 {
     unsafe {
         if !LAPIC_READY && offset != LAPIC_REG_VERSION && offset != LAPIC_REG_ID { return 0; }
+        if LAPIC_X2APIC_MODE {
+            return x86_read_msr(lapic_x2apic_msr(offset)) as u32;
+        }
         if LAPIC_BASE == 0 { return 0; }
         return x86_mmio_read32(LAPIC_BASE + offset);
     }
@@ -56,20 +73,24 @@ fn lapic_read(offset: u64) -> u32 {
 @system
 fn lapic_write(offset: u64, value: u32) -> void {
     unsafe {
+        if LAPIC_X2APIC_MODE {
+            x86_write_msr(lapic_x2apic_msr(offset), value as u64);
+            return;
+        }
         if LAPIC_BASE == 0 { return; }
         x86_mmio_write32(LAPIC_BASE + offset, value);
     }
 }
 
 @system
-fn lapic_mask_local_vectors_at(base: u64) -> void {
-    x86_mmio_write32(base + LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
-    x86_mmio_write32(base + LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
-    x86_mmio_write32(base + LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
-    x86_mmio_write32(base + LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
-    x86_mmio_write32(base + LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
-    x86_mmio_write32(base + LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
-    x86_mmio_write32(base + LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
+fn lapic_mask_local_vectors() -> void {
+    lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
+    lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
 }
 
 @system
@@ -79,32 +100,50 @@ pub fn lapic_init_masked(madt_base: u64) -> bool {
         LAPIC_BASE = 0;
         LAPIC_VERSION = 0;
         LAPIC_ID = 0;
+        LAPIC_X2APIC_MODE = false;
     }
     if madt_base == 0 || (madt_base & 0xFFF) != 0 { return false; }
+
     let mut apic_base = x86_read_msr(IA32_APIC_BASE_MSR);
-    if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }
-    let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
-    if msr_base != 0 && msr_base != madt_base { return false; }
-    if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
-        apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) | madt_base | IA32_APIC_BASE_ENABLE;
-        x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
+    let x2apic = (apic_base & IA32_APIC_BASE_X2APIC) != 0;
+    if x2apic && (apic_base & IA32_APIC_BASE_ENABLE) == 0 { return false; }
+
+    if !x2apic {
+        let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
+        if msr_base != 0 && msr_base != madt_base { return false; }
+        if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
+            apic_base = (apic_base & ~IA32_APIC_BASE_ADDRESS_MASK) | madt_base | IA32_APIC_BASE_ENABLE;
+            x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
+        }
+        if !active_page_tables_map_mmio_identity_4k(madt_base) { return false; }
     }
-    if !active_page_tables_map_mmio_identity_4k(madt_base) { return false; }
-    unsafe { LAPIC_BASE = madt_base; }
-    let version = x86_mmio_read32(madt_base + LAPIC_REG_VERSION);
+
+    unsafe {
+        LAPIC_BASE = madt_base;
+        LAPIC_X2APIC_MODE = x2apic;
+    }
+
+    let version = lapic_read(LAPIC_REG_VERSION);
     if (version & 0xFF) == 0 { return false; }
-    let apic_id = ((x86_mmio_read32(madt_base + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
-    lapic_write(LAPIC_REG_LVT_TIMER, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_REG_LVT_THERMAL, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_REG_LVT_PERF, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_REG_LVT_LINT0, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_REG_LVT_LINT1, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_REG_LVT_ERROR, LAPIC_LVT_MASKED);
-    lapic_write(LAPIC_REG_SVR, LAPIC_SVR_ENABLE | LAPIC_SPURIOUS_VECTOR);
-    if !xapic_ipi_bind(madt_base) { return false; }
+
+    let mut raw_apic_id: u32 = 0;
+    if x2apic {
+        raw_apic_id = x86_read_msr(X2APIC_MSR_ID) as u32;
+    } else {
+        raw_apic_id = (lapic_read(LAPIC_REG_ID) >> 24) & 0xFF;
+    }
+    if raw_apic_id > 255 { return false; }
+
+    lapic_mask_local_vectors();
+    if x2apic {
+        if !xapic_ipi_bind_x2apic() { return false; }
+    } else {
+        if !xapic_ipi_bind(madt_base) { return false; }
+    }
+
     unsafe {
         LAPIC_VERSION = version;
-        LAPIC_ID = apic_id;
+        LAPIC_ID = raw_apic_id as u8;
         LAPIC_READY = true;
     }
     return true;
@@ -115,6 +154,28 @@ pub fn lapic_prepare_current_cpu_masked() -> bool {
     let base = lapic_base();
     if !lapic_is_ready() || base == 0 || !xapic_ipi_is_ready() { return false; }
     let mut apic_base = x86_read_msr(IA32_APIC_BASE_MSR);
+
+    if lapic_is_x2apic() {
+        // APs devem operar no mesmo modo do BSP. Se INIT deixou o AP em xAPIC,
+        // reabilitamos primeiro o APIC e depois fazemos a transicao xAPIC->x2APIC.
+        if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
+            apic_base |= IA32_APIC_BASE_ENABLE;
+            x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
+        }
+        if (apic_base & IA32_APIC_BASE_X2APIC) == 0 {
+            apic_base |= IA32_APIC_BASE_X2APIC;
+            x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
+        }
+        let verify = x86_read_msr(IA32_APIC_BASE_MSR);
+        if (verify & (IA32_APIC_BASE_ENABLE | IA32_APIC_BASE_X2APIC)) !=
+           (IA32_APIC_BASE_ENABLE | IA32_APIC_BASE_X2APIC) { return false; }
+        let version = x86_read_msr(X2APIC_MSR_VERSION) as u32;
+        let raw_id = x86_read_msr(X2APIC_MSR_ID) as u32;
+        if (version & 0xFF) == 0 || raw_id > 255 { return false; }
+        lapic_mask_local_vectors();
+        return true;
+    }
+
     if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }
     let msr_base = apic_base & IA32_APIC_BASE_ADDRESS_MASK;
     if msr_base != 0 && msr_base != base { return false; }
@@ -124,28 +185,48 @@ pub fn lapic_prepare_current_cpu_masked() -> bool {
     }
     let version = x86_mmio_read32(base + LAPIC_REG_VERSION);
     if (version & 0xFF) == 0 { return false; }
-    lapic_mask_local_vectors_at(base);
+    lapic_mask_local_vectors();
     return true;
 }
 
 @system
 pub fn lapic_is_ready() -> bool { unsafe { return LAPIC_READY; } }
 @system
+pub fn lapic_is_x2apic() -> bool { unsafe { return LAPIC_READY && LAPIC_X2APIC_MODE; } }
+@system
 pub fn lapic_base() -> u64 { unsafe { return LAPIC_BASE; } }
 @system
 pub fn lapic_version() -> u32 { unsafe { return LAPIC_VERSION; } }
 @system
 pub fn lapic_id() -> u8 { unsafe { return LAPIC_ID; } }
+
+@system
+pub fn lapic_register_read(offset: u64) -> u32 {
+    if !lapic_is_ready() { return 0; }
+    return lapic_read(offset);
+}
+
+@system
+pub fn lapic_register_write(offset: u64, value: u32) -> void {
+    if !lapic_is_ready() { return; }
+    lapic_write(offset, value);
+}
+
 @system
 pub fn lapic_current_id() -> u8 {
-    let base = lapic_base();
-    if base == 0 { return 0; }
-    return ((x86_mmio_read32(base + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
+    if !lapic_is_ready() { return 0; }
+    if lapic_is_x2apic() {
+        let raw = x86_read_msr(X2APIC_MSR_ID) as u32;
+        if raw > 255 { return 0; }
+        return raw as u8;
+    }
+    return ((x86_mmio_read32(lapic_base() + LAPIC_REG_ID) >> 24) & 0xFF) as u8;
 }
 
 @system
 pub fn lapic_wait_icr_idle(spin_limit: u64) -> bool {
     if !lapic_is_ready() || spin_limit == 0 { return false; }
+    if lapic_is_x2apic() { return true; }
     let mut spins: u64 = 0;
     while spins < spin_limit {
         if (lapic_read(LAPIC_REG_ICR_LOW) & LAPIC_ICR_DELIVERY_STATUS) == 0 { return true; }
@@ -158,6 +239,11 @@ pub fn lapic_wait_icr_idle(spin_limit: u64) -> bool {
 @system
 fn lapic_send_icr(destination_apic_id: u8, command: u32) -> bool {
     if !lapic_wait_icr_idle(LAPIC_ICR_SPIN_LIMIT) { return false; }
+    if lapic_is_x2apic() {
+        let icr = ((destination_apic_id as u64) << 32) | (command as u64);
+        x86_write_msr(X2APIC_MSR_ICR, icr);
+        return true;
+    }
     lapic_write(LAPIC_REG_ICR_HIGH, (destination_apic_id as u32) << 24);
     lapic_write(LAPIC_REG_ICR_LOW, command);
     return lapic_wait_icr_idle(LAPIC_ICR_SPIN_LIMIT);
