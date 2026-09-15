@@ -64,7 +64,9 @@ fn df_self_test_probe(device: DeviceHandle) -> bool {
     unsafe { DF_SELF_TEST_IRQ = irq; }
 
     // DF-4a precisa funcionar durante BINDING, antes do commit para ACTIVE.
-    let generic_irq = irq_registry_register(device, driver, df_self_test_irq_handler);
+    let generic_irq = irq_registry_register(device, driver, IrqDescriptor {
+        handler: df_self_test_irq_handler
+    });
     if !generic_irq.valid {
         resource_release(irq, device, driver);
         resource_release(mmio, device, driver);
