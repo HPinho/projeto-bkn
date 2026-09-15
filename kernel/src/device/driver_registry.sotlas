@@ -6,6 +6,7 @@ import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::lifecycle::*;
 import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 
@@ -240,10 +241,14 @@ pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
         return driver_invalid_handle();
     }
 
-    // Callback fora dos locks: probe pode chamar Resource Manager no DF-3.
+    // Callback fora dos locks: probe pode chamar Resource Manager/IRQ Registry.
     let probe_ok = selected_record.descriptor.probe(device);
     let active = probe_ok && device_core_commit_bind(device, selected);
     if !active {
+        // IRQ registrations possuem uma claim RESOURCE_KIND_IRQ associada. Elas
+        // precisam desaparecer antes do release generico para nao deixar um
+        // registro IRQ apontando para um ResourceHandle ja invalidado.
+        irq_registry_release_all(device, selected);
         resource_release_all(device, selected);
         device_core_abort_bind(device, selected);
     }
