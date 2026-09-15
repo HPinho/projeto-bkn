@@ -30,7 +30,6 @@ fn wait_queue_write_blocked_marker_once() -> void {
         if WAIT_BLOCKED_MARKED { return; }
         WAIT_BLOCKED_MARKED = true;
     }
-    if !x86_serial_is_ready() { return; }
     let marker: [u8; 19] = [
         66, 65, 75, 69, 78, 58, 87, 65, 73, 84,
         95, 66, 76, 79, 67, 75, 69, 68, 10
@@ -48,7 +47,6 @@ fn wait_queue_write_wake_marker_once() -> void {
         if WAIT_WAKE_MARKED { return; }
         WAIT_WAKE_MARKED = true;
     }
-    if !x86_serial_is_ready() { return; }
     let marker: [u8; 16] = [
         66, 65, 75, 69, 78, 58, 87, 65,
         73, 84, 95, 87, 65, 75, 69, 10
