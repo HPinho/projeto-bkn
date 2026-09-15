@@ -1,4 +1,4 @@
-"""DF-3.1: lifecycle transacional provado no runtime sem tocar hardware."""
+"""DF-4a: lifecycle transacional provado no runtime sem tocar hardware real."""
 import unittest
 from pathlib import Path
 
@@ -7,6 +7,7 @@ TYPES = (ROOT / "kernel/src/device/types.sotlas").read_text(encoding="utf-8")
 DEVICES = (ROOT / "kernel/src/device/registry.sotlas").read_text(encoding="utf-8")
 DRIVERS = (ROOT / "kernel/src/device/driver_registry.sotlas").read_text(encoding="utf-8")
 RESOURCES = (ROOT / "kernel/src/device/resource_manager.sotlas").read_text(encoding="utf-8")
+IRQS = (ROOT / "kernel/src/interrupts/registry.sotlas").read_text(encoding="utf-8")
 SELF_TEST = (ROOT / "kernel/src/device/foundation_self_test.sotlas").read_text(encoding="utf-8")
 SMOKE = (ROOT / "tools/scripts/verify_kernel_smoke.py").read_text(encoding="utf-8")
 SMP_WORKFLOW = (ROOT / ".github/workflows/baken_smp.yml").read_text(encoding="utf-8")
@@ -54,10 +55,13 @@ class DriverFoundationRuntimeTests(unittest.TestCase):
 
     def test_runtime_exercises_full_success_lifecycle_and_is_a_gate(self):
         for token in ("device_core_attach", "driver_register", "driver_bind",
-                      "resource_count != 2", "driver_unbind", "device_core_detach",
+                      "irq_registry_init", "irq_registry_register",
+                      "resource_count != 3", "irq_registry_dispatch",
+                      "driver_unbind", "device_core_detach",
                       "second.generation == first.generation",
                       "BAKEN:DRIVER_FOUNDATION_READY"):
             self.assertIn(token, SELF_TEST)
+        self.assertIn("IRQ_DYNAMIC_VECTOR_FIRST", IRQS)
         self.assertIn('"DRIVER_FOUNDATION_READY"', SMOKE)
         self.assertIn("require_marker 'BAKEN:DRIVER_FOUNDATION_READY'", SMP_WORKFLOW)
         self.assertIn("'BAKEN:DRIVER_FOUNDATION_READY'", NVME_WORKFLOW)
