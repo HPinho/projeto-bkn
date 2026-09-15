@@ -31,8 +31,7 @@ class GenericIrqRegistryTests(unittest.TestCase):
         self.assertIn("DEVICE_STATE_BINDING", owner)
         self.assertIn("DEVICE_STATE_ACTIVE", owner)
         self.assertIn("IRQ_GENERATIONS", REGISTRY)
-        self.assertIn("handle.generation == IRQ_GENERATION", REGISTRY.replace(
-            "IRQ_RECORDS[slot].handle.generation", "IRQ_GENERATION"))
+        self.assertIn("IRQ_RECORDS[slot].handle.generation == handle.generation", REGISTRY)
 
     def test_handler_runs_outside_registry_lock_with_inflight_accounting(self):
         dispatch = REGISTRY.split("pub fn irq_registry_dispatch", 1)[1].split(
