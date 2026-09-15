@@ -22,6 +22,11 @@ testado e resultado. Dumps devem remover serial, UUID e outros identificadores.
 Fixtures sintéticas permanecem marcadas como `captured_from_hardware: false`;
 somente uma captura reproduzível pode mudar esse campo para `true`.
 
+O kernel emite uma linha `BAKEN:I2C=` por controlador observado. Os campos são
+`origem:identidade:estado`, em hexadecimal; `estado` compacta família, motivo de
+recusa e os 16 bits inferiores da revisão. `BAKEN:I2C_DIAG_READY` encerra o
+relatório. Isso permite anexar o trecho serial sem expor UUID ou número de série.
+
 ## Política universal
 
 O core trabalha com capacidades e interfaces neutras. Módulos de família traduzem

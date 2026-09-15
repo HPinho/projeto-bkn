@@ -1,0 +1,128 @@
+// Baken OS — inventário bounded de compatibilidade I2C para logs comunitários.
+// Não aloca, não contém ponteiros de firmware e não autoriza acesso ao hardware.
+
+module kernel::drivers::i2c_compatibility_diagnostics;
+
+import kernel::arch::x86_64::serial::*;
+import kernel::drivers::i2c_hardware_catalog::*;
+
+pub const I2C_DIAGNOSTIC_SCHEMA_VERSION: u32 = 1;
+pub const I2C_DIAGNOSTIC_CAPACITY: usize = 32;
+pub const I2C_DIAGNOSTIC_SOURCE_PCI: u8 = 1;
+pub const I2C_DIAGNOSTIC_SOURCE_ACPI: u8 = 2;
+
+@repr(C)
+pub struct I2cCompatibilityDiagnostic {
+    pub source: u8;
+    pub family: u8;
+    pub reason: u8;
+    pub bus: u8;
+    pub slot: u8;
+    pub function: u8;
+    pub vendor_id: u16;
+    pub device_id: u16;
+    pub namespace_index: usize;
+    pub component_version: u32;
+    pub supported: bool;
+    pub valid: bool;
+}
+
+static mut I2C_DIAGNOSTICS: [I2cCompatibilityDiagnostic; I2C_DIAGNOSTIC_CAPACITY] = [
+    I2cCompatibilityDiagnostic { source: 0, family: 0, reason: 0, bus: 0,
+        slot: 0, function: 0, vendor_id: 0, device_id: 0, namespace_index: 0,
+        component_version: 0, supported: false, valid: false };
+    I2C_DIAGNOSTIC_CAPACITY
+];
+static mut I2C_DIAGNOSTIC_COUNT: usize = 0;
+
+@system
+pub fn i2c_compatibility_diagnostics_init() -> void {
+    unsafe {
+        let mut i: usize = 0;
+        while i < I2C_DIAGNOSTIC_CAPACITY {
+            I2C_DIAGNOSTICS[i].valid = false;
+            i += 1;
+        }
+        I2C_DIAGNOSTIC_COUNT = 0;
+    }
+}
+
+@system
+pub fn i2c_compatibility_record(event: I2cCompatibilityDiagnostic) -> bool {
+    if !event.valid || event.source == 0 { return false; }
+    unsafe {
+        let mut i: usize = 0;
+        while i < I2C_DIAGNOSTIC_COUNT {
+            if I2C_DIAGNOSTICS[i].valid && I2C_DIAGNOSTICS[i].source == event.source &&
+               I2C_DIAGNOSTICS[i].bus == event.bus && I2C_DIAGNOSTICS[i].slot == event.slot &&
+               I2C_DIAGNOSTICS[i].function == event.function &&
+               I2C_DIAGNOSTICS[i].namespace_index == event.namespace_index {
+                I2C_DIAGNOSTICS[i] = event;
+                return true;
+            }
+            i += 1;
+        }
+        if I2C_DIAGNOSTIC_COUNT >= I2C_DIAGNOSTIC_CAPACITY { return false; }
+        I2C_DIAGNOSTICS[I2C_DIAGNOSTIC_COUNT] = event;
+        I2C_DIAGNOSTIC_COUNT += 1;
+    }
+    return true;
+}
+
+@system
+pub fn i2c_compatibility_diagnostic_count() -> usize {
+    unsafe { return I2C_DIAGNOSTIC_COUNT; }
+}
+
+@system
+pub fn i2c_compatibility_diagnostic(index: usize) -> I2cCompatibilityDiagnostic {
+    unsafe {
+        if index < I2C_DIAGNOSTIC_COUNT { return I2C_DIAGNOSTICS[index]; }
+    }
+    return I2cCompatibilityDiagnostic { source: 0, family: 0, reason: 0, bus: 0,
+        slot: 0, function: 0, vendor_id: 0, device_id: 0, namespace_index: 0,
+        component_version: 0, supported: false, valid: false };
+}
+
+@system
+fn i2c_diag_hex(value: u8) -> u8 {
+    if value < 10 { return ('0' as u8) + value; }
+    return ('A' as u8) + value - 10;
+}
+
+@system
+fn i2c_diag_put_hex32(line: *mut u8, offset: usize, value: u32) -> void {
+    let mut i: usize = 0;
+    while i < 8 {
+        let shift = 28 - ((i as u32) * 4);
+        unsafe { line[offset + i] = i2c_diag_hex(((value >> shift) & 0xF) as u8); }
+        i += 1;
+    }
+}
+
+// BAKEN:I2C=<source>:<identity>:<family/reason/revision-low16>\n
+@system
+pub fn i2c_compatibility_emit_serial_report() -> bool {
+    let mut i: usize = 0;
+    while i < i2c_compatibility_diagnostic_count() {
+        let event = i2c_compatibility_diagnostic(i);
+        if event.valid {
+            let mut line: [u8; 38] = [66,65,75,69,78,58,73,50,67,61,48,48,58,
+                48,48,48,48,48,48,48,48,58,48,48,48,48,48,48,48,48,10,0,0,0,0,0,0,0];
+            line[10] = i2c_diag_hex((event.source >> 4) & 0xF);
+            line[11] = i2c_diag_hex(event.source & 0xF);
+            let identity = if event.source == I2C_DIAGNOSTIC_SOURCE_PCI {
+                ((event.vendor_id as u32) << 16) | event.device_id as u32
+            } else { event.namespace_index as u32 };
+            i2c_diag_put_hex32(&mut line[0], 13, identity);
+            let status = ((event.family as u32) << 24) | ((event.reason as u32) << 16) |
+                         (event.component_version & 0xFFFF);
+            i2c_diag_put_hex32(&mut line[0], 22, status);
+            unsafe { if !x86_serial_write_buffer(&line[0], 31) { return false; } }
+        }
+        i += 1;
+    }
+    // Delimitador final: BAKEN:I2C_DIAG_READY\n
+    let ready: [u8; 27] = [66,65,75,69,78,58,73,50,67,95,68,73,65,71,95,82,69,65,68,89,10,0,0,0,0,0,0];
+    unsafe { return x86_serial_write_buffer(&ready[0], 21); }
+}

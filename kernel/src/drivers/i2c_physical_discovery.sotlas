@@ -20,6 +20,7 @@ import kernel::drivers::i2c_controller_registry::*;
 import kernel::drivers::i2c_discovery_bridge::*;
 import kernel::drivers::i2c_designware::*;
 import kernel::drivers::i2c_hardware_catalog::*;
+import kernel::drivers::i2c_compatibility_diagnostics::*;
 
 pub const I2C_HARDWARE_TYPE_UNKNOWN: u8 = 0;
 pub const I2C_HARDWARE_TYPE_DESIGNWARE: u8 = 1;
@@ -262,6 +263,8 @@ pub fn i2c_physical_probe_pci() -> usize {
             let class_code = unsafe { (*dev_ptr).class_code };
             let subclass = unsafe { (*dev_ptr).subclass };
 
+            let pci_profile = i2c_catalog_pci(vendor_id, device_id);
+
             let hw_type = i2c_physical_identify_hardware(vendor_id, device_id, class_code, subclass);
             if hw_type != I2C_HARDWARE_TYPE_UNKNOWN {
                 // Resolve e valida o controller lógico ANTES de habilitar PCI ou tocar MMIO.
@@ -317,10 +320,16 @@ pub fn i2c_physical_probe_pci() -> usize {
                         i2c_lpss_reset_release(phys_base, phys_base);
                     }
 
-                    let profile = i2c_catalog_pci(vendor_id, device_id);
+                    let profile = pci_profile;
                     let component_type = i2c_dw_component_type(phys_base);
                     let component_version = i2c_dw_component_version(phys_base);
                     if !i2c_catalog_component_allowed(&profile, component_type, component_version) {
+                        i2c_compatibility_record(I2cCompatibilityDiagnostic {
+                            source: I2C_DIAGNOSTIC_SOURCE_PCI, family: profile.family,
+                            reason: if component_type != I2C_DW_COMPONENT_TYPE { I2C_CATALOG_REASON_BAD_COMPONENT } else { I2C_CATALOG_REASON_BAD_REVISION },
+                            bus: bus, slot: slot, function: func, vendor_id: vendor_id,
+                            device_id: device_id, namespace_index: acpi_ns,
+                            component_version: component_version, supported: false, valid: true });
                         i += 1;
                         continue;
                     }
@@ -408,7 +417,20 @@ pub fn i2c_physical_probe_pci() -> usize {
                     }
 
                     discovered += 1;
+                    i2c_compatibility_record(I2cCompatibilityDiagnostic {
+                        source: I2C_DIAGNOSTIC_SOURCE_PCI, family: profile.family,
+                        reason: I2C_CATALOG_REASON_NONE, bus: bus, slot: slot,
+                        function: func, vendor_id: vendor_id, device_id: device_id,
+                        namespace_index: acpi_ns, component_version: component_version,
+                        supported: true, valid: true });
                 }
+            } else if class_code == PCI_CLASS_SERIAL_BUS &&
+                      (subclass == PCI_SUBCLASS_SERIAL_OTHER || subclass == PCI_SUBCLASS_SMBUS) {
+                i2c_compatibility_record(I2cCompatibilityDiagnostic {
+                    source: I2C_DIAGNOSTIC_SOURCE_PCI, family: pci_profile.family,
+                    reason: pci_profile.reason, bus: bus, slot: slot, function: func,
+                    vendor_id: vendor_id, device_id: device_id, namespace_index: AML_NAMESPACE_INVALID_INDEX,
+                    component_version: 0, supported: false, valid: true });
             }
         }
         i += 1;
@@ -470,6 +492,14 @@ pub fn i2c_physical_probe_acpi_platform() -> usize {
     while device_slot < count {
         let device = aml_discovery_device(device_slot);
         let profile = i2c_physical_acpi_profile(device_slot, device);
+        if profile.family != I2C_CATALOG_FAMILY_NONE && !profile.valid {
+            i2c_compatibility_record(I2cCompatibilityDiagnostic {
+                source: I2C_DIAGNOSTIC_SOURCE_ACPI, family: profile.family,
+                reason: profile.reason, bus: 0xFF, slot: 0, function: 0,
+                vendor_id: 0x1022, device_id: 0,
+                namespace_index: unsafe { (*device).namespace_index }, component_version: 0,
+                supported: false, valid: true });
+        }
         if profile.valid && profile.access == I2C_CATALOG_ACCESS_SAFE &&
            unsafe { !(*device).has_adr } {
             let ns = unsafe { (*device).namespace_index };
@@ -523,6 +553,12 @@ pub fn i2c_physical_probe_acpi_platform() -> usize {
                                i2c_controller_registry_publish_backend(handle.controller_id, handle.generation, instance) &&
                                i2c_controller_registry_activate(handle.controller_id, handle.generation) {
                                 discovered += 1;
+                                i2c_compatibility_record(I2cCompatibilityDiagnostic {
+                                    source: I2C_DIAGNOSTIC_SOURCE_ACPI, family: profile.family,
+                                    reason: I2C_CATALOG_REASON_NONE, bus: 0xFF, slot: 0,
+                                    function: 0, vendor_id: 0x1022, device_id: 0,
+                                    namespace_index: ns, component_version: component_version,
+                                    supported: true, valid: true });
                             } else {
                                 i2c_controller_registry_mark_failed(handle.controller_id, handle.generation);
                                 i2c_physical_rollback_last(slot_idx);
