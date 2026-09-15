@@ -10,8 +10,17 @@ import kernel::storage::block_device::*;
 import kernel::arch::x86_64::serial::*;
 
 static mut PLATFORM_STORAGE_BOUND: bool = false;
+static mut PLATFORM_STORAGE_CATALOG_LINKED: bool = false;
 static mut PLATFORM_STORAGE_DEVICE_INDEX: u32 = 0;
 static mut PLATFORM_STORAGE_DRIVER: u32 = PLATFORM_DRIVER_NONE;
+static mut PLATFORM_STORAGE_BIND_STATUS: u32 = 0;
+
+pub const PLATFORM_STORAGE_BIND_OK: u32 = 0;
+pub const PLATFORM_STORAGE_BIND_NO_BLOCK_DEVICE: u32 = 1;
+pub const PLATFORM_STORAGE_BIND_NO_CANDIDATE: u32 = 2;
+pub const PLATFORM_STORAGE_BIND_UNSUPPORTED_DRIVER: u32 = 3;
+pub const PLATFORM_STORAGE_BIND_DEVICE_MISMATCH: u32 = 4;
+pub const PLATFORM_STORAGE_BIND_CATALOG_UNLINKED: u32 = 0x100;
 
 // Nem todo boot precisa ter um disco de dados anexado (por exemplo, a prova SMP
 // inicia apenas pela mídia óptica). O binding só é um gate quando a camada de
@@ -25,14 +34,21 @@ pub fn platform_storage_binding_required() -> bool {
 @system
 pub fn platform_storage_bind_active_driver() -> bool {
     unsafe { if PLATFORM_STORAGE_BOUND { return true; } }
-    if !storage_generic_block_io_is_ready() || !block_device_has_native_target() { return false; }
+    if !storage_generic_block_io_is_ready() || !block_device_has_native_target() {
+        unsafe { PLATFORM_STORAGE_BIND_STATUS = PLATFORM_STORAGE_BIND_NO_BLOCK_DEVICE; }
+        return false;
+    }
     let candidate = storage_discovery_candidate();
-    if candidate == (null as *const StorageControllerCandidate) { return false; }
+    if candidate == (null as *const StorageControllerCandidate) {
+        unsafe { PLATFORM_STORAGE_BIND_STATUS = PLATFORM_STORAGE_BIND_NO_CANDIDATE; }
+        return false;
+    }
     let mut index: u32 = 0;
     let mut kind: u32 = 0;
     unsafe {
         index = (*candidate).pci_index;
         kind = (*candidate).kind;
+        PLATFORM_STORAGE_DEVICE_INDEX = index;
     }
     let driver = if kind == STORAGE_CONTROLLER_AHCI {
         PLATFORM_DRIVER_AHCI
@@ -41,21 +57,61 @@ pub fn platform_storage_bind_active_driver() -> bool {
     } else {
         PLATFORM_DRIVER_NONE
     };
-    if driver == PLATFORM_DRIVER_NONE { return false; }
+    if driver == PLATFORM_DRIVER_NONE {
+        unsafe { PLATFORM_STORAGE_BIND_STATUS = PLATFORM_STORAGE_BIND_UNSUPPORTED_DRIVER; }
+        return false;
+    }
+
+    // O BlockDevice e o candidato PCI são a autoridade sobre o driver que já
+    // completou MMIO, filas e IDENTIFY. O catálogo é metadado de ownership; uma
+    // divergência nele não pode invalidar I/O nativo que já foi provado.
+    let expected_block_kind = if driver == PLATFORM_DRIVER_AHCI {
+        BLOCK_DEVICE_AHCI
+    } else {
+        BLOCK_DEVICE_NVME
+    };
+    if block_device_index() != index || block_device_kind() != expected_block_kind {
+        unsafe { PLATFORM_STORAGE_BIND_STATUS = PLATFORM_STORAGE_BIND_DEVICE_MISMATCH; }
+        return false;
+    }
+
     let snapshot = platform_device_snapshot(index);
-    if !snapshot.valid || snapshot.class_code != PLATFORM_PCI_CLASS_STORAGE { return false; }
-    if !platform_device_claim(index, driver) { return false; }
-    if !platform_device_set_state(index, driver, PLATFORM_DEVICE_STATE_ACTIVE) { return false; }
+    let mut catalog_linked = false;
+    if snapshot.valid && snapshot.class_code == PLATFORM_PCI_CLASS_STORAGE {
+        if snapshot.owner_driver == driver && snapshot.state == PLATFORM_DEVICE_STATE_ACTIVE {
+            catalog_linked = true;
+        } else if platform_device_claim(index, driver) &&
+                  platform_device_set_state(index, driver, PLATFORM_DEVICE_STATE_ACTIVE) {
+            catalog_linked = true;
+        }
+    }
     unsafe {
         PLATFORM_STORAGE_DEVICE_INDEX = index;
         PLATFORM_STORAGE_DRIVER = driver;
+        PLATFORM_STORAGE_CATALOG_LINKED = catalog_linked;
         PLATFORM_STORAGE_BOUND = true;
+        PLATFORM_STORAGE_BIND_STATUS = if catalog_linked {
+            PLATFORM_STORAGE_BIND_OK
+        } else {
+            PLATFORM_STORAGE_BIND_CATALOG_UNLINKED
+        };
     }
     return true;
 }
 
 @system
 pub fn platform_storage_is_bound() -> bool { unsafe { return PLATFORM_STORAGE_BOUND; } }
+
+@system
+pub fn platform_storage_catalog_is_linked() -> bool {
+    unsafe { return PLATFORM_STORAGE_BOUND && PLATFORM_STORAGE_CATALOG_LINKED; }
+}
+
+@system
+pub fn platform_storage_bind_status() -> u32 { unsafe { return PLATFORM_STORAGE_BIND_STATUS; } }
+
+@system
+pub fn platform_storage_device_index() -> u32 { unsafe { return PLATFORM_STORAGE_DEVICE_INDEX; } }
 
 @system
 pub fn platform_storage_emit_bound_marker() -> bool {

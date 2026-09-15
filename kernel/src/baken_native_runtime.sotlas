@@ -198,6 +198,25 @@ pub fn baken_early_boot_failure_count(count: usize) -> void {
 }
 
 @system
+fn baken_early_boot_clear_failure_details() -> void {
+    unsafe {
+        EARLY_BOOT_FAILURE_COUNT_VALID = false;
+        EARLY_BOOT_AML_DETAILS_VALID = false;
+        EARLY_BOOT_AML_ERROR = 0;
+        EARLY_BOOT_AML_OFFSET = 0;
+    }
+}
+
+@system
+fn baken_early_boot_failure_detail(detail: u32, offset: u32) -> void {
+    unsafe {
+        EARLY_BOOT_AML_ERROR = detail;
+        EARLY_BOOT_AML_OFFSET = offset;
+        EARLY_BOOT_AML_DETAILS_VALID = true;
+    }
+}
+
+@system
 pub fn baken_native_bind_assets() -> void {
     let font_adv = baken_get_font_advances(2);
     let font_alpha = baken_get_font_alpha(2);
@@ -407,8 +426,15 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     // AUDIO-0: descoberta PCI read-only. Ausência de HDA ou BAR inválido não
     // impede o boot; nenhum controller é habilitado antes do backend MMIO/DMA.
     hda_discover_pci();
+    baken_early_boot_clear_failure_details();
     if platform_storage_binding_required() {
-        if !platform_storage_bind_active_driver() || !platform_storage_emit_bound_marker() { baken_early_boot_fail("E-STOR-001\0".as_ptr(), "STORAGE DRIVER BIND\0".as_ptr()); }
+        if !platform_storage_bind_active_driver() {
+            baken_early_boot_failure_detail(platform_storage_bind_status(), platform_storage_device_index());
+            baken_early_boot_fail("E-STOR-001\0".as_ptr(), "STORAGE DRIVER BIND\0".as_ptr());
+        }
+        // O marker é observabilidade para CI/boot log. Ausência de UART COM1 em
+        // notebook físico não invalida um driver de storage já ligado.
+        platform_storage_emit_bound_marker();
     }
 
     // Inicialização oportunista da plataforma I2C (controladores ACPI, backends físicos PCI e dispositivos HID).
