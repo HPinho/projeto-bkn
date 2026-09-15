@@ -39,6 +39,9 @@ pub const AML_CREATE_WORD_FIELD_OP: u8 = 0x8B;
 pub const AML_CREATE_BYTE_FIELD_OP: u8 = 0x8C;
 pub const AML_CREATE_BIT_FIELD_OP: u8 = 0x8D;
 pub const AML_CREATE_QWORD_FIELD_OP: u8 = 0x8F;
+// Store é um TermObj válido fora de Method (por exemplo, inicialização de
+// namespace feita pelo firmware). AML-4 somente o delimita: nunca o executa.
+pub const AML_STORE_OP: u8 = 0x70;
 pub const AML_IF_OP: u8 = 0xA0;
 pub const AML_ELSE_OP: u8 = 0xA1;
 pub const AML_WHILE_OP: u8 = 0xA2;
@@ -111,6 +114,27 @@ fn aml_loader_skip_static_term_arg(cursor: *mut AmlCursor) -> bool {
     // AML-4 não avalia TermArg. O subconjunto seguro é o mesmo PackageElement
     // estático de AML-3: constantes/data objects ou NameString.
     return aml_skip_package_element(cursor);
+}
+
+@system
+fn aml_loader_skip_store_target(cursor: *mut AmlCursor) -> bool {
+    // Store(Source, Target) aceita SuperName. Durante o carregamento do
+    // namespace não há escrita: apenas consumimos uma codificação conhecida e
+    // limitada. Local/Arg/Debug/NullName são um byte; os demais destinos são
+    // NameString validados pelo decoder.
+    if cursor == (null as *mut AmlCursor) ||
+       aml_cursor_remaining(cursor as *const AmlCursor) == 0 {
+        return false;
+    }
+    let target = aml_cursor_peek_u8(cursor as *const AmlCursor);
+    if target == AML_NULL_NAME || target == 0x31 ||
+       (target >= 0x60 && target <= 0x67) ||
+       (target >= 0x68 && target <= 0x6E) {
+        aml_cursor_read_u8(cursor);
+        return true;
+    }
+    let name = aml_decode_name_string(cursor);
+    return name.valid && name.segment_count != 0;
 }
 
 @system
@@ -244,6 +268,15 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
             let name = aml_decode_name_string(cursor);
             if !name.valid || name.segment_count == 0 {
                 return aml_loader_fail(table_index, AML_LOADER_ERROR_NAME, opcode, term_offset);
+            }
+        } else if opcode == AML_STORE_OP {
+            // Não executar Store durante o discovery: o firmware pode fazer
+            // inicialização dinâmica no nível do DSDT. A gramática tem dois
+            // operandos e ambos são consumidos com limites explícitos.
+            aml_cursor_read_u8(cursor);
+            if !aml_loader_skip_static_term_arg(cursor) ||
+               !aml_loader_skip_store_target(cursor) {
+                return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
             }
         } else if opcode == AML_IF_OP || opcode == AML_ELSE_OP || opcode == AML_WHILE_OP {
             // Não executar controle de fluxo durante namespace load. A produção

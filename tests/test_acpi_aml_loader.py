@@ -113,6 +113,23 @@ class AcpiAmlLoaderTests(unittest.TestCase):
         ):
             self.assertIn(token, self.source)
 
+    def test_store_is_delimited_but_never_executed_during_namespace_load(self):
+        body = self.source.split("fn aml_loader_parse_term_list", 1)[1].split(
+            "fn aml_loader_load_definition_block", 1
+        )[0]
+        self.assertIn("pub const AML_STORE_OP: u8 = 0x70", self.source)
+        self.assertIn("opcode == AML_STORE_OP", body)
+        self.assertIn("aml_loader_skip_static_term_arg(cursor)", body)
+        self.assertIn("aml_loader_skip_store_target(cursor)", body)
+        helper = self.source.split("fn aml_loader_skip_store_target", 1)[1].split(
+            "fn aml_loader_namespace_value_kind", 1
+        )[0]
+        self.assertIn("aml_decode_name_string(cursor)", helper)
+        self.assertIn("target >= 0x60 && target <= 0x67", helper)
+        lower = helper.lower()
+        for forbidden in ("evaluate", "execute", "mmio_write", "io_write"):
+            self.assertNotIn(forbidden, lower)
+
     def test_unknown_opcode_fails_closed_with_diagnostics(self):
         body = self.source.split("fn aml_loader_parse_term_list", 1)[1].split(
             "fn aml_loader_load_definition_block", 1
