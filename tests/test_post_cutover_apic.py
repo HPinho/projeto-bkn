@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 ACPI = ROOT / "kernel/src/acpi/tables.sotlas"
 LAPIC = ROOT / "kernel/src/interrupts/lapic.sotlas"
+XAPIC_IPI = ROOT / "kernel/src/interrupts/xapic_ipi.sotlas"
 IOAPIC = ROOT / "kernel/src/interrupts/ioapic.sotlas"
 ACTIVE = ROOT / "kernel/src/memory/active_page_tables.sotlas"
 X86 = ROOT / "tools/sotlas_compile/x86_intrinsics.py"
@@ -38,15 +39,32 @@ class PostCutoverApicTests(unittest.TestCase):
         self.assertIn("X86_PTE_NX", text)
         self.assertNotIn("map_all_mmio", text)
 
-    def test_lapic_rejects_x2apic_and_masks_lvts(self):
+    def test_lapic_supports_xapic_and_x2apic_and_masks_lvts(self):
         text = LAPIC.read_text(encoding="utf-8")
+        init = text.split("pub fn lapic_init_masked", 1)[1].split(
+            "pub fn lapic_prepare_current_cpu_masked", 1
+        )[0]
         self.assertIn("IA32_APIC_BASE_X2APIC", text)
-        self.assertIn("if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }", text)
+        self.assertIn("X2APIC_MSR_BASE: u32 = 0x800", text)
+        self.assertIn("X2APIC_MSR_ICR: u32 = 0x830", text)
+        self.assertIn("LAPIC_X2APIC_MODE", text)
+        self.assertIn("xapic_ipi_bind_x2apic()", init)
+        self.assertNotIn(
+            "if (apic_base & IA32_APIC_BASE_X2APIC) != 0 { return false; }",
+            init,
+        )
         for reg in (
             "LAPIC_REG_LVT_TIMER", "LAPIC_REG_LVT_THERMAL", "LAPIC_REG_LVT_PERF",
             "LAPIC_REG_LVT_LINT0", "LAPIC_REG_LVT_LINT1", "LAPIC_REG_LVT_ERROR",
         ):
             self.assertIn(f"lapic_write({reg}, LAPIC_LVT_MASKED)", text)
+
+    def test_x2apic_ipi_uses_64_bit_msr_icr(self):
+        text = XAPIC_IPI.read_text(encoding="utf-8")
+        self.assertIn("X2APIC_IPI_MSR_ICR: u32 = 0x830", text)
+        self.assertIn("xapic_ipi_bind_x2apic", text)
+        self.assertIn("((destination_apic_id as u64) << 32) | (vector as u64)", text)
+        self.assertIn("x86_write_msr(X2APIC_IPI_MSR_ICR, command)", text)
 
     def test_ioapic_masks_all_redirection_entries(self):
         text = IOAPIC.read_text(encoding="utf-8")
