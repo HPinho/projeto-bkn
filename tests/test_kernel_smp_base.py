@@ -34,9 +34,27 @@ class KernelSmpBaseTests(unittest.TestCase):
 
     def test_trampoline_enters_long_mode_with_nx_and_baken_cr3(self):
         text = TRAMP.read_text(encoding="utf-8")
-        for token in ("SMP_TRAMPOLINE_BYTES: usize = 166", "SMP_TRAMPOLINE_LONG_MODE_OFFSET: u64 = 0x42", "SMP_TRAMPOLINE_CR3_VALUE_OFFSET: usize = 0x80", "SMP_TRAMPOLINE_GDT_POINTER_OFFSET: usize = 0xA0", "root_physical > 0xFFFFFFFF", "smp_trampoline_write_u32(base, SMP_TRAMPOLINE_CR3_VALUE_OFFSET", "smp_trampoline_write_u64(base, SMP_TRAMPOLINE_IDLE_OFFSET", "__dma_fence();"):
+        for token in ("SMP_TRAMPOLINE_BYTES: usize = 179", "SMP_TRAMPOLINE_LONG_MODE_OFFSET: u64 = 0x42", "SMP_TRAMPOLINE_RUNTIME_CR3_OFFSET: usize = 0x4E", "SMP_TRAMPOLINE_CR3_VALUE_OFFSET: usize = 0x8D", "SMP_TRAMPOLINE_GDT_POINTER_OFFSET: usize = 0xAD", "bootstrap_root_physical > 0xFFFFFFFF", "smp_trampoline_write_u32(base, SMP_TRAMPOLINE_CR3_VALUE_OFFSET", "smp_trampoline_write_u64(base, SMP_TRAMPOLINE_RUNTIME_CR3_OFFSET", "smp_trampoline_write_u64(base, SMP_TRAMPOLINE_IDLE_OFFSET", "__dma_fence();"):
             self.assertIn(token, text)
         self.assertIn("102, 13, 0, 9, 0, 0", text)
+        self.assertIn("15, 34, 216", text)
+
+    def test_high_cr3_uses_low_bootstrap_root_then_restores_real_root(self):
+        text = SMP.read_text(encoding="utf-8")
+        for token in ("pmm_alloc_pages_constrained(1, 4096, 0xFFFFFFFF, 0)",
+                      "smp_prepare_bootstrap_root(root)",
+                      "smp_start_one_ap(cpu_slot, apic_id, bootstrap_root, root"):
+            self.assertIn(token, text)
+
+    def test_physical_boot_can_degrade_to_explicit_bsp_only_mode(self):
+        smp = SMP.read_text(encoding="utf-8")
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        self.assertIn("pub fn smp_enter_uniprocessor_fallback()", smp)
+        self.assertIn("tlb_shootdown_retain_bsp_only", smp)
+        self.assertIn("SMP UNIPROCESSOR FALLBACK", runtime)
+        body = runtime.split("SMP APPLICATION PROCESSORS", 1)[1]
+        self.assertIn("smp_enter_uniprocessor_fallback()", body)
+        self.assertIn("SMP UNIPROCESSOR FALLBACK", body)
 
     def test_ap_uses_private_stack_and_enters_per_cpu_runtime(self):
         text = SMP.read_text(encoding="utf-8")

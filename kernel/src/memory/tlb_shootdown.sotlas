@@ -102,6 +102,31 @@ pub fn tlb_shootdown_activate_cpu(slot: usize) -> bool {
     return true;
 }
 
+// Recuperação antes da ativação do scheduler: APs que não concluíram o
+// trampoline nunca entraram no conjunto ativo e podem ser removidos do alvo de
+// shootdown, preservando somente o BSP. APs parcialmente iniciados permanecem
+// estacionados com IF=0 e não recebem trabalho.
+@system
+pub fn tlb_shootdown_retain_bsp_only(bsp_apic_id: u8) -> bool {
+    if !tlb_shootdown_is_ready() || tlb_shootdown_active_ap_count() != 0 { return false; }
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < TLB_SHOOTDOWN_MAX_CPUS {
+            TLB_SHOOTDOWN_CPU_REGISTERED[slot] = false;
+            TLB_SHOOTDOWN_CPU_ACTIVE[slot] = false;
+            TLB_SHOOTDOWN_CPU_APIC_ID[slot] = 0;
+            TLB_SHOOTDOWN_CPU_ROOT[slot] = 0;
+            TLB_SHOOTDOWN_ACK[slot] = 0;
+            slot += 1;
+        }
+        TLB_SHOOTDOWN_CPU_REGISTERED[0] = true;
+        TLB_SHOOTDOWN_CPU_ACTIVE[0] = true;
+        TLB_SHOOTDOWN_CPU_APIC_ID[0] = bsp_apic_id;
+    }
+    __dma_fence();
+    return true;
+}
+
 @system
 pub fn tlb_shootdown_active_cpu_count() -> u32 {
     let mut count: u32 = 0;

@@ -451,7 +451,19 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
 
     // APs chegam ate runtime per-CPU com IF=0 e permanecem estacionados.
     baken_early_boot_stage("SMP APPLICATION PROCESSORS\0".as_ptr());
-    if !smp_initialize_base() || !smp_emit_ready_markers() { baken_early_boot_fail("E-SMP-001\0".as_ptr(), "SMP APPLICATION PROCESSORS\0".as_ptr()); }
+    if !smp_initialize_base() {
+        let smp_error = smp_last_error();
+        let smp_apic_id = smp_last_error_apic_id();
+        if !smp_enter_uniprocessor_fallback() {
+            baken_early_boot_failure_detail(smp_error, smp_apic_id);
+            baken_early_boot_fail("E-SMP-001\0".as_ptr(), "SMP APPLICATION PROCESSORS\0".as_ptr());
+        }
+        baken_early_boot_stage("SMP UNIPROCESSOR FALLBACK\0".as_ptr());
+    }
+    // Marker é prova para CI, mas a inexistência de COM1 não bloqueia hardware.
+    if !smp_emit_ready_markers() && x86_serial_is_ready() {
+        baken_early_boot_fail("E-SMP-MARKER\0".as_ptr(), "SMP SERIAL MARKER\0".as_ptr());
+    }
 
     baken_early_boot_stage("PROCESS ADDRESS SPACES\0".as_ptr());
     if !process_address_space_activate_foundation() ||
