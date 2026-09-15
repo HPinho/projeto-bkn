@@ -3,6 +3,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "kernel/src/drivers/i2c_physical_discovery.sotlas"
+CATALOG = ROOT / "kernel/src/drivers/i2c_hardware_catalog.sotlas"
 REGISTRY = ROOT / "kernel/src/drivers/i2c_controller_registry.sotlas"
 MAIN = ROOT / "kernel/src/main.sotlas"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
@@ -42,13 +43,14 @@ class I2cPhysicalDiscoveryContractTests(unittest.TestCase):
         self.assertNotIn("device_id >= 0x9DA0 && device_id <= 0x9DA5", self.text)
 
     def test_intel_lpss_clock_families_are_explicit(self):
-        self.assertIn("return 120000000;", self.text)
-        self.assertIn("return 216000000;", self.text)
-        self.assertIn("return 133000000;", self.text)
-        self.assertIn("return 100000000;", self.text)
-        self.assertIn("device_id >= 0x02E8 && device_id <= 0x02EB", self.text)
-        self.assertIn("device_id >= 0x4B78 && device_id <= 0x4B7B", self.text)
-        self.assertIn("device_id >= 0x7E50 && device_id <= 0x7E51", self.text)
+        catalog = CATALOG.read_text(encoding="utf-8")
+        self.assertIn("120000000", catalog)
+        self.assertIn("216000000", catalog)
+        self.assertIn("133000000", catalog)
+        self.assertIn("100000000", catalog)
+        self.assertIn("device >= 0x02E8 && device <= 0x02EB", catalog)
+        self.assertIn("device >= 0x4B78 && device <= 0x4B7B", catalog)
+        self.assertIn("device >= 0x7E50 && device <= 0x7E51", catalog)
 
     def test_acpi_binding_is_resolved_before_any_pci_or_mmio_side_effect(self):
         probe = self.text.split("pub fn i2c_physical_probe_pci()", 1)[1]

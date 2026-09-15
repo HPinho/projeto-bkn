@@ -1,0 +1,51 @@
+// Baken OS — seleção universal de famílias GPIO Intel.
+// Somente Tiger Lake possui mapa estático homologado hoje. Silício posterior é
+// reconhecido para diagnóstico, mas nunca reutiliza communities de outra geração.
+
+module kernel::drivers::intel_gpio_generation_catalog;
+
+pub const INTEL_GPIO_CATALOG_VERSION: u32 = 1;
+pub const INTEL_GPIO_GEN_UNKNOWN: u8 = 0;
+pub const INTEL_GPIO_GEN_TIGER_LAKE: u8 = 1;
+pub const INTEL_GPIO_GEN_ALDER_LAKE: u8 = 2;
+pub const INTEL_GPIO_GEN_RAPTOR_LAKE: u8 = 3;
+pub const INTEL_GPIO_GEN_METEOR_LAKE: u8 = 4;
+pub const INTEL_GPIO_GEN_LUNAR_LAKE: u8 = 5;
+pub const INTEL_GPIO_LAYOUT_STATIC_TGL: u8 = 1;
+pub const INTEL_GPIO_LAYOUT_FIRMWARE_DESCRIBED: u8 = 2;
+pub const INTEL_GPIO_LAYOUT_UNAVAILABLE: u8 = 3;
+
+@repr(C)
+pub struct IntelGpioGenerationProfile {
+    pub generation: u8;
+    pub layout: u8;
+    pub register_map_version: u32;
+    pub hardware_access_allowed: bool;
+}
+
+@system
+pub fn intel_gpio_generation_profile(generation: u8,
+                                     firmware_layout_complete: bool) -> IntelGpioGenerationProfile {
+    if generation == INTEL_GPIO_GEN_TIGER_LAKE {
+        return IntelGpioGenerationProfile { generation: generation,
+            layout: INTEL_GPIO_LAYOUT_STATIC_TGL, register_map_version: 1,
+            hardware_access_allowed: true };
+    }
+    if generation >= INTEL_GPIO_GEN_ALDER_LAKE && generation <= INTEL_GPIO_GEN_LUNAR_LAKE &&
+       firmware_layout_complete {
+        return IntelGpioGenerationProfile { generation: generation,
+            layout: INTEL_GPIO_LAYOUT_FIRMWARE_DESCRIBED, register_map_version: 1,
+            hardware_access_allowed: true };
+    }
+    return IntelGpioGenerationProfile { generation: generation,
+        layout: INTEL_GPIO_LAYOUT_UNAVAILABLE, register_map_version: 0,
+        hardware_access_allowed: false };
+}
+
+@system
+pub fn intel_gpio_generation_access_allowed(profile: *const IntelGpioGenerationProfile) -> bool {
+    if profile == (null as *const IntelGpioGenerationProfile) { return false; }
+    unsafe { return (*profile).hardware_access_allowed &&
+        ((*profile).layout == INTEL_GPIO_LAYOUT_STATIC_TGL ||
+         (*profile).layout == INTEL_GPIO_LAYOUT_FIRMWARE_DESCRIBED); }
+}

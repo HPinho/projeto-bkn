@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "provenance": "synthetic-contract-fixture",
+  "captured_from_hardware": false,
+  "architecture": "x86_64",
+  "hid": "AMDI0019",
+  "controller": "synopsys-designware",
+  "input_clock_hz": 150000000,
+  "requires_psp_arbitration": true,
+  "expected_policy": "reject-before-mmio",
+  "crs_resource_template_hex": "86090000000000100000001000007900"
+}

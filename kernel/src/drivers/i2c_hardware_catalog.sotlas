@@ -1,0 +1,137 @@
+// Baken OS — catálogo universal, versionado e fail-closed de controladores I2C.
+// A identidade do processador nunca seleciona registradores. PCI/ACPI identifica
+// a família e o próprio bloco DesignWare confirma assinatura e revisão em MMIO.
+
+module kernel::drivers::i2c_hardware_catalog;
+
+pub const I2C_CATALOG_SCHEMA_VERSION: u32 = 1;
+
+pub const I2C_CATALOG_FAMILY_NONE: u8 = 0;
+pub const I2C_CATALOG_FAMILY_INTEL_LPSS_SPT: u8 = 1;
+pub const I2C_CATALOG_FAMILY_INTEL_LPSS_CNL: u8 = 2;
+pub const I2C_CATALOG_FAMILY_INTEL_LPSS_BXT: u8 = 3;
+pub const I2C_CATALOG_FAMILY_INTEL_LPSS_EHL: u8 = 4;
+pub const I2C_CATALOG_FAMILY_AMD_DESIGNWARE: u8 = 5;
+pub const I2C_CATALOG_FAMILY_GENERIC_DESIGNWARE: u8 = 6;
+
+pub const I2C_CATALOG_ACCESS_NONE: u8 = 0;
+pub const I2C_CATALOG_ACCESS_SAFE: u8 = 1;
+pub const I2C_CATALOG_ACCESS_PSP_SEMAPHORE: u8 = 2;
+
+pub const I2C_CATALOG_REASON_NONE: u8 = 0;
+pub const I2C_CATALOG_REASON_UNKNOWN_ID: u8 = 1;
+pub const I2C_CATALOG_REASON_PSP_ARBITRATION: u8 = 2;
+pub const I2C_CATALOG_REASON_BAD_COMPONENT: u8 = 3;
+pub const I2C_CATALOG_REASON_BAD_REVISION: u8 = 4;
+
+pub const I2C_DW_COMPONENT_TYPE: u32 = 0x44570140;
+pub const I2C_DW_MIN_COMPONENT_VERSION: u32 = 0x3131312A;
+
+@repr(C)
+pub struct I2cHardwareProfile {
+    pub family: u8;
+    pub access: u8;
+    pub reason: u8;
+    pub input_clock_hz: u32;
+    pub min_component_version: u32;
+    pub max_component_version: u32;
+    pub valid: bool;
+}
+
+@system
+pub fn i2c_catalog_invalid(reason: u8) -> I2cHardwareProfile {
+    return I2cHardwareProfile { family: I2C_CATALOG_FAMILY_NONE,
+        access: I2C_CATALOG_ACCESS_NONE, reason: reason, input_clock_hz: 0,
+        min_component_version: 0, max_component_version: 0, valid: false };
+}
+
+@system
+fn i2c_catalog_profile(family: u8, clock: u32) -> I2cHardwareProfile {
+    return I2cHardwareProfile { family: family, access: I2C_CATALOG_ACCESS_SAFE,
+        reason: I2C_CATALOG_REASON_NONE, input_clock_hz: clock,
+        min_component_version: I2C_DW_MIN_COMPONENT_VERSION,
+        max_component_version: 0xFFFFFFFF, valid: true };
+}
+
+@system
+pub fn i2c_catalog_pci(vendor: u16, device: u16) -> I2cHardwareProfile {
+    if vendor == 0x16C3 { return i2c_catalog_profile(I2C_CATALOG_FAMILY_GENERIC_DESIGNWARE, 100000000); }
+    if vendor != 0x8086 { return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID); }
+    if (device >= 0x9D60 && device <= 0x9D65) ||
+       (device >= 0xA160 && device <= 0xA162) ||
+       (device >= 0xA0C5 && device <= 0xA0C6) ||
+       (device >= 0xA0D8 && device <= 0xA0D9) ||
+       (device >= 0xA0E8 && device <= 0xA0EB) {
+        return i2c_catalog_profile(I2C_CATALOG_FAMILY_INTEL_LPSS_SPT, 120000000);
+    }
+    if (device >= 0x02C5 && device <= 0x02C6) ||
+       (device >= 0x02E8 && device <= 0x02EB) ||
+       (device >= 0x06E8 && device <= 0x06EB) ||
+       (device >= 0x9DC5 && device <= 0x9DC6) ||
+       (device >= 0x9DE8 && device <= 0x9DEB) {
+        return i2c_catalog_profile(I2C_CATALOG_FAMILY_INTEL_LPSS_CNL, 216000000);
+    }
+    if (device >= 0x4B44 && device <= 0x4B45) ||
+       (device >= 0x4B4B && device <= 0x4B4C) ||
+       (device >= 0x4B78 && device <= 0x4B7B) {
+        return i2c_catalog_profile(I2C_CATALOG_FAMILY_INTEL_LPSS_EHL, 100000000);
+    }
+    // BXT/APL/GLK/ICL/TGL/ADL/RPL/MTL/LNL: seleção pelo ID do controlador,
+    // jamais pela identidade da CPU. IDs novos permanecem recusados até entrar no catálogo.
+    if device == 0x5AAC || device == 0x5AAE || device == 0x5AB0 || device == 0x5AB2 ||
+       device == 0x5AB4 || device == 0x5AB6 || device == 0x5AB8 || device == 0x5ABA ||
+       device == 0x31AC || device == 0x31AE || device == 0x31B0 || device == 0x31B2 ||
+       device == 0x31B4 || device == 0x31B6 || device == 0x31B8 || device == 0x31BA ||
+       (device >= 0x34C5 && device <= 0x34C6) || (device >= 0x34E8 && device <= 0x34EB) ||
+       (device >= 0x43AD && device <= 0x43AE) || device == 0x43D8 ||
+       (device >= 0x43E8 && device <= 0x43EB) ||
+       (device >= 0x51C5 && device <= 0x51C6) || (device >= 0x51D8 && device <= 0x51D9) ||
+       (device >= 0x51E8 && device <= 0x51EB) ||
+       (device >= 0x54C5 && device <= 0x54C6) || (device >= 0x54E8 && device <= 0x54EB) ||
+       (device >= 0x7A4C && device <= 0x7A4F) || (device >= 0x7A7C && device <= 0x7A7D) ||
+       (device >= 0x7ACC && device <= 0x7ACF) || (device >= 0x7AFC && device <= 0x7AFD) ||
+       (device >= 0x7E50 && device <= 0x7E51) || (device >= 0x7E78 && device <= 0x7E7B) ||
+       (device >= 0x98C5 && device <= 0x98C6) || (device >= 0x98E8 && device <= 0x98EB) {
+        return i2c_catalog_profile(I2C_CATALOG_FAMILY_INTEL_LPSS_BXT, 133000000);
+    }
+    return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID);
+}
+
+@system
+fn i2c_catalog_hid_eq(data: *const u8, length: usize,
+                      a:u8,b:u8,c:u8,d:u8,e:u8,f:u8,g:u8,h:u8) -> bool {
+    if data == (null as *const u8) { return false; }
+    if length == 7 { unsafe { return data[0]==a&&data[1]==b&&data[2]==c&&data[3]==d&&data[4]==e&&data[5]==f&&data[6]==g; } }
+    if length == 8 { unsafe { return data[0]==a&&data[1]==b&&data[2]==c&&data[3]==d&&data[4]==e&&data[5]==f&&data[6]==g&&data[7]==h; } }
+    return false;
+}
+
+@system
+pub fn i2c_catalog_acpi(data: *const u8, length: usize) -> I2cHardwareProfile {
+    // AMD0010 (Carrizo) = 133 MHz; AMDI0010/HYGO0010 = 150 MHz.
+    if i2c_catalog_hid_eq(data,length,65,77,68,48,48,49,48,0) {
+        return i2c_catalog_profile(I2C_CATALOG_FAMILY_AMD_DESIGNWARE, 133000000);
+    }
+    if i2c_catalog_hid_eq(data,length,65,77,68,73,48,48,49,48) ||
+       i2c_catalog_hid_eq(data,length,72,89,71,79,48,48,49,48) {
+        return i2c_catalog_profile(I2C_CATALOG_FAMILY_AMD_DESIGNWARE, 150000000);
+    }
+    if i2c_catalog_hid_eq(data,length,65,77,68,73,48,48,49,57) {
+        return I2cHardwareProfile { family: I2C_CATALOG_FAMILY_AMD_DESIGNWARE,
+            access: I2C_CATALOG_ACCESS_PSP_SEMAPHORE,
+            reason: I2C_CATALOG_REASON_PSP_ARBITRATION, input_clock_hz: 150000000,
+            min_component_version: I2C_DW_MIN_COMPONENT_VERSION,
+            max_component_version: 0xFFFFFFFF, valid: false };
+    }
+    return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID);
+}
+
+@system
+pub fn i2c_catalog_component_allowed(profile: *const I2cHardwareProfile,
+                                     component_type: u32, component_version: u32) -> bool {
+    if profile == (null as *const I2cHardwareProfile) { return false; }
+    unsafe { return (*profile).valid && (*profile).access == I2C_CATALOG_ACCESS_SAFE &&
+        component_type == I2C_DW_COMPONENT_TYPE &&
+        component_version >= (*profile).min_component_version &&
+        component_version <= (*profile).max_component_version; }
+}

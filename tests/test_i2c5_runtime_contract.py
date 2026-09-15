@@ -4,6 +4,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SMOKE = ROOT / "tools/scripts/verify_kernel_smoke.py"
 DISCOVERY = ROOT / "kernel/src/drivers/i2c_physical_discovery.sotlas"
+CATALOG = ROOT / "kernel/src/drivers/i2c_hardware_catalog.sotlas"
 DESIGNWARE = ROOT / "kernel/src/drivers/i2c_designware.sotlas"
 REGISTRY = ROOT / "kernel/src/drivers/i2c_controller_registry.sotlas"
 DEVICE = ROOT / "kernel/src/drivers/i2c_device.sotlas"
@@ -89,11 +90,11 @@ class I2c5RuntimeContractTests(unittest.TestCase):
 
     def test_i2c5b_clock_table_and_transaction_speed_contract(self):
         text = DESIGNWARE.read_text(encoding="utf-8")
-        disc = DISCOVERY.read_text(encoding="utf-8")
-        self.assertIn("return 120000000;", disc)
-        self.assertIn("return 216000000;", disc)
-        self.assertIn("return 133000000;", disc)
-        self.assertIn("return 100000000;", disc)
+        catalog = CATALOG.read_text(encoding="utf-8")
+        self.assertIn("120000000", catalog)
+        self.assertIn("216000000", catalog)
+        self.assertIn("133000000", catalog)
+        self.assertIn("100000000", catalog)
         self.assertIn("pub const DW_SUPPORTED_STANDARD_SPEED_HZ: u32 = 100000;", text)
         self.assertIn("pub const DW_SUPPORTED_FAST_SPEED_HZ: u32 = 400000;", text)
         self.assertIn("let bus_speed_hz = unsafe { (*transaction).bus_speed_hz };", text)

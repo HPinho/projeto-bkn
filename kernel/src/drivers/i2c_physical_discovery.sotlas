@@ -11,12 +11,15 @@ import kernel::sync::spinlock::*;
 import kernel::drivers::pci_bus::*;
 import kernel::memory::active_page_tables::*;
 import kernel::acpi::aml_discovery::*;
+import kernel::acpi::aml_dynamic_discovery::*;
 import kernel::acpi::aml_namespace::*;
+import kernel::acpi::aml_runtime_resources::*;
 import kernel::drivers::i2c_core::*;
 import kernel::drivers::i2c_controller::*;
 import kernel::drivers::i2c_controller_registry::*;
 import kernel::drivers::i2c_discovery_bridge::*;
 import kernel::drivers::i2c_designware::*;
+import kernel::drivers::i2c_hardware_catalog::*;
 
 pub const I2C_HARDWARE_TYPE_UNKNOWN: u8 = 0;
 pub const I2C_HARDWARE_TYPE_DESIGNWARE: u8 = 1;
@@ -26,6 +29,9 @@ pub const I2C_MAX_PHYSICAL_CONTROLLERS: usize = 8;
 pub const PCI_CLASS_SERIAL_BUS: u8 = 0x0C;
 pub const PCI_SUBCLASS_SMBUS: u8 = 0x05;
 pub const PCI_SUBCLASS_SERIAL_OTHER: u8 = 0x80;
+pub const I2C_ACPI_FIXED_MEMORY32: u8 = 0x06;
+pub const I2C_PLATFORM_MIN_MMIO: u32 = 0x100;
+pub const I2C_PLATFORM_MAX_MMIO: u32 = 0x10000;
 
 @repr(C)
 pub struct I2cPhysicalController {
@@ -39,6 +45,8 @@ pub struct I2cPhysicalController {
     pub virtual_base: u64;
     pub mmio_size: u64;
     pub input_clock_hz: u32;
+    pub component_version: u32;
+    pub catalog_family: u8;
     pub irq_line: u8;
     pub acpi_namespace_index: usize;
     pub initialized: bool;
@@ -57,6 +65,8 @@ static mut I2C_PHYSICAL_CONTROLLERS: [I2cPhysicalController; I2C_MAX_PHYSICAL_CO
         virtual_base: 0,
         mmio_size: 0,
         input_clock_hz: 0,
+        component_version: 0,
+        catalog_family: I2C_CATALOG_FAMILY_NONE,
         irq_line: 0,
         acpi_namespace_index: AML_NAMESPACE_INVALID_INDEX,
         initialized: false,
@@ -88,6 +98,8 @@ pub fn i2c_physical_invalid_controller() -> I2cPhysicalController {
         virtual_base: 0,
         mmio_size: 0,
         input_clock_hz: 0,
+        component_version: 0,
+        catalog_family: I2C_CATALOG_FAMILY_NONE,
         irq_line: 0,
         acpi_namespace_index: AML_NAMESPACE_INVALID_INDEX,
         initialized: false,
@@ -99,60 +111,9 @@ pub fn i2c_physical_invalid_controller() -> I2cPhysicalController {
 // IDs ausentes retornam 0 e portanto NÃO são tratados como I2C físico suportado.
 @system
 pub fn i2c_physical_clock_for_device(vendor_id: u16, device_id: u16) -> u32 {
-    if vendor_id == 0x16C3 { return 100000000; }
-    if vendor_id != 0x8086 { return 0; }
-
-    // Sunrise Point / Kaby Lake e Tiger Lake-LP usam a plataforma SPT: 120 MHz.
-    if (device_id >= 0x9D60 && device_id <= 0x9D65) ||
-       (device_id >= 0xA160 && device_id <= 0xA162) ||
-       (device_id >= 0xA0C5 && device_id <= 0xA0C6) ||
-       (device_id >= 0xA0D8 && device_id <= 0xA0D9) ||
-       (device_id >= 0xA0E8 && device_id <= 0xA0EB) {
-        return 120000000;
-    }
-
-    // Cannon/Comet Lake usam a plataforma CNL: 216 MHz.
-    if (device_id >= 0x02C5 && device_id <= 0x02C6) ||
-       (device_id >= 0x02E8 && device_id <= 0x02EB) ||
-       (device_id >= 0x06E8 && device_id <= 0x06EB) ||
-       (device_id >= 0x9DC5 && device_id <= 0x9DC6) ||
-       (device_id >= 0x9DE8 && device_id <= 0x9DEB) {
-        return 216000000;
-    }
-
-    // Elkhart Lake usa 100 MHz.
-    if (device_id >= 0x4B44 && device_id <= 0x4B45) ||
-       (device_id >= 0x4B4B && device_id <= 0x4B4C) ||
-       (device_id >= 0x4B78 && device_id <= 0x4B7B) {
-        return 100000000;
-    }
-
-    // Plataformas BXT/APL/GLK/ICL e gerações posteriores com bxt_i2c_info: 133 MHz.
-    if device_id == 0x5AAC || device_id == 0x5AAE || device_id == 0x5AB0 || device_id == 0x5AB2 ||
-       device_id == 0x5AB4 || device_id == 0x5AB6 || device_id == 0x5AB8 || device_id == 0x5ABA ||
-       device_id == 0x31AC || device_id == 0x31AE || device_id == 0x31B0 || device_id == 0x31B2 ||
-       device_id == 0x31B4 || device_id == 0x31B6 || device_id == 0x31B8 || device_id == 0x31BA ||
-       (device_id >= 0x34C5 && device_id <= 0x34C6) ||
-       (device_id >= 0x34E8 && device_id <= 0x34EB) ||
-       (device_id >= 0x43AD && device_id <= 0x43AE) || device_id == 0x43D8 ||
-       (device_id >= 0x43E8 && device_id <= 0x43EB) ||
-       (device_id >= 0x51C5 && device_id <= 0x51C6) ||
-       (device_id >= 0x51D8 && device_id <= 0x51D9) ||
-       (device_id >= 0x51E8 && device_id <= 0x51EB) ||
-       (device_id >= 0x54C5 && device_id <= 0x54C6) ||
-       (device_id >= 0x54E8 && device_id <= 0x54EB) ||
-       (device_id >= 0x7A4C && device_id <= 0x7A4F) ||
-       (device_id >= 0x7A7C && device_id <= 0x7A7D) ||
-       (device_id >= 0x7ACC && device_id <= 0x7ACF) ||
-       (device_id >= 0x7AFC && device_id <= 0x7AFD) ||
-       (device_id >= 0x7E50 && device_id <= 0x7E51) ||
-       (device_id >= 0x7E78 && device_id <= 0x7E7B) ||
-       (device_id >= 0x98C5 && device_id <= 0x98C6) ||
-       (device_id >= 0x98E8 && device_id <= 0x98EB) {
-        return 133000000;
-    }
-
-    return 0;
+    let profile = i2c_catalog_pci(vendor_id, device_id);
+    if !profile.valid { return 0; }
+    return profile.input_clock_hz;
 }
 
 @system
@@ -356,6 +317,14 @@ pub fn i2c_physical_probe_pci() -> usize {
                         i2c_lpss_reset_release(phys_base, phys_base);
                     }
 
+                    let profile = i2c_catalog_pci(vendor_id, device_id);
+                    let component_type = i2c_dw_component_type(phys_base);
+                    let component_version = i2c_dw_component_version(phys_base);
+                    if !i2c_catalog_component_allowed(&profile, component_type, component_version) {
+                        i += 1;
+                        continue;
+                    }
+
                     let init_ok = i2c_dw_init_with_clock(phys_base, DW_SUPPORTED_FAST_SPEED_HZ, input_clock);
                     if !init_ok {
                         i += 1;
@@ -379,6 +348,8 @@ pub fn i2c_physical_probe_pci() -> usize {
                                     virtual_base: phys_base,
                                     mmio_size: 4096,
                                     input_clock_hz: input_clock,
+                                    component_version: component_version,
+                                    catalog_family: profile.family,
                                     irq_line: 0,
                                     acpi_namespace_index: acpi_ns,
                                     initialized: true,
@@ -443,6 +414,128 @@ pub fn i2c_physical_probe_pci() -> usize {
         i += 1;
     }
 
+    return discovered;
+}
+
+@system
+fn i2c_physical_read_u32(data: *const u8, offset: usize) -> u32 {
+    unsafe { return (data[offset] as u32) | ((data[offset + 1] as u32) << 8) |
+        ((data[offset + 2] as u32) << 16) | ((data[offset + 3] as u32) << 24); }
+}
+
+@system
+fn i2c_physical_acpi_profile(device_slot: usize,
+                             device: *const AmlDiscoveredDevice) -> I2cHardwareProfile {
+    if device == (null as *const AmlDiscoveredDevice) { return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID); }
+    unsafe {
+        if !(*device).valid { return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID); }
+        let mut data = (*device).hid_data;
+        let mut length = (*device).hid_length;
+        if (*device).hid_requires_evaluator {
+            let dynamic = aml_dynamic_discovery_device(device_slot);
+            if dynamic == (null as *const AmlDynamicDevice) || !(*dynamic).valid ||
+               !(*dynamic).hid_resolved || (*dynamic).hid_kind != AML_DYNAMIC_ID_STRING {
+                return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID);
+            }
+            data = (*dynamic).hid_data;
+            length = (*dynamic).hid_length;
+        } else if (*device).hid_kind != AML_DISCOVERY_ID_STRING {
+            return i2c_catalog_invalid(I2C_CATALOG_REASON_UNKNOWN_ID);
+        }
+        return i2c_catalog_acpi(data, length);
+    }
+}
+
+@system
+fn i2c_physical_map_platform(base: u64, length: u32) -> bool {
+    if base == 0 || (base & 0xFFF) != 0 || length < I2C_PLATFORM_MIN_MMIO ||
+       length > I2C_PLATFORM_MAX_MMIO { return false; }
+    let mut offset: u32 = 0;
+    while offset < length {
+        if !active_page_tables_map_mmio_identity_4k(base + offset as u64) { return false; }
+        offset += 0x1000;
+    }
+    return true;
+}
+
+// Descobre DesignWare exposto como dispositivo de plataforma ACPI. AMDI0019 é
+// reconhecido pelo catálogo, mas não chega a esta função como perfil válido:
+// sem posse confirmada pelo PSP, nenhum registrador é acessado.
+@system
+pub fn i2c_physical_probe_acpi_platform() -> usize {
+    if !i2c_physical_discovery_init() || !aml_discovery_is_ready() { return 0; }
+    let count = aml_discovery_device_count();
+    let mut discovered: usize = 0;
+    let mut device_slot: usize = 0;
+    while device_slot < count {
+        let device = aml_discovery_device(device_slot);
+        let profile = i2c_physical_acpi_profile(device_slot, device);
+        if profile.valid && profile.access == I2C_CATALOG_ACCESS_SAFE &&
+           unsafe { !(*device).has_adr } {
+            let ns = unsafe { (*device).namespace_index };
+            let handle = i2c_discovery_bridge_find_by_namespace(ns);
+            if i2c_controller_handle_valid(&handle) {
+              let record = i2c_controller_registry_snapshot(handle.controller_id, handle.generation);
+              if record.valid && record.state == I2C_CONTROLLER_STATE_ATTACHED && !record.backend_ready {
+                let mut base: u64 = 0;
+                let mut length: u32 = 0;
+                let resource_count = aml_runtime_resource_count(device_slot);
+                let mut r: usize = 0;
+                while r < resource_count {
+                    let resource = aml_runtime_resource_at(device_slot, r);
+                    if resource.valid && resource.kind == AML_RESOURCE_KIND_LARGE &&
+                       resource.item_name == I2C_ACPI_FIXED_MEMORY32 &&
+                       resource.payload != (null as *const u8) && resource.payload_length == 9 && base == 0 {
+                        base = i2c_physical_read_u32(resource.payload, 1) as u64;
+                        length = i2c_physical_read_u32(resource.payload, 5);
+                    }
+                    r += 1;
+                }
+                if i2c_physical_map_platform(base, length) {
+                    let component_type = i2c_dw_component_type(base);
+                    let component_version = i2c_dw_component_version(base);
+                    if i2c_catalog_component_allowed(&profile, component_type, component_version) &&
+                       i2c_dw_init_with_clock(base, DW_SUPPORTED_FAST_SPEED_HZ, profile.input_clock_hz) {
+                        let flags = x86_irq_save_disable();
+                        let mut slot_idx = I2C_MAX_PHYSICAL_CONTROLLERS;
+                        unsafe {
+                            if spinlock_lock(&mut I2C_PHYSICAL_LOCK) {
+                                if I2C_PHYSICAL_COUNT < I2C_MAX_PHYSICAL_CONTROLLERS {
+                                    slot_idx = I2C_PHYSICAL_COUNT;
+                                    I2C_PHYSICAL_CONTROLLERS[slot_idx] = I2cPhysicalController {
+                                        bus: 0xFF, slot: 0, func: 0, vendor_id: 0x1022, device_id: 0,
+                                        hardware_type: I2C_HARDWARE_TYPE_DESIGNWARE,
+                                        physical_base: base, virtual_base: base, mmio_size: length as u64,
+                                        input_clock_hz: profile.input_clock_hz,
+                                        component_version: component_version, catalog_family: profile.family,
+                                        irq_line: 0, acpi_namespace_index: ns, initialized: true, valid: true
+                                    };
+                                    I2C_PHYSICAL_COUNT += 1;
+                                }
+                                spinlock_unlock(&mut I2C_PHYSICAL_LOCK);
+                            }
+                        }
+                        x86_irq_restore(flags);
+                        if slot_idx < I2C_MAX_PHYSICAL_CONTROLLERS {
+                            let instance = (slot_idx + 1) as u32;
+                            let caps = i2c_discovery_default_capabilities(DW_SUPPORTED_FAST_SPEED_HZ, false);
+                            if i2c_controller_registry_update_capabilities(handle.controller_id, handle.generation, &caps) &&
+                               i2c_controller_registry_publish_backend(handle.controller_id, handle.generation, instance) &&
+                               i2c_controller_registry_activate(handle.controller_id, handle.generation) {
+                                discovered += 1;
+                            } else {
+                                i2c_controller_registry_mark_failed(handle.controller_id, handle.generation);
+                                i2c_physical_rollback_last(slot_idx);
+                                i2c_dw_enable(base, false);
+                            }
+                        } else { i2c_dw_enable(base, false); }
+                    }
+                }
+              }
+            }
+        }
+        device_slot += 1;
+    }
     return discovered;
 }
 

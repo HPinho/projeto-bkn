@@ -31,6 +31,9 @@ pub const DW_IC_TXFLR: u64 = 0x74;
 pub const DW_IC_RXFLR: u64 = 0x78;
 pub const DW_IC_TX_ABRT_SOURCE: u64 = 0x80;
 pub const DW_IC_ENABLE_STATUS: u64 = 0x9C;
+pub const DW_IC_COMP_PARAM_1: u64 = 0xF4;
+pub const DW_IC_COMP_VERSION: u64 = 0xF8;
+pub const DW_IC_COMP_TYPE: u64 = 0xFC;
 
 // Offsets da camada privada Intel LPSS. A área privada começa em BAR0 + 0x200.
 pub const INTEL_LPSS_DEV_OFFSET: u64 = 0x000;
@@ -87,6 +90,18 @@ pub fn i2c_dw_read32(base: u64, offset: u64) -> u32 {
 @system
 pub fn i2c_dw_write32(base: u64, offset: u64, value: u32) -> void {
     x86_mmio_write32(base + offset, value);
+}
+
+@system
+pub fn i2c_dw_component_type(base: u64) -> u32 {
+    if base == 0 { return 0; }
+    return i2c_dw_read32(base, DW_IC_COMP_TYPE);
+}
+
+@system
+pub fn i2c_dw_component_version(base: u64) -> u32 {
+    if base == 0 { return 0; }
+    return i2c_dw_read32(base, DW_IC_COMP_VERSION);
 }
 
 @system
