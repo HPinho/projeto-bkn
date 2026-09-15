@@ -1,0 +1,214 @@
+// Registro global de dispositivos. Identidade generation-safe e arvore parent/child.
+// Nao toca PCI, BAR, MMIO, IRQ nem DMA: somente fatos logicos.
+module kernel::device::registry;
+
+import kernel::device::types::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+static mut DEVICE_RECORDS: [DeviceRecord; DEVICE_CORE_CAPACITY] = [
+    DeviceRecord {
+        handle: DeviceHandle { device_id: 0, generation: 0, valid: false },
+        parent: DeviceHandle { device_id: 0, generation: 0, valid: false },
+        bus: 0, class_code: 0, state: 0, driver_id: 0, vendor_id: 0,
+        hardware_id: 0, bus_instance: 0, child_count: 0, valid: false
+    }; DEVICE_CORE_CAPACITY
+];
+static mut DEVICE_GENERATIONS: [u32; DEVICE_CORE_CAPACITY] = [0; DEVICE_CORE_CAPACITY];
+static mut DEVICE_CORE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut DEVICE_CORE_LOCK_READY: bool = false;
+static mut DEVICE_CORE_READY: bool = false;
+static mut DEVICE_CORE_ATTACHED_COUNT: u32 = 0;
+
+@system
+fn device_slot(device_id: u32) -> usize {
+    if device_id == DEVICE_ID_NONE || device_id > DEVICE_CORE_CAPACITY as u32 {
+        return DEVICE_CORE_CAPACITY;
+    }
+    return (device_id - 1) as usize;
+}
+
+@system
+fn device_generation_next(current: u32) -> u32 {
+    let mut next = current + 1;
+    if next == DEVICE_GENERATION_INVALID { next = 1; }
+    return next;
+}
+
+@system
+fn device_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !DEVICE_CORE_LOCK_READY || !spinlock_lock(&mut DEVICE_CORE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn device_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut DEVICE_CORE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn device_handle_live_locked(handle: DeviceHandle) -> bool {
+    let slot = device_slot(handle.device_id);
+    if !handle.valid || handle.generation == DEVICE_GENERATION_INVALID ||
+       slot >= DEVICE_CORE_CAPACITY { return false; }
+    unsafe {
+        return DEVICE_RECORDS[slot].valid &&
+               DEVICE_RECORDS[slot].handle.generation == handle.generation &&
+               DEVICE_RECORDS[slot].state != DEVICE_STATE_DETACHED;
+    }
+}
+
+@system
+pub fn device_core_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !DEVICE_CORE_LOCK_READY {
+            if !spinlock_init(&mut DEVICE_CORE_LOCK) {
+                x86_irq_restore(flags); return false;
+            }
+            DEVICE_CORE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut DEVICE_CORE_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        if !DEVICE_CORE_READY {
+            let mut slot: usize = 0;
+            while slot < DEVICE_CORE_CAPACITY {
+                DEVICE_RECORDS[slot] = device_invalid_record();
+                DEVICE_GENERATIONS[slot] = 0;
+                slot += 1;
+            }
+            DEVICE_CORE_ATTACHED_COUNT = 0;
+            DEVICE_CORE_READY = true;
+        }
+        spinlock_unlock(&mut DEVICE_CORE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn device_core_is_ready() -> bool { unsafe { return DEVICE_CORE_READY; } }
+
+@system
+pub fn device_core_attach(parent: DeviceHandle, bus: u8, class_code: u8,
+                          vendor_id: u32, hardware_id: u32,
+                          bus_instance: u32) -> DeviceHandle {
+    if !device_core_is_ready() || bus == DEVICE_BUS_NONE ||
+       bus > DEVICE_BUS_VIRTUAL || class_code == DEVICE_CLASS_NONE ||
+       class_code > DEVICE_CLASS_CONTROLLER { return device_invalid_handle(); }
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return device_invalid_handle(); }
+    if parent.valid && !device_handle_live_locked(parent) {
+        device_unlock_irq(flags); return device_invalid_handle();
+    }
+    let mut result = device_invalid_handle();
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < DEVICE_CORE_CAPACITY {
+            if !DEVICE_RECORDS[slot].valid ||
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_DETACHED {
+                let generation = device_generation_next(DEVICE_GENERATIONS[slot]);
+                DEVICE_GENERATIONS[slot] = generation;
+                result = DeviceHandle { device_id: (slot + 1) as u32,
+                                        generation: generation, valid: true };
+                DEVICE_RECORDS[slot] = DeviceRecord {
+                    handle: result, parent: parent, bus: bus, class_code: class_code,
+                    state: DEVICE_STATE_ATTACHED, driver_id: 0,
+                    vendor_id: vendor_id, hardware_id: hardware_id,
+                    bus_instance: bus_instance, child_count: 0, valid: true
+                };
+                if parent.valid {
+                    let parent_slot = device_slot(parent.device_id);
+                    DEVICE_RECORDS[parent_slot].child_count += 1;
+                }
+                DEVICE_CORE_ATTACHED_COUNT += 1;
+                break;
+            }
+            slot += 1;
+        }
+    }
+    device_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn device_core_snapshot(handle: DeviceHandle) -> DeviceRecord {
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return device_invalid_record(); }
+    let mut result = device_invalid_record();
+    if device_handle_live_locked(handle) {
+        unsafe { result = DEVICE_RECORDS[device_slot(handle.device_id)]; }
+    }
+    device_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn device_core_attached_count() -> u32 {
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return 0; }
+    let mut count: u32 = 0;
+    unsafe { if DEVICE_CORE_READY { count = DEVICE_CORE_ATTACHED_COUNT; } }
+    device_unlock_irq(flags);
+    return count;
+}
+
+@system
+pub fn device_core_set_state(handle: DeviceHandle, expected: u8,
+                             next: u8) -> bool {
+    if next != DEVICE_STATE_ACTIVE && next != DEVICE_STATE_FAILED { return false; }
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return false; }
+    let mut changed = false;
+    if device_handle_live_locked(handle) {
+        unsafe {
+            let slot = device_slot(handle.device_id);
+            if DEVICE_RECORDS[slot].state == expected &&
+               ((expected == DEVICE_STATE_ATTACHED && next == DEVICE_STATE_ACTIVE) ||
+                (expected == DEVICE_STATE_ATTACHED && next == DEVICE_STATE_FAILED) ||
+                (expected == DEVICE_STATE_ACTIVE && next == DEVICE_STATE_FAILED)) {
+                DEVICE_RECORDS[slot].state = next;
+                changed = true;
+            }
+        }
+    }
+    device_unlock_irq(flags);
+    return changed;
+}
+
+@system
+pub fn device_core_detach(handle: DeviceHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return false; }
+    let mut detached = false;
+    if device_handle_live_locked(handle) {
+        unsafe {
+            let slot = device_slot(handle.device_id);
+            if DEVICE_RECORDS[slot].child_count == 0 {
+                let parent = DEVICE_RECORDS[slot].parent;
+                DEVICE_RECORDS[slot].state = DEVICE_STATE_DETACHED;
+                DEVICE_RECORDS[slot].driver_id = 0;
+                DEVICE_CORE_ATTACHED_COUNT -= 1;
+                if parent.valid && device_handle_live_locked(parent) {
+                    let parent_slot = device_slot(parent.device_id);
+                    DEVICE_RECORDS[parent_slot].child_count -= 1;
+                }
+                detached = true;
+            }
+        }
+    }
+    device_unlock_irq(flags);
+    return detached;
+}

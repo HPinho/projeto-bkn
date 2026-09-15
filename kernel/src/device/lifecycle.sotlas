@@ -1,0 +1,22 @@
+// Fachada de lifecycle. Bind de driver e recursos virao nos cortes DF-2/DF-3.
+module kernel::device::lifecycle;
+
+import kernel::device::types::*;
+import kernel::device::registry::*;
+
+@system
+pub fn device_activate(handle: DeviceHandle) -> bool {
+    return device_core_set_state(handle, DEVICE_STATE_ATTACHED, DEVICE_STATE_ACTIVE);
+}
+
+@system
+pub fn device_fail(handle: DeviceHandle) -> bool {
+    let snapshot = device_core_snapshot(handle);
+    if !snapshot.valid { return false; }
+    return device_core_set_state(handle, snapshot.state, DEVICE_STATE_FAILED);
+}
+
+@system
+pub fn device_detach(handle: DeviceHandle) -> bool {
+    return device_core_detach(handle);
+}

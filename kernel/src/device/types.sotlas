@@ -1,0 +1,72 @@
+// Identidade e estados universais do Device Core. Nenhum backend fisico aqui.
+module kernel::device::types;
+
+pub const DEVICE_CORE_CAPACITY: usize = 128;
+pub const DEVICE_ID_NONE: u32 = 0;
+pub const DEVICE_GENERATION_INVALID: u32 = 0;
+
+pub const DEVICE_BUS_NONE: u8 = 0;
+pub const DEVICE_BUS_PCI: u8 = 1;
+pub const DEVICE_BUS_USB: u8 = 2;
+pub const DEVICE_BUS_I2C: u8 = 3;
+pub const DEVICE_BUS_ACPI: u8 = 4;
+pub const DEVICE_BUS_VIRTUAL: u8 = 5;
+
+pub const DEVICE_CLASS_NONE: u8 = 0;
+pub const DEVICE_CLASS_BUS: u8 = 1;
+pub const DEVICE_CLASS_BLOCK: u8 = 2;
+pub const DEVICE_CLASS_INPUT: u8 = 3;
+pub const DEVICE_CLASS_DISPLAY: u8 = 4;
+pub const DEVICE_CLASS_AUDIO: u8 = 5;
+pub const DEVICE_CLASS_NETWORK: u8 = 6;
+pub const DEVICE_CLASS_CONTROLLER: u8 = 7;
+
+pub const DEVICE_STATE_EMPTY: u8 = 0;
+pub const DEVICE_STATE_ATTACHED: u8 = 1;
+pub const DEVICE_STATE_ACTIVE: u8 = 2;
+pub const DEVICE_STATE_FAILED: u8 = 3;
+pub const DEVICE_STATE_DETACHED: u8 = 4;
+
+@repr(C)
+pub struct DeviceHandle {
+    pub device_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct DeviceRecord {
+    pub handle: DeviceHandle;
+    pub parent: DeviceHandle;
+    pub bus: u8;
+    pub class_code: u8;
+    pub state: u8;
+    pub driver_id: u32;
+    pub vendor_id: u32;
+    pub hardware_id: u32;
+    pub bus_instance: u32;
+    pub child_count: u32;
+    pub valid: bool;
+}
+
+@system
+pub fn device_invalid_handle() -> DeviceHandle {
+    return DeviceHandle { device_id: DEVICE_ID_NONE,
+                          generation: DEVICE_GENERATION_INVALID, valid: false };
+}
+
+@system
+pub fn device_invalid_record() -> DeviceRecord {
+    return DeviceRecord {
+        handle: device_invalid_handle(), parent: device_invalid_handle(),
+        bus: DEVICE_BUS_NONE, class_code: DEVICE_CLASS_NONE,
+        state: DEVICE_STATE_EMPTY, driver_id: 0, vendor_id: 0,
+        hardware_id: 0, bus_instance: 0, child_count: 0, valid: false
+    };
+}
+
+@system
+pub fn device_handle_equal(left: DeviceHandle, right: DeviceHandle) -> bool {
+    return left.valid && right.valid && left.device_id == right.device_id &&
+           left.generation == right.generation;
+}

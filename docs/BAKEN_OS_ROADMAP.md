@@ -655,4 +655,38 @@ Os débitos abaixo continuam separados do hot-unplug teardown e não invalidam a
 - rollback de DMA em falhas intermediárias de `xhci_hid_context_prepare_for_slot()`;
 - rollback da arena em falhas intermediárias de `xhci_context_prepare_for_slot()`.
 
+---
+
+# Atualização — Driver Foundation (DF)
+
+> Estado em 2026-09-15. O boot físico ASUS confirmou o caminho de fundação em
+> modo seguro; isso não substitui provas de SMP pleno nem de drivers em outros
+> equipamentos. O Kernel Core permanece congelado.
+
+O objetivo DF é criar uma camada de dispositivos e drivers **sobre** as primitivas
+PMM/VMM/PCI/IRQ/DMA já existentes, sem reescrever o boot físico certificado.
+
+| Corte | Estado | Entrega |
+|---|---|---|
+| DF-0 Baseline física | ✅ | Boot ASUS observado; AML limitado e possível SMP BSP-only são estados explícitos, não certificação multi-hardware |
+| DF-1 Device Core | ⏳ implementado, validação em andamento | identidade `device_id + generation`, parent/child, estados e registro fixo SMP/IRQ-safe; grafo Sotlas, ainda sem alterar boot |
+| DF-2 Driver Registry | ⬜ | match, probe/remove, bind/unbind e owner exclusivo |
+| DF-3 Resource Manager | ⬜ | claims MMIO, I/O ports, PCI BAR, IRQ e DMA |
+| DF-4 Generic IRQ Registry | ⬜ | vetores dinâmicos e handlers; preservar vetores bootstrap |
+| DF-5 PCI Core v2 | ⬜ | backend CF8/CFC+ECAM, capability walker e claim |
+| DF-6 MSI / DF-7 MSI-X | ⬜ | interrupções PCIe modernas sobre o registry |
+| DF-8 DMA Device API | ⬜ | constraints por dispositivo; allocator atual permanece |
+| DF-9 MMIO Mapping API | ⬜ | ownership e política UC/WC/WT/WB |
+| DF-10 Bus Model | ⬜ | PCI, USB, I²C e ACPI/platform |
+| DF-11 Class Registries | ⬜ | block, input, display, audio e network |
+| DF-12 Hotplug Framework | ⬜ | generation, quarantine, drain e detach |
+| DF-13 Power Lifecycle | ⬜ | suspend/resume/shutdown/reset |
+| DF-14 Diagnostics | ⬜ | identidade, estado, recursos, IRQ, DMA e erros |
+| DF-15 Compatibility Adapters | ⬜ | xHCI/HID, NVMe/AHCI e GPIO/I²C atuais, gradualmente |
+
+DF-1 é propositalmente passivo: não inicializa hardware, não reivindica PCI, não
+altera IRQ e não toca armazenamento. O próximo corte é DF-2, depois da prova de
+build e boot do DF-1. A existência do Device Core não promove automaticamente
+nenhum controlador Intel/AMD não testado a hardware suportado.
+
 Esses itens devem ser tratados em microcortes próprios, preservando os quatro gates e sem alterar o consumidor global único do Event Ring.
