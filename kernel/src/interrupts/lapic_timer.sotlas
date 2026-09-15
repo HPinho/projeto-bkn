@@ -2,6 +2,8 @@
 //
 // Usa o ACPI PM Timer como referencia no BSP. APs reutilizam o valor calibrado
 // para programar o proprio timer local ainda mascarado; nao repetem calibracao.
+// O acesso aos registradores passa pelo backend LAPIC para funcionar tanto em
+// xAPIC/MMIO quanto em x2APIC/MSR.
 
 module kernel::interrupts::lapic_timer;
 
@@ -25,14 +27,14 @@ static mut LAPIC_TIMER_TICKS_PER_MS: u32 = 0;
 
 @system
 fn lapic_timer_read(offset: u64) -> u32 {
-    if !lapic_is_ready() || lapic_base() == 0 { return 0; }
-    return x86_mmio_read32(lapic_base() + offset);
+    if !lapic_is_ready() { return 0; }
+    return lapic_register_read(offset);
 }
 
 @system
 fn lapic_timer_write(offset: u64, value: u32) -> void {
-    if !lapic_is_ready() || lapic_base() == 0 { return; }
-    x86_mmio_write32(lapic_base() + offset, value);
+    if !lapic_is_ready() { return; }
+    lapic_register_write(offset, value);
 }
 
 @system

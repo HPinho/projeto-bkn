@@ -18,6 +18,13 @@ class LapicTimerTests(unittest.TestCase):
         self.assertIn("LAPIC_TIMER_REG_CURRENT_COUNT", text)
         self.assertIn("LAPIC_TIMER_MAX_SPINS", text)
 
+    def test_timer_uses_mode_aware_lapic_register_backend(self):
+        text = TIMER.read_text(encoding="utf-8")
+        self.assertIn("lapic_register_read(offset)", text)
+        self.assertIn("lapic_register_write(offset, value)", text)
+        self.assertNotIn("x86_mmio_read32(lapic_base()", text)
+        self.assertNotIn("x86_mmio_write32(lapic_base()", text)
+
     def test_periodic_timer_remains_masked_after_calibration(self):
         text = TIMER.read_text(encoding="utf-8")
         body = text.split("pub fn lapic_timer_calibrate_masked_from_pm", 1)[1].split("pub fn lapic_timer_is_ready", 1)[0]

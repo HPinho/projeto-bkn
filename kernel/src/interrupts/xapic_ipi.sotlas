@@ -1,8 +1,9 @@
-// Baken OS — transporte xAPIC minimo para IPIs arquiteturais globais e dirigidos.
+// Baken OS — transporte de IPI para xAPIC e x2APIC.
 //
-// Este modulo conhece somente o MMIO/ICR do Local APIC. Ele nao importa a
-// politica de IRQ, scheduler ou page tables, evitando ciclos entre essas
-// camadas. O LAPIC principal publica a base ja mapeada no bootstrap.
+// Mantemos a API historica xapic_ipi_* para nao acoplar TLB/scheduler ao modo
+// fisico do Local APIC. Em xAPIC o ICR e MMIO; em x2APIC o ICR e um MSR de
+// 64 bits. O inventario atual limita IDs a <=255 para permanecer compativel
+// com o destino fisico de 8 bits do IOAPIC ate existir interrupt remapping.
 module kernel::interrupts::xapic_ipi;
 
 import kernel::arch::x86_64::cpu::*;
@@ -16,15 +17,22 @@ pub const XAPIC_IPI_FIXED_VECTOR_MIN: u8 = 0x20;
 pub const XAPIC_IPI_FIXED_VECTOR_MAX: u8 = 0xFE;
 pub const XAPIC_IPI_SPIN_LIMIT: u64 = 1000000;
 
+pub const X2APIC_IPI_MSR_ID: u32 = 0x802;
+pub const X2APIC_IPI_MSR_ICR: u32 = 0x830;
+
 static mut XAPIC_IPI_BASE: u64 = 0;
 static mut XAPIC_IPI_READY: bool = false;
+static mut XAPIC_IPI_X2APIC: bool = false;
 
 @system
 pub fn xapic_ipi_bind(base: u64) -> bool {
     if base == 0 || (base & 0xFFF) != 0 { return false; }
     unsafe {
-        if XAPIC_IPI_READY { return XAPIC_IPI_BASE == base; }
+        if XAPIC_IPI_READY {
+            return !XAPIC_IPI_X2APIC && XAPIC_IPI_BASE == base;
+        }
         XAPIC_IPI_BASE = base;
+        XAPIC_IPI_X2APIC = false;
         XAPIC_IPI_READY = true;
     }
     __dma_fence();
@@ -32,12 +40,41 @@ pub fn xapic_ipi_bind(base: u64) -> bool {
 }
 
 @system
-pub fn xapic_ipi_is_ready() -> bool { unsafe { return XAPIC_IPI_READY && XAPIC_IPI_BASE != 0; } }
+pub fn xapic_ipi_bind_x2apic() -> bool {
+    unsafe {
+        if XAPIC_IPI_READY { return XAPIC_IPI_X2APIC; }
+        XAPIC_IPI_BASE = 0;
+        XAPIC_IPI_X2APIC = true;
+        XAPIC_IPI_READY = true;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn xapic_ipi_is_ready() -> bool {
+    unsafe { return XAPIC_IPI_READY && (XAPIC_IPI_X2APIC || XAPIC_IPI_BASE != 0); }
+}
+
+@system
+pub fn xapic_ipi_is_x2apic() -> bool {
+    unsafe { return XAPIC_IPI_READY && XAPIC_IPI_X2APIC; }
+}
 
 @system
 fn xapic_ipi_read(offset: u64) -> u32 {
     unsafe {
-        if !XAPIC_IPI_READY || XAPIC_IPI_BASE == 0 { return 0; }
+        if !XAPIC_IPI_READY { return 0; }
+        if XAPIC_IPI_X2APIC {
+            if offset == XAPIC_IPI_REG_ID {
+                return x86_read_msr(X2APIC_IPI_MSR_ID) as u32;
+            }
+            if offset == XAPIC_IPI_REG_ICR_LOW {
+                return x86_read_msr(X2APIC_IPI_MSR_ICR) as u32;
+            }
+            return 0;
+        }
+        if XAPIC_IPI_BASE == 0 { return 0; }
         return x86_mmio_read32(XAPIC_IPI_BASE + offset);
     }
 }
@@ -45,7 +82,7 @@ fn xapic_ipi_read(offset: u64) -> u32 {
 @system
 fn xapic_ipi_write(offset: u64, value: u32) -> bool {
     unsafe {
-        if !XAPIC_IPI_READY || XAPIC_IPI_BASE == 0 { return false; }
+        if !XAPIC_IPI_READY || XAPIC_IPI_X2APIC || XAPIC_IPI_BASE == 0 { return false; }
         x86_mmio_write32(XAPIC_IPI_BASE + offset, value);
     }
     return true;
@@ -54,12 +91,21 @@ fn xapic_ipi_write(offset: u64, value: u32) -> bool {
 @system
 pub fn xapic_ipi_current_id() -> u8 {
     if !xapic_ipi_is_ready() { return 0; }
-    return ((xapic_ipi_read(XAPIC_IPI_REG_ID) >> 24) & 0xFF) as u8;
+    let raw = xapic_ipi_read(XAPIC_IPI_REG_ID);
+    if xapic_ipi_is_x2apic() {
+        if raw > 255 { return 0; }
+        return raw as u8;
+    }
+    // Em xAPIC o ID ocupa bits 31:24. Validar o valor bruto antes do shift
+    // faria qualquer AP diferente do BSP parecer APIC ID 0 e quebraria o
+    // reconhecimento do requester/handler no TLB shootdown SMP.
+    return ((raw >> 24) & 0xFF) as u8;
 }
 
 @system
 fn xapic_ipi_wait_idle() -> bool {
     if !xapic_ipi_is_ready() { return false; }
+    if xapic_ipi_is_x2apic() { return true; }
     let mut spins: u64 = 0;
     while spins < XAPIC_IPI_SPIN_LIMIT {
         if (xapic_ipi_read(XAPIC_IPI_REG_ICR_LOW) & XAPIC_IPI_ICR_DELIVERY_STATUS) == 0 {
@@ -71,14 +117,19 @@ fn xapic_ipi_wait_idle() -> bool {
     return false;
 }
 
-// Entrega fixed dirigida a um Local APIC especifico. O destination field xAPIC
-// ocupa os bits 31:24 de ICR_HIGH; nenhum shorthand e usado neste caminho.
+// Entrega fixed dirigida a um Local APIC especifico. Em xAPIC o destino ocupa
+// ICR_HIGH[31:24]; em x2APIC ocupa ICR_MSR[63:32].
 @system
 pub fn xapic_ipi_send_fixed(destination_apic_id: u8, vector: u8) -> bool {
     if vector < XAPIC_IPI_FIXED_VECTOR_MIN || vector > XAPIC_IPI_FIXED_VECTOR_MAX {
         return false;
     }
     if !xapic_ipi_wait_idle() { return false; }
+    if xapic_ipi_is_x2apic() {
+        let command = ((destination_apic_id as u64) << 32) | (vector as u64);
+        x86_write_msr(X2APIC_IPI_MSR_ICR, command);
+        return true;
+    }
     if !xapic_ipi_write(
         XAPIC_IPI_REG_ICR_HIGH,
         (destination_apic_id as u32) << 24
@@ -88,13 +139,19 @@ pub fn xapic_ipi_send_fixed(destination_apic_id: u8, vector: u8) -> bool {
 }
 
 // O destination shorthand 11b entrega a todos os Local APICs exceto o atual.
-// ICR_HIGH e zerado por clareza; com shorthand o destination field e ignorado.
 @system
 pub fn xapic_ipi_send_fixed_all_excluding_self(vector: u8) -> bool {
     if vector < XAPIC_IPI_FIXED_VECTOR_MIN || vector > XAPIC_IPI_FIXED_VECTOR_MAX {
         return false;
     }
     if !xapic_ipi_wait_idle() { return false; }
+    if xapic_ipi_is_x2apic() {
+        x86_write_msr(
+            X2APIC_IPI_MSR_ICR,
+            (XAPIC_IPI_DEST_ALL_EXCLUDING_SELF | (vector as u32)) as u64
+        );
+        return true;
+    }
     if !xapic_ipi_write(XAPIC_IPI_REG_ICR_HIGH, 0) { return false; }
     if !xapic_ipi_write(
         XAPIC_IPI_REG_ICR_LOW,
