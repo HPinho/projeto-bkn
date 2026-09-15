@@ -568,26 +568,43 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     let snapshot = post_cutover_context_snapshot(context);
     let serial_ready = x86_serial_init();
     if serial_ready { x86_serial_write_stage_marker('B' as u8); }
+    baken_early_boot_begin(unsafe { snapshot.framebuffer_base as *mut u32 },
+                           snapshot.screen_width, snapshot.screen_height,
+                           snapshot.pixels_per_scanline);
 
     // Núcleo obrigatório: se qualquer uma destas invariantes falhar não existe
     // ambiente seguro para continuar executando o kernel.
-    if !post_cutover_activate_cpu(context) { loop {} }
+    baken_early_boot_stage("CPU TABLES / GDT / IDT\0".as_ptr());
+    if !post_cutover_activate_cpu(context) { baken_early_boot_fail("E-CPU-001\0".as_ptr(), "CPU TABLES / GDT / IDT\0".as_ptr()); }
+    baken_early_boot_pass("CPU TABLES / GDT / IDT\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('C' as u8); }
-    if !post_cutover_activate_pmm(context) { loop {} }
+    baken_early_boot_stage("PHYSICAL MEMORY MANAGER\0".as_ptr());
+    if !post_cutover_activate_pmm(context) { baken_early_boot_fail("E-PMM-001\0".as_ptr(), "PHYSICAL MEMORY MANAGER\0".as_ptr()); }
+    baken_early_boot_pass("PHYSICAL MEMORY MANAGER\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('P' as u8); }
-    if !post_cutover_activate_vmm(context) { loop {} }
+    baken_early_boot_stage("VIRTUAL MEMORY MANAGER\0".as_ptr());
+    if !post_cutover_activate_vmm(context) { baken_early_boot_fail("E-VMM-001\0".as_ptr(), "VIRTUAL MEMORY MANAGER\0".as_ptr()); }
+    baken_early_boot_pass("VIRTUAL MEMORY MANAGER\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('V' as u8); }
-    if !post_cutover_activate_heap() { loop {} }
+    baken_early_boot_stage("KERNEL HEAP\0".as_ptr());
+    if !post_cutover_activate_heap() { baken_early_boot_fail("E-HEAP-001\0".as_ptr(), "KERNEL HEAP\0".as_ptr()); }
     if serial_ready { if !x86_serial_write_heap_ready_marker() { loop {} } }
-    if !post_cutover_activate_acpi(context) { loop {} }
+    baken_early_boot_stage("ACPI TABLES\0".as_ptr());
+    if !post_cutover_activate_acpi(context) { baken_early_boot_fail("E-ACPI-001\0".as_ptr(), "ACPI TABLES\0".as_ptr()); }
+    baken_early_boot_pass("ACPI TABLES\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('A' as u8); }
-    if !post_cutover_activate_interrupt_controllers() { loop {} }
+    baken_early_boot_stage("APIC / IOAPIC\0".as_ptr());
+    if !post_cutover_activate_interrupt_controllers() { baken_early_boot_fail("E-APIC-001\0".as_ptr(), "APIC / IOAPIC\0".as_ptr()); }
+    baken_early_boot_pass("APIC / IOAPIC\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('I' as u8); }
-    if !post_cutover_prepare_irqs() { loop {} }
+    baken_early_boot_stage("INTERRUPT ROUTING\0".as_ptr());
+    if !post_cutover_prepare_irqs() { baken_early_boot_fail("E-IRQ-001\0".as_ptr(), "INTERRUPT ROUTING\0".as_ptr()); }
     if serial_ready { x86_serial_write_stage_marker('R' as u8); }
-    if !post_cutover_prepare_timer() { loop {} }
+    baken_early_boot_stage("LAPIC TIMER\0".as_ptr());
+    if !post_cutover_prepare_timer() { baken_early_boot_fail("E-TIMER-001\0".as_ptr(), "LAPIC TIMER\0".as_ptr()); }
     if serial_ready { x86_serial_write_timer_ready_marker(); }
-    if !post_cutover_enable_timer_interrupts() { loop {} }
+    if !post_cutover_enable_timer_interrupts() { baken_early_boot_fail("E-TIMER-002\0".as_ptr(), "FIRST TIMER INTERRUPT\0".as_ptr()); }
+    baken_early_boot_pass("KERNEL FOUNDATION\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('T' as u8); }
 
     // Daqui em diante são provas de controladores/dispositivos concretos. O
@@ -682,7 +699,10 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
 
     // Cache policy do framebuffer pertence à fundação obrigatória: o runtime
     // gráfico não começa com o framebuffer em política desconhecida.
-    if !active_framebuffer_write_combining(snapshot.framebuffer_base, snapshot.framebuffer_size) { loop {} }
+    baken_early_boot_stage("FRAMEBUFFER CACHE POLICY\0".as_ptr());
+    if !active_framebuffer_write_combining(snapshot.framebuffer_base, snapshot.framebuffer_size) {
+        baken_early_boot_fail("E-FBWC-001\0".as_ptr(), "FRAMEBUFFER CACHE POLICY\0".as_ptr());
+    }
     if serial_ready { x86_serial_write_stage_marker('%' as u8); }
     if serial_ready { x86_serial_write_stage_marker('J' as u8); }
 
@@ -693,6 +713,7 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
         if !x86_serial_write_bare_metal_ready_marker() { loop {} }
     }
 
+    baken_early_boot_stage("NATIVE KERNEL RUNTIME\0".as_ptr());
     baken_native_kernel_run(unsafe { snapshot.framebuffer_base as *mut u32 },
                             snapshot.screen_width,
                             snapshot.screen_height,

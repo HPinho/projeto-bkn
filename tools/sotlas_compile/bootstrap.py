@@ -1460,6 +1460,16 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True,
             lines.append(f"    {fld.type.c_decl(fld.name)};")
         lines.append(f"}} {struct.name};\n")
 
+    # Function prototypes must precede globals because a callback can be used
+    # in the static initializer of a provider or vtable.
+    for function in module.functions:
+        is_export = "@export" in function.attributes or function.public
+        fname = function.name if (is_export or not mangle) else f"{prefix}{function.name}"
+        parameters = ", ".join(f"{typ.c_decl(name)}" for name, typ in function.params) or "void"
+        inline_attr = "static inline " if "@inline" in function.attributes and not is_export else ""
+        lines.append(f"{inline_attr}{function.result.c()} {fname}({parameters});")
+    if module.functions: lines.append("")
+
     # Globals / Consts
     for g in module.globals:
         if g.is_const and not g.type.is_array:
@@ -1590,14 +1600,6 @@ def emit_c(module: Module, mangle: bool = False, include_preamble: bool = True,
         return out
 
     # Forward declarations das funções
-    for function in module.functions:
-        is_export = "@export" in function.attributes or function.public
-        fname = function.name if (is_export or not mangle) else f"{prefix}{function.name}"
-        parameters = ", ".join(f"{typ.c_decl(name)}" for name, typ in function.params) or "void"
-        inline_attr = "static inline " if "@inline" in function.attributes and not is_export else ""
-        lines.append(f"{inline_attr}{function.result.c()} {fname}({parameters});")
-    if module.functions: lines.append("")
-
     for function in module.functions:
         is_export = "@export" in function.attributes or function.public
         fname = function.name if (is_export or not mangle) else f"{prefix}{function.name}"

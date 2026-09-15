@@ -141,10 +141,10 @@ pub fn amd_psp_i2c_transport_request(generation: u32, request_type: u8) -> bool 
        request_type != AMD_PSP_I2C_REQUEST_RELEASE) || !amd_psp_i2c_transport_init() ||
        !x86_timer_is_calibrated() { return false; }
 
-    let mut provider = AmdPspI2cProvider {
-        protocol_version: 0, generation: 0, transport_kind: 0,
-        submit: amd_psp_i2c_unavailable, valid: false
-    };
+    // O provider global sempre contém um callback válido, mesmo antes do
+    // registro. Copiá-lo evita que o frontend precise materializar novamente
+    // um símbolo de função privado dentro de uma expressão local de struct.
+    let mut provider = unsafe { AMD_PSP_I2C_PROVIDER };
     let flags = x86_irq_save_disable();
     unsafe {
         if !spinlock_lock(&mut AMD_PSP_I2C_LOCK) {
@@ -229,7 +229,9 @@ pub fn amd_psp_i2c_transport_unregister(generation: u32) -> bool {
         }
         AMD_PSP_I2C_PROVIDER.valid = false;
         AMD_PSP_I2C_PROVIDER.generation = 0;
-        AMD_PSP_I2C_PROVIDER.submit = amd_psp_i2c_unavailable;
+        // `valid = false` fecha o gate antes de qualquer chamada. Preservar o
+        // ponteiro anterior evita uma escrita de function item que o frontend
+        // bootstrap ainda não aceita dentro de corpos de função.
         AMD_PSP_I2C_LAST_TRANSPORT_STATUS = AMD_PSP_TRANSPORT_UNAVAILABLE;
         spinlock_unlock(&mut AMD_PSP_I2C_LOCK);
     }

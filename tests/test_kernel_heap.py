@@ -103,7 +103,8 @@ class KernelHeapTests(unittest.TestCase):
         acpi = entry.index("post_cutover_activate_acpi(context)")
         self.assertLess(vmm, heap)
         self.assertLess(heap, acpi)
-        self.assertIn("if !post_cutover_activate_heap() { loop {} }", entry)
+        self.assertIn("if !post_cutover_activate_heap()", entry)
+        self.assertIn('baken_early_boot_fail("E-HEAP-001\\0".as_ptr(), "KERNEL HEAP\\0".as_ptr())', entry)
         activation = text.split("pub fn post_cutover_activate_heap() -> bool", 1)[1].split("pub fn post_cutover_heap_active", 1)[0]
         self.assertIn("kernel_heap_activate()", activation)
         self.assertIn("kernel_heap_self_test_passed()", activation)
