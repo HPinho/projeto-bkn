@@ -128,9 +128,12 @@ pub fn smp_trampoline_build(physical: u64,
                              (physical + SMP_TRAMPOLINE_GDT_OFFSET as u64) as u32);
     __dma_fence();
 
+    // Os campos self-patched devem ser validados contra as próprias constantes
+    // de layout. Isso evita que um deslocamento atualizado deixe um magic number
+    // antigo fazendo o trampoline falhar antes mesmo de enviar INIT/SIPI.
     unsafe {
-        if base[SMP_TRAMPOLINE_GDTR_OFFSET] != 0xA0 ||
-           base[SMP_TRAMPOLINE_CR3_LOAD_OFFSET] != 0x8D ||
+        if base[SMP_TRAMPOLINE_GDTR_OFFSET] != SMP_TRAMPOLINE_GDT_POINTER_OFFSET as u8 ||
+           base[SMP_TRAMPOLINE_CR3_LOAD_OFFSET] != SMP_TRAMPOLINE_CR3_VALUE_OFFSET as u8 ||
            base[SMP_TRAMPOLINE_CR3_VALUE_OFFSET] != (bootstrap_root_physical & 0xFF) as u8 ||
            base[SMP_TRAMPOLINE_RUNTIME_CR3_OFFSET] != (runtime_root_physical & 0xFF) as u8 {
             return false;
