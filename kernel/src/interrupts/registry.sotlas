@@ -89,17 +89,19 @@ pub fn irq_invalid_handle() -> IrqHandle {
 
 @system
 fn irq_invalid_registration() -> IrqRegistration {
-    return IrqRegistration {
-        handle: irq_invalid_handle(),
-        owner_device: device_invalid_handle(),
-        owner_driver: driver_invalid_handle(),
-        resource: resource_invalid_handle(),
-        vector: 0,
-        handler: irq_reject_handler,
-        state: IRQ_REGISTRY_STATE_EMPTY,
-        operations_in_flight: 0,
-        valid: false
-    };
+    // O bootstrap Sotlas trata nomes de funcao como chamaveis, mas ainda nao
+    // como valores Name dentro de corpos de funcao. Preserve o ponteiro ja
+    // inicializado estaticamente e invalide todos os campos observaveis.
+    let mut invalid = unsafe { IRQ_RECORDS[0] };
+    invalid.handle = irq_invalid_handle();
+    invalid.owner_device = device_invalid_handle();
+    invalid.owner_driver = driver_invalid_handle();
+    invalid.resource = resource_invalid_handle();
+    invalid.vector = 0;
+    invalid.state = IRQ_REGISTRY_STATE_EMPTY;
+    invalid.operations_in_flight = 0;
+    invalid.valid = false;
+    return invalid;
 }
 
 @system
