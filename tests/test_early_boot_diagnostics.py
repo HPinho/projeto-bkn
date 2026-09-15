@@ -56,7 +56,13 @@ class EarlyBootDiagnosticsContract(unittest.TestCase):
 
     def test_serial_markers_are_not_boot_prerequisites_without_com1(self):
         serial = (ROOT / "kernel/src/arch/x86_64/serial.sotlas").read_text(encoding="utf-8")
-        self.assertIn("status == 0xFF || (status & 0x20) == 0", serial)
+        init = serial.split("pub fn x86_serial_init() -> bool", 1)[1].split(
+            "pub fn x86_serial_is_ready", 1)[0]
+        self.assertIn("let status = __inb(X86_SERIAL_COM1 + 5);", init)
+        self.assertIn("status != 0xFF && (status & 0x20) != 0", init)
+        self.assertIn("X86_SERIAL_READY = true", init)
+        self.assertIn("return true;", init)
+        self.assertNotIn("status == 0xFF || (status & 0x20) == 0 { return false; }", init)
         for marker in ("aml_tables_emit_ready_marker", "aml_decoder_emit_ready_marker",
                        "aml_namespace_emit_ready_marker", "aml_loader_emit_ready_marker",
                        "aml_discovery_emit_ready_marker", "platform_inventory_emit_ready_marker",
