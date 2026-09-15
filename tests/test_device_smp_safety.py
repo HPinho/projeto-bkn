@@ -15,7 +15,7 @@ class DeviceSmpSafetyTests(unittest.TestCase):
 
     def test_every_public_operation_uses_same_lock(self):
         for op in ("device_core_attach", "device_core_snapshot", "device_core_attached_count",
-                   "device_core_set_state", "device_core_detach"):
+                   "device_core_mark_failed", "device_core_detach"):
             body = REGISTRY.split(f"pub fn {op}", 1)[1].split("\n@system", 1)[0]
             self.assertIn("device_lock_irq(&mut flags)", body)
             self.assertIn("device_unlock_irq(flags)", body)

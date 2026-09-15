@@ -16,7 +16,7 @@ class DeviceGenerationTests(unittest.TestCase):
         check = REGISTRY.split("fn device_handle_live_locked", 1)[1].split("pub fn device_core_init", 1)[0]
         self.assertIn("DEVICE_RECORDS[slot].handle.generation == handle.generation", check)
         self.assertIn("DEVICE_RECORDS[slot].state != DEVICE_STATE_DETACHED", check)
-        for op in ("device_core_snapshot", "device_core_set_state", "device_core_detach"):
+        for op in ("device_core_snapshot", "device_core_mark_failed", "device_core_detach"):
             body = REGISTRY.split(f"pub fn {op}", 1)[1].split("\n@system", 1)[0]
             self.assertIn("device_handle_live_locked(handle)", body)
 
