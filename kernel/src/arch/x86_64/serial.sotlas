@@ -15,6 +15,47 @@ pub const X86_SERIAL_MAX_SPINS: u32 = 100000;
 
 static mut X86_SERIAL_READY: bool = false;
 static mut X86_SERIAL_LOCK: SpinLock = SpinLock { state: 0 };
+pub const X86_BOOT_LOG_CAPACITY: usize = 65536;
+static mut X86_BOOT_LOG: [u8; X86_BOOT_LOG_CAPACITY] = [0; X86_BOOT_LOG_CAPACITY];
+static mut X86_BOOT_LOG_HEAD: usize = 0;
+static mut X86_BOOT_LOG_SIZE: usize = 0;
+static mut X86_BOOT_LOG_FROZEN: bool = false;
+
+// Called with the serial lock held. UART availability never controls capture.
+@system
+fn x86_boot_log_append(value: u8) -> void {
+    unsafe {
+        if X86_BOOT_LOG_FROZEN { return; }
+        X86_BOOT_LOG[X86_BOOT_LOG_HEAD] = value;
+        X86_BOOT_LOG_HEAD = (X86_BOOT_LOG_HEAD + 1) % X86_BOOT_LOG_CAPACITY;
+        if X86_BOOT_LOG_SIZE < X86_BOOT_LOG_CAPACITY { X86_BOOT_LOG_SIZE += 1; }
+    }
+}
+
+@system
+pub fn x86_boot_log_freeze() -> void {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if spinlock_lock(&mut X86_SERIAL_LOCK) {
+            X86_BOOT_LOG_FROZEN = true;
+            spinlock_unlock(&mut X86_SERIAL_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+}
+
+@system
+pub fn x86_boot_log_size() -> usize { unsafe { return X86_BOOT_LOG_SIZE; } }
+
+// Chronological view of the frozen ring, for screen rendering/export.
+@system
+pub fn x86_boot_log_byte(index: usize) -> u8 {
+    unsafe {
+        if !X86_BOOT_LOG_FROZEN || index >= X86_BOOT_LOG_SIZE { return 0; }
+        let start = (X86_BOOT_LOG_HEAD + X86_BOOT_LOG_CAPACITY - X86_BOOT_LOG_SIZE) % X86_BOOT_LOG_CAPACITY;
+        return X86_BOOT_LOG[(start + index) % X86_BOOT_LOG_CAPACITY];
+    }
+}
 
 @system
 pub fn x86_serial_init() -> bool {
@@ -64,7 +105,6 @@ fn x86_serial_write_byte_unlocked(value: u8) -> bool {
 // que dois CPUs observam THR-empty e escrevem no COM1 simultaneamente.
 @system
 pub fn x86_serial_write_byte(value: u8) -> bool {
-    if !x86_serial_is_ready() { return false; }
     let flags = x86_irq_save_disable();
     unsafe {
         if !spinlock_lock(&mut X86_SERIAL_LOCK) {
@@ -72,7 +112,8 @@ pub fn x86_serial_write_byte(value: u8) -> bool {
             return false;
         }
     }
-    let success = x86_serial_write_byte_unlocked(value);
+    x86_boot_log_append(value);
+    let success = x86_serial_is_ready() && x86_serial_write_byte_unlocked(value);
     unsafe { spinlock_unlock(&mut X86_SERIAL_LOCK); }
     x86_irq_restore(flags);
     return success;
@@ -84,7 +125,7 @@ pub fn x86_serial_write_byte(value: u8) -> bool {
 @system
 pub fn x86_serial_write_buffer(bytes: *const u8, length: usize) -> bool {
     if length == 0 { return true; }
-    if bytes == (null as *const u8) || !x86_serial_is_ready() { return false; }
+    if bytes == (null as *const u8) { return false; }
 
     let flags = x86_irq_save_disable();
     unsafe {
@@ -97,6 +138,16 @@ pub fn x86_serial_write_buffer(bytes: *const u8, length: usize) -> bool {
     let mut success = true;
     let mut index: usize = 0;
     unsafe {
+        while index < length {
+            x86_boot_log_append(bytes[index]);
+            index += 1;
+        }
+        index = 0;
+        if !x86_serial_is_ready() {
+            spinlock_unlock(&mut X86_SERIAL_LOCK);
+            x86_irq_restore(flags);
+            return false;
+        }
         while index < length {
             if !x86_serial_write_byte_unlocked(bytes[index]) {
                 success = false;

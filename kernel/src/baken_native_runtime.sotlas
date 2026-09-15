@@ -55,6 +55,49 @@ static mut EARLY_BOOT_AML_ERROR: u32 = 0;
 static mut EARLY_BOOT_AML_OFFSET: u32 = 0;
 
 @system
+fn baken_boot_log_line(text: *const u8) -> void {
+    if text == (null as *const u8) { return; }
+    let mut length: usize = 0;
+    unsafe { while length < 160 && text[length] != 0 { length += 1; } }
+    x86_serial_write_buffer(text, length);
+    x86_serial_write_byte(10);
+}
+
+@system
+fn baken_boot_log_render() -> void {
+    if display_get_height() < 400 { return; }
+    let size = x86_boot_log_size();
+    let mut start = size;
+    let mut lines: usize = 0;
+    while start > 0 {
+        if x86_boot_log_byte(start - 1) == 10 {
+            lines += 1;
+            if lines > 8 { break; }
+        }
+        start -= 1;
+    }
+    raster_fill_rect(0, 232, display_get_width(), display_get_height() - 232, 0x0008111F);
+    raster_draw_text(28, 242, "BOOT LOG (RAM ONLY) - LAST EVENTS\0".as_ptr(), 0x008FB8FF);
+    let mut y: u32 = 272;
+    while start < size && y + 24 < display_get_height() {
+        let mut line: [u8; 81] = [0; 81];
+        let mut used: usize = 0;
+        while start < size {
+            let value = x86_boot_log_byte(start);
+            start += 1;
+            if value == 10 { break; }
+            if value >= 32 && value <= 126 && used < 80 {
+                line[used] = value;
+                used += 1;
+            }
+        }
+        raster_draw_text(28, y, line.as_ptr(), 0x00FFFFFF);
+        y += 24;
+    }
+    display_swap_buffers_rect(0, 232, display_get_width(), display_get_height() - 232);
+}
+
+@system
 fn baken_early_boot_hex(x: u32, y: u32, value: u32) -> void {
     let mut digits: [u8; 9] = [0; 9];
     let mut index: usize = 0;
@@ -88,6 +131,7 @@ pub fn baken_early_boot_begin(framebuffer: *mut u32, width: u32,
 
 @system
 pub fn baken_early_boot_stage(stage: *const u8) -> void {
+    baken_boot_log_line(stage);
     unsafe { if !EARLY_BOOT_DIAGNOSTICS_READY { return; } }
     raster_fill_rect(24, 92, display_get_width() - 48, 38, 0x00142435);
     raster_fill_rect(24, 92, 8, 38, 0x00F5B942);
@@ -108,6 +152,9 @@ pub fn baken_early_boot_pass(stage: *const u8) -> void {
 
 @system
 pub fn baken_early_boot_fail(code: *const u8, stage: *const u8) -> ! {
+    baken_boot_log_line(code);
+    baken_boot_log_line(stage);
+    x86_boot_log_freeze();
     unsafe {
         if EARLY_BOOT_DIAGNOSTICS_READY {
             raster_fill_rect(0, 0, display_get_width(), 230, 0x002A0D14);
@@ -136,6 +183,7 @@ pub fn baken_early_boot_fail(code: *const u8, stage: *const u8) -> ! {
             raster_draw_text(28, 152, "Photograph this screen and report the code.\0".as_ptr(), 0x00FFFFFF);
             raster_draw_text(28, 184, "The machine is halted safely; disk data was not changed.\0".as_ptr(), 0x00CBD5E1);
             display_swap_buffers_rect(0, 0, display_get_width(), 230);
+            baken_boot_log_render();
         }
     }
     loop { x86_cpu_pause(); }

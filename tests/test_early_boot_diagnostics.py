@@ -64,6 +64,16 @@ class EarlyBootDiagnosticsContract(unittest.TestCase):
             self.assertIn(f"if !{marker}() && x86_serial_is_ready()", self.runtime)
         self.assertIn("X86_SERIAL_READY = false", serial)
 
+    def test_failure_screen_keeps_a_bounded_ram_boot_log(self):
+        serial = (ROOT / "kernel/src/arch/x86_64/serial.sotlas").read_text(encoding="utf-8")
+        for token in ("X86_BOOT_LOG_CAPACITY: usize = 65536", "x86_boot_log_append",
+                      "x86_boot_log_freeze", "x86_boot_log_byte"):
+            self.assertIn(token, serial)
+        for token in ("baken_boot_log_line(stage)", "baken_boot_log_line(code)",
+                      "x86_boot_log_freeze()", "BOOT LOG (RAM ONLY) - LAST EVENTS",
+                      "baken_boot_log_render()"):
+            self.assertIn(token, self.runtime)
+
 
 if __name__ == "__main__":
     unittest.main()
