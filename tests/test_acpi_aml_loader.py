@@ -119,9 +119,9 @@ class AcpiAmlLoaderTests(unittest.TestCase):
         )[0]
         self.assertIn("pub const AML_STORE_OP: u8 = 0x70", self.source)
         self.assertIn("opcode == AML_STORE_OP", body)
-        self.assertIn("aml_loader_skip_static_term_arg(cursor)", body)
-        self.assertIn("aml_loader_skip_store_target(cursor)", body)
-        helper = self.source.split("fn aml_loader_skip_store_target", 1)[1].split(
+        self.assertIn("aml_loader_skip_term_arg(cursor, 0, budget)", body)
+        self.assertIn("aml_loader_skip_super_name(cursor)", body)
+        helper = self.source.split("fn aml_loader_skip_super_name", 1)[1].split(
             "fn aml_loader_namespace_value_kind", 1
         )[0]
         self.assertIn("aml_decode_name_string(cursor)", helper)
@@ -129,6 +129,28 @@ class AcpiAmlLoaderTests(unittest.TestCase):
         lower = helper.lower()
         for forbidden in ("evaluate", "execute", "mmio_write", "io_write"):
             self.assertNotIn(forbidden, lower)
+
+    def test_dynamic_term_args_are_structurally_bounded_and_self_tested(self):
+        helper = self.source.split("fn aml_loader_skip_term_arg", 1)[1].split(
+            "fn aml_loader_namespace_value_kind", 1
+        )[0]
+        for token in (
+            "AML_LOADER_MAX_TERM_ARG_DEPTH",
+            "aml_loader_consume_budget(budget)",
+            "opcode == AML_ADD_OP",
+            "opcode == AML_LNOT_OP",
+            "opcode == AML_TO_INTEGER_OP",
+            "AML_EXT_COND_REF_OF_OP",
+            "AML_EXT_TIMER_OP",
+        ):
+            self.assertIn(token, helper)
+        self_test = self.source.split("fn aml_loader_structural_self_test", 1)[1].split(
+            "fn aml_loader_load_definition_block", 1
+        )[0]
+        for token in ("simple_store", "nested_store", "extended_expression"):
+            self.assertIn(token, self_test)
+        init = self.source.split("pub fn aml_loader_init", 1)[1]
+        self.assertIn("aml_loader_structural_self_test()", init)
 
     def test_unknown_opcode_fails_closed_with_diagnostics(self):
         body = self.source.split("fn aml_loader_parse_term_list", 1)[1].split(

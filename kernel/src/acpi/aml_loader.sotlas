@@ -39,16 +39,71 @@ pub const AML_CREATE_WORD_FIELD_OP: u8 = 0x8B;
 pub const AML_CREATE_BYTE_FIELD_OP: u8 = 0x8C;
 pub const AML_CREATE_BIT_FIELD_OP: u8 = 0x8D;
 pub const AML_CREATE_QWORD_FIELD_OP: u8 = 0x8F;
-// Store é um TermObj válido fora de Method (por exemplo, inicialização de
-// namespace feita pelo firmware). AML-4 somente o delimita: nunca o executa.
+// TermObj/TermArg executáveis. AML-4 reconhece a forma binária para preservar
+// os limites do DSDT, mas nunca avalia nenhum deles durante o discovery.
 pub const AML_STORE_OP: u8 = 0x70;
+pub const AML_REF_OF_OP: u8 = 0x71;
+pub const AML_ADD_OP: u8 = 0x72;
+pub const AML_CONCAT_OP: u8 = 0x73;
+pub const AML_SUBTRACT_OP: u8 = 0x74;
+pub const AML_INCREMENT_OP: u8 = 0x75;
+pub const AML_DECREMENT_OP: u8 = 0x76;
+pub const AML_MULTIPLY_OP: u8 = 0x77;
+pub const AML_DIVIDE_OP: u8 = 0x78;
+pub const AML_SHIFT_LEFT_OP: u8 = 0x79;
+pub const AML_SHIFT_RIGHT_OP: u8 = 0x7A;
+pub const AML_AND_OP: u8 = 0x7B;
+pub const AML_NAND_OP: u8 = 0x7C;
+pub const AML_OR_OP: u8 = 0x7D;
+pub const AML_NOR_OP: u8 = 0x7E;
+pub const AML_XOR_OP: u8 = 0x7F;
+pub const AML_NOT_OP: u8 = 0x80;
+pub const AML_DEREF_OF_OP: u8 = 0x83;
+pub const AML_MOD_OP: u8 = 0x85;
+pub const AML_NOTIFY_OP: u8 = 0x86;
+pub const AML_SIZE_OF_OP: u8 = 0x87;
+pub const AML_INDEX_OP: u8 = 0x88;
+pub const AML_MATCH_OP: u8 = 0x89;
+pub const AML_OBJECT_TYPE_OP: u8 = 0x8E;
+pub const AML_LAND_OP: u8 = 0x90;
+pub const AML_LOR_OP: u8 = 0x91;
+pub const AML_LNOT_OP: u8 = 0x92;
+pub const AML_LEQUAL_OP: u8 = 0x93;
+pub const AML_LGREATER_OP: u8 = 0x94;
+pub const AML_LLESS_OP: u8 = 0x95;
+pub const AML_TO_BUFFER_OP: u8 = 0x96;
+pub const AML_TO_DECIMAL_STRING_OP: u8 = 0x97;
+pub const AML_TO_HEX_STRING_OP: u8 = 0x98;
+pub const AML_TO_INTEGER_OP: u8 = 0x99;
+pub const AML_TO_STRING_OP: u8 = 0x9C;
+pub const AML_COPY_OBJECT_OP: u8 = 0x9D;
+pub const AML_MID_OP: u8 = 0x9E;
 pub const AML_IF_OP: u8 = 0xA0;
 pub const AML_ELSE_OP: u8 = 0xA1;
 pub const AML_WHILE_OP: u8 = 0xA2;
 pub const AML_NOOP_OP: u8 = 0xA3;
+pub const AML_RETURN_OP: u8 = 0xA4;
+pub const AML_BREAK_OP: u8 = 0xA5;
+pub const AML_BREAKPOINT_OP: u8 = 0xA6;
+
+pub const AML_EXT_COND_REF_OF_OP: u8 = 0x12;
+pub const AML_EXT_LOAD_OP: u8 = 0x20;
+pub const AML_EXT_STALL_OP: u8 = 0x21;
+pub const AML_EXT_SLEEP_OP: u8 = 0x22;
+pub const AML_EXT_ACQUIRE_OP: u8 = 0x23;
+pub const AML_EXT_SIGNAL_OP: u8 = 0x24;
+pub const AML_EXT_WAIT_OP: u8 = 0x25;
+pub const AML_EXT_RESET_OP: u8 = 0x26;
+pub const AML_EXT_RELEASE_OP: u8 = 0x27;
+pub const AML_EXT_FROM_BCD_OP: u8 = 0x28;
+pub const AML_EXT_TO_BCD_OP: u8 = 0x29;
+pub const AML_EXT_REVISION_OP: u8 = 0x30;
+pub const AML_EXT_FATAL_OP: u8 = 0x32;
+pub const AML_EXT_TIMER_OP: u8 = 0x33;
 
 pub const AML_LOADER_MAX_DEPTH: usize = 16;
 pub const AML_LOADER_MAX_TERMS: usize = 32768;
+pub const AML_LOADER_MAX_TERM_ARG_DEPTH: usize = 16;
 
 const AML_LOADER_ERROR_BOUNDS: u8 = 1;
 const AML_LOADER_ERROR_BUDGET: u8 = 2;
@@ -117,11 +172,26 @@ fn aml_loader_skip_static_term_arg(cursor: *mut AmlCursor) -> bool {
 }
 
 @system
-fn aml_loader_skip_store_target(cursor: *mut AmlCursor) -> bool {
-    // Store(Source, Target) aceita SuperName. Durante o carregamento do
-    // namespace não há escrita: apenas consumimos uma codificação conhecida e
-    // limitada. Local/Arg/Debug/NullName são um byte; os demais destinos são
-    // NameString validados pelo decoder.
+fn aml_loader_is_name_start(opcode: u8) -> bool {
+    return opcode == AML_ROOT_CHAR || opcode == AML_PARENT_PREFIX_CHAR ||
+        opcode == AML_DUAL_NAME_PREFIX || opcode == AML_MULTI_NAME_PREFIX ||
+        opcode == '_' as u8 || (opcode >= 'A' as u8 && opcode <= 'Z' as u8);
+}
+
+@system
+fn aml_loader_is_static_data_start(opcode: u8) -> bool {
+    return opcode == AML_ZERO_OP || opcode == AML_ONE_OP || opcode == AML_ONES_OP ||
+        opcode == AML_BYTE_PREFIX || opcode == AML_WORD_PREFIX ||
+        opcode == AML_DWORD_PREFIX || opcode == AML_QWORD_PREFIX ||
+        opcode == AML_STRING_PREFIX || opcode == AML_BUFFER_OP ||
+        opcode == AML_PACKAGE_OP || opcode == AML_VAR_PACKAGE_OP ||
+        aml_loader_is_name_start(opcode);
+}
+
+@system
+fn aml_loader_skip_super_name(cursor: *mut AmlCursor) -> bool {
+    // SuperName é usado como destino ou identificador por opcodes executáveis.
+    // Nesta fase ele é somente consumido e validado; nada é lido ou escrito.
     if cursor == (null as *mut AmlCursor) ||
        aml_cursor_remaining(cursor as *const AmlCursor) == 0 {
         return false;
@@ -135,6 +205,125 @@ fn aml_loader_skip_store_target(cursor: *mut AmlCursor) -> bool {
     }
     let name = aml_decode_name_string(cursor);
     return name.valid && name.segment_count != 0;
+}
+
+@system
+fn aml_loader_skip_term_arg(cursor: *mut AmlCursor, depth: usize,
+                            budget: *mut usize) -> bool {
+    // Parser estrutural de TermArg para o carregamento de namespace. Ele é
+    // propositalmente separado do avaliador AML: cada produção conhecida tem
+    // aridade explícita, limites de profundidade/orçamento e zero efeitos.
+    if cursor == (null as *mut AmlCursor) || depth >= AML_LOADER_MAX_TERM_ARG_DEPTH ||
+       aml_cursor_remaining(cursor as *const AmlCursor) == 0 ||
+       !aml_loader_consume_budget(budget) {
+        return false;
+    }
+    let opcode = aml_cursor_peek_u8(cursor as *const AmlCursor);
+    if aml_loader_is_static_data_start(opcode) {
+        return aml_loader_skip_static_term_arg(cursor);
+    }
+    if (opcode >= 0x60 && opcode <= 0x67) ||
+       (opcode >= 0x68 && opcode <= 0x6E) {
+        aml_cursor_read_u8(cursor);
+        return true;
+    }
+
+    if opcode == AML_REF_OF_OP || opcode == AML_SIZE_OF_OP ||
+       opcode == AML_OBJECT_TYPE_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_DEREF_OF_OP || opcode == AML_LNOT_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget);
+    }
+    if opcode == AML_ADD_OP || opcode == AML_CONCAT_OP ||
+       opcode == AML_SUBTRACT_OP || opcode == AML_MULTIPLY_OP ||
+       opcode == AML_SHIFT_LEFT_OP || opcode == AML_SHIFT_RIGHT_OP ||
+       opcode == AML_AND_OP || opcode == AML_NAND_OP || opcode == AML_OR_OP ||
+       opcode == AML_NOR_OP || opcode == AML_XOR_OP || opcode == AML_MOD_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_DIVIDE_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_NOT_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_INDEX_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_MATCH_OP {
+        aml_cursor_read_u8(cursor);
+        if !aml_loader_skip_term_arg(cursor, depth + 1, budget) ||
+           aml_cursor_remaining(cursor as *const AmlCursor) < 1 {
+            return false;
+        }
+        aml_cursor_read_u8(cursor); // MatchOpcode1
+        if !aml_loader_skip_term_arg(cursor, depth + 1, budget) ||
+           aml_cursor_remaining(cursor as *const AmlCursor) < 1 {
+            return false;
+        }
+        aml_cursor_read_u8(cursor); // MatchOpcode2
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget);
+    }
+    if opcode == AML_LAND_OP || opcode == AML_LOR_OP || opcode == AML_LEQUAL_OP ||
+       opcode == AML_LGREATER_OP || opcode == AML_LLESS_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget);
+    }
+    if opcode == AML_TO_BUFFER_OP || opcode == AML_TO_DECIMAL_STRING_OP ||
+       opcode == AML_TO_HEX_STRING_OP || opcode == AML_TO_INTEGER_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_TO_STRING_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_COPY_OBJECT_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode == AML_MID_OP {
+        aml_cursor_read_u8(cursor);
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if opcode != AML_EXT_OP_PREFIX { return false; }
+
+    aml_cursor_read_u8(cursor);
+    if aml_cursor_remaining(cursor as *const AmlCursor) == 0 { return false; }
+    let ext = aml_cursor_read_u8(cursor);
+    if ext == AML_EXT_COND_REF_OF_OP {
+        return aml_loader_skip_super_name(cursor) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    if ext == AML_EXT_FROM_BCD_OP || ext == AML_EXT_TO_BCD_OP {
+        return aml_loader_skip_term_arg(cursor, depth + 1, budget) &&
+            aml_loader_skip_super_name(cursor);
+    }
+    return ext == AML_EXT_REVISION_OP || ext == AML_EXT_TIMER_OP;
 }
 
 @system
@@ -272,10 +461,49 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
         } else if opcode == AML_STORE_OP {
             // Não executar Store durante o discovery: o firmware pode fazer
             // inicialização dinâmica no nível do DSDT. A gramática tem dois
-            // operandos e ambos são consumidos com limites explícitos.
+            // operandos e ambos são consumidos pela gramática completa de
+            // TermArg, com limites explícitos.
             aml_cursor_read_u8(cursor);
-            if !aml_loader_skip_static_term_arg(cursor) ||
-               !aml_loader_skip_store_target(cursor) {
+            if !aml_loader_skip_term_arg(cursor, 0, budget) ||
+               !aml_loader_skip_super_name(cursor) {
+                return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
+            }
+        } else if opcode == AML_NOTIFY_OP {
+            aml_cursor_read_u8(cursor);
+            if !aml_loader_skip_super_name(cursor) ||
+               !aml_loader_skip_term_arg(cursor, 0, budget) {
+                return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
+            }
+        } else if opcode == AML_INCREMENT_OP || opcode == AML_DECREMENT_OP {
+            aml_cursor_read_u8(cursor);
+            if !aml_loader_skip_super_name(cursor) {
+                return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
+            }
+        } else if opcode == AML_RETURN_OP {
+            aml_cursor_read_u8(cursor);
+            if !aml_loader_skip_term_arg(cursor, 0, budget) {
+                return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
+            }
+        } else if opcode == AML_BREAK_OP || opcode == AML_BREAKPOINT_OP {
+            aml_cursor_read_u8(cursor);
+        } else if opcode == AML_REF_OF_OP || opcode == AML_ADD_OP ||
+                  opcode == AML_CONCAT_OP || opcode == AML_SUBTRACT_OP ||
+                  opcode == AML_MULTIPLY_OP || opcode == AML_DIVIDE_OP ||
+                  opcode == AML_SHIFT_LEFT_OP || opcode == AML_SHIFT_RIGHT_OP ||
+                  opcode == AML_AND_OP || opcode == AML_NAND_OP || opcode == AML_OR_OP ||
+                  opcode == AML_NOR_OP || opcode == AML_XOR_OP || opcode == AML_NOT_OP ||
+                  opcode == AML_DEREF_OF_OP || opcode == AML_MOD_OP ||
+                  opcode == AML_SIZE_OF_OP || opcode == AML_INDEX_OP ||
+                  opcode == AML_MATCH_OP || opcode == AML_OBJECT_TYPE_OP ||
+                  opcode == AML_LAND_OP || opcode == AML_LOR_OP || opcode == AML_LNOT_OP ||
+                  opcode == AML_LEQUAL_OP || opcode == AML_LGREATER_OP || opcode == AML_LLESS_OP ||
+                  opcode == AML_TO_BUFFER_OP || opcode == AML_TO_DECIMAL_STRING_OP ||
+                  opcode == AML_TO_HEX_STRING_OP || opcode == AML_TO_INTEGER_OP ||
+                  opcode == AML_TO_STRING_OP || opcode == AML_COPY_OBJECT_OP ||
+                  opcode == AML_MID_OP {
+            // Expressões no nível do DefinitionBlock podem inicializar nomes
+            // do firmware. São delimitadas, porém continuam opacas nesta fase.
+            if !aml_loader_skip_term_arg(cursor, 0, budget) {
                 return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
             }
         } else if opcode == AML_IF_OP || opcode == AML_ELSE_OP || opcode == AML_WHILE_OP {
@@ -424,6 +652,54 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
                    !aml_loader_skip_static_term_arg(cursor) {
                     return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
                 }
+            } else if ext == AML_EXT_LOAD_OP {
+                if !aml_loader_skip_term_arg(cursor, 0, budget) ||
+                   !aml_loader_skip_super_name(cursor) {
+                    return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                }
+            } else if ext == AML_EXT_STALL_OP || ext == AML_EXT_SLEEP_OP {
+                if !aml_loader_skip_term_arg(cursor, 0, budget) {
+                    return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                }
+            } else if ext == AML_EXT_ACQUIRE_OP || ext == AML_EXT_WAIT_OP {
+                if !aml_loader_skip_super_name(cursor) ||
+                   !aml_loader_skip_term_arg(cursor, 0, budget) {
+                    return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                }
+            } else if ext == AML_EXT_SIGNAL_OP || ext == AML_EXT_RESET_OP ||
+                      ext == AML_EXT_RELEASE_OP {
+                if !aml_loader_skip_super_name(cursor) {
+                    return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                }
+            } else if ext == AML_EXT_COND_REF_OF_OP ||
+                      ext == AML_EXT_FROM_BCD_OP || ext == AML_EXT_TO_BCD_OP ||
+                      ext == AML_EXT_REVISION_OP || ext == AML_EXT_TIMER_OP {
+                // São TermArg válidos também quando aparecem sozinhos no
+                // DefinitionBlock. O prefixo já foi consumido no cursor real,
+                // portanto cada produção consome somente sua própria aridade.
+                if ext == AML_EXT_COND_REF_OF_OP {
+                    if !aml_loader_skip_super_name(cursor) ||
+                       !aml_loader_skip_super_name(cursor) {
+                        return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                    }
+                } else if ext == AML_EXT_FROM_BCD_OP || ext == AML_EXT_TO_BCD_OP {
+                    if !aml_loader_skip_term_arg(cursor, 0, budget) ||
+                       !aml_loader_skip_super_name(cursor) {
+                        return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                    }
+                } else {
+                    // Revision e Timer não têm operandos e não são avaliados.
+                }
+            } else if ext == AML_EXT_FATAL_OP {
+                if aml_cursor_remaining(cursor as *const AmlCursor) < 5 {
+                    return aml_loader_fail(table_index, AML_LOADER_ERROR_HEADER, ext, term_offset);
+                }
+                aml_cursor_read_u8(cursor); // FatalType
+                aml_cursor_read_u8(cursor); aml_cursor_read_u8(cursor);
+                aml_cursor_read_u8(cursor); aml_cursor_read_u8(cursor); // FatalCode
+                if !aml_loader_skip_term_arg(cursor, 0, budget) {
+                    return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, ext, term_offset);
+                }
             } else {
                 return aml_loader_fail(table_index, AML_LOADER_ERROR_OPCODE, ext, term_offset);
             }
@@ -434,6 +710,39 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
         unsafe { if !(*cursor).valid { return aml_loader_fail(table_index, AML_LOADER_ERROR_BOUNDS, opcode, term_offset); } }
     }
     return true;
+}
+
+@system
+fn aml_loader_structural_self_test() -> bool {
+    // Store(LNot(One), Local0): expressão dinâmica comum, sem execução.
+    let simple_store: [u8; 4] = [AML_STORE_OP, AML_LNOT_OP, AML_ONE_OP, 0x60];
+    let mut simple_cursor = aml_cursor_new(&simple_store[0], 4);
+    let mut simple_budget: usize = 32;
+    if !aml_loader_parse_term_list(&mut simple_cursor, 0, 0, &mut simple_budget, 0) ||
+       !simple_cursor.valid || aml_cursor_remaining(&simple_cursor) != 0 {
+        return false;
+    }
+
+    // Store(Add(Byte(2), One, Local1), Local0): TermArg aninhado com Target.
+    let nested_store: [u8; 7] = [
+        AML_STORE_OP, AML_ADD_OP, AML_BYTE_PREFIX, 0x02, AML_ONE_OP, 0x61, 0x60
+    ];
+    let mut nested_cursor = aml_cursor_new(&nested_store[0], 7);
+    let mut nested_budget: usize = 64;
+    if !aml_loader_parse_term_list(&mut nested_cursor, 0, 0, &mut nested_budget, 0) ||
+       !nested_cursor.valid || aml_cursor_remaining(&nested_cursor) != 0 {
+        return false;
+    }
+
+    // ToBCD(One, Local0) no nível do DefinitionBlock também é somente skip.
+    let extended_expression: [u8; 4] = [
+        AML_EXT_OP_PREFIX, AML_EXT_TO_BCD_OP, AML_ONE_OP, 0x60
+    ];
+    let mut extended_cursor = aml_cursor_new(&extended_expression[0], 4);
+    let mut extended_budget: usize = 32;
+    return aml_loader_parse_term_list(&mut extended_cursor, 0, 0,
+                                      &mut extended_budget, 0) &&
+        extended_cursor.valid && aml_cursor_remaining(&extended_cursor) == 0;
 }
 
 @system
@@ -481,6 +790,7 @@ pub fn aml_loader_init() -> bool {
        aml_namespace_count() != 1 {
         return false;
     }
+    if !aml_loader_structural_self_test() { return false; }
     if !aml_namespace_loader_begin() { return false; }
 
     let mut budget: usize = AML_LOADER_MAX_TERMS;
