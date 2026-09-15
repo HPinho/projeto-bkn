@@ -4,6 +4,11 @@
 // Não faz parte da UI e nunca espera indefinidamente por hardware ausente.
 // Escritas multi-byte são serializadas entre CPUs para preservar framing dos
 // checkpoints mesmo depois que Application Processors passam a executar trabalho.
+//
+// O boot log em RAM é o sink autoritativo de diagnóstico. COM1/UART é apenas
+// um transporte opcional de espelhamento para QEMU/CI e nunca pode decidir se
+// o kernel continua em hardware físico sem UART legado. Quando disponibilidade
+// do transporte importar, consulte x86_serial_is_ready() explicitamente.
 
 module kernel::arch::x86_64::serial;
 
@@ -75,7 +80,7 @@ pub fn x86_serial_init() -> bool {
     // Um UART ausente costuma retornar 0xFF. Não tratamos isso como COM1 real.
     let status = __inb(X86_SERIAL_COM1 + 5);
     // Bridges LPC modernas podem retornar 0x00 sem um UART funcional.
-    // THR-empty Ã© a condiÃ§Ã£o mÃ­nima antes de usar COM1 para CI.
+    // THR-empty é a condição mínima antes de usar COM1 para CI.
     if status == 0xFF || (status & 0x20) == 0 { return false; }
 
     unsafe { X86_SERIAL_READY = true; }
@@ -101,8 +106,9 @@ fn x86_serial_write_byte_unlocked(value: u8) -> bool {
     return false;
 }
 
-// Uma escrita isolada também é protegida. Isso evita a corrida clássica em
-// que dois CPUs observam THR-empty e escrevem no COM1 simultaneamente.
+// Uma escrita isolada também é protegida. O valor de retorno significa que o
+// diagnóstico foi capturado no boot log em RAM. Se COM1 estiver disponível,
+// ele é espelhado em best-effort; falha/ausência do UART não torna o boot fatal.
 @system
 pub fn x86_serial_write_byte(value: u8) -> bool {
     let flags = x86_irq_save_disable();
@@ -112,16 +118,23 @@ pub fn x86_serial_write_byte(value: u8) -> bool {
             return false;
         }
     }
+
     x86_boot_log_append(value);
-    let success = x86_serial_is_ready() && x86_serial_write_byte_unlocked(value);
+    if x86_serial_is_ready() {
+        // Uma falha de transporte apenas desativa X86_SERIAL_READY em
+        // x86_serial_write_byte_unlocked(); a cópia em RAM já está segura.
+        x86_serial_write_byte_unlocked(value);
+    }
+
     unsafe { spinlock_unlock(&mut X86_SERIAL_LOCK); }
     x86_irq_restore(flags);
-    return success;
+    return true;
 }
 
-// Transação serial multi-byte. O lock cobre a linha inteira e as interrupções
-// locais ficam desabilitadas enquanto o lock está em posse deste CPU, evitando
-// deadlock por reentrada de IRQ e impedindo interleaving de checkpoints SMP.
+// Transação diagnóstica multi-byte. O lock cobre a linha inteira e as
+// interrupções locais ficam desabilitadas enquanto o lock está em posse deste
+// CPU, evitando reentrada e interleaving. O boot log em RAM é obrigatório;
+// UART/COM1 é somente um espelho opcional para QEMU/CI.
 @system
 pub fn x86_serial_write_buffer(bytes: *const u8, length: usize) -> bool {
     if length == 0 { return true; }
@@ -135,30 +148,27 @@ pub fn x86_serial_write_buffer(bytes: *const u8, length: usize) -> bool {
         }
     }
 
-    let mut success = true;
     let mut index: usize = 0;
     unsafe {
         while index < length {
             x86_boot_log_append(bytes[index]);
             index += 1;
         }
-        index = 0;
-        if !x86_serial_is_ready() {
-            spinlock_unlock(&mut X86_SERIAL_LOCK);
-            x86_irq_restore(flags);
-            return false;
-        }
-        while index < length {
-            if !x86_serial_write_byte_unlocked(bytes[index]) {
-                success = false;
-                break;
+
+        // Só tenta o transporte legado se ele realmente foi detectado. Uma
+        // falha no meio da linha desativa o UART para chamadas seguintes, mas
+        // não invalida a linha que já foi capturada integralmente em RAM.
+        if x86_serial_is_ready() {
+            index = 0;
+            while index < length {
+                if !x86_serial_write_byte_unlocked(bytes[index]) { break; }
+                index += 1;
             }
-            index += 1;
         }
         spinlock_unlock(&mut X86_SERIAL_LOCK);
     }
     x86_irq_restore(flags);
-    return success;
+    return true;
 }
 
 @system
