@@ -39,6 +39,19 @@ class KernelSmpBaseTests(unittest.TestCase):
         self.assertIn("102, 13, 0, 9, 0, 0", text)
         self.assertIn("15, 34, 216", text)
 
+    def test_trampoline_self_patch_validation_tracks_layout_constants(self):
+        text = TRAMP.read_text(encoding="utf-8")
+        self.assertIn(
+            "base[SMP_TRAMPOLINE_GDTR_OFFSET] != SMP_TRAMPOLINE_GDT_POINTER_OFFSET as u8",
+            text,
+        )
+        self.assertIn(
+            "base[SMP_TRAMPOLINE_CR3_LOAD_OFFSET] != SMP_TRAMPOLINE_CR3_VALUE_OFFSET as u8",
+            text,
+        )
+        self.assertNotIn("base[SMP_TRAMPOLINE_GDTR_OFFSET] != 0xA0", text)
+        self.assertNotIn("base[SMP_TRAMPOLINE_CR3_LOAD_OFFSET] != 0x80", text)
+
     def test_high_cr3_uses_low_bootstrap_root_then_restores_real_root(self):
         text = SMP.read_text(encoding="utf-8")
         for token in ("pmm_alloc_pages_constrained(1, 4096, 0xFFFFFFFF, 0)",
