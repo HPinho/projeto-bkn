@@ -170,21 +170,19 @@ pub fn device_core_attached_count() -> u32 {
     return count;
 }
 
+// DF-3.1a: falha e uma transicao conservadora; ACTIVE nunca e promovido por
+// uma API generica. A unica promocao para ACTIVE pertence a commit_bind().
 @system
-pub fn device_core_set_state(handle: DeviceHandle, expected: u8,
-                             next: u8) -> bool {
-    if next != DEVICE_STATE_ACTIVE && next != DEVICE_STATE_FAILED { return false; }
+pub fn device_core_mark_failed(handle: DeviceHandle) -> bool {
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
     let mut changed = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].state == expected &&
-               ((expected == DEVICE_STATE_ATTACHED && next == DEVICE_STATE_ACTIVE) ||
-                (expected == DEVICE_STATE_ATTACHED && next == DEVICE_STATE_FAILED) ||
-                (expected == DEVICE_STATE_ACTIVE && next == DEVICE_STATE_FAILED)) {
-                DEVICE_RECORDS[slot].state = next;
+            if DEVICE_RECORDS[slot].state == DEVICE_STATE_ATTACHED ||
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE {
+                DEVICE_RECORDS[slot].state = DEVICE_STATE_FAILED;
                 changed = true;
             }
         }
