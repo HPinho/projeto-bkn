@@ -50,6 +50,21 @@ static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 static mut EARLY_BOOT_DIAGNOSTICS_READY: bool = false;
 static mut EARLY_BOOT_FAILURE_COUNT: usize = 0;
 static mut EARLY_BOOT_FAILURE_COUNT_VALID: bool = false;
+static mut EARLY_BOOT_AML_DETAILS_VALID: bool = false;
+static mut EARLY_BOOT_AML_ERROR: u32 = 0;
+static mut EARLY_BOOT_AML_OFFSET: u32 = 0;
+
+@system
+fn baken_early_boot_hex(x: u32, y: u32, value: u32) -> void {
+    let mut digits: [u8; 9] = [0; 9];
+    let mut index: usize = 0;
+    while index < 8 {
+        let nibble = ((value >> ((7 - index) * 4)) & 15) as u8;
+        digits[index] = if nibble < 10 { 48 + nibble } else { 65 + nibble - 10 };
+        index += 1;
+    }
+    raster_draw_text(x, y, digits.as_ptr(), 0x00FFFFFF);
+}
 
 // Diagnóstico visual disponível imediatamente após o trampoline pós-cutover.
 // Usa somente o framebuffer GOP já mapeado e assets embutidos; não depende de
@@ -101,6 +116,12 @@ pub fn baken_early_boot_fail(code: *const u8, stage: *const u8) -> ! {
             raster_draw_text(116, 66, stage, 0x00FFFFFF);
             raster_draw_text(28, 104, "CODE: \0".as_ptr(), 0x00FB7185);
             raster_draw_text(96, 104, code, 0x00FFFFFF);
+            if EARLY_BOOT_AML_DETAILS_VALID {
+                raster_draw_text(28, 128, "DETAIL:\0".as_ptr(), 0x00FFFFFF);
+                baken_early_boot_hex(128, 128, EARLY_BOOT_AML_ERROR);
+                raster_draw_text(280, 128, "OFFSET:\0".as_ptr(), 0x00FFFFFF);
+                baken_early_boot_hex(390, 128, EARLY_BOOT_AML_OFFSET);
+            }
             if EARLY_BOOT_FAILURE_COUNT_VALID {
                 let count = EARLY_BOOT_FAILURE_COUNT;
                 let mut digits: [u8; 6] = [0; 6];
@@ -308,6 +329,11 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     if !aml_namespace_foundation_init() { baken_early_boot_fail("E-AML-003\0".as_ptr(), "AML NAMESPACE\0".as_ptr()); }
     if !aml_namespace_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-AML-NAMESPACE-MARKER\0".as_ptr(), "AML NAMESPACE SERIAL MARKER\0".as_ptr()); }
     if !aml_loader_init() {
+        unsafe {
+            EARLY_BOOT_AML_ERROR = aml_loader_last_error();
+            EARLY_BOOT_AML_OFFSET = aml_loader_last_offset();
+            EARLY_BOOT_AML_DETAILS_VALID = true;
+        }
         aml_loader_emit_failure_markers();
         baken_early_boot_fail("E-AML-004\0".as_ptr(), "AML LOADER\0".as_ptr());
     }

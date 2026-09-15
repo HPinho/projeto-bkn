@@ -426,6 +426,12 @@ fn aml_loader_load_definition_block(table: *const u8, table_index: usize,
 pub fn aml_loader_is_ready() -> bool { unsafe { return AML_LOADER_READY; } }
 
 @system
+pub fn aml_loader_last_error() -> u32 { unsafe { return AML_LOADER_LAST_ERROR; } }
+
+@system
+pub fn aml_loader_last_offset() -> u32 { unsafe { return AML_LOADER_LAST_OFFSET as u32; } }
+
+@system
 pub fn aml_loader_table_count() -> usize {
     unsafe { if !AML_LOADER_READY { return 0; } return AML_LOADER_TABLES_LOADED; }
 }
