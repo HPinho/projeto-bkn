@@ -19,6 +19,18 @@ class GenericIrqRegistryTests(unittest.TestCase):
         self.assertNotIn("kernel::interrupts::registry", BOOTSTRAP)
         self.assertNotIn("irq_registry_dispatch", BOOTSTRAP)
 
+    def test_public_registration_uses_descriptor_callback_abi(self):
+        self.assertIn("pub struct IrqDescriptor", REGISTRY)
+        self.assertIn("pub handler: fn(DeviceHandle, u16) -> bool", REGISTRY)
+        signature = REGISTRY.split("pub fn irq_registry_register", 1)[1].split("{", 1)[0]
+        self.assertIn("descriptor: IrqDescriptor", signature)
+        self.assertNotIn("handler: fn(", signature)
+        register = REGISTRY.split("pub fn irq_registry_register", 1)[1].split(
+            "pub fn irq_registry_vector", 1)[0]
+        self.assertIn("handler: descriptor.handler", register)
+        self.assertIn("IrqDescriptor {", SELF_TEST)
+        self.assertIn("handler: df_self_test_irq_handler", SELF_TEST)
+
     def test_registration_uses_resource_manager_as_vector_owner(self):
         register = REGISTRY.split("pub fn irq_registry_register", 1)[1].split(
             "pub fn irq_registry_vector", 1)[0]
