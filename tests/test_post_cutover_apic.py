@@ -66,6 +66,22 @@ class PostCutoverApicTests(unittest.TestCase):
         self.assertIn("((destination_apic_id as u64) << 32) | (vector as u64)", text)
         self.assertIn("x86_write_msr(X2APIC_IPI_MSR_ICR, command)", text)
 
+    def test_current_apic_id_decodes_xapic_before_x2apic_range_guard(self):
+        text = XAPIC_IPI.read_text(encoding="utf-8")
+        body = text.split("pub fn xapic_ipi_current_id() -> u8", 1)[1].split(
+            "fn xapic_ipi_wait_idle", 1
+        )[0]
+        mode = body.index("if xapic_ipi_is_x2apic()")
+        guard = body.index("if raw > 255")
+        xapic_decode = body.index("(raw >> 24) & 0xFF")
+        self.assertLess(mode, guard)
+        self.assertLess(guard, xapic_decode)
+        self.assertIn("return raw as u8;", body)
+        self.assertNotIn(
+            "let raw = xapic_ipi_read(XAPIC_IPI_REG_ID);\n    if raw > 255 { return 0; }\n    if xapic_ipi_is_x2apic()",
+            body,
+        )
+
     def test_ioapic_masks_all_redirection_entries(self):
         text = IOAPIC.read_text(encoding="utf-8")
         self.assertIn("ioapic_init_all_masked", text)
