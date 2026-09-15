@@ -62,6 +62,10 @@ pub fn x86_boot_log_byte(index: usize) -> u8 {
     }
 }
 
+// Inicializa a infraestrutura diagnóstica. O retorno representa disponibilidade
+// do boot log/lock, não a presença física de COM1. A saúde do transporte UART é
+// publicada separadamente por x86_serial_is_ready(). Isso permite que callers
+// como post_cutover preservem checkpoints em RAM mesmo em PCs sem UART legado.
 @system
 pub fn x86_serial_init() -> bool {
     unsafe {
@@ -77,13 +81,12 @@ pub fn x86_serial_init() -> bool {
     __outb(X86_SERIAL_COM1 + 2, 0xC7);
     __outb(X86_SERIAL_COM1 + 4, 0x0B);
 
-    // Um UART ausente costuma retornar 0xFF. Não tratamos isso como COM1 real.
+    // Um UART ausente costuma retornar 0xFF. Bridges LPC modernas também podem
+    // retornar 0x00 sem UART funcional. Nenhum dos casos invalida o boot log.
     let status = __inb(X86_SERIAL_COM1 + 5);
-    // Bridges LPC modernas podem retornar 0x00 sem um UART funcional.
-    // THR-empty é a condição mínima antes de usar COM1 para CI.
-    if status == 0xFF || (status & 0x20) == 0 { return false; }
-
-    unsafe { X86_SERIAL_READY = true; }
+    if status != 0xFF && (status & 0x20) != 0 {
+        unsafe { X86_SERIAL_READY = true; }
+    }
     return true;
 }
 
