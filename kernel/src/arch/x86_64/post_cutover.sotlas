@@ -22,6 +22,8 @@ import kernel::memory::active_page_tables::*;
 import kernel::arch::x86_64::paging::*;
 import kernel::acpi::tables::*;
 import kernel::acpi::madt::*;
+import kernel::acpi::fadt::*;
+import kernel::acpi::pm_timer::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::irq::*;
@@ -80,9 +82,13 @@ static mut POST_CUTOVER_HEAP_ACTIVE: bool = false;
 static mut POST_CUTOVER_ACPI_READY: bool = false;
 static mut POST_CUTOVER_ACPI_FAILURE_STAGE: u8 = 0;
 static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
+static mut POST_CUTOVER_APIC_FAILURE_STAGE: u8 = 0;
 static mut POST_CUTOVER_IRQS_READY: bool = false;
+static mut POST_CUTOVER_IRQ_FAILURE_STAGE: u8 = 0;
 static mut POST_CUTOVER_TIMER_READY: bool = false;
+static mut POST_CUTOVER_TIMER_FAILURE_STAGE: u8 = 0;
 static mut POST_CUTOVER_TIMER_LIVE: bool = false;
+static mut POST_CUTOVER_TICK_FAILURE_STAGE: u8 = 0;
 static mut POST_CUTOVER_KEYBOARD_LIVE: bool = false;
 static mut POST_CUTOVER_XHCI_READY: bool = false;
 static mut POST_CUTOVER_XHCI_DMA_READY: bool = false;
@@ -273,14 +279,20 @@ pub fn post_cutover_acpi_ready() -> bool { unsafe { return POST_CUTOVER_ACPI_REA
 
 @system
 pub fn post_cutover_activate_interrupt_controllers() -> bool {
+    unsafe { POST_CUTOVER_APIC_FAILURE_STAGE = 1; }
     if !post_cutover_acpi_ready() { return false; }
     let local_apic = madt_lapic_address();
     if local_apic == 0 { return false; }
+    unsafe { POST_CUTOVER_APIC_FAILURE_STAGE = 2; }
     if !lapic_init_masked(local_apic) || !lapic_is_ready() { return false; }
+    unsafe { POST_CUTOVER_APIC_FAILURE_STAGE = 3; }
     if !ioapic_init_all_masked() || !ioapic_is_ready() { return false; }
     unsafe { POST_CUTOVER_INTERRUPT_CONTROLLERS_READY = true; }
     return true;
 }
+
+@system
+pub fn post_cutover_apic_failure_stage() -> u8 { unsafe { return POST_CUTOVER_APIC_FAILURE_STAGE; } }
 
 @system
 pub fn post_cutover_interrupt_controllers_ready() -> bool {
@@ -289,19 +301,30 @@ pub fn post_cutover_interrupt_controllers_ready() -> bool {
 
 @system
 pub fn post_cutover_prepare_irqs() -> bool {
+    unsafe { POST_CUTOVER_IRQ_FAILURE_STAGE = 1; }
     if !post_cutover_interrupt_controllers_ready() { return false; }
+    unsafe { POST_CUTOVER_IRQ_FAILURE_STAGE = 2; }
     if !irq_prepare_idt() || !irq_idt_ready() { return false; }
+    unsafe { POST_CUTOVER_IRQ_FAILURE_STAGE = 3; }
     if !irq_prepare_masked_ioapic_routes() || !irq_routes_ready() { return false; }
     unsafe { POST_CUTOVER_IRQS_READY = true; }
     return true;
 }
 
 @system
+pub fn post_cutover_irq_failure_stage() -> u8 { unsafe { return POST_CUTOVER_IRQ_FAILURE_STAGE; } }
+
+@system
 pub fn post_cutover_irqs_ready() -> bool { unsafe { return POST_CUTOVER_IRQS_READY; } }
 
 @system
 pub fn post_cutover_prepare_timer() -> bool {
+    unsafe { POST_CUTOVER_TIMER_FAILURE_STAGE = 1; }
     if !post_cutover_irqs_ready() { return false; }
+    unsafe { POST_CUTOVER_TIMER_FAILURE_STAGE = 2; }
+    if !fadt_pm_timer_is_ready() && !fadt_pm_timer_init() { return false; }
+    if !acpi_pm_timer_port_ready() { return false; }
+    unsafe { POST_CUTOVER_TIMER_FAILURE_STAGE = 3; }
     if !lapic_timer_calibrate_masked_from_pm() || !lapic_timer_is_ready() { return false; }
     unsafe {
         POST_CUTOVER_TIMER_READY = true;
@@ -314,6 +337,9 @@ pub fn post_cutover_prepare_timer() -> bool {
     }
     return true;
 }
+
+@system
+pub fn post_cutover_timer_failure_stage() -> u8 { unsafe { return POST_CUTOVER_TIMER_FAILURE_STAGE; } }
 
 @system
 pub fn post_cutover_timer_ready() -> bool { unsafe { return POST_CUTOVER_TIMER_READY; } }
@@ -332,10 +358,12 @@ pub fn post_cutover_usb_port_ready() -> bool { unsafe { return POST_CUTOVER_USB_
 
 @system
 pub fn post_cutover_enable_timer_interrupts() -> bool {
-    unsafe { POST_CUTOVER_TIMER_LIVE = false; }
+    unsafe { POST_CUTOVER_TIMER_LIVE = false; POST_CUTOVER_TICK_FAILURE_STAGE = 1; }
     if !post_cutover_timer_ready() || external_interrupts_enabled() { return false; }
     let before = irq_timer_count();
+    unsafe { POST_CUTOVER_TICK_FAILURE_STAGE = 2; }
     if !interrupt_enable_timer_only() { return false; }
+    unsafe { POST_CUTOVER_TICK_FAILURE_STAGE = 3; }
     let mut spins: u64 = 0;
     while spins < POST_CUTOVER_FIRST_TICK_SPIN_LIMIT {
         if irq_timer_count() != before {
@@ -347,6 +375,9 @@ pub fn post_cutover_enable_timer_interrupts() -> bool {
     interrupt_disable_all();
     return false;
 }
+
+@system
+pub fn post_cutover_tick_failure_stage() -> u8 { unsafe { return POST_CUTOVER_TICK_FAILURE_STAGE; } }
 
 @system
 pub fn post_cutover_enable_keyboard_interrupts() -> bool {
@@ -610,16 +641,36 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     baken_early_boot_pass("ACPI TABLES\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('A' as u8); }
     baken_early_boot_stage("APIC / IOAPIC\0".as_ptr());
-    if !post_cutover_activate_interrupt_controllers() { baken_early_boot_fail("E-APIC-001\0".as_ptr(), "APIC / IOAPIC\0".as_ptr()); }
+    if !post_cutover_activate_interrupt_controllers() {
+        let failure = post_cutover_apic_failure_stage();
+        if failure == 2 { baken_early_boot_fail("E-LAPIC-001\0".as_ptr(), "LOCAL APIC INIT\0".as_ptr()); }
+        if failure == 3 { baken_early_boot_fail("E-IOAPIC-001\0".as_ptr(), "I/O APIC INIT\0".as_ptr()); }
+        baken_early_boot_fail("E-APIC-001\0".as_ptr(), "APIC PRECONDITION\0".as_ptr());
+    }
     baken_early_boot_pass("APIC / IOAPIC\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('I' as u8); }
     baken_early_boot_stage("INTERRUPT ROUTING\0".as_ptr());
-    if !post_cutover_prepare_irqs() { baken_early_boot_fail("E-IRQ-001\0".as_ptr(), "INTERRUPT ROUTING\0".as_ptr()); }
+    if !post_cutover_prepare_irqs() {
+        let failure = post_cutover_irq_failure_stage();
+        if failure == 2 { baken_early_boot_fail("E-IRQ-IDT\0".as_ptr(), "INTERRUPT IDT GATES\0".as_ptr()); }
+        if failure == 3 { baken_early_boot_fail("E-IRQ-ROUTE\0".as_ptr(), "MASKED I/O APIC ROUTES\0".as_ptr()); }
+        baken_early_boot_fail("E-IRQ-001\0".as_ptr(), "IRQ PRECONDITION\0".as_ptr());
+    }
     if serial_ready { x86_serial_write_stage_marker('R' as u8); }
     baken_early_boot_stage("LAPIC TIMER\0".as_ptr());
-    if !post_cutover_prepare_timer() { baken_early_boot_fail("E-TIMER-001\0".as_ptr(), "LAPIC TIMER\0".as_ptr()); }
+    if !post_cutover_prepare_timer() {
+        let failure = post_cutover_timer_failure_stage();
+        if failure == 2 { baken_early_boot_fail("E-TIMER-PM\0".as_ptr(), "ACPI PM TIMER SOURCE\0".as_ptr()); }
+        if failure == 3 { baken_early_boot_fail("E-TIMER-CAL\0".as_ptr(), "LAPIC TIMER CALIBRATION\0".as_ptr()); }
+        baken_early_boot_fail("E-TIMER-001\0".as_ptr(), "TIMER PRECONDITION\0".as_ptr());
+    }
     if serial_ready { x86_serial_write_timer_ready_marker(); }
-    if !post_cutover_enable_timer_interrupts() { baken_early_boot_fail("E-TIMER-002\0".as_ptr(), "FIRST TIMER INTERRUPT\0".as_ptr()); }
+    if !post_cutover_enable_timer_interrupts() {
+        let failure = post_cutover_tick_failure_stage();
+        if failure == 2 { baken_early_boot_fail("E-TIMER-ENABLE\0".as_ptr(), "TIMER INTERRUPT ENABLE\0".as_ptr()); }
+        if failure == 3 { baken_early_boot_fail("E-TIMER-TICK\0".as_ptr(), "FIRST LAPIC TIMER TICK\0".as_ptr()); }
+        baken_early_boot_fail("E-TIMER-002\0".as_ptr(), "TIMER IRQ PRECONDITION\0".as_ptr());
+    }
     baken_early_boot_pass("KERNEL FOUNDATION\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('T' as u8); }
 
