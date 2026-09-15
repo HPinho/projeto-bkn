@@ -27,6 +27,28 @@ pub const DEVICE_STATE_ACTIVE: u8 = 2;
 pub const DEVICE_STATE_FAILED: u8 = 3;
 pub const DEVICE_STATE_DETACHED: u8 = 4;
 
+pub const DRIVER_ID_NONE: u32 = 0;
+pub const DRIVER_GENERATION_INVALID: u32 = 0;
+pub const DRIVER_MATCH_ANY: u32 = 0xFFFFFFFF;
+pub const DRIVER_STATE_EMPTY: u8 = 0;
+pub const DRIVER_STATE_REGISTERED: u8 = 1;
+pub const DRIVER_STATE_REMOVING: u8 = 2;
+
+@repr(C)
+pub struct DriverHandle {
+    pub driver_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct DriverMatch {
+    pub bus: u8;
+    pub class_code: u8;
+    pub vendor_id: u32;
+    pub hardware_id: u32;
+}
+
 @repr(C)
 pub struct DeviceHandle {
     pub device_id: u32;
@@ -68,5 +90,17 @@ pub fn device_invalid_record() -> DeviceRecord {
 @system
 pub fn device_handle_equal(left: DeviceHandle, right: DeviceHandle) -> bool {
     return left.valid && right.valid && left.device_id == right.device_id &&
+           left.generation == right.generation;
+}
+
+@system
+pub fn driver_invalid_handle() -> DriverHandle {
+    return DriverHandle { driver_id: DRIVER_ID_NONE,
+                          generation: DRIVER_GENERATION_INVALID, valid: false };
+}
+
+@system
+pub fn driver_handle_equal(left: DriverHandle, right: DriverHandle) -> bool {
+    return left.valid && right.valid && left.driver_id == right.driver_id &&
            left.generation == right.generation;
 }

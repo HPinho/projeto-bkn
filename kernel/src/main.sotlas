@@ -47,6 +47,7 @@ import kernel::drivers::pci_bus::*;
 import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::lifecycle::*;
+import kernel::device::driver_registry::*;
 import kernel::drivers::hda_controller::*;
 import kernel::drivers::i2c_core::*;
 import kernel::drivers::i2c_executor::*;

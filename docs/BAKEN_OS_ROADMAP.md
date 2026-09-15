@@ -669,8 +669,8 @@ PMM/VMM/PCI/IRQ/DMA já existentes, sem reescrever o boot físico certificado.
 | Corte | Estado | Entrega |
 |---|---|---|
 | DF-0 Baseline física | ✅ | Boot ASUS observado; AML limitado e possível SMP BSP-only são estados explícitos, não certificação multi-hardware |
-| DF-1 Device Core | ⏳ implementado, validação em andamento | identidade `device_id + generation`, parent/child, estados e registro fixo SMP/IRQ-safe; grafo Sotlas, ainda sem alterar boot |
-| DF-2 Driver Registry | ⬜ | match, probe/remove, bind/unbind e owner exclusivo |
+| DF-1 Device Core | ✅ implementado e validado localmente | identidade `device_id + generation`, parent/child, estados e registro fixo SMP/IRQ-safe; grafo Sotlas, ainda sem alterar boot |
+| DF-2 Driver Registry | ✅ implementado e validado localmente | match com prioridade, callbacks fora do lock, probe/remove, bind/unbind, rollback e owner exclusivo |
 | DF-3 Resource Manager | ⬜ | claims MMIO, I/O ports, PCI BAR, IRQ e DMA |
 | DF-4 Generic IRQ Registry | ⬜ | vetores dinâmicos e handlers; preservar vetores bootstrap |
 | DF-5 PCI Core v2 | ⬜ | backend CF8/CFC+ECAM, capability walker e claim |
@@ -684,9 +684,10 @@ PMM/VMM/PCI/IRQ/DMA já existentes, sem reescrever o boot físico certificado.
 | DF-14 Diagnostics | ⬜ | identidade, estado, recursos, IRQ, DMA e erros |
 | DF-15 Compatibility Adapters | ⬜ | xHCI/HID, NVMe/AHCI e GPIO/I²C atuais, gradualmente |
 
-DF-1 é propositalmente passivo: não inicializa hardware, não reivindica PCI, não
-altera IRQ e não toca armazenamento. O próximo corte é DF-2, depois da prova de
-build e boot do DF-1. A existência do Device Core não promove automaticamente
+DF-1 e DF-2 são propositalmente passivos: não inicializam hardware, não reivindicam
+PCI, não alteram IRQ e não tocam armazenamento. O DF-2 foi certificado com 1.935 testes,
+build modular de 198 módulos/200 objetos e boot QEMU SMP completo. O próximo corte é DF-3.
+A existência do Device/Driver Core não promove automaticamente
 nenhum controlador Intel/AMD não testado a hardware suportado.
 
 Esses itens devem ser tratados em microcortes próprios, preservando os quatro gates e sem alterar o consumidor global único do Event Ring.

@@ -1,0 +1,282 @@
+// DF-2: registro e binding de drivers sobre o Device Core.
+// Callbacks nunca executam sob o lock do registro; hardware continua fora desta camada.
+module kernel::device::driver_registry;
+
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::lifecycle::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const DRIVER_REGISTRY_CAPACITY: usize = 64;
+
+@repr(C)
+pub struct DriverDescriptor {
+    pub match_rule: DriverMatch;
+    pub priority: u32;
+    pub probe: fn(DeviceHandle) -> bool;
+    pub remove: fn(DeviceHandle) -> bool;
+}
+
+@repr(C)
+pub struct DriverRecord {
+    pub handle: DriverHandle;
+    pub descriptor: DriverDescriptor;
+    pub state: u8;
+    pub bound_count: u32;
+    pub operations_in_flight: u32;
+    pub valid: bool;
+}
+
+@system fn driver_reject_probe(device: DeviceHandle) -> bool { return false; }
+@system fn driver_reject_remove(device: DeviceHandle) -> bool { return false; }
+
+static mut DRIVER_RECORDS: [DriverRecord; DRIVER_REGISTRY_CAPACITY] = [
+    DriverRecord {
+        handle: DriverHandle { driver_id: 0, generation: 0, valid: false },
+        descriptor: DriverDescriptor {
+            match_rule: DriverMatch { bus: 0, class_code: 0,
+                                      vendor_id: 0, hardware_id: 0 },
+            priority: 0, probe: driver_reject_probe, remove: driver_reject_remove
+        },
+        state: DRIVER_STATE_EMPTY, bound_count: 0, operations_in_flight: 0,
+        valid: false
+    }; DRIVER_REGISTRY_CAPACITY
+];
+static mut DRIVER_GENERATIONS: [u32; DRIVER_REGISTRY_CAPACITY] = [0; DRIVER_REGISTRY_CAPACITY];
+static mut DRIVER_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut DRIVER_LOCK_READY: bool = false;
+static mut DRIVER_REGISTRY_READY: bool = false;
+
+@system
+fn driver_slot(driver_id: u32) -> usize {
+    if driver_id == DRIVER_ID_NONE || driver_id > DRIVER_REGISTRY_CAPACITY as u32 {
+        return DRIVER_REGISTRY_CAPACITY;
+    }
+    return (driver_id - 1) as usize;
+}
+
+@system
+fn driver_generation_next(current: u32) -> u32 {
+    let mut next = current + 1;
+    if next == DRIVER_GENERATION_INVALID { next = 1; }
+    return next;
+}
+
+@system
+fn driver_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !DRIVER_LOCK_READY || !spinlock_lock(&mut DRIVER_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn driver_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut DRIVER_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn driver_handle_live_locked(handle: DriverHandle) -> bool {
+    let slot = driver_slot(handle.driver_id);
+    if !handle.valid || handle.generation == DRIVER_GENERATION_INVALID ||
+       slot >= DRIVER_REGISTRY_CAPACITY { return false; }
+    unsafe {
+        return DRIVER_RECORDS[slot].valid &&
+               DRIVER_RECORDS[slot].state == DRIVER_STATE_REGISTERED &&
+               DRIVER_RECORDS[slot].handle.generation == handle.generation;
+    }
+}
+
+@system
+fn driver_rule_valid(rule: DriverMatch) -> bool {
+    return rule.bus != DEVICE_BUS_NONE && rule.bus <= DEVICE_BUS_VIRTUAL &&
+           rule.class_code != DEVICE_CLASS_NONE &&
+           rule.class_code <= DEVICE_CLASS_CONTROLLER;
+}
+
+@system
+fn driver_matches(rule: DriverMatch, device: DeviceRecord) -> bool {
+    if !device.valid || device.state != DEVICE_STATE_ATTACHED { return false; }
+    if rule.bus != device.bus || rule.class_code != device.class_code { return false; }
+    if rule.vendor_id != DRIVER_MATCH_ANY && rule.vendor_id != device.vendor_id { return false; }
+    if rule.hardware_id != DRIVER_MATCH_ANY && rule.hardware_id != device.hardware_id { return false; }
+    return true;
+}
+
+@system
+pub fn driver_registry_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !DRIVER_LOCK_READY {
+            if !spinlock_init(&mut DRIVER_LOCK) { x86_irq_restore(flags); return false; }
+            DRIVER_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut DRIVER_LOCK) { x86_irq_restore(flags); return false; }
+        if !DRIVER_REGISTRY_READY {
+            let mut slot: usize = 0;
+            while slot < DRIVER_REGISTRY_CAPACITY {
+                DRIVER_RECORDS[slot].valid = false;
+                DRIVER_RECORDS[slot].state = DRIVER_STATE_EMPTY;
+                DRIVER_RECORDS[slot].bound_count = 0;
+                DRIVER_RECORDS[slot].operations_in_flight = 0;
+                DRIVER_GENERATIONS[slot] = 0;
+                slot += 1;
+            }
+            DRIVER_REGISTRY_READY = true;
+        }
+        spinlock_unlock(&mut DRIVER_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn driver_register(descriptor: DriverDescriptor) -> DriverHandle {
+    if !DRIVER_REGISTRY_READY || !driver_rule_valid(descriptor.match_rule) {
+        return driver_invalid_handle();
+    }
+    let mut flags: u64 = 0;
+    if !driver_lock_irq(&mut flags) { return driver_invalid_handle(); }
+    let mut result = driver_invalid_handle();
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < DRIVER_REGISTRY_CAPACITY {
+            if !DRIVER_RECORDS[slot].valid {
+                let generation = driver_generation_next(DRIVER_GENERATIONS[slot]);
+                DRIVER_GENERATIONS[slot] = generation;
+                result = DriverHandle { driver_id: (slot + 1) as u32,
+                                        generation: generation, valid: true };
+                DRIVER_RECORDS[slot].handle = result;
+                DRIVER_RECORDS[slot].descriptor = descriptor;
+                DRIVER_RECORDS[slot].state = DRIVER_STATE_REGISTERED;
+                DRIVER_RECORDS[slot].bound_count = 0;
+                DRIVER_RECORDS[slot].operations_in_flight = 0;
+                DRIVER_RECORDS[slot].valid = true;
+                break;
+            }
+            slot += 1;
+        }
+    }
+    driver_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn driver_unregister(handle: DriverHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !driver_lock_irq(&mut flags) { return false; }
+    let mut removed = false;
+    if driver_handle_live_locked(handle) {
+        unsafe {
+            let slot = driver_slot(handle.driver_id);
+            if DRIVER_RECORDS[slot].bound_count == 0 &&
+               DRIVER_RECORDS[slot].operations_in_flight == 0 {
+                DRIVER_RECORDS[slot].state = DRIVER_STATE_REMOVING;
+                DRIVER_RECORDS[slot].valid = false;
+                removed = true;
+            }
+        }
+    }
+    driver_unlock_irq(flags);
+    return removed;
+}
+
+@system
+pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
+    let snapshot = device_core_snapshot(device);
+    if !snapshot.valid || snapshot.driver_id != DRIVER_ID_NONE ||
+       snapshot.state != DEVICE_STATE_ATTACHED { return driver_invalid_handle(); }
+
+    let mut flags: u64 = 0;
+    if !driver_lock_irq(&mut flags) { return driver_invalid_handle(); }
+    let mut selected = driver_invalid_handle();
+    let mut selected_priority: u32 = 0;
+    let mut selected_record = unsafe { DRIVER_RECORDS[0] };
+    unsafe {
+        let mut search_slot: usize = 0;
+        while search_slot < DRIVER_REGISTRY_CAPACITY {
+            if DRIVER_RECORDS[search_slot].valid &&
+               DRIVER_RECORDS[search_slot].state == DRIVER_STATE_REGISTERED &&
+               driver_matches(DRIVER_RECORDS[search_slot].descriptor.match_rule, snapshot) &&
+               (!selected.valid || DRIVER_RECORDS[search_slot].descriptor.priority > selected_priority) {
+                selected = DRIVER_RECORDS[search_slot].handle;
+                selected_priority = DRIVER_RECORDS[search_slot].descriptor.priority;
+                selected_record = DRIVER_RECORDS[search_slot];
+            }
+            search_slot += 1;
+        }
+        if selected.valid {
+            DRIVER_RECORDS[driver_slot(selected.driver_id)].operations_in_flight += 1;
+        }
+    }
+    driver_unlock_irq(flags);
+    if !selected.valid { return selected; }
+
+    if !device_core_claim_driver(device, selected.driver_id) {
+        let mut finish_flags: u64 = 0;
+        if driver_lock_irq(&mut finish_flags) {
+            unsafe { DRIVER_RECORDS[driver_slot(selected.driver_id)].operations_in_flight -= 1; }
+            driver_unlock_irq(finish_flags);
+        }
+        return driver_invalid_handle();
+    }
+
+    // Callback fora dos locks: probe pode chamar Resource Manager no DF-3.
+    let probe_ok = selected_record.descriptor.probe(device);
+    let active = probe_ok && device_activate(device);
+    if !active { device_core_release_driver(device, selected.driver_id); }
+
+    let mut finish_flags: u64 = 0;
+    if !driver_lock_irq(&mut finish_flags) { return driver_invalid_handle(); }
+    unsafe {
+        let finish_slot = driver_slot(selected.driver_id);
+        DRIVER_RECORDS[finish_slot].operations_in_flight -= 1;
+        if active { DRIVER_RECORDS[finish_slot].bound_count += 1; }
+    }
+    driver_unlock_irq(finish_flags);
+    if !active { return driver_invalid_handle(); }
+    return selected;
+}
+
+@system
+pub fn driver_unbind(device: DeviceHandle, driver: DriverHandle) -> bool {
+    let snapshot = device_core_snapshot(device);
+    if !snapshot.valid || snapshot.state != DEVICE_STATE_ACTIVE ||
+       snapshot.driver_id != driver.driver_id { return false; }
+    let mut flags: u64 = 0;
+    if !driver_lock_irq(&mut flags) { return false; }
+    let mut selected_record = unsafe { DRIVER_RECORDS[0] };
+    if !driver_handle_live_locked(driver) {
+        driver_unlock_irq(flags); return false;
+    }
+    unsafe {
+        let operation_slot = driver_slot(driver.driver_id);
+        if DRIVER_RECORDS[operation_slot].bound_count == 0 {
+            driver_unlock_irq(flags); return false;
+        }
+        DRIVER_RECORDS[operation_slot].operations_in_flight += 1;
+        selected_record = DRIVER_RECORDS[operation_slot];
+    }
+    driver_unlock_irq(flags);
+
+    let remove_ok = selected_record.descriptor.remove(device);
+    let released = remove_ok && device_core_unbind_active_driver(device, driver.driver_id);
+    let mut finish_flags: u64 = 0;
+    if !driver_lock_irq(&mut finish_flags) { return false; }
+    unsafe {
+        let finish_slot = driver_slot(driver.driver_id);
+        DRIVER_RECORDS[finish_slot].operations_in_flight -= 1;
+        if released { DRIVER_RECORDS[finish_slot].bound_count -= 1; }
+    }
+    driver_unlock_irq(finish_flags);
+    return released;
+}
