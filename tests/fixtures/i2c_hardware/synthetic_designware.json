@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "capture": {
+    "kind": "synthetic",
+    "anonymized": true,
+    "source": "Baken deterministic DesignWare model"
+  },
+  "platform": {
+    "cpu_vendor": "other",
+    "cpu_family": "emulated",
+    "firmware_vendor": "Baken test fixture"
+  },
+  "controllers": [
+    {
+      "transport": "pci-designware",
+      "acpi_hid": "SYN0001",
+      "pci_vendor": "0x16c3",
+      "pci_device": "0x0001",
+      "revision": "0x01",
+      "component_type": "0x44570140",
+      "component_version": "0x3131312a",
+      "psp_required": false,
+      "observations": {
+        "enumeration": "not-applicable",
+        "reset": "not-applicable",
+        "gpio_irq": "not-applicable",
+        "hid_report": "not-applicable",
+        "recovery": "not-applicable"
+      }
+    }
+  ]
+}

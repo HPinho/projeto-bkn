@@ -1,0 +1,248 @@
+// Baken OS — transporte versionado para arbitragem I2C pelo AMD PSP/CCP.
+//
+// O protocolo é separado do mecanismo físico: Cezanne usa Platform Access;
+// Mendocino e posteriores podem usar doorbell. O provider de baixo nível deve
+// ser publicado somente depois de validar a própria revisão e seus offsets.
+// Falha de mailbox nunca é convertida em posse presumida do barramento.
+module kernel::drivers::amd_psp_i2c_transport;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::timer::*;
+import kernel::sync::spinlock::*;
+
+pub const AMD_PSP_I2C_PROTOCOL_VERSION: u32 = 1;
+pub const AMD_PSP_I2C_TRANSPORT_PLATFORM_ACCESS: u8 = 1;
+pub const AMD_PSP_I2C_TRANSPORT_DOORBELL: u8 = 2;
+
+pub const AMD_PSP_I2C_REQUEST_ACQUIRE: u8 = 0;
+pub const AMD_PSP_I2C_REQUEST_RELEASE: u8 = 1;
+pub const AMD_PSP_I2C_STATUS_OK: u32 = 0;
+pub const AMD_PSP_I2C_STATUS_BUS_BUSY: u32 = 1;
+pub const AMD_PSP_I2C_STATUS_INVALID_PARAMETER: u32 = 3;
+
+pub const AMD_PSP_TRANSPORT_OK: u32 = 0;
+pub const AMD_PSP_TRANSPORT_BUSY: u32 = 1;
+pub const AMD_PSP_TRANSPORT_IO_ERROR: u32 = 2;
+pub const AMD_PSP_TRANSPORT_TIMEOUT: u32 = 3;
+pub const AMD_PSP_TRANSPORT_UNAVAILABLE: u32 = 4;
+
+pub const AMD_PSP_I2C_RETRY_COUNT: u32 = 400;
+pub const AMD_PSP_I2C_RETRY_DELAY_US: u64 = 25000;
+pub const AMD_PSP_I2C_REQUEST_TIMEOUT_US: u64 = 10000000;
+
+@repr(C)
+pub struct AmdPspRequestHeader {
+    pub payload_size: u32;
+    pub status: u32;
+}
+
+@repr(C)
+pub struct AmdPspI2cRequest {
+    pub header: AmdPspRequestHeader;
+    pub request_type: u32;
+}
+
+@repr(C)
+pub struct AmdPspI2cProvider {
+    pub protocol_version: u32;
+    pub generation: u32;
+    pub transport_kind: u8;
+    pub submit: fn(u8, *mut AmdPspI2cRequest, u64) -> u32;
+    pub valid: bool;
+}
+
+@system
+fn amd_psp_i2c_unavailable(request_type: u8,
+                           request: *mut AmdPspI2cRequest,
+                           timeout_us: u64) -> u32 {
+    return AMD_PSP_TRANSPORT_UNAVAILABLE;
+}
+
+static mut AMD_PSP_I2C_PROVIDER: AmdPspI2cProvider = AmdPspI2cProvider {
+    protocol_version: 0, generation: 0, transport_kind: 0,
+    submit: amd_psp_i2c_unavailable, valid: false
+};
+static mut AMD_PSP_I2C_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut AMD_PSP_I2C_READY: bool = false;
+static mut AMD_PSP_I2C_IN_FLIGHT: bool = false;
+static mut AMD_PSP_I2C_LAST_TRANSPORT_STATUS: u32 = AMD_PSP_TRANSPORT_UNAVAILABLE;
+static mut AMD_PSP_I2C_LAST_PROTOCOL_STATUS: u32 = AMD_PSP_I2C_STATUS_INVALID_PARAMETER;
+
+@system
+pub fn amd_psp_i2c_transport_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if AMD_PSP_I2C_READY { x86_irq_restore(flags); return true; }
+        if !spinlock_init(&mut AMD_PSP_I2C_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        AMD_PSP_I2C_READY = true;
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn amd_psp_i2c_transport_register(provider: *const AmdPspI2cProvider) -> bool {
+    if provider == (null as *const AmdPspI2cProvider) ||
+       !amd_psp_i2c_transport_init() { return false; }
+    unsafe {
+        if !(*provider).valid || (*provider).protocol_version != AMD_PSP_I2C_PROTOCOL_VERSION ||
+           (*provider).generation == 0 ||
+           ((*provider).transport_kind != AMD_PSP_I2C_TRANSPORT_PLATFORM_ACCESS &&
+            (*provider).transport_kind != AMD_PSP_I2C_TRANSPORT_DOORBELL) { return false; }
+    }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut AMD_PSP_I2C_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        if AMD_PSP_I2C_PROVIDER.valid || AMD_PSP_I2C_IN_FLIGHT {
+            spinlock_unlock(&mut AMD_PSP_I2C_LOCK); x86_irq_restore(flags); return false;
+        }
+        AMD_PSP_I2C_PROVIDER = AmdPspI2cProvider {
+            protocol_version: (*provider).protocol_version,
+            generation: (*provider).generation,
+            transport_kind: (*provider).transport_kind,
+            submit: (*provider).submit,
+            valid: true
+        };
+        AMD_PSP_I2C_LAST_TRANSPORT_STATUS = AMD_PSP_TRANSPORT_OK;
+        AMD_PSP_I2C_LAST_PROTOCOL_STATUS = AMD_PSP_I2C_STATUS_OK;
+        spinlock_unlock(&mut AMD_PSP_I2C_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn amd_psp_i2c_transport_generation() -> u32 {
+    if !amd_psp_i2c_transport_init() { return 0; }
+    let flags = x86_irq_save_disable();
+    let mut generation: u32 = 0;
+    unsafe {
+        if spinlock_lock(&mut AMD_PSP_I2C_LOCK) {
+            if AMD_PSP_I2C_PROVIDER.valid { generation = AMD_PSP_I2C_PROVIDER.generation; }
+            spinlock_unlock(&mut AMD_PSP_I2C_LOCK);
+        }
+    }
+    x86_irq_restore(flags);
+    return generation;
+}
+
+@system
+pub fn amd_psp_i2c_transport_ready(generation: u32) -> bool {
+    return generation != 0 && amd_psp_i2c_transport_generation() == generation;
+}
+
+@system
+pub fn amd_psp_i2c_transport_request(generation: u32, request_type: u8) -> bool {
+    if generation == 0 || (request_type != AMD_PSP_I2C_REQUEST_ACQUIRE &&
+       request_type != AMD_PSP_I2C_REQUEST_RELEASE) || !amd_psp_i2c_transport_init() ||
+       !x86_timer_is_calibrated() { return false; }
+
+    let mut provider = AmdPspI2cProvider {
+        protocol_version: 0, generation: 0, transport_kind: 0,
+        submit: amd_psp_i2c_unavailable, valid: false
+    };
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut AMD_PSP_I2C_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        if !AMD_PSP_I2C_PROVIDER.valid || AMD_PSP_I2C_PROVIDER.generation != generation ||
+           AMD_PSP_I2C_IN_FLIGHT {
+            spinlock_unlock(&mut AMD_PSP_I2C_LOCK); x86_irq_restore(flags); return false;
+        }
+        provider = AMD_PSP_I2C_PROVIDER;
+        AMD_PSP_I2C_IN_FLIGHT = true;
+        spinlock_unlock(&mut AMD_PSP_I2C_LOCK);
+    }
+    x86_irq_restore(flags);
+
+    let cycles_per_us = x86_timer_cycles_per_us();
+    if cycles_per_us == 0 {
+        unsafe { AMD_PSP_I2C_IN_FLIGHT = false; }
+        return false;
+    }
+    let start = x86_timer_read_tsc();
+    let budget_cycles = AMD_PSP_I2C_REQUEST_TIMEOUT_US * cycles_per_us;
+    let deadline = start + budget_cycles;
+    if deadline < start {
+        unsafe { AMD_PSP_I2C_IN_FLIGHT = false; }
+        return false;
+    }
+
+    let mut request = AmdPspI2cRequest {
+        header: AmdPspRequestHeader { payload_size: 12, status: AMD_PSP_I2C_STATUS_OK },
+        request_type: request_type as u32
+    };
+    let mut attempt: u32 = 0;
+    let mut transport_status = AMD_PSP_TRANSPORT_UNAVAILABLE;
+    let mut protocol_status = AMD_PSP_I2C_STATUS_INVALID_PARAMETER;
+    let mut success = false;
+    while attempt < AMD_PSP_I2C_RETRY_COUNT {
+        let now = x86_timer_read_tsc();
+        if now >= deadline { transport_status = AMD_PSP_TRANSPORT_TIMEOUT; break; }
+        let remaining_us = x86_timer_elapsed_us(now, deadline);
+        request.header.status = AMD_PSP_I2C_STATUS_OK;
+        transport_status = provider.submit(request_type, &mut request, remaining_us);
+        protocol_status = request.header.status;
+        if transport_status == AMD_PSP_TRANSPORT_OK &&
+           protocol_status == AMD_PSP_I2C_STATUS_OK { success = true; break; }
+        if (transport_status != AMD_PSP_TRANSPORT_BUSY &&
+            protocol_status != AMD_PSP_I2C_STATUS_BUS_BUSY) ||
+           protocol_status == AMD_PSP_I2C_STATUS_INVALID_PARAMETER { break; }
+        attempt += 1;
+        if attempt < AMD_PSP_I2C_RETRY_COUNT {
+            x86_timer_spin_wait_us(AMD_PSP_I2C_RETRY_DELAY_US);
+        }
+    }
+
+    let finish_flags = x86_irq_save_disable();
+    unsafe {
+        if spinlock_lock(&mut AMD_PSP_I2C_LOCK) {
+            AMD_PSP_I2C_LAST_TRANSPORT_STATUS = transport_status;
+            AMD_PSP_I2C_LAST_PROTOCOL_STATUS = protocol_status;
+            AMD_PSP_I2C_IN_FLIGHT = false;
+            spinlock_unlock(&mut AMD_PSP_I2C_LOCK);
+        } else {
+            AMD_PSP_I2C_IN_FLIGHT = false;
+            success = false;
+        }
+    }
+    x86_irq_restore(finish_flags);
+    return success;
+}
+
+@system
+pub fn amd_psp_i2c_transport_unregister(generation: u32) -> bool {
+    if generation == 0 || !amd_psp_i2c_transport_init() { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut AMD_PSP_I2C_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        if !AMD_PSP_I2C_PROVIDER.valid || AMD_PSP_I2C_PROVIDER.generation != generation ||
+           AMD_PSP_I2C_IN_FLIGHT {
+            spinlock_unlock(&mut AMD_PSP_I2C_LOCK); x86_irq_restore(flags); return false;
+        }
+        AMD_PSP_I2C_PROVIDER.valid = false;
+        AMD_PSP_I2C_PROVIDER.generation = 0;
+        AMD_PSP_I2C_PROVIDER.submit = amd_psp_i2c_unavailable;
+        AMD_PSP_I2C_LAST_TRANSPORT_STATUS = AMD_PSP_TRANSPORT_UNAVAILABLE;
+        spinlock_unlock(&mut AMD_PSP_I2C_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn amd_psp_i2c_last_transport_status() -> u32 {
+    unsafe { return AMD_PSP_I2C_LAST_TRANSPORT_STATUS; }
+}
+
+@system
+pub fn amd_psp_i2c_last_protocol_status() -> u32 {
+    unsafe { return AMD_PSP_I2C_LAST_PROTOCOL_STATUS; }
+}

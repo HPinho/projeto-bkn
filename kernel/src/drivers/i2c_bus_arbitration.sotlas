@@ -6,6 +6,7 @@ module kernel::drivers::i2c_bus_arbitration;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
+import kernel::drivers::amd_psp_i2c_transport::*;
 
 pub const I2C_ARBITRATION_CAPACITY: usize = 8;
 pub const I2C_ARBITRATION_MODE_NONE: u8 = 1;
@@ -14,6 +15,8 @@ pub const I2C_ARBITRATION_STATE_EMPTY: u8 = 0;
 pub const I2C_ARBITRATION_STATE_READY: u8 = 1;
 pub const I2C_ARBITRATION_STATE_ACQUIRED: u8 = 2;
 pub const I2C_ARBITRATION_STATE_FAULTED: u8 = 3;
+pub const I2C_ARBITRATION_STATE_ACQUIRING: u8 = 4;
+pub const I2C_ARBITRATION_STATE_RELEASING: u8 = 5;
 
 pub const I2C_PSP_REQUEST_ACQUIRE: u8 = 0;
 pub const I2C_PSP_REQUEST_RELEASE: u8 = 1;
@@ -94,12 +97,50 @@ pub fn i2c_bus_arbitration_register(backend_instance: u32, mode: u8) -> bool {
     return false;
 }
 
-// Até que o transporte PSP/CCP publique uma geração válida e implemente a
-// troca de mensagens, AMD_PSP retorna false. Não existe fallback fail-open.
+// Vincula uma política PSP somente ao provider de mesma geração. A publicação
+// ocorre separadamente para que discovery nunca execute mailbox sob o lock.
+@system
+pub fn i2c_bus_arbitration_bind_psp_transport(backend_instance: u32,
+                                              transport_generation: u32) -> bool {
+    if backend_instance == 0 || transport_generation == 0 ||
+       !amd_psp_i2c_transport_ready(transport_generation) ||
+       !i2c_bus_arbitration_init() { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut I2C_ARBITRATION_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        let mut i: usize = 0;
+        while i < I2C_ARBITRATION_CAPACITY {
+            if I2C_ARBITRATION[i].valid &&
+               I2C_ARBITRATION[i].backend_instance == backend_instance {
+                if I2C_ARBITRATION[i].mode != I2C_ARBITRATION_MODE_AMD_PSP ||
+                   I2C_ARBITRATION[i].owner_count != 0 {
+                    spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+                    x86_irq_restore(flags); return false;
+                }
+                I2C_ARBITRATION[i].psp_transport_generation = transport_generation;
+                I2C_ARBITRATION[i].state = I2C_ARBITRATION_STATE_READY;
+                spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+                x86_irq_restore(flags); return true;
+            }
+            i += 1;
+        }
+        spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+    }
+    x86_irq_restore(flags);
+    return false;
+}
+
+// PSP/CCP usa transição em duas fases: reserva o record sob lock, executa a
+// mailbox com IRQs restauradas e então publica o resultado. Nunca há espera
+// de 25 ms ou chamada de provider dentro do spinlock.
 @system
 pub fn i2c_bus_arbitration_acquire(backend_instance: u32) -> bool {
     if backend_instance == 0 || !i2c_bus_arbitration_init() { return false; }
     let flags = x86_irq_save_disable();
+    let mut psp_generation: u32 = 0;
+    let mut psp_slot: usize = I2C_ARBITRATION_CAPACITY;
     unsafe {
         if !spinlock_lock(&mut I2C_ARBITRATION_LOCK) { x86_irq_restore(flags); return false; }
         let mut i: usize = 0;
@@ -110,38 +151,110 @@ pub fn i2c_bus_arbitration_acquire(backend_instance: u32) -> bool {
                     I2C_ARBITRATION[i].owner_count += 1;
                     spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags); return true;
                 }
-                spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags); return false;
+                if I2C_ARBITRATION[i].mode == I2C_ARBITRATION_MODE_AMD_PSP &&
+                   I2C_ARBITRATION[i].state == I2C_ARBITRATION_STATE_READY &&
+                   I2C_ARBITRATION[i].owner_count == 0 &&
+                   I2C_ARBITRATION[i].psp_transport_generation != 0 {
+                    psp_generation = I2C_ARBITRATION[i].psp_transport_generation;
+                    psp_slot = i;
+                    I2C_ARBITRATION[i].state = I2C_ARBITRATION_STATE_ACQUIRING;
+                    spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+                    x86_irq_restore(flags);
+                    break;
+                }
+                spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+                x86_irq_restore(flags); return false;
             }
             i += 1;
         }
-        spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+        if psp_slot >= I2C_ARBITRATION_CAPACITY {
+            spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+            x86_irq_restore(flags); return false;
+        }
     }
-    x86_irq_restore(flags);
-    return false;
+
+    let acquired = amd_psp_i2c_transport_request(
+        psp_generation, AMD_PSP_I2C_REQUEST_ACQUIRE);
+    let finish_flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut I2C_ARBITRATION_LOCK) {
+            x86_irq_restore(finish_flags); return false;
+        }
+        let same = I2C_ARBITRATION[psp_slot].valid &&
+            I2C_ARBITRATION[psp_slot].backend_instance == backend_instance &&
+            I2C_ARBITRATION[psp_slot].psp_transport_generation == psp_generation &&
+            I2C_ARBITRATION[psp_slot].state == I2C_ARBITRATION_STATE_ACQUIRING;
+        if same && acquired {
+            I2C_ARBITRATION[psp_slot].owner_count = 1;
+            I2C_ARBITRATION[psp_slot].state = I2C_ARBITRATION_STATE_ACQUIRED;
+        } else if same {
+            I2C_ARBITRATION[psp_slot].state = I2C_ARBITRATION_STATE_FAULTED;
+        }
+        spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+        x86_irq_restore(finish_flags);
+        return same && acquired;
+    }
 }
 
 @system
 pub fn i2c_bus_arbitration_release(backend_instance: u32) -> bool {
     if backend_instance == 0 || !i2c_bus_arbitration_init() { return false; }
     let flags = x86_irq_save_disable();
+    let mut psp_generation: u32 = 0;
+    let mut psp_slot: usize = I2C_ARBITRATION_CAPACITY;
     unsafe {
         if !spinlock_lock(&mut I2C_ARBITRATION_LOCK) { x86_irq_restore(flags); return false; }
         let mut i: usize = 0;
         while i < I2C_ARBITRATION_CAPACITY {
             if I2C_ARBITRATION[i].valid && I2C_ARBITRATION[i].backend_instance == backend_instance {
-                if I2C_ARBITRATION[i].mode != I2C_ARBITRATION_MODE_NONE ||
-                   I2C_ARBITRATION[i].owner_count == 0 {
+                if I2C_ARBITRATION[i].mode == I2C_ARBITRATION_MODE_NONE {
+                    if I2C_ARBITRATION[i].owner_count == 0 {
+                        spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags); return false;
+                    }
+                    I2C_ARBITRATION[i].owner_count -= 1;
+                    spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags); return true;
+                }
+                if I2C_ARBITRATION[i].mode != I2C_ARBITRATION_MODE_AMD_PSP ||
+                   I2C_ARBITRATION[i].state != I2C_ARBITRATION_STATE_ACQUIRED ||
+                   I2C_ARBITRATION[i].owner_count != 1 ||
+                   I2C_ARBITRATION[i].psp_transport_generation == 0 {
                     spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags); return false;
                 }
-                I2C_ARBITRATION[i].owner_count -= 1;
-                spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags); return true;
+                psp_generation = I2C_ARBITRATION[i].psp_transport_generation;
+                psp_slot = i;
+                I2C_ARBITRATION[i].state = I2C_ARBITRATION_STATE_RELEASING;
+                spinlock_unlock(&mut I2C_ARBITRATION_LOCK); x86_irq_restore(flags);
+                break;
             }
             i += 1;
         }
-        spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+        if psp_slot >= I2C_ARBITRATION_CAPACITY {
+            spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+            x86_irq_restore(flags); return false;
+        }
     }
-    x86_irq_restore(flags);
-    return false;
+
+    let released = amd_psp_i2c_transport_request(
+        psp_generation, AMD_PSP_I2C_REQUEST_RELEASE);
+    let finish_flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut I2C_ARBITRATION_LOCK) {
+            x86_irq_restore(finish_flags); return false;
+        }
+        let same = I2C_ARBITRATION[psp_slot].valid &&
+            I2C_ARBITRATION[psp_slot].backend_instance == backend_instance &&
+            I2C_ARBITRATION[psp_slot].psp_transport_generation == psp_generation &&
+            I2C_ARBITRATION[psp_slot].state == I2C_ARBITRATION_STATE_RELEASING;
+        if same && released {
+            I2C_ARBITRATION[psp_slot].owner_count = 0;
+            I2C_ARBITRATION[psp_slot].state = I2C_ARBITRATION_STATE_READY;
+        } else if same {
+            I2C_ARBITRATION[psp_slot].state = I2C_ARBITRATION_STATE_FAULTED;
+        }
+        spinlock_unlock(&mut I2C_ARBITRATION_LOCK);
+        x86_irq_restore(finish_flags);
+        return same && released;
+    }
 }
 
 @system

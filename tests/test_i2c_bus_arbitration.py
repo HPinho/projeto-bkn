@@ -23,7 +23,18 @@ class I2cBusArbitrationContract(unittest.TestCase):
             "pub fn i2c_bus_arbitration_release", 1)[0]
         self.assertIn("I2C_ARBITRATION_STATE_FAULTED", register)
         self.assertIn("mode == I2C_ARBITRATION_MODE_NONE", acquire)
-        self.assertNotIn("I2C_ARBITRATION_MODE_AMD_PSP &&", acquire)
+        self.assertIn("I2C_ARBITRATION_MODE_AMD_PSP", acquire)
+        self.assertIn("psp_transport_generation != 0", acquire)
+        self.assertIn("amd_psp_i2c_transport_request", acquire)
+
+    def test_psp_mailbox_runs_outside_arbitration_spinlock(self):
+        text = ARB.read_text(encoding="utf-8")
+        acquire = text.split("pub fn i2c_bus_arbitration_acquire", 1)[1].split(
+            "pub fn i2c_bus_arbitration_release", 1)[0]
+        self.assertLess(acquire.index("spinlock_unlock"),
+                        acquire.index("amd_psp_i2c_transport_request"))
+        self.assertIn("I2C_ARBITRATION_STATE_ACQUIRING", acquire)
+        self.assertIn("I2C_ARBITRATION_STATE_FAULTED", acquire)
 
     def test_every_physical_transfer_acquires_and_releases_policy(self):
         text = DEVICE.read_text(encoding="utf-8")

@@ -41,6 +41,7 @@ import kernel::drivers::i2c_discovery_bridge::*;
 import kernel::drivers::i2c_physical_discovery::*;
 import kernel::drivers::i2c_compatibility_diagnostics::*;
 import kernel::drivers::i2c_bus_arbitration::*;
+import kernel::drivers::amd_psp_i2c_transport::*;
 import kernel::drivers::i2c_hid_acpi::*;
 import kernel::drivers::i2c_hid_manager::*;
 import kernel::drivers::hda_controller::*;
@@ -232,6 +233,7 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     // Inicialização oportunista da plataforma I2C (controladores ACPI, backends físicos PCI e dispositivos HID).
     // O escaneamento é não-bloqueante e fail-safe: plataformas sem hardware I2C continuam normalmente.
     i2c_compatibility_diagnostics_init();
+    amd_psp_i2c_transport_init();
     i2c_bus_arbitration_init();
     i2c_discovery_scan_acpi_controllers();
     i2c_physical_probe_pci();

@@ -1,0 +1,48 @@
+name: I2C hardware validation report
+description: Submit anonymized I2C/GPIO/I2C-HID evidence from a physical machine
+title: "[I2C hardware] vendor / controller / revision"
+labels: ["hardware-validation", "i2c"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not post serial numbers, UUIDs, MAC addresses, hostnames, usernames,
+        firmware dumps or raw ACPI tables. Attach only a validated anonymized JSON.
+  - type: input
+    id: commit
+    attributes:
+      label: Tested Baken commit SHA
+      placeholder: 40 hexadecimal characters
+    validations:
+      required: true
+  - type: dropdown
+    id: cpu_vendor
+    attributes:
+      label: CPU vendor
+      options: [Intel, AMD, Other]
+    validations:
+      required: true
+  - type: input
+    id: family
+    attributes:
+      label: Public CPU/platform family
+      placeholder: Ryzen 7000, Alder Lake, EPYC Genoa...
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Validated anonymized JSON
+      description: Run tools/scripts/validate_i2c_hardware_fixture.py first.
+      render: json
+    validations:
+      required: true
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy and provenance
+      options:
+        - label: I ran this on a physical machine and did not convert synthetic output into a physical pass.
+          required: true
+        - label: I removed serials, UUIDs, MACs, hostnames, usernames and raw firmware tables.
+          required: true

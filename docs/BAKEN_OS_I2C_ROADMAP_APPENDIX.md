@@ -331,3 +331,46 @@ Invariantes:
 - LangSotlas não deve ser alterado para este corte.
 
 Se este SHA fechar 4/4, o próximo microcorte será **I2C-1d — controller instance/backend contract + auditoria do controlador físico alvo**. Nenhum backend de silício será inventado antes de haver evidência concreta no PCI/ACPI ou no hardware alvo. Se qualquer gate falhar, `main` congela e a próxima mudança será correction-only.
+
+---
+
+## 2026-09-14 — atualização autoritativa: universalização e PSP/CCP
+
+Esta seção substitui apenas o estado operacional das etapas históricas acima.
+
+### Implementado no core
+
+- pipeline ACPI → controller → device → I²C-HID generation-safe;
+- DesignWare físico com deadline, recuperação e erros normalizados;
+- catálogo versionado por HID/PCI, revisão e versão do próprio controlador;
+- descoberta Intel/AMD independente da identidade da CPU;
+- recursos `_CRS` dinâmicos e backends GPIO Intel Tiger Lake/AMD conhecidos;
+- diagnósticos de compatibilidade e caminho unsupported fail-closed;
+- arbitragem universal envolvendo toda transação física;
+- provider AMD PSP/CCP versionado com transportes Platform Access e doorbell;
+- protocolo PSP `ACQUIRE/RELEASE`, `BUS_BUSY`, retry bounded e deadline real;
+- mailbox PSP executada fora do spinlock/IRQ-disabled;
+- geração exata, requisição única in-flight e falha fechada sem posse presumida;
+- formato de evidência comunitária anonimizado, versionado e validado em CI.
+
+### Fronteira que exige evidência de plataforma
+
+O provider PSP de baixo nível ainda precisa descobrir uma implementação CCP/PSP
+compatível e fornecer offsets validados para Platform Access ou doorbell. O core não
+embute offsets copiados de outra geração. Do mesmo modo, GPIO Intel posterior a Tiger
+Lake só toca hardware quando o layout daquela geração estiver identificado por dados
+firmware/catálogo confiáveis.
+
+Isto não bloqueia áudio, GPU, rede ou storage. Também não é correto transformar esta
+fronteira em “implementado” sem uma fonte verificável: o comportamento permanente é
+recusar o controlador, publicar diagnóstico e preservar o restante do sistema.
+
+### Certificação sem laboratório próprio
+
+`tests/fixtures/i2c_hardware/` contém o schema de evidência. Relatórios físicos são
+aceitos por `.github/ISSUE_TEMPLATE/i2c-hardware-report.yml` e validados por
+`tools/scripts/validate_i2c_hardware_fixture.py`. Fixtures sintéticas podem provar
+parsing, bounds e falhas, mas são impedidas de declarar resultado físico `pass`.
+
+Estado: **software core completo; backends físicos adicionais e certificação
+multi-hardware permanecem evidence-driven**.
