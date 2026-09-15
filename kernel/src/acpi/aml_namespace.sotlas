@@ -351,6 +351,41 @@ pub fn aml_namespace_loader_open_scope(requested_scope: usize,
 }
 
 @system
+pub fn aml_namespace_loader_method_arg_count(requested_scope: usize,
+                                               name: *const AmlNameString) -> u8 {
+    // Durante o primeiro passe o namespace ainda não foi publicado, mas o
+    // parser precisa distinguir NameString de MethodInvocation para consumir
+    // os argumentos declarados nos MethodFlags. 0xFF significa que o nome não
+    // resolve para um método já catalogado.
+    unsafe {
+        if !AML_NAMESPACE_LOADING || AML_NAMESPACE_READY {
+            return 0xFF;
+        }
+    }
+    let mut search_scope = requested_scope;
+    let mut index = aml_namespace_lookup_internal(search_scope, name);
+    unsafe {
+        // Uma NameString relativa sem '^' segue as regras de busca AML: tenta
+        // o escopo atual e sobe até a raiz. Caminhos absolutos ou com ParentPrefix
+        // já expressam o ponto inicial e não recebem busca adicional.
+        while index == AML_NAMESPACE_INVALID_INDEX && !(*name).rooted &&
+              (*name).parent_prefixes == 0 && search_scope != 0 {
+            search_scope = AML_NAMESPACE_NODES[search_scope].parent;
+            if search_scope == AML_NAMESPACE_INVALID_INDEX { return 0xFF; }
+            index = aml_namespace_lookup_internal(search_scope, name);
+        }
+    }
+    if index == AML_NAMESPACE_INVALID_INDEX { return 0xFF; }
+    unsafe {
+        if !AML_NAMESPACE_NODES[index].valid ||
+           AML_NAMESPACE_NODES[index].kind != AML_NAMESPACE_KIND_METHOD {
+            return 0xFF;
+        }
+        return AML_NAMESPACE_NODES[index].flags & 0x07;
+    }
+}
+
+@system
 pub fn aml_namespace_loader_finish() -> bool {
     unsafe {
         if !AML_NAMESPACE_LOADING || AML_NAMESPACE_READY || AML_NAMESPACE_COUNT <= 1 {

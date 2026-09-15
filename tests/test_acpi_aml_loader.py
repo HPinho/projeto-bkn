@@ -8,6 +8,7 @@ sys.path.insert(0, str(ROOT))
 LOADER = ROOT / "kernel/src/acpi/aml_loader.sotlas"
 NAMESPACE = ROOT / "kernel/src/acpi/aml_namespace.sotlas"
 RUNTIME = ROOT / "kernel/src/baken_native_runtime.sotlas"
+PLATFORM = ROOT / "kernel/src/platform/inventory.sotlas"
 
 
 class AcpiAmlLoaderTests(unittest.TestCase):
@@ -151,6 +152,43 @@ class AcpiAmlLoaderTests(unittest.TestCase):
             self.assertIn(token, self_test)
         init = self.source.split("pub fn aml_loader_init", 1)[1]
         self.assertIn("aml_loader_structural_self_test()", init)
+
+    def test_method_invocation_consumes_declared_arguments_during_load(self):
+        helper = self.source.split("fn aml_loader_skip_term_arg", 1)[1].split(
+            "fn aml_loader_namespace_value_kind", 1
+        )[0]
+        self.assertIn("aml_namespace_loader_method_arg_count", helper)
+        self.assertIn("while argument < method_args", helper)
+        lookup = self.namespace.split(
+            "pub fn aml_namespace_loader_method_arg_count", 1
+        )[1].split("pub fn aml_namespace_loader_finish", 1)[0]
+        self.assertIn("AML_NAMESPACE_KIND_METHOD", lookup)
+        self.assertIn("flags & 0x07", lookup)
+        self.assertIn("while index == AML_NAMESPACE_INVALID_INDEX", lookup)
+
+    def test_incomplete_firmware_aml_enters_safe_degraded_boot(self):
+        runtime = RUNTIME.read_text(encoding="utf-8")
+        run = runtime.split("pub fn baken_native_kernel_run", 1)[1]
+        loader_failure = run.split("if !aml_full_namespace", 1)[1].split(
+            "} else {", 1
+        )[0]
+        self.assertIn("aml_loader_enter_degraded_mode()", loader_failure)
+        self.assertIn("AML LIMITED HARDWARE MODE", loader_failure)
+        self.assertIn("aml_loader_emit_degraded_marker()", loader_failure)
+
+        degraded = self.source.split("pub fn aml_loader_enter_degraded_mode", 1)[1].split(
+            "pub fn aml_loader_last_error", 1
+        )[0]
+        self.assertIn("aml_namespace_count() != 1", degraded)
+        self.assertIn("AML_LOADER_DEGRADED = true", degraded)
+
+        platform = PLATFORM.read_text(encoding="utf-8")
+        inventory = platform.split("pub fn platform_inventory_init", 1)[1].split(
+            "pub fn platform_inventory", 1
+        )[0]
+        self.assertIn("let full_aml = aml_loader_is_ready()", inventory)
+        self.assertIn("if full_aml {", inventory)
+        self.assertIn("PLATFORM_INFO.has_aml = full_aml", inventory)
 
     def test_unknown_opcode_fails_closed_with_diagnostics(self):
         body = self.source.split("fn aml_loader_parse_term_list", 1)[1].split(

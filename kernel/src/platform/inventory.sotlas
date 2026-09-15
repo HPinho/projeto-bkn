@@ -11,6 +11,7 @@ import kernel::acpi::madt::*;
 import kernel::acpi::mcfg::*;
 import kernel::acpi::hpet::*;
 import kernel::acpi::aml_tables::*;
+import kernel::acpi::aml_loader::*;
 import kernel::acpi::aml_evaluator::*;
 import kernel::acpi::aml_dynamic_discovery::*;
 import kernel::acpi::aml_regions::*;
@@ -72,40 +73,45 @@ fn platform_emit_aml_evaluator_failure_marker() -> bool {
 pub fn platform_inventory_init() -> bool {
     unsafe { if PLATFORM_INFO.valid { return true; } }
 
-    // AML-6a: prova a engine isolada sobre o namespace real já carregado.
-    if !aml_evaluator_is_ready() {
-        if !aml_evaluator_self_test() {
-            // HEX=T/U são canais compartilhados no kernel (timer/userspace);
-            // somente este marker textual torna a falha do evaluator inequívoca.
-            platform_emit_aml_evaluator_failure_marker();
-            aml_evaluator_emit_failure_markers();
-            return false;
-        }
-    }
+    let full_aml = aml_loader_is_ready();
+    if !full_aml && !aml_loader_is_degraded() { return false; }
 
-    // AML-6b: resolve somente predefined methods seguros de discovery.
-    if !aml_dynamic_discovery_is_ready() {
-        if !aml_dynamic_discovery_init() {
-            aml_dynamic_discovery_emit_failure_marker();
-            return false;
+    if full_aml {
+        // AML-6a: prova a engine isolada sobre o namespace real já carregado.
+        if !aml_evaluator_is_ready() {
+            if !aml_evaluator_self_test() {
+                // HEX=T/U são canais compartilhados no kernel (timer/userspace);
+                // somente este marker textual torna a falha do evaluator inequívoca.
+                platform_emit_aml_evaluator_failure_marker();
+                aml_evaluator_emit_failure_markers();
+                return false;
+            }
         }
-    }
 
-    // AML-7: instala somente o core mediado/bounded de OperationRegion/Field.
-    // Init e self-test não executam acesso de hardware.
-    if !aml_regions_is_ready() {
-        if !aml_regions_init() {
-            aml_regions_emit_failure_marker();
-            return false;
+        // AML-6b: resolve somente predefined methods seguros de discovery.
+        if !aml_dynamic_discovery_is_ready() {
+            if !aml_dynamic_discovery_init() {
+                aml_dynamic_discovery_emit_failure_marker();
+                return false;
+            }
         }
-    }
 
-    // AML-8: resolve _PIC/_PRT/_S5 dentro do subconjunto certificado.
-    // Objetos que dependam de AML ainda não suportado permanecem unresolved.
-    if !aml_platform_is_ready() {
-        if !aml_platform_init() {
-            aml_platform_emit_failure_marker();
-            return false;
+        // AML-7: instala somente o core mediado/bounded de OperationRegion/Field.
+        // Init e self-test não executam acesso de hardware.
+        if !aml_regions_is_ready() {
+            if !aml_regions_init() {
+                aml_regions_emit_failure_marker();
+                return false;
+            }
+        }
+
+        // AML-8: resolve _PIC/_PRT/_S5 dentro do subconjunto certificado.
+        // Objetos que dependam de AML ainda não suportado permanecem unresolved.
+        if !aml_platform_is_ready() {
+            if !aml_platform_init() {
+                aml_platform_emit_failure_marker();
+                return false;
+            }
         }
     }
 
@@ -143,7 +149,7 @@ pub fn platform_inventory_init() -> bool {
         PLATFORM_INFO.bsp_apic_id = lapic_id();
         PLATFORM_INFO.acpi_revision = acpi_revision();
         PLATFORM_INFO.has_hpet = hpet_is_ready();
-        PLATFORM_INFO.has_aml = true;
+        PLATFORM_INFO.has_aml = full_aml;
         PLATFORM_INFO.has_display = display;
         PLATFORM_INFO.has_storage = storage;
         PLATFORM_INFO.has_xhci = xhci;
@@ -166,10 +172,18 @@ pub fn platform_inventory_is_ready() -> bool { unsafe { return PLATFORM_INFO.val
 @system
 pub fn platform_inventory_emit_ready_marker() -> bool {
     if !platform_inventory_is_ready() { return false; }
-    if !aml_evaluator_emit_ready_marker() { return false; }
-    if !aml_dynamic_discovery_emit_ready_marker() { return false; }
-    if !aml_regions_emit_ready_marker() { return false; }
-    if !aml_platform_emit_ready_marker() { return false; }
+    let info = platform_inventory();
+    if info == (null as *const PlatformInventory) { return false; }
+    unsafe {
+        if (*info).has_aml {
+            if !aml_evaluator_emit_ready_marker() { return false; }
+            if !aml_dynamic_discovery_emit_ready_marker() { return false; }
+            if !aml_regions_emit_ready_marker() { return false; }
+            if !aml_platform_emit_ready_marker() { return false; }
+        } else if !aml_loader_is_degraded() {
+            return false;
+        }
+    }
     let marker: [u8; 21] = [
         66,65,75,69,78,58,80,76,65,84,70,79,82,77,95,82,69,65,68,89,10
     ];

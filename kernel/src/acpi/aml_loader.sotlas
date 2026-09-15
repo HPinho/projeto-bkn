@@ -116,9 +116,11 @@ const AML_LOADER_ERROR_OPCODE: u8 = 8;
 const AML_LOADER_ERROR_HEADER: u8 = 9;
 
 static mut AML_LOADER_READY: bool = false;
+static mut AML_LOADER_DEGRADED: bool = false;
 static mut AML_LOADER_TABLES_LOADED: usize = 0;
 static mut AML_LOADER_LAST_ERROR: u32 = 0;
 static mut AML_LOADER_LAST_OFFSET: usize = 0;
+static mut AML_LOADER_TERM_SCOPE: usize = 0;
 
 @system
 fn aml_loader_fail(table_index: usize, reason: u8, opcode: u8,
@@ -127,6 +129,18 @@ fn aml_loader_fail(table_index: usize, reason: u8, opcode: u8,
         AML_LOADER_LAST_ERROR = ((reason as u32) << 24) |
             (((table_index & 0xFF) as u32) << 16) |
             ((opcode as u32) << 8);
+        AML_LOADER_LAST_OFFSET = offset;
+    }
+    return false;
+}
+
+@system
+fn aml_loader_fail_term_arg(table_index: usize, opcode: u8,
+                            operand: u8, offset: usize) -> bool {
+    unsafe {
+        AML_LOADER_LAST_ERROR = ((AML_LOADER_ERROR_TERM_ARG as u32) << 24) |
+            (((table_index & 0xFF) as u32) << 16) |
+            ((opcode as u32) << 8) | (operand as u32);
         AML_LOADER_LAST_OFFSET = offset;
     }
     return false;
@@ -220,6 +234,20 @@ fn aml_loader_skip_term_arg(cursor: *mut AmlCursor, depth: usize,
     }
     let opcode = aml_cursor_peek_u8(cursor as *const AmlCursor);
     if aml_loader_is_static_data_start(opcode) {
+        if aml_loader_is_name_start(opcode) {
+            let name = aml_decode_name_string(cursor);
+            if !name.valid || name.segment_count == 0 { return false; }
+            let method_args = unsafe {
+                aml_namespace_loader_method_arg_count(AML_LOADER_TERM_SCOPE, &name)
+            };
+            if method_args == 0xFF { return true; }
+            let mut argument: u8 = 0;
+            while argument < method_args {
+                if !aml_loader_skip_term_arg(cursor, depth + 1, budget) { return false; }
+                argument += 1;
+            }
+            return true;
+        }
         return aml_loader_skip_static_term_arg(cursor);
     }
     if (opcode >= 0x60 && opcode <= 0x67) ||
@@ -346,6 +374,7 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
 
     while aml_cursor_remaining(cursor as *const AmlCursor) > 0 {
         let term_offset = unsafe { (*cursor).offset };
+        unsafe { AML_LOADER_TERM_SCOPE = scope; }
         if !aml_loader_consume_budget(budget) {
             return aml_loader_fail(table_index, AML_LOADER_ERROR_BUDGET,
                                    aml_cursor_peek_u8(cursor as *const AmlCursor), term_offset);
@@ -464,9 +493,12 @@ fn aml_loader_parse_term_list(cursor: *mut AmlCursor, scope: usize,
             // operandos e ambos são consumidos pela gramática completa de
             // TermArg, com limites explícitos.
             aml_cursor_read_u8(cursor);
+            let source_opcode = aml_cursor_peek_u8(cursor as *const AmlCursor);
             if !aml_loader_skip_term_arg(cursor, 0, budget) ||
                !aml_loader_skip_super_name(cursor) {
-                return aml_loader_fail(table_index, AML_LOADER_ERROR_TERM_ARG, opcode, term_offset);
+                return aml_loader_fail_term_arg(
+                    table_index, opcode, source_opcode, term_offset
+                );
             }
         } else if opcode == AML_NOTIFY_OP {
             aml_cursor_read_u8(cursor);
@@ -740,9 +772,32 @@ fn aml_loader_structural_self_test() -> bool {
     ];
     let mut extended_cursor = aml_cursor_new(&extended_expression[0], 4);
     let mut extended_budget: usize = 32;
-    return aml_loader_parse_term_list(&mut extended_cursor, 0, 0,
-                                      &mut extended_budget, 0) &&
-        extended_cursor.valid && aml_cursor_remaining(&extended_cursor) == 0;
+    if !aml_loader_parse_term_list(&mut extended_cursor, 0, 0,
+                                   &mut extended_budget, 0) ||
+       !extended_cursor.valid || aml_cursor_remaining(&extended_cursor) != 0 {
+        return false;
+    }
+
+    // MethodInvocation é NameString seguido pela quantidade de argumentos dos
+    // MethodFlags. Este caso reproduz a forma que aparecia como Store/TermArg
+    // truncado no firmware físico ASUS.
+    let method_name_bytes: [u8; 4] = [77,84,72,48]; // MTH0
+    let mut method_name_cursor = aml_cursor_new(&method_name_bytes[0], 4);
+    let method_name = aml_decode_name_string(&mut method_name_cursor);
+    if !method_name.valid || aml_namespace_loader_define_leaf(
+        0, &method_name, AML_NAMESPACE_KIND_METHOD, AML_NAMESPACE_VALUE_NONE,
+        0, 2, null as *const u8, 0
+    ) == AML_NAMESPACE_INVALID_INDEX { return false; }
+    let method_store: [u8; 10] = [
+        AML_STORE_OP,77,84,72,48,
+        AML_BYTE_PREFIX,0x11,AML_BYTE_PREFIX,0x22,0x60
+    ];
+    let mut method_store_cursor = aml_cursor_new(&method_store[0], 10);
+    let mut method_store_budget: usize = 64;
+    return aml_loader_parse_term_list(&mut method_store_cursor, 0, 0,
+                                      &mut method_store_budget, 0) &&
+        method_store_cursor.valid &&
+        aml_cursor_remaining(&method_store_cursor) == 0;
 }
 
 @system
@@ -768,6 +823,26 @@ fn aml_loader_load_definition_block(table: *const u8, table_index: usize,
 pub fn aml_loader_is_ready() -> bool { unsafe { return AML_LOADER_READY; } }
 
 @system
+pub fn aml_loader_is_degraded() -> bool { unsafe { return AML_LOADER_DEGRADED; } }
+
+@system
+pub fn aml_loader_enter_degraded_mode() -> bool {
+    // O catálogo ACPI e o decoder já foram validados. Se somente o namespace
+    // AML completo falhar, o kernel pode continuar usando MADT/MCFG/PCI e
+    // manter drivers dependentes de AML desativados.
+    unsafe {
+        if AML_LOADER_READY || AML_LOADER_LAST_ERROR == 0 ||
+           !aml_tables_is_ready() || !aml_namespace_is_ready() ||
+           aml_namespace_count() != 1 {
+            return false;
+        }
+        __dma_fence();
+        AML_LOADER_DEGRADED = true;
+    }
+    return true;
+}
+
+@system
 pub fn aml_loader_last_error() -> u32 { unsafe { return AML_LOADER_LAST_ERROR; } }
 
 @system
@@ -782,15 +857,24 @@ pub fn aml_loader_table_count() -> usize {
 pub fn aml_loader_init() -> bool {
     unsafe {
         AML_LOADER_READY = false;
+        AML_LOADER_DEGRADED = false;
         AML_LOADER_TABLES_LOADED = 0;
         AML_LOADER_LAST_ERROR = 0;
         AML_LOADER_LAST_OFFSET = 0;
+        AML_LOADER_TERM_SCOPE = 0;
     }
     if !aml_tables_is_ready() || !aml_namespace_is_ready() ||
        aml_namespace_count() != 1 {
         return false;
     }
-    if !aml_loader_structural_self_test() { return false; }
+    // Exercita inclusive MethodInvocation dentro da janela real de construção,
+    // descarta o namespace do teste e abre uma janela limpa para DSDT/SSDT.
+    if !aml_namespace_loader_begin() { return false; }
+    if !aml_loader_structural_self_test() {
+        aml_namespace_loader_abort();
+        return false;
+    }
+    aml_namespace_loader_abort();
     if !aml_namespace_loader_begin() { return false; }
 
     let mut budget: usize = AML_LOADER_MAX_TERMS;
@@ -815,6 +899,20 @@ pub fn aml_loader_init() -> bool {
         if AML_LOADER_TABLES_LOADED != ssdt_count + 1 { return false; }
         __dma_fence();
         AML_LOADER_READY = true;
+    }
+    return true;
+}
+
+@system
+pub fn aml_loader_emit_degraded_marker() -> bool {
+    if !aml_loader_is_degraded() { return false; }
+    let marker: [u8; 24] = [
+        66,65,75,69,78,58,65,67,80,73,95,65,77,76,95,68,69,71,82,65,68,69,68,10
+    ];
+    let mut index: usize = 0;
+    while index < 24 {
+        if !x86_serial_write_byte(marker[index]) { return false; }
+        index += 1;
     }
     return true;
 }
