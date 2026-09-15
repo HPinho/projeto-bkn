@@ -60,6 +60,7 @@ import kernel::drivers::i2c_physical_discovery::*;
 import kernel::drivers::i2c_designware::*;
 import kernel::drivers::i2c_hardware_catalog::*;
 import kernel::drivers::i2c_compatibility_diagnostics::*;
+import kernel::drivers::i2c_bus_arbitration::*;
 import kernel::drivers::i2c_hid_acpi::*;
 import kernel::drivers::i2c_hid_descriptor::*;
 import kernel::drivers::i2c_hid_command::*;

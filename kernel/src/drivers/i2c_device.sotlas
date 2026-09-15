@@ -16,6 +16,7 @@ import kernel::drivers::i2c_protocol::*;
 import kernel::drivers::i2c_controller::*;
 import kernel::drivers::i2c_controller_registry::*;
 import kernel::drivers::i2c_physical_discovery::*;
+import kernel::drivers::i2c_bus_arbitration::*;
 import kernel::drivers::i2c_designware::*;
 import kernel::drivers::gpio_core::*;
 
@@ -422,10 +423,19 @@ pub fn i2c_device_execute_transaction(device_id: u32,
     if desc.backend_ready && desc.backend_instance != 0 {
         let mmio_base = i2c_physical_get_mmio_base(desc.backend_instance);
         if mmio_base != 0 {
+            if !i2c_bus_arbitration_acquire(desc.backend_instance) {
+                return I2C_STATUS_ARBITRATION_LOST;
+            }
             // Serialização SMP por controlador (sem mascaramento prolongado de interrupções)
-            i2c_physical_lock_controller(desc.backend_instance);
+            if !i2c_physical_lock_controller(desc.backend_instance) {
+                i2c_bus_arbitration_release(desc.backend_instance);
+                return I2C_STATUS_CONTROLLER_ERROR;
+            }
             let hw_status = i2c_dw_transfer(mmio_base, transaction);
             i2c_physical_unlock_controller(desc.backend_instance);
+            if !i2c_bus_arbitration_release(desc.backend_instance) {
+                return I2C_STATUS_CONTROLLER_ERROR;
+            }
 
             let slot = i2c_device_slot(device_id);
             let flags = x86_irq_save_disable();
@@ -620,4 +630,3 @@ pub fn i2c_device_set_gpio(device_id: u32, generation: u32, gpio_connection_id: 
     x86_irq_restore(flags);
     return false;
 }
-

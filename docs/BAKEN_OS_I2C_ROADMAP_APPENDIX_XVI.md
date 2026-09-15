@@ -12,6 +12,10 @@
   com clocks de 133/150 MHz e publicação no registry universal.
 - `AMDI0019` reconhecido como barramento compartilhado com PSP e recusado antes
   do primeiro acesso MMIO enquanto não houver protocolo de posse comprovado.
+- Política universal de arbitragem registrada antes da publicação do backend.
+  Toda transferência executa `acquire → lock → transferência → unlock → release`.
+  Backends comuns usam a política `NONE`; PSP permanece `FAULTED` sem transporte
+  CCP autenticado e não adota o fallback permissivo de assumir posse exclusiva.
 - Catálogo GPIO Intel separando Tiger, Alder, Raptor, Meteor e Lunar Lake. Apenas
   Tiger usa as communities estáticas existentes; gerações posteriores precisam
   de descrição completa do firmware ou mapa homologado próprio.

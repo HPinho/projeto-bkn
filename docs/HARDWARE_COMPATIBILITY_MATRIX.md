@@ -10,7 +10,7 @@ Uma família reconhecida não é automaticamente autorizada a receber escritas M
 | Intel LPSS BXT/SPT/CNL/EHL e IDs catalogados posteriores | I²C | PCI + ACPI + assinatura/revisão DesignWare | sim | pendente |
 | AMD `AMD0010` | I²C DesignWare 133 MHz | backend ACPI `_CRS` | contrato sintético | pendente |
 | AMD/Hygon `AMDI0010`/`HYGO0010` | I²C DesignWare 150 MHz | backend ACPI `_CRS` | contrato sintético | pendente |
-| AMD `AMDI0019` | I²C compartilhado com PSP | reconhecido e recusado antes de MMIO | sim | bloqueado até handshake PSP |
+| AMD `AMDI0019` | I²C compartilhado com PSP | política ACQUIRE/RELEASE criada; transporte PSP ainda fail-closed | sim | bloqueado até handshake PSP |
 | AMD `AMDI0030`/`AMDIF031` | GPIO | backend ACPI `_CRS` | sim | pendente |
 | ID/revisão desconhecida | qualquer | não suportado com recusa segura | sim | não aplicável |
 

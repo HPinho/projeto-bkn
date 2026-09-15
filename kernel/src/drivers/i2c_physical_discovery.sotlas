@@ -21,6 +21,7 @@ import kernel::drivers::i2c_discovery_bridge::*;
 import kernel::drivers::i2c_designware::*;
 import kernel::drivers::i2c_hardware_catalog::*;
 import kernel::drivers::i2c_compatibility_diagnostics::*;
+import kernel::drivers::i2c_bus_arbitration::*;
 
 pub const I2C_HARDWARE_TYPE_UNKNOWN: u8 = 0;
 pub const I2C_HARDWARE_TYPE_DESIGNWARE: u8 = 1;
@@ -380,12 +381,20 @@ pub fn i2c_physical_probe_pci() -> usize {
                     let backend_instance = (slot_idx + 1) as u32;
                     let physical_caps = i2c_discovery_default_capabilities(DW_SUPPORTED_FAST_SPEED_HZ, false);
 
+                    if !i2c_bus_arbitration_register(backend_instance, I2C_ARBITRATION_MODE_NONE) {
+                        i2c_physical_rollback_last(slot_idx);
+                        i2c_dw_enable(phys_base, false);
+                        i += 1;
+                        continue;
+                    }
+
                     if !i2c_controller_registry_update_capabilities(
                         logical_handle.controller_id,
                         logical_handle.generation,
                         &physical_caps
                     ) {
                         i2c_physical_rollback_last(slot_idx);
+                        i2c_bus_arbitration_unregister(backend_instance);
                         i2c_dw_enable(phys_base, false);
                         i += 1;
                         continue;
@@ -397,6 +406,7 @@ pub fn i2c_physical_probe_pci() -> usize {
                         backend_instance
                     ) {
                         i2c_physical_rollback_last(slot_idx);
+                        i2c_bus_arbitration_unregister(backend_instance);
                         i2c_dw_enable(phys_base, false);
                         i += 1;
                         continue;
@@ -411,6 +421,7 @@ pub fn i2c_physical_probe_pci() -> usize {
                             logical_handle.generation
                         );
                         i2c_physical_rollback_last(slot_idx);
+                        i2c_bus_arbitration_unregister(backend_instance);
                         i2c_dw_enable(phys_base, false);
                         i += 1;
                         continue;
@@ -549,7 +560,8 @@ pub fn i2c_physical_probe_acpi_platform() -> usize {
                         if slot_idx < I2C_MAX_PHYSICAL_CONTROLLERS {
                             let instance = (slot_idx + 1) as u32;
                             let caps = i2c_discovery_default_capabilities(DW_SUPPORTED_FAST_SPEED_HZ, false);
-                            if i2c_controller_registry_update_capabilities(handle.controller_id, handle.generation, &caps) &&
+                            if i2c_bus_arbitration_register(instance, I2C_ARBITRATION_MODE_NONE) &&
+                               i2c_controller_registry_update_capabilities(handle.controller_id, handle.generation, &caps) &&
                                i2c_controller_registry_publish_backend(handle.controller_id, handle.generation, instance) &&
                                i2c_controller_registry_activate(handle.controller_id, handle.generation) {
                                 discovered += 1;
@@ -562,6 +574,7 @@ pub fn i2c_physical_probe_acpi_platform() -> usize {
                             } else {
                                 i2c_controller_registry_mark_failed(handle.controller_id, handle.generation);
                                 i2c_physical_rollback_last(slot_idx);
+                                i2c_bus_arbitration_unregister(instance);
                                 i2c_dw_enable(base, false);
                             }
                         } else { i2c_dw_enable(base, false); }
