@@ -671,7 +671,8 @@ PMM/VMM/PCI/IRQ/DMA já existentes, sem reescrever o boot físico certificado.
 | DF-0 Baseline física | ✅ | Boot ASUS observado; AML limitado e possível SMP BSP-only são estados explícitos, não certificação multi-hardware |
 | DF-1 Device Core | ✅ implementado e validado localmente | identidade `device_id + generation`, parent/child, estados e registro fixo SMP/IRQ-safe; grafo Sotlas, ainda sem alterar boot |
 | DF-2 Driver Registry | ✅ implementado e validado localmente | match com prioridade, callbacks fora do lock, probe/remove, bind/unbind, rollback e owner exclusivo |
-| DF-3 Resource Manager | ✅ implementado e validado localmente | claims generation-safe de MMIO, I/O ports, PCI BAR, IRQ e DMA; owner exclusivo, detecção de sobreposição e bloqueio de unbind/detach com recursos ativos |
+| DF-3 Resource Manager | ✅ implementado e validado localmente | claims generation-safe de MMIO, I/O ports, PCI BAR, IRQ e DMA; owner exclusivo e detecção de sobreposição |
+| DF-3.1 Transactional Lifecycle | ✅ implementado, provado em runtime | `BINDING`/`UNBINDING`, probe com claims, remove com drain, owner `DriverHandle`, falha parcial em `FAILED`, detach fail-closed e self-test sem hardware |
 | DF-4 Generic IRQ Registry | ⬜ | vetores dinâmicos e handlers; preservar vetores bootstrap |
 | DF-5 PCI Core v2 | ⬜ | backend CF8/CFC+ECAM, capability walker e claim |
 | DF-6 MSI / DF-7 MSI-X | ⬜ | interrupções PCIe modernas sobre o registry |
@@ -684,13 +685,15 @@ PMM/VMM/PCI/IRQ/DMA já existentes, sem reescrever o boot físico certificado.
 | DF-14 Diagnostics | ⬜ | identidade, estado, recursos, IRQ, DMA e erros |
 | DF-15 Compatibility Adapters | ⬜ | xHCI/HID, NVMe/AHCI e GPIO/I²C atuais, gradualmente |
 
-DF-1, DF-2 e DF-3 são propositalmente passivos: não inicializam hardware, não reivindicam
-PCI, não alteram IRQ e não tocam armazenamento. O DF-2 foi certificado com 1.935 testes,
+DF-1, DF-2 e DF-3 não inicializam hardware real, não reivindicam PCI físico, não alteram
+controladores de IRQ e não tocam armazenamento. O DF-3.1 executa somente uma prova lógica
+com dispositivo, driver e recursos sintéticos. O DF-2 foi certificado com 1.935 testes,
 build modular de 198 módulos/200 objetos e boot QEMU SMP completo.
 A existência do Device/Driver/Resource Core não promove automaticamente
 nenhum controlador Intel/AMD não testado a hardware suportado.
 
-O DF-3 foi certificado com 1.948 testes, build modular de 199 módulos/201 objetos
-e boot QEMU SMP completo. O próximo corte é DF-4 Generic IRQ Registry.
+O DF-3.1 foi certificado com 1.954 testes, build modular de 200 módulos/202 objetos
+e boot QEMU SMP completo exigindo `BAKEN:DRIVER_FOUNDATION_READY`. O próximo corte é
+DF-4 Generic IRQ Registry.
 
 Esses itens devem ser tratados em microcortes próprios, preservando os quatro gates e sem alterar o consumidor global único do Event Ring.

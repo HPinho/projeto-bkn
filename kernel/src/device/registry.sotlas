@@ -10,8 +10,10 @@ static mut DEVICE_RECORDS: [DeviceRecord; DEVICE_CORE_CAPACITY] = [
     DeviceRecord {
         handle: DeviceHandle { device_id: 0, generation: 0, valid: false },
         parent: DeviceHandle { device_id: 0, generation: 0, valid: false },
-        bus: 0, class_code: 0, state: 0, driver_id: 0, vendor_id: 0,
-        hardware_id: 0, bus_instance: 0, child_count: 0, resource_count: 0,
+        bus: 0, class_code: 0, state: 0,
+        driver: DriverHandle { driver_id: 0, generation: 0, valid: false },
+        vendor_id: 0, hardware_id: 0, bus_instance: 0, child_count: 0,
+        resource_count: 0, resource_epoch: 0,
         valid: false
     }; DEVICE_CORE_CAPACITY
 ];
@@ -126,9 +128,10 @@ pub fn device_core_attach(parent: DeviceHandle, bus: u8, class_code: u8,
                                         generation: generation, valid: true };
                 DEVICE_RECORDS[slot] = DeviceRecord {
                     handle: result, parent: parent, bus: bus, class_code: class_code,
-                    state: DEVICE_STATE_ATTACHED, driver_id: 0,
+                    state: DEVICE_STATE_ATTACHED, driver: driver_invalid_handle(),
                     vendor_id: vendor_id, hardware_id: hardware_id,
                     bus_instance: bus_instance, child_count: 0, resource_count: 0,
+                    resource_epoch: 0,
                     valid: true
                 };
                 if parent.valid {
@@ -191,17 +194,18 @@ pub fn device_core_set_state(handle: DeviceHandle, expected: u8,
 }
 
 @system
-pub fn device_core_claim_driver(handle: DeviceHandle, driver_id: u32) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_begin_bind(handle: DeviceHandle, driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
     let mut claimed = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == DRIVER_ID_NONE &&
+            if !DEVICE_RECORDS[slot].driver.valid &&
                DEVICE_RECORDS[slot].state == DEVICE_STATE_ATTACHED {
-                DEVICE_RECORDS[slot].driver_id = driver_id;
+                DEVICE_RECORDS[slot].driver = driver;
+                DEVICE_RECORDS[slot].state = DEVICE_STATE_BINDING;
                 claimed = true;
             }
         }
@@ -211,60 +215,61 @@ pub fn device_core_claim_driver(handle: DeviceHandle, driver_id: u32) -> bool {
 }
 
 @system
-pub fn device_core_release_driver(handle: DeviceHandle, driver_id: u32) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_commit_bind(handle: DeviceHandle, driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
-    let mut released = false;
+    let mut committed = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == driver_id &&
-               DEVICE_RECORDS[slot].state != DEVICE_STATE_ACTIVE {
-                DEVICE_RECORDS[slot].driver_id = DRIVER_ID_NONE;
-                released = true;
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_BINDING {
+                DEVICE_RECORDS[slot].state = DEVICE_STATE_ACTIVE;
+                committed = true;
             }
         }
     }
     device_unlock_irq(flags);
-    return released;
+    return committed;
 }
 
 @system
-pub fn device_core_unbind_active_driver(handle: DeviceHandle, driver_id: u32) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_abort_bind(handle: DeviceHandle, driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
-    let mut released = false;
+    let mut aborted = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == driver_id &&
-               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE &&
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_BINDING &&
                DEVICE_RECORDS[slot].resource_count == 0 {
-                DEVICE_RECORDS[slot].driver_id = DRIVER_ID_NONE;
+                DEVICE_RECORDS[slot].driver = driver_invalid_handle();
                 DEVICE_RECORDS[slot].state = DEVICE_STATE_ATTACHED;
-                released = true;
+                aborted = true;
             }
         }
     }
     device_unlock_irq(flags);
-    return released;
+    return aborted;
 }
 
 @system
-pub fn device_core_prepare_unbind(handle: DeviceHandle, driver_id: u32) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_prepare_unbind(handle: DeviceHandle, driver: DriverHandle,
+                                  initial_epoch: *mut u32) -> bool {
+    if !driver.valid || initial_epoch == (null as *mut u32) { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
     let mut prepared = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == driver_id &&
-               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE &&
-               DEVICE_RECORDS[slot].resource_count == 0 {
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE {
                 DEVICE_RECORDS[slot].state = DEVICE_STATE_UNBINDING;
+                *initial_epoch = DEVICE_RECORDS[slot].resource_epoch;
                 prepared = true;
             }
         }
@@ -274,45 +279,53 @@ pub fn device_core_prepare_unbind(handle: DeviceHandle, driver_id: u32) -> bool 
 }
 
 @system
-pub fn device_core_finish_unbind(handle: DeviceHandle, driver_id: u32,
-                                 remove_ok: bool) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_finish_unbind(handle: DeviceHandle, driver: DriverHandle,
+                                 remove_ok: bool, initial_epoch: u32) -> bool {
+    if !driver.valid { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
-    let mut finished = false;
+    let mut unbound = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == driver_id &&
-               DEVICE_RECORDS[slot].state == DEVICE_STATE_UNBINDING &&
-               DEVICE_RECORDS[slot].resource_count == 0 {
-                if remove_ok {
-                    DEVICE_RECORDS[slot].driver_id = DRIVER_ID_NONE;
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_UNBINDING {
+                if remove_ok && DEVICE_RECORDS[slot].resource_count == 0 {
+                    DEVICE_RECORDS[slot].driver = driver_invalid_handle();
                     DEVICE_RECORDS[slot].state = DEVICE_STATE_ATTACHED;
-                } else {
+                    unbound = true;
+                } else if !remove_ok &&
+                          DEVICE_RECORDS[slot].resource_epoch == initial_epoch {
                     DEVICE_RECORDS[slot].state = DEVICE_STATE_ACTIVE;
+                } else {
+                    // Remocao parcial nunca volta a publicar hardware como ACTIVE.
+                    DEVICE_RECORDS[slot].state = DEVICE_STATE_FAILED;
                 }
-                finished = true;
             }
         }
     }
     device_unlock_irq(flags);
-    return finished;
+    return unbound;
 }
 
 @system
-pub fn device_core_acquire_resource(handle: DeviceHandle, driver_id: u32) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_acquire_resource(handle: DeviceHandle, driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
     let mut acquired = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == driver_id &&
-               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE &&
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               (DEVICE_RECORDS[slot].state == DEVICE_STATE_BINDING ||
+                DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE) &&
                DEVICE_RECORDS[slot].resource_count != 0xFFFFFFFF {
                 DEVICE_RECORDS[slot].resource_count += 1;
+                DEVICE_RECORDS[slot].resource_epoch += 1;
+                if DEVICE_RECORDS[slot].resource_epoch == 0 {
+                    DEVICE_RECORDS[slot].resource_epoch = 1;
+                }
                 acquired = true;
             }
         }
@@ -322,17 +335,21 @@ pub fn device_core_acquire_resource(handle: DeviceHandle, driver_id: u32) -> boo
 }
 
 @system
-pub fn device_core_release_resource(handle: DeviceHandle, driver_id: u32) -> bool {
-    if driver_id == DRIVER_ID_NONE { return false; }
+pub fn device_core_release_resource(handle: DeviceHandle, driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
     let mut flags: u64 = 0;
     if !device_lock_irq(&mut flags) { return false; }
     let mut released = false;
     if device_handle_live_locked(handle) {
         unsafe {
             let slot = device_slot(handle.device_id);
-            if DEVICE_RECORDS[slot].driver_id == driver_id &&
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
                DEVICE_RECORDS[slot].resource_count > 0 {
                 DEVICE_RECORDS[slot].resource_count -= 1;
+                DEVICE_RECORDS[slot].resource_epoch += 1;
+                if DEVICE_RECORDS[slot].resource_epoch == 0 {
+                    DEVICE_RECORDS[slot].resource_epoch = 1;
+                }
                 released = true;
             }
         }
@@ -350,10 +367,12 @@ pub fn device_core_detach(handle: DeviceHandle) -> bool {
         unsafe {
             let slot = device_slot(handle.device_id);
             if DEVICE_RECORDS[slot].child_count == 0 &&
-               DEVICE_RECORDS[slot].resource_count == 0 {
+               DEVICE_RECORDS[slot].resource_count == 0 &&
+               !DEVICE_RECORDS[slot].driver.valid &&
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_ATTACHED {
                 let parent = DEVICE_RECORDS[slot].parent;
                 DEVICE_RECORDS[slot].state = DEVICE_STATE_DETACHED;
-                DEVICE_RECORDS[slot].driver_id = 0;
+                DEVICE_RECORDS[slot].driver = driver_invalid_handle();
                 DEVICE_CORE_ATTACHED_COUNT -= 1;
                 if parent.valid && device_handle_live_locked(parent) {
                     let parent_slot = device_slot(parent.device_id);

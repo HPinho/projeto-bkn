@@ -5,6 +5,7 @@ module kernel::device::driver_registry;
 import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::lifecycle::*;
+import kernel::device::resource_manager::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 
@@ -202,7 +203,7 @@ pub fn driver_registry_handle_live(handle: DriverHandle) -> bool {
 @system
 pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
     let snapshot = device_core_snapshot(device);
-    if !snapshot.valid || snapshot.driver_id != DRIVER_ID_NONE ||
+    if !snapshot.valid || snapshot.driver.valid ||
        snapshot.state != DEVICE_STATE_ATTACHED { return driver_invalid_handle(); }
 
     let mut flags: u64 = 0;
@@ -230,7 +231,7 @@ pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
     driver_unlock_irq(flags);
     if !selected.valid { return selected; }
 
-    if !device_core_claim_driver(device, selected.driver_id) {
+    if !device_core_begin_bind(device, selected) {
         let mut finish_flags: u64 = 0;
         if driver_lock_irq(&mut finish_flags) {
             unsafe { DRIVER_RECORDS[driver_slot(selected.driver_id)].operations_in_flight -= 1; }
@@ -241,8 +242,11 @@ pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
 
     // Callback fora dos locks: probe pode chamar Resource Manager no DF-3.
     let probe_ok = selected_record.descriptor.probe(device);
-    let active = probe_ok && device_activate(device);
-    if !active { device_core_release_driver(device, selected.driver_id); }
+    let active = probe_ok && device_core_commit_bind(device, selected);
+    if !active {
+        resource_release_all(device, selected);
+        device_core_abort_bind(device, selected);
+    }
 
     let mut finish_flags: u64 = 0;
     if !driver_lock_irq(&mut finish_flags) { return driver_invalid_handle(); }
@@ -260,7 +264,7 @@ pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
 pub fn driver_unbind(device: DeviceHandle, driver: DriverHandle) -> bool {
     let snapshot = device_core_snapshot(device);
     if !snapshot.valid || snapshot.state != DEVICE_STATE_ACTIVE ||
-       snapshot.driver_id != driver.driver_id { return false; }
+       !driver_handle_equal(snapshot.driver, driver) { return false; }
     let mut flags: u64 = 0;
     if !driver_lock_irq(&mut flags) { return false; }
     let mut selected_record = unsafe { DRIVER_RECORDS[0] };
@@ -277,7 +281,8 @@ pub fn driver_unbind(device: DeviceHandle, driver: DriverHandle) -> bool {
     }
     driver_unlock_irq(flags);
 
-    if !device_core_prepare_unbind(device, driver.driver_id) {
+    let mut initial_epoch: u32 = 0;
+    if !device_core_prepare_unbind(device, driver, &mut initial_epoch) {
         let mut abort_flags: u64 = 0;
         if driver_lock_irq(&mut abort_flags) {
             unsafe { DRIVER_RECORDS[driver_slot(driver.driver_id)].operations_in_flight -= 1; }
@@ -287,8 +292,7 @@ pub fn driver_unbind(device: DeviceHandle, driver: DriverHandle) -> bool {
     }
 
     let remove_ok = selected_record.descriptor.remove(device);
-    let finished = device_core_finish_unbind(device, driver.driver_id, remove_ok);
-    let released = remove_ok && finished;
+    let released = device_core_finish_unbind(device, driver, remove_ok, initial_epoch);
     let mut finish_flags: u64 = 0;
     if !driver_lock_irq(&mut finish_flags) { return false; }
     unsafe {

@@ -45,6 +45,7 @@ import kernel::drivers::amd_psp_i2c_transport::*;
 import kernel::drivers::i2c_hid_acpi::*;
 import kernel::drivers::i2c_hid_manager::*;
 import kernel::drivers::hda_controller::*;
+import kernel::device::foundation_self_test::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 static mut EARLY_BOOT_DIAGNOSTICS_READY: bool = false;
@@ -448,6 +449,15 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     i2c_compatibility_emit_serial_report();
     i2c_hid_acpi_scan_devices();
     i2c_hid_manager_init();
+
+    // Prova runtime sem hardware da maquina de estados DF-1/DF-2/DF-3.
+    baken_early_boot_stage("DRIVER FOUNDATION SELF TEST\0".as_ptr());
+    if !device_foundation_runtime_self_test() {
+        baken_early_boot_fail("E-DF-001\0".as_ptr(), "DRIVER FOUNDATION SELF TEST\0".as_ptr());
+    }
+    if !device_foundation_emit_ready_marker() && x86_serial_is_ready() {
+        baken_early_boot_fail("E-DF-MARKER\0".as_ptr(), "DRIVER FOUNDATION SERIAL MARKER\0".as_ptr());
+    }
 
     // APs chegam ate runtime per-CPU com IF=0 e permanecem estacionados.
     baken_early_boot_stage("SMP APPLICATION PROCESSORS\0".as_ptr());

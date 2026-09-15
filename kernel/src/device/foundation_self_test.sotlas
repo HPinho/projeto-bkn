@@ -1,0 +1,111 @@
+// DF-3.1: prova runtime puramente logica do lifecycle Device/Driver/Resource.
+// Nao toca PCI, MMIO, portas, IRQ controller ou allocator DMA.
+module kernel::device::foundation_self_test;
+
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::driver_registry::*;
+import kernel::device::resource_manager::*;
+import kernel::arch::x86_64::serial::*;
+
+static mut DF_SELF_TEST_DRIVER: DriverHandle = DriverHandle {
+    driver_id: 0, generation: 0, valid: false
+};
+static mut DF_SELF_TEST_MMIO: ResourceHandle = ResourceHandle {
+    resource_id: 0, generation: 0, valid: false
+};
+static mut DF_SELF_TEST_IRQ: ResourceHandle = ResourceHandle {
+    resource_id: 0, generation: 0, valid: false
+};
+static mut DF_SELF_TEST_COMPLETE: bool = false;
+
+@system
+fn df_self_test_probe(device: DeviceHandle) -> bool {
+    let driver = unsafe { DF_SELF_TEST_DRIVER };
+    let mmio = resource_claim(device, driver, ResourceRequest {
+        kind: RESOURCE_KIND_MMIO, start: 0x00000000F0000000,
+        length: 0x1000, auxiliary: 0
+    });
+    if !mmio.valid { return false; }
+    unsafe { DF_SELF_TEST_MMIO = mmio; }
+
+    let irq = resource_claim(device, driver, ResourceRequest {
+        kind: RESOURCE_KIND_IRQ, start: 0xF1, length: 1, auxiliary: 0
+    });
+    if !irq.valid {
+        resource_release(mmio, device, driver);
+        unsafe { DF_SELF_TEST_MMIO = resource_invalid_handle(); }
+        return false;
+    }
+    unsafe { DF_SELF_TEST_IRQ = irq; }
+    return true;
+}
+
+@system
+fn df_self_test_remove(device: DeviceHandle) -> bool {
+    let driver = unsafe { DF_SELF_TEST_DRIVER };
+    let irq = unsafe { DF_SELF_TEST_IRQ };
+    let mmio = unsafe { DF_SELF_TEST_MMIO };
+    if !resource_release(irq, device, driver) { return false; }
+    unsafe { DF_SELF_TEST_IRQ = resource_invalid_handle(); }
+    if !resource_release(mmio, device, driver) { return false; }
+    unsafe { DF_SELF_TEST_MMIO = resource_invalid_handle(); }
+    return true;
+}
+
+static DF_SELF_TEST_DESCRIPTOR: DriverDescriptor = DriverDescriptor {
+    match_rule: DriverMatch {
+        bus: DEVICE_BUS_VIRTUAL, class_code: DEVICE_CLASS_CONTROLLER,
+        vendor_id: 0xBA6E, hardware_id: 0xDF31
+    },
+    priority: 100, probe: df_self_test_probe, remove: df_self_test_remove
+};
+
+@system
+pub fn device_foundation_runtime_self_test() -> bool {
+    unsafe { if DF_SELF_TEST_COMPLETE { return true; } }
+    if !device_core_init() || !driver_registry_init() || !resource_manager_init() {
+        return false;
+    }
+
+    let first = device_core_attach(device_invalid_handle(), DEVICE_BUS_VIRTUAL,
+                                   DEVICE_CLASS_CONTROLLER, 0xBA6E, 0xDF31, 1);
+    if !first.valid { return false; }
+    let driver = driver_register(DF_SELF_TEST_DESCRIPTOR);
+    if !driver.valid { return false; }
+    unsafe { DF_SELF_TEST_DRIVER = driver; }
+
+    let bound = driver_bind(first);
+    if !driver_handle_equal(bound, driver) { return false; }
+    let active = device_core_snapshot(first);
+    if !active.valid || active.state != DEVICE_STATE_ACTIVE ||
+       !driver_handle_equal(active.driver, driver) || active.resource_count != 2 {
+        return false;
+    }
+    if !driver_unbind(first, driver) { return false; }
+    let attached = device_core_snapshot(first);
+    if !attached.valid || attached.state != DEVICE_STATE_ATTACHED ||
+       attached.driver.valid || attached.resource_count != 0 ||
+       resource_active_count() != 0 { return false; }
+    if !device_core_detach(first) || !driver_unregister(driver) { return false; }
+
+    let second = device_core_attach(device_invalid_handle(), DEVICE_BUS_VIRTUAL,
+                                    DEVICE_CLASS_CONTROLLER, 0xBA6E, 0xDF31, 2);
+    if !second.valid || second.device_id != first.device_id ||
+       second.generation == first.generation { return false; }
+    if !device_core_detach(second) { return false; }
+
+    unsafe {
+        DF_SELF_TEST_DRIVER = driver_invalid_handle();
+        DF_SELF_TEST_COMPLETE = true;
+    }
+    return true;
+}
+
+@system
+pub fn device_foundation_emit_ready_marker() -> bool {
+    if !device_foundation_runtime_self_test() { return false; }
+    return x86_serial_write_buffer(
+        "BAKEN:DRIVER_FOUNDATION_READY\n".as_ptr(), 30
+    );
+}

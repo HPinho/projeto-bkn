@@ -23,7 +23,7 @@ class DeviceLifecycleTests(unittest.TestCase):
     def test_detach_never_leaves_old_driver_owner(self):
         detach = REGISTRY.split("pub fn device_core_detach", 1)[1]
         self.assertIn("DEVICE_RECORDS[slot].state = DEVICE_STATE_DETACHED", detach)
-        self.assertIn("DEVICE_RECORDS[slot].driver_id = 0", detach)
+        self.assertIn("DEVICE_RECORDS[slot].driver = driver_invalid_handle()", detach)
 
 
 if __name__ == "__main__":

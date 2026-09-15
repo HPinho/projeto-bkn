@@ -23,10 +23,10 @@ class ResourceManagerTests(unittest.TestCase):
         self.assertIn("left.auxiliary == right.auxiliary", body)
         self.assertIn("resource_ranges_overlap(left, right)", body)
 
-    def test_manager_is_in_graph_but_not_boot_path(self):
+    def test_manager_and_runtime_self_test_are_in_graph(self):
         self.assertIn("import kernel::device::resource_manager::*;", MAIN)
         runtime = (ROOT / "kernel/src/baken_native_runtime.sotlas").read_text(encoding="utf-8")
-        self.assertNotIn("resource_manager_init()", runtime)
+        self.assertIn("device_foundation_runtime_self_test()", runtime)
 
 
 if __name__ == "__main__":

@@ -9,14 +9,16 @@ DEVICES = (ROOT / "kernel/src/device/registry.sotlas").read_text(encoding="utf-8
 
 class DriverOwnershipTests(unittest.TestCase):
     def test_device_claim_is_atomic_and_exclusive(self):
-        body = DEVICES.split("pub fn device_core_claim_driver", 1)[1].split("pub fn device_core_release_driver", 1)[0]
-        self.assertIn("DEVICE_RECORDS[slot].driver_id == DRIVER_ID_NONE", body)
+        body = DEVICES.split("pub fn device_core_begin_bind", 1)[1].split("pub fn device_core_commit_bind", 1)[0]
+        self.assertIn("!DEVICE_RECORDS[slot].driver.valid", body)
         self.assertIn("DEVICE_RECORDS[slot].state == DEVICE_STATE_ATTACHED", body)
-        self.assertIn("DEVICE_RECORDS[slot].driver_id = driver_id", body)
+        self.assertIn("DEVICE_RECORDS[slot].driver = driver", body)
+        self.assertIn("DEVICE_STATE_BINDING", body)
 
     def test_failed_probe_releases_claim(self):
         body = DRIVERS.split("pub fn driver_bind", 1)[1].split("pub fn driver_unbind", 1)[0]
-        self.assertIn("if !active { device_core_release_driver(device, selected.driver_id); }", body)
+        self.assertIn("resource_release_all(device, selected)", body)
+        self.assertIn("device_core_abort_bind(device, selected)", body)
         self.assertIn("if !active { return driver_invalid_handle(); }", body)
 
     def test_remove_is_bracketed_by_transactional_unbind(self):
@@ -26,7 +28,7 @@ class DriverOwnershipTests(unittest.TestCase):
         self.assertGreater(body.index("device_core_finish_unbind"), callback)
         finish = DEVICES.split("pub fn device_core_finish_unbind", 1)[1].split(
             "pub fn device_core_acquire_resource", 1)[0]
-        self.assertIn("DEVICE_RECORDS[slot].driver_id = DRIVER_ID_NONE", finish)
+        self.assertIn("DEVICE_RECORDS[slot].driver = driver_invalid_handle()", finish)
         self.assertIn("DEVICE_RECORDS[slot].state = DEVICE_STATE_ATTACHED", finish)
         self.assertIn("DEVICE_RECORDS[slot].state = DEVICE_STATE_ACTIVE", finish)
 

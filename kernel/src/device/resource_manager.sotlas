@@ -1,10 +1,13 @@
 // DF-3: ownership transacional de recursos de hardware.
 // Esta camada registra claims; nao mapeia MMIO, programa IRQ ou aloca DMA.
+// Lock order global: RESOURCE_LOCK pode adquirir DEVICE_CORE_LOCK. O caminho
+// inverso e proibido; callbacks rodam sem qualquer lock destes registros.
+// PCI_BAR identifica ownership logico de (BDF, BAR): start e o BDF empacotado,
+// length vale 1 e auxiliary e o indice 0..5. A faixa fisica e um claim MMIO.
 module kernel::device::resource_manager;
 
 import kernel::device::types::*;
 import kernel::device::registry::*;
-import kernel::device::driver_registry::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 
@@ -71,7 +74,7 @@ fn resource_request_valid(request: ResourceRequest) -> bool {
         return request.length == 1 && request.auxiliary == 0;
     }
     if request.kind == RESOURCE_KIND_PCI_BAR {
-        return request.auxiliary < 6;
+        return request.length == 1 && request.auxiliary < 6;
     }
     return request.auxiliary == 0;
 }
@@ -135,7 +138,7 @@ pub fn resource_manager_is_ready() -> bool { unsafe { return RESOURCE_MANAGER_RE
 pub fn resource_claim(device: DeviceHandle, driver: DriverHandle,
                       request: ResourceRequest) -> ResourceHandle {
     if !resource_manager_is_ready() || !resource_request_valid(request) ||
-       !driver_registry_handle_live(driver) { return resource_invalid_handle(); }
+       !driver.valid { return resource_invalid_handle(); }
 
     let mut flags: u64 = 0;
     if !resource_lock_irq(&mut flags) { return resource_invalid_handle(); }
@@ -155,7 +158,7 @@ pub fn resource_claim(device: DeviceHandle, driver: DriverHandle,
             let mut free_slot: usize = 0;
             while free_slot < RESOURCE_MANAGER_CAPACITY {
                 if !RESOURCE_CLAIMS[free_slot].valid {
-                    if !device_core_acquire_resource(device, driver.driver_id) { break; }
+                    if !device_core_acquire_resource(device, driver) { break; }
                     let generation = resource_generation_next(RESOURCE_GENERATIONS[free_slot]);
                     RESOURCE_GENERATIONS[free_slot] = generation;
                     result = ResourceHandle { resource_id: (free_slot + 1) as u32,
@@ -198,7 +201,7 @@ pub fn resource_release(handle: ResourceHandle, device: DeviceHandle,
             let slot = resource_slot(handle.resource_id);
             if device_handle_equal(RESOURCE_CLAIMS[slot].owner_device, device) &&
                driver_handle_equal(RESOURCE_CLAIMS[slot].owner_driver, driver) &&
-               device_core_release_resource(device, driver.driver_id) {
+               device_core_release_resource(device, driver) {
                 RESOURCE_CLAIMS[slot] = resource_invalid_claim();
                 RESOURCE_ACTIVE_COUNT -= 1;
                 released = true;
@@ -220,7 +223,7 @@ pub fn resource_release_all(device: DeviceHandle, driver: DriverHandle) -> u32 {
             if RESOURCE_CLAIMS[slot].valid &&
                device_handle_equal(RESOURCE_CLAIMS[slot].owner_device, device) &&
                driver_handle_equal(RESOURCE_CLAIMS[slot].owner_driver, driver) &&
-               device_core_release_resource(device, driver.driver_id) {
+               device_core_release_resource(device, driver) {
                 RESOURCE_CLAIMS[slot] = resource_invalid_claim();
                 RESOURCE_ACTIVE_COUNT -= 1;
                 released += 1;

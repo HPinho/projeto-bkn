@@ -27,6 +27,7 @@ pub const DEVICE_STATE_ACTIVE: u8 = 2;
 pub const DEVICE_STATE_FAILED: u8 = 3;
 pub const DEVICE_STATE_DETACHED: u8 = 4;
 pub const DEVICE_STATE_UNBINDING: u8 = 5;
+pub const DEVICE_STATE_BINDING: u8 = 6;
 
 pub const DRIVER_ID_NONE: u32 = 0;
 pub const DRIVER_GENERATION_INVALID: u32 = 0;
@@ -89,12 +90,13 @@ pub struct DeviceRecord {
     pub bus: u8;
     pub class_code: u8;
     pub state: u8;
-    pub driver_id: u32;
+    pub driver: DriverHandle;
     pub vendor_id: u32;
     pub hardware_id: u32;
     pub bus_instance: u32;
     pub child_count: u32;
     pub resource_count: u32;
+    pub resource_epoch: u32;
     pub valid: bool;
 }
 
@@ -118,8 +120,9 @@ pub fn device_invalid_record() -> DeviceRecord {
     return DeviceRecord {
         handle: device_invalid_handle(), parent: device_invalid_handle(),
         bus: DEVICE_BUS_NONE, class_code: DEVICE_CLASS_NONE,
-        state: DEVICE_STATE_EMPTY, driver_id: 0, vendor_id: 0,
+        state: DEVICE_STATE_EMPTY, driver: driver_invalid_handle(), vendor_id: 0,
         hardware_id: 0, bus_instance: 0, child_count: 0, resource_count: 0,
+        resource_epoch: 0,
         valid: false
     };
 }

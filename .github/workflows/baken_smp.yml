@@ -220,6 +220,7 @@ jobs:
           require_marker 'BAKEN:ACPI_AML_NAMESPACE_READY'
           require_marker 'BAKEN:ACPI_AML_NAMESPACE_LOADED'
           require_marker 'BAKEN:ACPI_AML_DEVICES_READY'
+          require_marker 'BAKEN:DRIVER_FOUNDATION_READY'
           require_marker 'BAKEN:ACPI_AML_EVALUATOR_READY'
           require_marker 'BAKEN:ACPI_AML_DYNAMIC_READY'
           require_marker 'BAKEN:USB_HID_DESCRIPTOR_READY'

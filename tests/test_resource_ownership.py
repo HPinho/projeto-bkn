@@ -11,22 +11,25 @@ class ResourceOwnershipTests(unittest.TestCase):
     def test_claim_requires_live_driver_and_active_owned_device(self):
         claim = SOURCE.split("pub fn resource_claim", 1)[1].split(
             "pub fn resource_snapshot", 1)[0]
-        self.assertIn("driver_registry_handle_live(driver)", claim)
-        self.assertIn("device_core_acquire_resource(device, driver.driver_id)", claim)
+        self.assertIn("!driver.valid", claim)
+        self.assertIn("device_core_acquire_resource(device, driver)", claim)
         acquire = REGISTRY.split("pub fn device_core_acquire_resource", 1)[1].split(
             "pub fn device_core_release_resource", 1)[0]
+        self.assertIn("DEVICE_STATE_BINDING", acquire)
         self.assertIn("DEVICE_STATE_ACTIVE", acquire)
-        self.assertIn("DEVICE_RECORDS[slot].driver_id == driver_id", acquire)
+        self.assertIn("driver_handle_equal(DEVICE_RECORDS[slot].driver, driver)", acquire)
 
     def test_release_requires_exact_generation_safe_owners(self):
         release = SOURCE.split("pub fn resource_release", 1)[1].split(
             "pub fn resource_release_all", 1)[0]
         self.assertIn("device_handle_equal", release)
         self.assertIn("driver_handle_equal", release)
-        self.assertIn("device_core_release_resource", release)
+        self.assertIn("device_core_release_resource(device, driver)", release)
 
     def test_unbind_and_detach_require_zero_resources(self):
-        self.assertGreaterEqual(REGISTRY.count("resource_count == 0"), 2)
+        detach = REGISTRY.split("pub fn device_core_detach", 1)[1]
+        self.assertIn("resource_count == 0", detach)
+        self.assertIn("!DEVICE_RECORDS[slot].driver.valid", detach)
 
     def test_unbind_closes_claim_window_before_remove_callback(self):
         drivers = (ROOT / "kernel/src/device/driver_registry.sotlas").read_text(encoding="utf-8")
