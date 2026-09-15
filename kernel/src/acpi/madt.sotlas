@@ -8,6 +8,7 @@ pub const MADT_ENTRY_LOCAL_APIC: u8 = 0;
 pub const MADT_ENTRY_IO_APIC: u8 = 1;
 pub const MADT_ENTRY_INTERRUPT_OVERRIDE: u8 = 2;
 pub const MADT_ENTRY_LOCAL_APIC_ADDRESS_OVERRIDE: u8 = 5;
+pub const MADT_ENTRY_LOCAL_X2APIC: u8 = 9;
 pub const MADT_MAX_CPUS: usize = 32;
 pub const MADT_MAX_IOAPICS: usize = 8;
 pub const MADT_MAX_OVERRIDES: usize = 32;
@@ -85,6 +86,28 @@ pub fn madt_init() -> bool {
                         let idx = MADT_CPU_COUNT as usize;
                         MADT_CPUS[idx].acpi_processor_id = table[offset + 2];
                         MADT_CPUS[idx].apic_id = table[offset + 3];
+                        MADT_CPUS[idx].flags = flags;
+                        MADT_CPUS[idx].enabled = (flags & MADT_CPU_ENABLED) != 0;
+                        MADT_CPUS[idx].valid = true;
+                        MADT_CPU_COUNT += 1;
+                    }
+                }
+            }
+        } else if entry_type == MADT_ENTRY_LOCAL_X2APIC && entry_length >= 16 {
+            // ACPI 4.0+: Type 9 = reserved:u16, x2APIC ID:u32,
+            // flags:u32, ACPI UID:u32. O backend atual envia INIT/SIPI pelo
+            // xAPIC ICR de 8 bits; portanto inventariamos somente IDs que ele
+            // pode endereçar e deixamos IDs maiores para o futuro modo x2APIC.
+            let x2apic_id = madt_read_u32(table, offset + 4);
+            let flags = madt_read_u32(table, offset + 8);
+            let acpi_uid = madt_read_u32(table, offset + 12);
+            if x2apic_id <= 255 &&
+               (flags & (MADT_CPU_ENABLED | MADT_CPU_ONLINE_CAPABLE)) != 0 {
+                unsafe {
+                    if MADT_CPU_COUNT < MADT_MAX_CPUS as u32 {
+                        let idx = MADT_CPU_COUNT as usize;
+                        MADT_CPUS[idx].acpi_processor_id = (acpi_uid & 0xFF) as u8;
+                        MADT_CPUS[idx].apic_id = x2apic_id as u8;
                         MADT_CPUS[idx].flags = flags;
                         MADT_CPUS[idx].enabled = (flags & MADT_CPU_ENABLED) != 0;
                         MADT_CPUS[idx].valid = true;

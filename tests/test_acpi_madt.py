@@ -23,6 +23,15 @@ class AcpiMadtTests(unittest.TestCase):
         ):
             self.assertIn(token, text)
 
+    def test_parser_handles_modern_x2apic_cpu_entries_without_truncating_routes(self):
+        text = MADT.read_text(encoding="utf-8")
+        self.assertIn("MADT_ENTRY_LOCAL_X2APIC: u8 = 9", text)
+        self.assertIn("let x2apic_id = madt_read_u32(table, offset + 4)", text)
+        self.assertIn("let flags = madt_read_u32(table, offset + 8)", text)
+        self.assertIn("let acpi_uid = madt_read_u32(table, offset + 12)", text)
+        self.assertIn("x2apic_id <= 255", text)
+        self.assertIn("MADT_CPUS[idx].apic_id = x2apic_id as u8", text)
+
     def test_irq_mapping_uses_iso_and_has_identity_fallback(self):
         text = MADT.read_text(encoding="utf-8")
         self.assertIn("pub fn madt_irq_to_gsi(irq: u8) -> u32", text)

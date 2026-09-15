@@ -25,7 +25,8 @@ class EarlyBootDiagnosticsContract(unittest.TestCase):
     def test_mandatory_cutover_failures_have_visible_stable_codes(self):
         entry = self.post.split("pub fn sotlas_x86_post_cutover_entry", 1)[1]
         for code in ("E-CPU-001", "E-PMM-001", "E-VMM-001", "E-HEAP-001",
-                     "E-ACPI-001", "E-APIC-001", "E-IRQ-001", "E-TIMER-001",
+                     "E-ACPI-001", "E-ACPI-ROOT", "E-MADT-001",
+                     "E-APIC-001", "E-IRQ-001", "E-TIMER-001",
                      "E-TIMER-002", "E-FBWC-001"):
             self.assertIn(code, entry)
         self.assertLess(entry.index("baken_early_boot_begin"),

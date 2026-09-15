@@ -78,6 +78,7 @@ static mut POST_CUTOVER_PMM_ACTIVE: bool = false;
 static mut POST_CUTOVER_VMM_ACTIVE: bool = false;
 static mut POST_CUTOVER_HEAP_ACTIVE: bool = false;
 static mut POST_CUTOVER_ACPI_READY: bool = false;
+static mut POST_CUTOVER_ACPI_FAILURE_STAGE: u8 = 0;
 static mut POST_CUTOVER_INTERRUPT_CONTROLLERS_READY: bool = false;
 static mut POST_CUTOVER_IRQS_READY: bool = false;
 static mut POST_CUTOVER_TIMER_READY: bool = false;
@@ -247,15 +248,25 @@ pub fn post_cutover_heap_active() -> bool { unsafe { return POST_CUTOVER_HEAP_AC
 
 @system
 pub fn post_cutover_activate_acpi(context: *const PostCutoverContext) -> bool {
-    if !post_cutover_vmm_active() || !post_cutover_heap_active() || !post_cutover_context_valid(context) { return false; }
+    unsafe { POST_CUTOVER_ACPI_FAILURE_STAGE = 0; }
+    if !post_cutover_vmm_active() || !post_cutover_heap_active() || !post_cutover_context_valid(context) {
+        unsafe { POST_CUTOVER_ACPI_FAILURE_STAGE = 1; }
+        return false;
+    }
     let rsdp = post_cutover_acpi_rsdp_virtual(context);
-    if rsdp == (null as *const u8) { return false; }
-    if !acpi_init_post_cutover(rsdp) || !acpi_is_ready() { return false; }
-    if !acpi_uses_post_cutover_direct_map() { return false; }
-    if !madt_init() || !madt_is_ready() { return false; }
+    if rsdp == (null as *const u8) { unsafe { POST_CUTOVER_ACPI_FAILURE_STAGE = 2; } return false; }
+    if !acpi_init_post_cutover(rsdp) || !acpi_is_ready() {
+        unsafe { POST_CUTOVER_ACPI_FAILURE_STAGE = 3; }
+        return false;
+    }
+    if !acpi_uses_post_cutover_direct_map() { unsafe { POST_CUTOVER_ACPI_FAILURE_STAGE = 4; } return false; }
+    if !madt_init() || !madt_is_ready() { unsafe { POST_CUTOVER_ACPI_FAILURE_STAGE = 5; } return false; }
     unsafe { POST_CUTOVER_ACPI_READY = true; }
     return true;
 }
+
+@system
+pub fn post_cutover_acpi_failure_stage() -> u8 { unsafe { return POST_CUTOVER_ACPI_FAILURE_STAGE; } }
 
 @system
 pub fn post_cutover_acpi_ready() -> bool { unsafe { return POST_CUTOVER_ACPI_READY; } }
@@ -590,7 +601,12 @@ pub fn sotlas_x86_post_cutover_entry(argument: u64) -> ! {
     if !post_cutover_activate_heap() { baken_early_boot_fail("E-HEAP-001\0".as_ptr(), "KERNEL HEAP\0".as_ptr()); }
     if serial_ready { if !x86_serial_write_heap_ready_marker() { loop {} } }
     baken_early_boot_stage("ACPI TABLES\0".as_ptr());
-    if !post_cutover_activate_acpi(context) { baken_early_boot_fail("E-ACPI-001\0".as_ptr(), "ACPI TABLES\0".as_ptr()); }
+    if !post_cutover_activate_acpi(context) {
+        let acpi_failure = post_cutover_acpi_failure_stage();
+        if acpi_failure == 3 { baken_early_boot_fail("E-ACPI-ROOT\0".as_ptr(), "ACPI ROOT / XSDT\0".as_ptr()); }
+        if acpi_failure == 5 { baken_early_boot_fail("E-MADT-001\0".as_ptr(), "ACPI MADT / CPU INVENTORY\0".as_ptr()); }
+        baken_early_boot_fail("E-ACPI-001\0".as_ptr(), "ACPI HANDOFF\0".as_ptr());
+    }
     baken_early_boot_pass("ACPI TABLES\0".as_ptr());
     if serial_ready { x86_serial_write_stage_marker('A' as u8); }
     baken_early_boot_stage("APIC / IOAPIC\0".as_ptr());
