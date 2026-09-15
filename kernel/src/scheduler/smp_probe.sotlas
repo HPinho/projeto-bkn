@@ -66,9 +66,10 @@ static mut SCHEDULER_SMP_RING3_PID_LO: u32 = 0;
 static mut SCHEDULER_SMP_RING3_PID_HI: u32 = 0;
 
 // Q = etapa Ring3/TLB; bit 31 indica falha, preservando a etapa inferior.
+// O boot log em RAM é o sink autoritativo; COM1 é apenas espelho opcional.
 @system
 fn scheduler_smp_ring3_diag(stage: u32) -> void {
-    if x86_serial_is_ready() { x86_serial_write_hex32_marker('Q' as u8, stage); }
+    x86_serial_write_hex32_marker('Q' as u8, stage);
 }
 
 @system
@@ -375,61 +376,43 @@ fn scheduler_smp_probe_wait_process_reaped(pid: u64, reap_before: u64) -> bool {
     return false;
 }
 
+// Marcadores do probe sempre passam pelo sink diagnóstico comum. O próprio
+// serial.sotlas decide se há COM1 para espelhamento; ausência de UART nunca
+// invalida uma prova funcional já capturada no boot log em RAM.
 @system
 fn scheduler_smp_probe_emit_thread_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 23] = [66,65,75,69,78,58,83,77,80,95,84,72,82,69,65,68,95,79,78,95,65,80,10];
-    let mut index: usize = 0;
-    while index < 23 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 23); }
 }
 @system
 fn scheduler_smp_probe_emit_timer_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 22] = [66,65,75,69,78,58,83,77,80,95,84,73,77,69,82,95,79,78,95,65,80,10];
-    let mut index: usize = 0;
-    while index < 22 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 22); }
 }
 @system
 fn scheduler_smp_probe_emit_any_thread_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 27] = [66,65,75,69,78,58,83,77,80,95,65,78,89,95,84,72,82,69,65,68,95,79,78,95,65,80,10];
-    let mut index: usize = 0;
-    while index < 27 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 27); }
 }
 @system
 fn scheduler_smp_probe_emit_heap_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 21] = [66,65,75,69,78,58,83,77,80,95,72,69,65,80,95,82,69,65,68,89,10];
-    let mut index: usize = 0;
-    while index < 21 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 21); }
 }
 @system
 fn scheduler_smp_probe_emit_tlb_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 30] = [66,65,75,69,78,58,83,77,80,95,84,76,66,95,83,72,79,79,84,68,79,87,78,95,82,69,65,68,89,10];
-    let mut index: usize = 0;
-    while index < 30 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 30); }
 }
 @system
 fn scheduler_smp_probe_emit_process_tlb_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 28] = [66,65,75,69,78,58,83,77,80,95,80,82,79,67,69,83,83,95,84,76,66,95,82,69,65,68,89,10];
-    let mut index: usize = 0;
-    while index < 28 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 28); }
 }
 @system
 fn scheduler_smp_probe_emit_ring3_ready_marker() -> bool {
-    if !x86_serial_is_ready() { return false; }
     let marker: [u8; 28] = [66,65,75,69,78,58,83,77,80,95,82,73,78,71,51,95,79,78,95,65,80,95,82,69,65,68,89,10];
-    let mut index: usize = 0;
-    while index < 28 { if !x86_serial_write_byte(marker[index]) { return false; } index += 1; }
-    return true;
+    unsafe { return x86_serial_write_buffer(&marker[0], 28); }
 }
 
 @system
