@@ -43,6 +43,7 @@ import kernel::drivers::i2c_compatibility_diagnostics::*;
 import kernel::drivers::i2c_bus_arbitration::*;
 import kernel::drivers::i2c_hid_acpi::*;
 import kernel::drivers::i2c_hid_manager::*;
+import kernel::drivers::hda_controller::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 
@@ -221,6 +222,9 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
     // Consolida ACPI/APIC/PCI antes de liberar APs ou inicializar serviços.
     if !platform_inventory_init() || !platform_inventory_emit_ready_marker() { loop {} }
     if !platform_device_catalog_init() || !platform_device_catalog_emit_ready_marker() { loop {} }
+    // AUDIO-0: descoberta PCI read-only. Ausência de HDA ou BAR inválido não
+    // impede o boot; nenhum controller é habilitado antes do backend MMIO/DMA.
+    hda_discover_pci();
     if platform_storage_binding_required() {
         if !platform_storage_bind_active_driver() || !platform_storage_emit_bound_marker() { loop {} }
     }

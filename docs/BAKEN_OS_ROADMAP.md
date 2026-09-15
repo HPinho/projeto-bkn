@@ -355,6 +355,82 @@ Fundação presente: `AHCI/NVMe → BlockDevice → GPT/MBR → FAT32 base`.
 
 ---
 
+# Atualização autoritativa — plataforma universal, I²C e início do áudio
+
+> Estado corrente em **2026-09-14 (America/Sao_Paulo)**. Esta seção substitui o
+> estado operacional das seções históricas acima sem apagar seus checkpoints.
+
+## Estado geral atual
+
+- **Fase 0 — Fundação Bare-Metal:** ✅ concluída.
+- **Fase 1 — Kernel Core:** ✅ concluída e certificada.
+- **Fase 2 — Platform/Drivers:** ▶️ em desenvolvimento.
+- **xHCI/USB HID hot-plug:** ✅ escopo planejado concluído e certificado.
+- **ACPI/AML dinâmico:** ✅ base necessária para descoberta de dispositivos concluída.
+- **I²C-HID universal:** ⏳ core, executor, DesignWare, discovery ACPI/PCI, catálogo
+  versionado, diagnósticos e arbitragem implementados; validação física e transporte
+  AMD PSP/CCP autenticado ainda pendentes.
+
+## Compatibilidade I²C Intel/AMD
+
+O core é vendor-neutral e escolhe backend pelas capacidades do controlador, revisão
+PCI e recursos ACPI avaliados. Intel e AMD não são tratados por nome de CPU. Hardware
+desconhecido ou layout não certificado permanece visível nos diagnósticos e falha
+fechado, sem escrever MMIO presumido.
+
+Cobertura estrutural atual:
+
+- Intel Tiger Lake: backend físico conhecido;
+- Intel Alder Lake, Raptor Lake, Meteor Lake, Lunar Lake e posteriores: catálogo e
+  detecção por controlador, sem promover layout não certificado;
+- AMD Ryzen/Threadripper/EPYC com controladores ACPI DesignWare compatíveis: caminho
+  genérico por HID/recursos/revisão;
+- controladores AMD com barramento arbitrado pelo PSP: política obrigatória e
+  fail-closed; falta implementar o transporte PSP/CCP específico e validá-lo em
+  hardware/documentação pública suficiente.
+
+## Trilha de áudio — HDA
+
+| Etapa | Estado | Critério |
+|---|---|---|
+| AUDIO-0 descoberta PCI HDA | ⏳ implementada, aguardando gates | classe 04:03, revisão real do controlador, BAR0 validado e zero escrita durante discovery |
+| AUDIO-1 backend MMIO/reset | ⬜ | mapear BAR, validar GCAP/VMAJ/VMIN, reset com deadline e rollback |
+| AUDIO-2 CORB/RIRB e codecs | ⬜ | verbos, enumeração de codec/function groups/widgets |
+| AUDIO-3 streams DMA | ⬜ | BDL, buffers, ownership, posição e IRQ/MSI |
+| AUDIO-4 PCM/mixer | ⬜ | formatos, volume, rotas pin/amp e política de codec |
+| AUDIO-5 API userspace | ⬜ | handles, isolamento, serviço de áudio e testes E2E |
+
+`AUDIO-0` é intencionalmente read-only. Detectar um HDA não habilita Memory Space,
+Bus Master nem DMA; essas transições só ocorrerão após o backend validar recursos e
+possuir rollback completo.
+
+## Vídeo, display e GPU
+
+- **Vídeo/framebuffer:** ✅ já existe saída GOP preservada após o cutover, mapping WC,
+  backbuffer, rasterização CPU e compositor de software.
+- **HAL de display acelerado:** ⬜ ainda não existe um backend físico promovível.
+- **GPU real:** ⬜ exige por família: descoberta e BARs seguros, firmware quando
+  aplicável, gerência de memória/VRAM, command submission, fences, interrupções,
+  modesetting/display engine e recuperação de hang.
+- **Primeiro alvo recomendado:** VirtIO-GPU em QEMU, pois permite provar a HAL,
+  filas, recursos 2D, fences e present sem fingir suporte Intel/AMD/NVIDIA.
+- **Depois:** Intel integrada como primeiro backend físico; AMD e NVIDIA permanecem
+  backends separados sobre a mesma HAL universal.
+
+## Ordem recomendada da Fase 2
+
+1. Certificar `AUDIO-0` nos gates existentes.
+2. Implementar AUDIO-1..3 até playback PCM real em QEMU/hardware comunitário.
+3. Em paralelo arquitetural, definir GPU/display HAL e implementar VirtIO-GPU 2D.
+4. Fechar storage de produção mínimo (`Block cache → VFS → FAT32 RW`) para firmware,
+   mídia e aplicações reais.
+5. Adicionar rede e serviços userspace; então avançar para backends GPU físicos.
+
+Nenhuma etapa será marcada como certificada apenas por teste textual: continuam
+obrigatórios build Sotlas nativo e os gates runtime pertinentes no mesmo SHA.
+
+---
+
 # Atualização de continuidade — HID-4d.3b encerrado / HID-4d.3c1 em validação
 
 > Esta seção é append-only e **substitui, como estado corrente, as indicações históricas acima que ainda apontam descriptor/report DMA como próximos cortes**. O conteúdo anterior foi preservado para manter o histórico de decisões e certificações.

@@ -1,0 +1,134 @@
+// Baken OS — descoberta universal e read-only de controladores High Definition Audio.
+//
+// A classe PCI 04:03 identifica o contrato HDA. Esta etapa apenas inventaria
+// funções, revisões e BAR0 já configurados pelo firmware. Ela deliberadamente
+// não habilita bus mastering, não dimensiona BARs e não toca MMIO: reset,
+// CORB/RIRB, streams DMA e codecs pertencem às próximas etapas do driver.
+module kernel::drivers::hda_controller;
+
+import kernel::drivers::pci_bus::*;
+
+pub const PCI_CLASS_MULTIMEDIA: u8 = 0x04;
+pub const PCI_SUBCLASS_HDA: u8 = 0x03;
+pub const HDA_CONTROLLER_CAPACITY: usize = 8;
+
+pub const HDA_VENDOR_GENERIC: u8 = 0;
+pub const HDA_VENDOR_INTEL: u8 = 1;
+pub const HDA_VENDOR_AMD: u8 = 2;
+pub const HDA_VENDOR_NVIDIA: u8 = 3;
+
+pub const HDA_STATE_EMPTY: u8 = 0;
+pub const HDA_STATE_DISCOVERED: u8 = 1;
+pub const HDA_STATE_UNUSABLE_BAR: u8 = 2;
+
+@repr(C)
+pub struct HdaControllerRecord {
+    pub bus: u8;
+    pub slot: u8;
+    pub func: u8;
+    pub vendor_id: u16;
+    pub device_id: u16;
+    // Revisão do próprio controlador PCI, nunca inferida da família da CPU.
+    pub controller_revision: u8;
+    pub vendor_family: u8;
+    pub mmio_base: u64;
+    pub state: u8;
+    pub valid: bool;
+}
+
+static mut HDA_CONTROLLERS: [HdaControllerRecord; HDA_CONTROLLER_CAPACITY] = [
+    HdaControllerRecord { bus: 0, slot: 0, func: 0, vendor_id: 0, device_id: 0,
+        controller_revision: 0, vendor_family: HDA_VENDOR_GENERIC,
+        mmio_base: 0, state: HDA_STATE_EMPTY, valid: false };
+    HDA_CONTROLLER_CAPACITY
+];
+static mut HDA_CONTROLLER_COUNT: usize = 0;
+
+@system
+fn hda_vendor_family(vendor_id: u16) -> u8 {
+    if vendor_id == 0x8086 { return HDA_VENDOR_INTEL; }
+    if vendor_id == 0x1002 || vendor_id == 0x1022 { return HDA_VENDOR_AMD; }
+    if vendor_id == 0x10DE { return HDA_VENDOR_NVIDIA; }
+    return HDA_VENDOR_GENERIC;
+}
+
+@system
+pub fn hda_pci_class_matches(device: *const PciDevice) -> bool {
+    if device == (null as *const PciDevice) { return false; }
+    unsafe {
+        return (*device).class_code == PCI_CLASS_MULTIMEDIA &&
+            (*device).subclass == PCI_SUBCLASS_HDA;
+    }
+}
+
+@system
+fn hda_bar0_usable(device: *const PciDevice) -> bool {
+    if device == (null as *const PciDevice) { return false; }
+    unsafe {
+        // HDA usa BAR0 MMIO. Base zero, BAR de I/O ou endereço sem alinhamento
+        // mínimo não podem ser promovidos a um backend físico.
+        return !(*device).bars[0].is_io && (*device).bars[0].base_address != 0 &&
+            ((*device).bars[0].base_address & 0x3FFF) == 0;
+    }
+}
+
+@system
+pub fn hda_discover_pci() -> usize {
+    unsafe {
+        HDA_CONTROLLER_COUNT = 0;
+        let mut clear: usize = 0;
+        while clear < HDA_CONTROLLER_CAPACITY {
+            HDA_CONTROLLERS[clear].valid = false;
+            HDA_CONTROLLERS[clear].state = HDA_STATE_EMPTY;
+            clear += 1;
+        }
+
+        let mut index: u32 = 0;
+        while index < pci_get_device_count() && HDA_CONTROLLER_COUNT < HDA_CONTROLLER_CAPACITY {
+            let device = pci_get_device(index);
+            if hda_pci_class_matches(device) {
+                let slot_index = HDA_CONTROLLER_COUNT;
+                let usable = hda_bar0_usable(device);
+                HDA_CONTROLLERS[slot_index] = HdaControllerRecord {
+                    bus: (*device).bus,
+                    slot: (*device).slot,
+                    func: (*device).func,
+                    vendor_id: (*device).vendor_id,
+                    device_id: (*device).device_id,
+                    controller_revision: (*device).revision_id,
+                    vendor_family: hda_vendor_family((*device).vendor_id),
+                    mmio_base: if usable { (*device).bars[0].base_address } else { 0 },
+                    state: if usable { HDA_STATE_DISCOVERED } else { HDA_STATE_UNUSABLE_BAR },
+                    valid: true
+                };
+                HDA_CONTROLLER_COUNT += 1;
+            }
+            index += 1;
+        }
+        return HDA_CONTROLLER_COUNT;
+    }
+}
+
+@system
+pub fn hda_controller_count() -> usize {
+    unsafe { return HDA_CONTROLLER_COUNT; }
+}
+
+@system
+pub fn hda_controller_at(index: usize) -> *const HdaControllerRecord {
+    unsafe {
+        if index >= HDA_CONTROLLER_COUNT || !HDA_CONTROLLERS[index].valid {
+            return null as *const HdaControllerRecord;
+        }
+        return &HDA_CONTROLLERS[index];
+    }
+}
+
+@system
+pub fn hda_controller_can_initialize(index: usize) -> bool {
+    let record = hda_controller_at(index);
+    if record == (null as *const HdaControllerRecord) { return false; }
+    unsafe {
+        return (*record).state == HDA_STATE_DISCOVERED && (*record).mmio_base != 0;
+    }
+}
