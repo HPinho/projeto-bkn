@@ -19,7 +19,7 @@ class DriverSmpSafetyTests(unittest.TestCase):
         unbind = SOURCE.split("pub fn driver_unbind", 1)[1]
         callback = unbind.index("let remove_ok = selected_record.descriptor.remove(device)")
         self.assertLess(unbind.index("operations_in_flight += 1"), callback)
-        self.assertGreater(unbind.index("operations_in_flight -= 1"), callback)
+        self.assertGreater(unbind.rindex("operations_in_flight -= 1"), callback)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ pub const DEVICE_STATE_ATTACHED: u8 = 1;
 pub const DEVICE_STATE_ACTIVE: u8 = 2;
 pub const DEVICE_STATE_FAILED: u8 = 3;
 pub const DEVICE_STATE_DETACHED: u8 = 4;
+pub const DEVICE_STATE_UNBINDING: u8 = 5;
 
 pub const DRIVER_ID_NONE: u32 = 0;
 pub const DRIVER_GENERATION_INVALID: u32 = 0;
@@ -33,6 +34,31 @@ pub const DRIVER_MATCH_ANY: u32 = 0xFFFFFFFF;
 pub const DRIVER_STATE_EMPTY: u8 = 0;
 pub const DRIVER_STATE_REGISTERED: u8 = 1;
 pub const DRIVER_STATE_REMOVING: u8 = 2;
+
+pub const RESOURCE_ID_NONE: u32 = 0;
+pub const RESOURCE_GENERATION_INVALID: u32 = 0;
+pub const RESOURCE_KIND_NONE: u8 = 0;
+pub const RESOURCE_KIND_MMIO: u8 = 1;
+pub const RESOURCE_KIND_IO_PORT: u8 = 2;
+pub const RESOURCE_KIND_PCI_BAR: u8 = 3;
+pub const RESOURCE_KIND_IRQ: u8 = 4;
+pub const RESOURCE_KIND_DMA: u8 = 5;
+
+@repr(C)
+pub struct ResourceHandle {
+    pub resource_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct ResourceRequest {
+    pub kind: u8;
+    pub start: u64;
+    pub length: u64;
+    // PCI BAR: indice 0..5. Demais classes devem usar zero.
+    pub auxiliary: u32;
+}
 
 @repr(C)
 pub struct DriverHandle {
@@ -68,6 +94,16 @@ pub struct DeviceRecord {
     pub hardware_id: u32;
     pub bus_instance: u32;
     pub child_count: u32;
+    pub resource_count: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct ResourceClaim {
+    pub handle: ResourceHandle;
+    pub owner_device: DeviceHandle;
+    pub owner_driver: DriverHandle;
+    pub request: ResourceRequest;
     pub valid: bool;
 }
 
@@ -83,7 +119,8 @@ pub fn device_invalid_record() -> DeviceRecord {
         handle: device_invalid_handle(), parent: device_invalid_handle(),
         bus: DEVICE_BUS_NONE, class_code: DEVICE_CLASS_NONE,
         state: DEVICE_STATE_EMPTY, driver_id: 0, vendor_id: 0,
-        hardware_id: 0, bus_instance: 0, child_count: 0, valid: false
+        hardware_id: 0, bus_instance: 0, child_count: 0, resource_count: 0,
+        valid: false
     };
 }
 
@@ -102,5 +139,28 @@ pub fn driver_invalid_handle() -> DriverHandle {
 @system
 pub fn driver_handle_equal(left: DriverHandle, right: DriverHandle) -> bool {
     return left.valid && right.valid && left.driver_id == right.driver_id &&
+           left.generation == right.generation;
+}
+
+@system
+pub fn resource_invalid_handle() -> ResourceHandle {
+    return ResourceHandle { resource_id: RESOURCE_ID_NONE,
+                            generation: RESOURCE_GENERATION_INVALID, valid: false };
+}
+
+@system
+pub fn resource_invalid_claim() -> ResourceClaim {
+    return ResourceClaim {
+        handle: resource_invalid_handle(), owner_device: device_invalid_handle(),
+        owner_driver: driver_invalid_handle(),
+        request: ResourceRequest { kind: RESOURCE_KIND_NONE, start: 0,
+                                   length: 0, auxiliary: 0 },
+        valid: false
+    };
+}
+
+@system
+pub fn resource_handle_equal(left: ResourceHandle, right: ResourceHandle) -> bool {
+    return left.valid && right.valid && left.resource_id == right.resource_id &&
            left.generation == right.generation;
 }

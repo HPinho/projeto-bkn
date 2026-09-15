@@ -19,13 +19,16 @@ class DriverOwnershipTests(unittest.TestCase):
         self.assertIn("if !active { device_core_release_driver(device, selected.driver_id); }", body)
         self.assertIn("if !active { return driver_invalid_handle(); }", body)
 
-    def test_remove_precedes_active_owner_release(self):
+    def test_remove_is_bracketed_by_transactional_unbind(self):
         body = DRIVERS.split("pub fn driver_unbind", 1)[1]
-        self.assertLess(body.index("let remove_ok = selected_record.descriptor.remove(device)"),
-                        body.index("device_core_unbind_active_driver"))
-        release = DEVICES.split("pub fn device_core_unbind_active_driver", 1)[1].split("pub fn device_core_detach", 1)[0]
-        self.assertIn("DEVICE_RECORDS[slot].driver_id = DRIVER_ID_NONE", release)
-        self.assertIn("DEVICE_RECORDS[slot].state = DEVICE_STATE_ATTACHED", release)
+        callback = body.index("let remove_ok = selected_record.descriptor.remove(device)")
+        self.assertLess(body.index("device_core_prepare_unbind"), callback)
+        self.assertGreater(body.index("device_core_finish_unbind"), callback)
+        finish = DEVICES.split("pub fn device_core_finish_unbind", 1)[1].split(
+            "pub fn device_core_acquire_resource", 1)[0]
+        self.assertIn("DEVICE_RECORDS[slot].driver_id = DRIVER_ID_NONE", finish)
+        self.assertIn("DEVICE_RECORDS[slot].state = DEVICE_STATE_ATTACHED", finish)
+        self.assertIn("DEVICE_RECORDS[slot].state = DEVICE_STATE_ACTIVE", finish)
 
     def test_registered_driver_cannot_disappear_while_busy_or_bound(self):
         body = DRIVERS.split("pub fn driver_unregister", 1)[1].split("pub fn driver_bind", 1)[0]

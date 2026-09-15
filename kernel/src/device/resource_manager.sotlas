@@ -1,0 +1,242 @@
+// DF-3: ownership transacional de recursos de hardware.
+// Esta camada registra claims; nao mapeia MMIO, programa IRQ ou aloca DMA.
+module kernel::device::resource_manager;
+
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::driver_registry::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const RESOURCE_MANAGER_CAPACITY: usize = 256;
+
+static mut RESOURCE_CLAIMS: [ResourceClaim; RESOURCE_MANAGER_CAPACITY] = [
+    ResourceClaim {
+        handle: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+        owner_device: DeviceHandle { device_id: 0, generation: 0, valid: false },
+        owner_driver: DriverHandle { driver_id: 0, generation: 0, valid: false },
+        request: ResourceRequest { kind: 0, start: 0, length: 0, auxiliary: 0 },
+        valid: false
+    }; RESOURCE_MANAGER_CAPACITY
+];
+static mut RESOURCE_GENERATIONS: [u32; RESOURCE_MANAGER_CAPACITY] = [0; RESOURCE_MANAGER_CAPACITY];
+static mut RESOURCE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut RESOURCE_LOCK_READY: bool = false;
+static mut RESOURCE_MANAGER_READY: bool = false;
+static mut RESOURCE_ACTIVE_COUNT: u32 = 0;
+
+@system
+fn resource_slot(resource_id: u32) -> usize {
+    if resource_id == RESOURCE_ID_NONE || resource_id > RESOURCE_MANAGER_CAPACITY as u32 {
+        return RESOURCE_MANAGER_CAPACITY;
+    }
+    return (resource_id - 1) as usize;
+}
+
+@system
+fn resource_generation_next(current: u32) -> u32 {
+    let mut next = current + 1;
+    if next == RESOURCE_GENERATION_INVALID { next = 1; }
+    return next;
+}
+
+@system
+fn resource_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !RESOURCE_LOCK_READY || !spinlock_lock(&mut RESOURCE_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn resource_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut RESOURCE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn resource_request_valid(request: ResourceRequest) -> bool {
+    if request.kind == RESOURCE_KIND_NONE || request.kind > RESOURCE_KIND_DMA ||
+       request.length == 0 || request.start + request.length < request.start {
+        return false;
+    }
+    if request.kind == RESOURCE_KIND_IRQ {
+        return request.length == 1 && request.auxiliary == 0;
+    }
+    if request.kind == RESOURCE_KIND_PCI_BAR {
+        return request.auxiliary < 6;
+    }
+    return request.auxiliary == 0;
+}
+
+@system
+fn resource_ranges_overlap(left: ResourceRequest, right: ResourceRequest) -> bool {
+    return left.start < right.start + right.length &&
+           right.start < left.start + left.length;
+}
+
+@system
+fn resource_requests_conflict(left: ResourceRequest, right: ResourceRequest) -> bool {
+    if left.kind != right.kind { return false; }
+    if left.kind == RESOURCE_KIND_PCI_BAR {
+        return left.start == right.start && left.auxiliary == right.auxiliary;
+    }
+    if left.kind == RESOURCE_KIND_IRQ { return left.start == right.start; }
+    return resource_ranges_overlap(left, right);
+}
+
+@system
+fn resource_handle_live_locked(handle: ResourceHandle) -> bool {
+    let slot = resource_slot(handle.resource_id);
+    if !handle.valid || handle.generation == RESOURCE_GENERATION_INVALID ||
+       slot >= RESOURCE_MANAGER_CAPACITY { return false; }
+    unsafe {
+        return RESOURCE_CLAIMS[slot].valid &&
+               RESOURCE_CLAIMS[slot].handle.generation == handle.generation;
+    }
+}
+
+@system
+pub fn resource_manager_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !RESOURCE_LOCK_READY {
+            if !spinlock_init(&mut RESOURCE_LOCK) { x86_irq_restore(flags); return false; }
+            RESOURCE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut RESOURCE_LOCK) { x86_irq_restore(flags); return false; }
+        if !RESOURCE_MANAGER_READY {
+            let mut slot: usize = 0;
+            while slot < RESOURCE_MANAGER_CAPACITY {
+                RESOURCE_CLAIMS[slot] = resource_invalid_claim();
+                RESOURCE_GENERATIONS[slot] = 0;
+                slot += 1;
+            }
+            RESOURCE_ACTIVE_COUNT = 0;
+            RESOURCE_MANAGER_READY = true;
+        }
+        spinlock_unlock(&mut RESOURCE_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn resource_manager_is_ready() -> bool { unsafe { return RESOURCE_MANAGER_READY; } }
+
+@system
+pub fn resource_claim(device: DeviceHandle, driver: DriverHandle,
+                      request: ResourceRequest) -> ResourceHandle {
+    if !resource_manager_is_ready() || !resource_request_valid(request) ||
+       !driver_registry_handle_live(driver) { return resource_invalid_handle(); }
+
+    let mut flags: u64 = 0;
+    if !resource_lock_irq(&mut flags) { return resource_invalid_handle(); }
+    let mut result = resource_invalid_handle();
+    unsafe {
+        let mut scan: usize = 0;
+        let mut conflict = false;
+        while scan < RESOURCE_MANAGER_CAPACITY {
+            if RESOURCE_CLAIMS[scan].valid &&
+               resource_requests_conflict(RESOURCE_CLAIMS[scan].request, request) {
+                conflict = true;
+                break;
+            }
+            scan += 1;
+        }
+        if !conflict {
+            let mut free_slot: usize = 0;
+            while free_slot < RESOURCE_MANAGER_CAPACITY {
+                if !RESOURCE_CLAIMS[free_slot].valid {
+                    if !device_core_acquire_resource(device, driver.driver_id) { break; }
+                    let generation = resource_generation_next(RESOURCE_GENERATIONS[free_slot]);
+                    RESOURCE_GENERATIONS[free_slot] = generation;
+                    result = ResourceHandle { resource_id: (free_slot + 1) as u32,
+                                              generation: generation, valid: true };
+                    RESOURCE_CLAIMS[free_slot] = ResourceClaim {
+                        handle: result, owner_device: device, owner_driver: driver,
+                        request: request, valid: true
+                    };
+                    RESOURCE_ACTIVE_COUNT += 1;
+                    break;
+                }
+                free_slot += 1;
+            }
+        }
+    }
+    resource_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn resource_snapshot(handle: ResourceHandle) -> ResourceClaim {
+    let mut flags: u64 = 0;
+    if !resource_lock_irq(&mut flags) { return resource_invalid_claim(); }
+    let mut result = resource_invalid_claim();
+    if resource_handle_live_locked(handle) {
+        unsafe { result = RESOURCE_CLAIMS[resource_slot(handle.resource_id)]; }
+    }
+    resource_unlock_irq(flags);
+    return result;
+}
+
+@system
+pub fn resource_release(handle: ResourceHandle, device: DeviceHandle,
+                        driver: DriverHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !resource_lock_irq(&mut flags) { return false; }
+    let mut released = false;
+    if resource_handle_live_locked(handle) {
+        unsafe {
+            let slot = resource_slot(handle.resource_id);
+            if device_handle_equal(RESOURCE_CLAIMS[slot].owner_device, device) &&
+               driver_handle_equal(RESOURCE_CLAIMS[slot].owner_driver, driver) &&
+               device_core_release_resource(device, driver.driver_id) {
+                RESOURCE_CLAIMS[slot] = resource_invalid_claim();
+                RESOURCE_ACTIVE_COUNT -= 1;
+                released = true;
+            }
+        }
+    }
+    resource_unlock_irq(flags);
+    return released;
+}
+
+@system
+pub fn resource_release_all(device: DeviceHandle, driver: DriverHandle) -> u32 {
+    let mut flags: u64 = 0;
+    if !resource_lock_irq(&mut flags) { return 0; }
+    let mut released: u32 = 0;
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < RESOURCE_MANAGER_CAPACITY {
+            if RESOURCE_CLAIMS[slot].valid &&
+               device_handle_equal(RESOURCE_CLAIMS[slot].owner_device, device) &&
+               driver_handle_equal(RESOURCE_CLAIMS[slot].owner_driver, driver) &&
+               device_core_release_resource(device, driver.driver_id) {
+                RESOURCE_CLAIMS[slot] = resource_invalid_claim();
+                RESOURCE_ACTIVE_COUNT -= 1;
+                released += 1;
+            }
+            slot += 1;
+        }
+    }
+    resource_unlock_irq(flags);
+    return released;
+}
+
+@system
+pub fn resource_active_count() -> u32 {
+    let mut flags: u64 = 0;
+    if !resource_lock_irq(&mut flags) { return 0; }
+    let count = unsafe { RESOURCE_ACTIVE_COUNT };
+    resource_unlock_irq(flags);
+    return count;
+}

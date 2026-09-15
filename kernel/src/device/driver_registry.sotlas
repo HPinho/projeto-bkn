@@ -191,6 +191,15 @@ pub fn driver_unregister(handle: DriverHandle) -> bool {
 }
 
 @system
+pub fn driver_registry_handle_live(handle: DriverHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !driver_lock_irq(&mut flags) { return false; }
+    let live = driver_handle_live_locked(handle);
+    driver_unlock_irq(flags);
+    return live;
+}
+
+@system
 pub fn driver_bind(device: DeviceHandle) -> DriverHandle {
     let snapshot = device_core_snapshot(device);
     if !snapshot.valid || snapshot.driver_id != DRIVER_ID_NONE ||
@@ -268,8 +277,18 @@ pub fn driver_unbind(device: DeviceHandle, driver: DriverHandle) -> bool {
     }
     driver_unlock_irq(flags);
 
+    if !device_core_prepare_unbind(device, driver.driver_id) {
+        let mut abort_flags: u64 = 0;
+        if driver_lock_irq(&mut abort_flags) {
+            unsafe { DRIVER_RECORDS[driver_slot(driver.driver_id)].operations_in_flight -= 1; }
+            driver_unlock_irq(abort_flags);
+        }
+        return false;
+    }
+
     let remove_ok = selected_record.descriptor.remove(device);
-    let released = remove_ok && device_core_unbind_active_driver(device, driver.driver_id);
+    let finished = device_core_finish_unbind(device, driver.driver_id, remove_ok);
+    let released = remove_ok && finished;
     let mut finish_flags: u64 = 0;
     if !driver_lock_irq(&mut finish_flags) { return false; }
     unsafe {
