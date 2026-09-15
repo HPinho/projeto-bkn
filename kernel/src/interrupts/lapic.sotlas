@@ -159,16 +159,15 @@ pub fn lapic_prepare_current_cpu_masked() -> bool {
         // APs devem operar no mesmo modo do BSP. Se INIT deixou o AP em xAPIC,
         // reabilitamos primeiro o APIC e depois fazemos a transicao xAPIC->x2APIC.
         if (apic_base & IA32_APIC_BASE_ENABLE) == 0 {
-            apic_base |= IA32_APIC_BASE_ENABLE;
+            apic_base = apic_base | IA32_APIC_BASE_ENABLE;
             x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
         }
         if (apic_base & IA32_APIC_BASE_X2APIC) == 0 {
-            apic_base |= IA32_APIC_BASE_X2APIC;
+            apic_base = apic_base | IA32_APIC_BASE_X2APIC;
             x86_write_msr(IA32_APIC_BASE_MSR, apic_base);
         }
         let verify = x86_read_msr(IA32_APIC_BASE_MSR);
-        if (verify & (IA32_APIC_BASE_ENABLE | IA32_APIC_BASE_X2APIC)) !=
-           (IA32_APIC_BASE_ENABLE | IA32_APIC_BASE_X2APIC) { return false; }
+        if (verify & (IA32_APIC_BASE_ENABLE | IA32_APIC_BASE_X2APIC)) != (IA32_APIC_BASE_ENABLE | IA32_APIC_BASE_X2APIC) { return false; }
         let version = x86_read_msr(X2APIC_MSR_VERSION) as u32;
         let raw_id = x86_read_msr(X2APIC_MSR_ID) as u32;
         if (version & 0xFF) == 0 || raw_id > 255 { return false; }
