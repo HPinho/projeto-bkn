@@ -46,8 +46,6 @@ Contrato integrado:
 
 ## 2026-09-15 — hardening pós-integração: inicialização diagnóstica independente do transporte
 
-**⏳ CANDIDATO EM VALIDAÇÃO nesta branch.**
-
 Problema residual encontrado após a integração da PR #25:
 
 `post_cutover` usa o retorno de `x86_serial_init()` para decidir se publica checkpoints iniciais. Mesmo com as escritas já tolerando ausência de UART, `x86_serial_init()` ainda retornava `false` quando COM1 não existia. Isso impedia que esses checkpoints fossem preservados no próprio boot log em RAM em hardware moderno.
@@ -72,6 +70,27 @@ Hardening adicional já incluído no candidato:
 
 Nenhuma mudança de sintaxe, semântica ou lowering em LangSotlas foi necessária.
 
+### Primeiro candidato do hardening
+
+**❌ REPROVADO pelo gate CI principal; falha de guardrail textual, sem evidência de regressão funcional.**
+
+```text
+19563a3147e1535e2d8a25b0901e53364e26723d
+```
+
+Resultado observado:
+
+- CI principal #1260 ❌ em `Run Complete Test Suite`;
+- 1913 testes executados: 1912 passaram e 1 falhou;
+- falha: `test_serial_markers_are_not_boot_prerequisites_without_com1`;
+- causa: o teste exigia literalmente a antiga condição negativa `status == 0xFF || (status & 0x20) == 0`, enquanto a nova implementação usa a forma positiva equivalente para marcar o transporte como disponível e mantém o boot log ativo sem UART.
+
+Correção-only aplicada no candidato seguinte:
+
+- o guardrail agora valida a semântica: probe do Line Status Register, publicação de `X86_SERIAL_READY` somente para UART utilizável, `return true` da infraestrutura diagnóstica e ausência de retorno fatal por COM1 inexistente;
+- nenhum comportamento funcional do kernel foi revertido;
+- nenhum novo recurso foi empilhado sobre o gate vermelho.
+
 ### Próximo gate
 
-Este candidato só deve entrar na `main` se **CI principal + SMP + NVMe-only + HID Dual-device** fecharem verdes no mesmo SHA. Em seguida, o próximo boot físico deve verificar o avanço além de `E-PROC-002`, preservando no framebuffer/boot log os próximos checkpoints mesmo em máquina sem COM1 legado.
+O candidato corrigido só deve entrar na `main` se **CI principal + SMP + NVMe-only + HID Dual-device** fecharem verdes no mesmo SHA. Em seguida, o próximo boot físico deve verificar o avanço além de `E-PROC-002`, preservando no framebuffer/boot log os próximos checkpoints mesmo em máquina sem COM1 legado.
