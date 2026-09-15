@@ -1,15 +1,19 @@
-// DF-3.1: prova runtime puramente logica do lifecycle Device/Driver/Resource.
-// Nao toca PCI, MMIO, portas, IRQ controller ou allocator DMA.
+// DF-4a: prova runtime puramente logica do lifecycle Device/Driver/Resource/IRQ.
+// Nao toca PCI, MMIO real, portas, IOAPIC/MSI/MSI-X ou allocator DMA.
 module kernel::device::foundation_self_test;
 
 import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::driver_registry::*;
 import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
 import kernel::arch::x86_64::serial::*;
 
 static mut DF_SELF_TEST_DRIVER: DriverHandle = DriverHandle {
     driver_id: 0, generation: 0, valid: false
+};
+static mut DF_SELF_TEST_DEVICE: DeviceHandle = DeviceHandle {
+    device_id: 0, generation: 0, valid: false
 };
 static mut DF_SELF_TEST_MMIO: ResourceHandle = ResourceHandle {
     resource_id: 0, generation: 0, valid: false
@@ -17,7 +21,26 @@ static mut DF_SELF_TEST_MMIO: ResourceHandle = ResourceHandle {
 static mut DF_SELF_TEST_IRQ: ResourceHandle = ResourceHandle {
     resource_id: 0, generation: 0, valid: false
 };
+static mut DF_SELF_TEST_GENERIC_IRQ: IrqHandle = IrqHandle {
+    irq_id: 0, generation: 0, valid: false
+};
+static mut DF_SELF_TEST_IRQ_DISPATCH_COUNT: u32 = 0;
+static mut DF_SELF_TEST_IRQ_LAST_VECTOR: u16 = 0;
 static mut DF_SELF_TEST_COMPLETE: bool = false;
+
+@system
+fn df_self_test_irq_handler(device: DeviceHandle, vector: u16) -> bool {
+    let expected = unsafe { DF_SELF_TEST_DEVICE };
+    if !device_handle_equal(device, expected) ||
+       vector < IRQ_DYNAMIC_VECTOR_FIRST || vector > IRQ_DYNAMIC_VECTOR_LAST {
+        return false;
+    }
+    unsafe {
+        DF_SELF_TEST_IRQ_DISPATCH_COUNT += 1;
+        DF_SELF_TEST_IRQ_LAST_VECTOR = vector;
+    }
+    return true;
+}
 
 @system
 fn df_self_test_probe(device: DeviceHandle) -> bool {
@@ -29,6 +52,7 @@ fn df_self_test_probe(device: DeviceHandle) -> bool {
     if !mmio.valid { return false; }
     unsafe { DF_SELF_TEST_MMIO = mmio; }
 
+    // Claim IRQ cru fora da janela dinamica para manter a prova DF-3 intacta.
     let irq = resource_claim(device, driver, ResourceRequest {
         kind: RESOURCE_KIND_IRQ, start: 0xF1, length: 1, auxiliary: 0
     });
@@ -38,14 +62,35 @@ fn df_self_test_probe(device: DeviceHandle) -> bool {
         return false;
     }
     unsafe { DF_SELF_TEST_IRQ = irq; }
+
+    // DF-4a precisa funcionar durante BINDING, antes do commit para ACTIVE.
+    let generic_irq = irq_registry_register(device, driver, IrqDescriptor {
+        handler: df_self_test_irq_handler
+    });
+    if !generic_irq.valid {
+        resource_release(irq, device, driver);
+        resource_release(mmio, device, driver);
+        unsafe {
+            DF_SELF_TEST_IRQ = resource_invalid_handle();
+            DF_SELF_TEST_MMIO = resource_invalid_handle();
+        }
+        return false;
+    }
+    unsafe { DF_SELF_TEST_GENERIC_IRQ = generic_irq; }
     return true;
 }
 
 @system
 fn df_self_test_remove(device: DeviceHandle) -> bool {
     let driver = unsafe { DF_SELF_TEST_DRIVER };
+    let generic_irq = unsafe { DF_SELF_TEST_GENERIC_IRQ };
     let irq = unsafe { DF_SELF_TEST_IRQ };
     let mmio = unsafe { DF_SELF_TEST_MMIO };
+
+    // Registro generico sai primeiro; assim sua ResourceHandle IRQ continua
+    // valida ate o registry encerrar completamente o ownership logico.
+    if !irq_registry_unregister(generic_irq, device, driver) { return false; }
+    unsafe { DF_SELF_TEST_GENERIC_IRQ = irq_invalid_handle(); }
     if !resource_release(irq, device, driver) { return false; }
     unsafe { DF_SELF_TEST_IRQ = resource_invalid_handle(); }
     if !resource_release(mmio, device, driver) { return false; }
@@ -64,7 +109,8 @@ static DF_SELF_TEST_DESCRIPTOR: DriverDescriptor = DriverDescriptor {
 @system
 pub fn device_foundation_runtime_self_test() -> bool {
     unsafe { if DF_SELF_TEST_COMPLETE { return true; } }
-    if !device_core_init() || !driver_registry_init() || !resource_manager_init() {
+    if !device_core_init() || !driver_registry_init() || !resource_manager_init() ||
+       !irq_registry_init() {
         return false;
     }
 
@@ -73,20 +119,41 @@ pub fn device_foundation_runtime_self_test() -> bool {
     if !first.valid { return false; }
     let driver = driver_register(DF_SELF_TEST_DESCRIPTOR);
     if !driver.valid { return false; }
-    unsafe { DF_SELF_TEST_DRIVER = driver; }
+    unsafe {
+        DF_SELF_TEST_DRIVER = driver;
+        DF_SELF_TEST_DEVICE = first;
+        DF_SELF_TEST_IRQ_DISPATCH_COUNT = 0;
+        DF_SELF_TEST_IRQ_LAST_VECTOR = 0;
+    }
 
     let bound = driver_bind(first);
     if !driver_handle_equal(bound, driver) { return false; }
     let active = device_core_snapshot(first);
     if !active.valid || active.state != DEVICE_STATE_ACTIVE ||
-       !driver_handle_equal(active.driver, driver) || active.resource_count != 2 {
+       !driver_handle_equal(active.driver, driver) || active.resource_count != 3 ||
+       resource_active_count() != 3 || irq_registry_active_count() != 1 {
         return false;
     }
+
+    let generic_irq = unsafe { DF_SELF_TEST_GENERIC_IRQ };
+    let vector = irq_registry_vector(generic_irq);
+    if vector < IRQ_DYNAMIC_VECTOR_FIRST || vector > IRQ_DYNAMIC_VECTOR_LAST {
+        return false;
+    }
+    if !irq_registry_dispatch(vector) { return false; }
+    unsafe {
+        if DF_SELF_TEST_IRQ_DISPATCH_COUNT != 1 ||
+           DF_SELF_TEST_IRQ_LAST_VECTOR != vector { return false; }
+    }
+
     if !driver_unbind(first, driver) { return false; }
     let attached = device_core_snapshot(first);
     if !attached.valid || attached.state != DEVICE_STATE_ATTACHED ||
        attached.driver.valid || attached.resource_count != 0 ||
-       resource_active_count() != 0 { return false; }
+       resource_active_count() != 0 || irq_registry_active_count() != 0 {
+        return false;
+    }
+    if irq_registry_dispatch(vector) { return false; }
     if !device_core_detach(first) || !driver_unregister(driver) { return false; }
 
     let second = device_core_attach(device_invalid_handle(), DEVICE_BUS_VIRTUAL,
@@ -97,6 +164,12 @@ pub fn device_foundation_runtime_self_test() -> bool {
 
     unsafe {
         DF_SELF_TEST_DRIVER = driver_invalid_handle();
+        DF_SELF_TEST_DEVICE = device_invalid_handle();
+        DF_SELF_TEST_MMIO = resource_invalid_handle();
+        DF_SELF_TEST_IRQ = resource_invalid_handle();
+        DF_SELF_TEST_GENERIC_IRQ = irq_invalid_handle();
+        DF_SELF_TEST_IRQ_DISPATCH_COUNT = 0;
+        DF_SELF_TEST_IRQ_LAST_VECTOR = 0;
         DF_SELF_TEST_COMPLETE = true;
     }
     return true;

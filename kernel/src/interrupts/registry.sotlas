@@ -1,0 +1,425 @@
+// DF-4a: registro generico e generation-safe de IRQs dinamicas.
+// Este microcorte e deliberadamente passivo: nao instala gates na IDT, nao
+// programa IOAPIC/MSI/MSI-X e nao envia EOI. O dispatcher x86 bootstrap
+// continua autoritativo ate o corte de integracao DF-4b.
+//
+// Lock order: IRQ_REGISTRY_LOCK nunca e mantido ao adquirir RESOURCE_LOCK ou
+// DEVICE_CORE_LOCK. Callbacks de driver sempre executam fora do lock.
+module kernel::interrupts::registry;
+
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const IRQ_REGISTRY_CAPACITY: usize = 160;
+pub const IRQ_REGISTRY_ID_NONE: u32 = 0;
+pub const IRQ_REGISTRY_GENERATION_INVALID: u32 = 0;
+
+// 0x40..0x46 pertencem ao bootstrap atual; 0xFF e spurious. Reservamos ainda
+// 0x47..0x4F para crescimento interno e 0xF0..0xFE para vetores arquiteturais.
+pub const IRQ_DYNAMIC_VECTOR_FIRST: u16 = 0x50;
+pub const IRQ_DYNAMIC_VECTOR_LAST: u16 = 0xEF;
+
+pub const IRQ_REGISTRY_STATE_EMPTY: u8 = 0;
+pub const IRQ_REGISTRY_STATE_ACTIVE: u8 = 1;
+pub const IRQ_REGISTRY_STATE_REMOVING: u8 = 2;
+
+@repr(C)
+pub struct IrqHandle {
+    pub irq_id: u32;
+    pub generation: u32;
+    pub valid: bool;
+}
+
+// O callback fica encapsulado em um descriptor de primeira classe. Alem de
+// manter a ABI explicita, isso evita expor um tipo fn(..., ...) diretamente na
+// lista de parametros da interface publica modular.
+@repr(C)
+pub struct IrqDescriptor {
+    pub handler: fn(DeviceHandle, u16) -> bool;
+}
+
+@repr(C)
+pub struct IrqRegistration {
+    pub handle: IrqHandle;
+    pub owner_device: DeviceHandle;
+    pub owner_driver: DriverHandle;
+    pub resource: ResourceHandle;
+    pub vector: u16;
+    pub handler: fn(DeviceHandle, u16) -> bool;
+    pub state: u8;
+    pub operations_in_flight: u32;
+    pub valid: bool;
+}
+
+@system
+fn irq_reject_handler(device: DeviceHandle, vector: u16) -> bool {
+    return false;
+}
+
+static mut IRQ_RECORDS: [IrqRegistration; IRQ_REGISTRY_CAPACITY] = [
+    IrqRegistration {
+        handle: IrqHandle { irq_id: 0, generation: 0, valid: false },
+        owner_device: DeviceHandle { device_id: 0, generation: 0, valid: false },
+        owner_driver: DriverHandle { driver_id: 0, generation: 0, valid: false },
+        resource: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+        vector: 0,
+        handler: irq_reject_handler,
+        state: IRQ_REGISTRY_STATE_EMPTY,
+        operations_in_flight: 0,
+        valid: false
+    }; IRQ_REGISTRY_CAPACITY
+];
+static mut IRQ_GENERATIONS: [u32; IRQ_REGISTRY_CAPACITY] = [0; IRQ_REGISTRY_CAPACITY];
+static mut IRQ_REGISTRY_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut IRQ_REGISTRY_LOCK_READY: bool = false;
+static mut IRQ_REGISTRY_READY: bool = false;
+static mut IRQ_REGISTRY_ACTIVE_COUNT: u32 = 0;
+
+@system
+pub fn irq_invalid_handle() -> IrqHandle {
+    return IrqHandle {
+        irq_id: IRQ_REGISTRY_ID_NONE,
+        generation: IRQ_REGISTRY_GENERATION_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn irq_invalid_registration() -> IrqRegistration {
+    return IrqRegistration {
+        handle: irq_invalid_handle(),
+        owner_device: device_invalid_handle(),
+        owner_driver: driver_invalid_handle(),
+        resource: resource_invalid_handle(),
+        vector: 0,
+        handler: irq_reject_handler,
+        state: IRQ_REGISTRY_STATE_EMPTY,
+        operations_in_flight: 0,
+        valid: false
+    };
+}
+
+@system
+fn irq_slot(irq_id: u32) -> usize {
+    if irq_id == IRQ_REGISTRY_ID_NONE || irq_id > IRQ_REGISTRY_CAPACITY as u32 {
+        return IRQ_REGISTRY_CAPACITY;
+    }
+    return (irq_id - 1) as usize;
+}
+
+@system
+fn irq_generation_next(current: u32) -> u32 {
+    let mut next = current + 1;
+    if next == IRQ_REGISTRY_GENERATION_INVALID { next = 1; }
+    return next;
+}
+
+@system
+fn irq_vector_is_dynamic(vector: u16) -> bool {
+    return vector >= IRQ_DYNAMIC_VECTOR_FIRST && vector <= IRQ_DYNAMIC_VECTOR_LAST;
+}
+
+@system
+fn irq_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !IRQ_REGISTRY_LOCK_READY || !spinlock_lock(&mut IRQ_REGISTRY_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn irq_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut IRQ_REGISTRY_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn irq_handle_live_locked(handle: IrqHandle) -> bool {
+    let slot = irq_slot(handle.irq_id);
+    if !handle.valid || handle.generation == IRQ_REGISTRY_GENERATION_INVALID ||
+       slot >= IRQ_REGISTRY_CAPACITY { return false; }
+    unsafe {
+        return IRQ_RECORDS[slot].valid &&
+               IRQ_RECORDS[slot].handle.generation == handle.generation &&
+               IRQ_RECORDS[slot].state != IRQ_REGISTRY_STATE_EMPTY;
+    }
+}
+
+@system
+fn irq_owner_can_register(device: DeviceHandle, driver: DriverHandle) -> bool {
+    if !device.valid || !driver.valid { return false; }
+    let snapshot = device_core_snapshot(device);
+    if !snapshot.valid || !driver_handle_equal(snapshot.driver, driver) { return false; }
+    return snapshot.state == DEVICE_STATE_BINDING || snapshot.state == DEVICE_STATE_ACTIVE;
+}
+
+@system
+pub fn irq_registry_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !IRQ_REGISTRY_LOCK_READY {
+            if !spinlock_init(&mut IRQ_REGISTRY_LOCK) {
+                x86_irq_restore(flags); return false;
+            }
+            IRQ_REGISTRY_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut IRQ_REGISTRY_LOCK) {
+            x86_irq_restore(flags); return false;
+        }
+        if !IRQ_REGISTRY_READY {
+            let mut slot: usize = 0;
+            while slot < IRQ_REGISTRY_CAPACITY {
+                IRQ_RECORDS[slot] = irq_invalid_registration();
+                IRQ_GENERATIONS[slot] = 0;
+                slot += 1;
+            }
+            IRQ_REGISTRY_ACTIVE_COUNT = 0;
+            IRQ_REGISTRY_READY = true;
+        }
+        spinlock_unlock(&mut IRQ_REGISTRY_LOCK);
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn irq_registry_is_ready() -> bool { unsafe { return IRQ_REGISTRY_READY; } }
+
+@system
+pub fn irq_registry_register(device: DeviceHandle, driver: DriverHandle,
+                             descriptor: IrqDescriptor) -> IrqHandle {
+    if !irq_registry_is_ready() || !resource_manager_is_ready() ||
+       !irq_owner_can_register(device, driver) { return irq_invalid_handle(); }
+
+    let mut vector: u16 = IRQ_DYNAMIC_VECTOR_FIRST;
+    while vector <= IRQ_DYNAMIC_VECTOR_LAST {
+        let resource = resource_claim(device, driver, ResourceRequest {
+            kind: RESOURCE_KIND_IRQ,
+            start: vector as u64,
+            length: 1,
+            auxiliary: 0
+        });
+        if resource.valid {
+            // Fecha a principal janela TOCTOU com o lifecycle universal. Se um
+            // unbind comecou depois do claim, nao publicamos um novo handler.
+            if !irq_owner_can_register(device, driver) {
+                resource_release(resource, device, driver);
+                return irq_invalid_handle();
+            }
+
+            let mut flags: u64 = 0;
+            if !irq_lock_irq(&mut flags) {
+                resource_release(resource, device, driver);
+                return irq_invalid_handle();
+            }
+
+            let mut result = irq_invalid_handle();
+            let mut free_slot: usize = IRQ_REGISTRY_CAPACITY;
+            let mut duplicate = false;
+            unsafe {
+                let mut scan: usize = 0;
+                while scan < IRQ_REGISTRY_CAPACITY {
+                    if IRQ_RECORDS[scan].valid && IRQ_RECORDS[scan].vector == vector {
+                        duplicate = true;
+                        break;
+                    }
+                    if free_slot == IRQ_REGISTRY_CAPACITY && !IRQ_RECORDS[scan].valid {
+                        free_slot = scan;
+                    }
+                    scan += 1;
+                }
+                if !duplicate && free_slot < IRQ_REGISTRY_CAPACITY {
+                    let generation = irq_generation_next(IRQ_GENERATIONS[free_slot]);
+                    IRQ_GENERATIONS[free_slot] = generation;
+                    result = IrqHandle {
+                        irq_id: (free_slot + 1) as u32,
+                        generation: generation,
+                        valid: true
+                    };
+                    IRQ_RECORDS[free_slot] = IrqRegistration {
+                        handle: result,
+                        owner_device: device,
+                        owner_driver: driver,
+                        resource: resource,
+                        vector: vector,
+                        handler: descriptor.handler,
+                        state: IRQ_REGISTRY_STATE_ACTIVE,
+                        operations_in_flight: 0,
+                        valid: true
+                    };
+                    IRQ_REGISTRY_ACTIVE_COUNT += 1;
+                }
+            }
+            irq_unlock_irq(flags);
+
+            if result.valid {
+                // Se o owner entrou em UNBINDING exatamente durante a
+                // publicacao, removemos imediatamente e falhamos fechado.
+                if !irq_owner_can_register(device, driver) {
+                    irq_registry_unregister(result, device, driver);
+                    return irq_invalid_handle();
+                }
+                return result;
+            }
+
+            resource_release(resource, device, driver);
+            return irq_invalid_handle();
+        }
+        vector = vector + 1;
+    }
+    return irq_invalid_handle();
+}
+
+@system
+pub fn irq_registry_vector(handle: IrqHandle) -> u16 {
+    let mut flags: u64 = 0;
+    if !irq_lock_irq(&mut flags) { return 0; }
+    let mut vector: u16 = 0;
+    if irq_handle_live_locked(handle) {
+        unsafe {
+            let slot = irq_slot(handle.irq_id);
+            if IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_ACTIVE {
+                vector = IRQ_RECORDS[slot].vector;
+            }
+        }
+    }
+    irq_unlock_irq(flags);
+    return vector;
+}
+
+@system
+pub fn irq_registry_unregister(handle: IrqHandle, device: DeviceHandle,
+                               driver: DriverHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !irq_lock_irq(&mut flags) { return false; }
+    let mut resource = resource_invalid_handle();
+    let mut prepared = false;
+    if irq_handle_live_locked(handle) {
+        unsafe {
+            let slot = irq_slot(handle.irq_id);
+            if IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_ACTIVE &&
+               IRQ_RECORDS[slot].operations_in_flight == 0 &&
+               device_handle_equal(IRQ_RECORDS[slot].owner_device, device) &&
+               driver_handle_equal(IRQ_RECORDS[slot].owner_driver, driver) {
+                IRQ_RECORDS[slot].state = IRQ_REGISTRY_STATE_REMOVING;
+                resource = IRQ_RECORDS[slot].resource;
+                prepared = true;
+            }
+        }
+    }
+    irq_unlock_irq(flags);
+    if !prepared { return false; }
+
+    // RESOURCE_LOCK/DEVICE_CORE_LOCK sao adquiridos sem IRQ_REGISTRY_LOCK.
+    let released = resource_release(resource, device, driver);
+
+    let mut finish_flags: u64 = 0;
+    if !irq_lock_irq(&mut finish_flags) { return false; }
+    let mut finished = false;
+    if irq_handle_live_locked(handle) {
+        unsafe {
+            let slot = irq_slot(handle.irq_id);
+            if IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_REMOVING &&
+               device_handle_equal(IRQ_RECORDS[slot].owner_device, device) &&
+               driver_handle_equal(IRQ_RECORDS[slot].owner_driver, driver) {
+                if released {
+                    IRQ_RECORDS[slot] = irq_invalid_registration();
+                    IRQ_REGISTRY_ACTIVE_COUNT -= 1;
+                    finished = true;
+                } else {
+                    IRQ_RECORDS[slot].state = IRQ_REGISTRY_STATE_ACTIVE;
+                }
+            }
+        }
+    }
+    irq_unlock_irq(finish_flags);
+    return finished;
+}
+
+@system
+pub fn irq_registry_release_all(device: DeviceHandle, driver: DriverHandle) -> u32 {
+    if !irq_registry_is_ready() { return 0; }
+    let mut released: u32 = 0;
+    let mut slot: usize = 0;
+    while slot < IRQ_REGISTRY_CAPACITY {
+        let mut flags: u64 = 0;
+        if !irq_lock_irq(&mut flags) { return released; }
+        let mut candidate = irq_invalid_handle();
+        unsafe {
+            if IRQ_RECORDS[slot].valid &&
+               IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_ACTIVE &&
+               IRQ_RECORDS[slot].operations_in_flight == 0 &&
+               device_handle_equal(IRQ_RECORDS[slot].owner_device, device) &&
+               driver_handle_equal(IRQ_RECORDS[slot].owner_driver, driver) {
+                candidate = IRQ_RECORDS[slot].handle;
+            }
+        }
+        irq_unlock_irq(flags);
+        if candidate.valid && irq_registry_unregister(candidate, device, driver) {
+            released += 1;
+        }
+        slot += 1;
+    }
+    return released;
+}
+
+@system
+pub fn irq_registry_dispatch(vector: u16) -> bool {
+    if !irq_registry_is_ready() || !irq_vector_is_dynamic(vector) { return false; }
+    let mut flags: u64 = 0;
+    if !irq_lock_irq(&mut flags) { return false; }
+    let mut selected = irq_invalid_registration();
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < IRQ_REGISTRY_CAPACITY {
+            if IRQ_RECORDS[slot].valid &&
+               IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_ACTIVE &&
+               IRQ_RECORDS[slot].vector == vector &&
+               IRQ_RECORDS[slot].operations_in_flight != 0xFFFFFFFF {
+                IRQ_RECORDS[slot].operations_in_flight += 1;
+                selected = IRQ_RECORDS[slot];
+                break;
+            }
+            slot += 1;
+        }
+    }
+    irq_unlock_irq(flags);
+    if !selected.valid { return false; }
+
+    // Nenhum lock de registry fica ativo durante callback de driver.
+    let handled = selected.handler(selected.owner_device, vector);
+
+    let mut finish_flags: u64 = 0;
+    if !irq_lock_irq(&mut finish_flags) { return false; }
+    let mut completed = false;
+    if irq_handle_live_locked(selected.handle) {
+        unsafe {
+            let slot = irq_slot(selected.handle.irq_id);
+            if IRQ_RECORDS[slot].operations_in_flight > 0 {
+                IRQ_RECORDS[slot].operations_in_flight -= 1;
+                completed = true;
+            }
+        }
+    }
+    irq_unlock_irq(finish_flags);
+    return handled && completed;
+}
+
+@system
+pub fn irq_registry_active_count() -> u32 {
+    let mut flags: u64 = 0;
+    if !irq_lock_irq(&mut flags) { return 0; }
+    let count = unsafe { IRQ_REGISTRY_ACTIVE_COUNT };
+    irq_unlock_irq(flags);
+    return count;
+}
