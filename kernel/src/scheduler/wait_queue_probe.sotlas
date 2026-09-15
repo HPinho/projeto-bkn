@@ -35,7 +35,6 @@ fn wait_probe_write_resume_marker_once() -> void {
         if WAIT_RESUME_MARKED { return; }
         WAIT_RESUME_MARKED = true;
     }
-    if !x86_serial_is_ready() { return; }
     let marker: [u8; 18] = [
         66, 65, 75, 69, 78, 58, 87, 65, 73,
         84, 95, 82, 69, 83, 85, 77, 69, 10
