@@ -302,24 +302,28 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
         }
         baken_early_boot_fail("E-AML-001\0".as_ptr(), "AML TABLE CATALOG\0".as_ptr());
     }
-    if !aml_tables_emit_ready_marker() { baken_early_boot_fail("E-AML-MARKER\0".as_ptr(), "AML TABLE SERIAL MARKER\0".as_ptr()); }
-    if !aml_decoder_self_test() || !aml_decoder_emit_ready_marker() { baken_early_boot_fail("E-AML-002\0".as_ptr(), "AML DECODER\0".as_ptr()); }
-    if !aml_namespace_foundation_init() || !aml_namespace_emit_ready_marker() { baken_early_boot_fail("E-AML-003\0".as_ptr(), "AML NAMESPACE\0".as_ptr()); }
+    if !aml_tables_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-AML-MARKER\0".as_ptr(), "AML TABLE SERIAL MARKER\0".as_ptr()); }
+    if !aml_decoder_self_test() { baken_early_boot_fail("E-AML-002\0".as_ptr(), "AML DECODER\0".as_ptr()); }
+    if !aml_decoder_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-AML-DECODER-MARKER\0".as_ptr(), "AML DECODER SERIAL MARKER\0".as_ptr()); }
+    if !aml_namespace_foundation_init() { baken_early_boot_fail("E-AML-003\0".as_ptr(), "AML NAMESPACE\0".as_ptr()); }
+    if !aml_namespace_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-AML-NAMESPACE-MARKER\0".as_ptr(), "AML NAMESPACE SERIAL MARKER\0".as_ptr()); }
     if !aml_loader_init() {
         aml_loader_emit_failure_markers();
         baken_early_boot_fail("E-AML-004\0".as_ptr(), "AML LOADER\0".as_ptr());
     }
-    if !aml_loader_emit_ready_marker() { baken_early_boot_fail("E-AML-005\0".as_ptr(), "AML LOADER MARKER\0".as_ptr()); }
+    if !aml_loader_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-AML-005\0".as_ptr(), "AML LOADER MARKER\0".as_ptr()); }
     if !aml_discovery_init() {
         aml_discovery_emit_failure_markers();
         baken_early_boot_fail("E-AML-006\0".as_ptr(), "AML DISCOVERY\0".as_ptr());
     }
-    if !aml_discovery_emit_ready_marker() { baken_early_boot_fail("E-AML-007\0".as_ptr(), "AML DISCOVERY MARKER\0".as_ptr()); }
+    if !aml_discovery_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-AML-007\0".as_ptr(), "AML DISCOVERY MARKER\0".as_ptr()); }
 
     // Consolida ACPI/APIC/PCI antes de liberar APs ou inicializar serviços.
     baken_early_boot_stage("PCI PLATFORM INVENTORY\0".as_ptr());
-    if !platform_inventory_init() || !platform_inventory_emit_ready_marker() { baken_early_boot_fail("E-PLAT-001\0".as_ptr(), "PCI PLATFORM INVENTORY\0".as_ptr()); }
-    if !platform_device_catalog_init() || !platform_device_catalog_emit_ready_marker() { baken_early_boot_fail("E-PLAT-002\0".as_ptr(), "DEVICE CATALOG\0".as_ptr()); }
+    if !platform_inventory_init() { baken_early_boot_fail("E-PLAT-001\0".as_ptr(), "PCI PLATFORM INVENTORY\0".as_ptr()); }
+    if !platform_inventory_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-PLAT-MARKER\0".as_ptr(), "PLATFORM SERIAL MARKER\0".as_ptr()); }
+    if !platform_device_catalog_init() { baken_early_boot_fail("E-PLAT-002\0".as_ptr(), "DEVICE CATALOG\0".as_ptr()); }
+    if !platform_device_catalog_emit_ready_marker() && x86_serial_is_ready() { baken_early_boot_fail("E-CATALOG-MARKER\0".as_ptr(), "DEVICE CATALOG SERIAL MARKER\0".as_ptr()); }
     // AUDIO-0: descoberta PCI read-only. Ausência de HDA ou BAR inválido não
     // impede o boot; nenhum controller é habilitado antes do backend MMIO/DMA.
     hda_discover_pci();

@@ -33,7 +33,9 @@ pub fn x86_serial_init() -> bool {
 
     // Um UART ausente costuma retornar 0xFF. Não tratamos isso como COM1 real.
     let status = __inb(X86_SERIAL_COM1 + 5);
-    if status == 0xFF { return false; }
+    // Bridges LPC modernas podem retornar 0x00 sem um UART funcional.
+    // THR-empty Ã© a condiÃ§Ã£o mÃ­nima antes de usar COM1 para CI.
+    if status == 0xFF || (status & 0x20) == 0 { return false; }
 
     unsafe { X86_SERIAL_READY = true; }
     return true;
@@ -54,6 +56,7 @@ fn x86_serial_write_byte_unlocked(value: u8) -> bool {
         }
         spins += 1;
     }
+    unsafe { X86_SERIAL_READY = false; }
     return false;
 }
 

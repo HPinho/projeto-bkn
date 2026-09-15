@@ -52,7 +52,17 @@ class EarlyBootDiagnosticsContract(unittest.TestCase):
                       "E-AML-SSDT", "E-AML-MARKER", "VALID SSDTS"):
             self.assertIn(token, self.runtime)
         self.assertLess(self.runtime.index("if !aml_tables_init()"),
-                        self.runtime.index("if !aml_tables_emit_ready_marker()"))
+                        self.runtime.index("if !aml_tables_emit_ready_marker() && x86_serial_is_ready()"))
+
+    def test_serial_markers_are_not_boot_prerequisites_without_com1(self):
+        serial = (ROOT / "kernel/src/arch/x86_64/serial.sotlas").read_text(encoding="utf-8")
+        self.assertIn("status == 0xFF || (status & 0x20) == 0", serial)
+        for marker in ("aml_tables_emit_ready_marker", "aml_decoder_emit_ready_marker",
+                       "aml_namespace_emit_ready_marker", "aml_loader_emit_ready_marker",
+                       "aml_discovery_emit_ready_marker", "platform_inventory_emit_ready_marker",
+                       "platform_device_catalog_emit_ready_marker"):
+            self.assertIn(f"if !{marker}() && x86_serial_is_ready()", self.runtime)
+        self.assertIn("X86_SERIAL_READY = false", serial)
 
 
 if __name__ == "__main__":
