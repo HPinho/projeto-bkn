@@ -43,6 +43,17 @@ class EarlyBootDiagnosticsContract(unittest.TestCase):
             self.assertIn(token, kernel)
         self.assertIn("Photograph this screen and report the code", self.runtime)
 
+    def test_aml_catalog_failures_identify_dsdt_ssdt_limit_and_serial(self):
+        catalog = (ROOT / "kernel/src/acpi/aml_tables.sotlas").read_text(encoding="utf-8")
+        for token in ("AML_TABLES_FAILURE_STAGE = 2", "AML_TABLES_FAILURE_STAGE = 3",
+                      "AML_TABLES_FAILURE_STAGE = 4", "AML_TABLES_OBSERVED_SSDTS = count"):
+            self.assertIn(token, catalog)
+        for token in ("E-AML-ACPI", "E-AML-DSDT", "E-AML-SSDT-LIMIT",
+                      "E-AML-SSDT", "E-AML-MARKER", "VALID SSDTS"):
+            self.assertIn(token, self.runtime)
+        self.assertLess(self.runtime.index("if !aml_tables_init()"),
+                        self.runtime.index("if !aml_tables_emit_ready_marker()"))
+
 
 if __name__ == "__main__":
     unittest.main()

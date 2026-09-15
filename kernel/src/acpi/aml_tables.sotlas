@@ -18,6 +18,8 @@ static mut AML_SSDTS: [*const u8; AML_MAX_SSDT_COUNT] = [
 ];
 static mut AML_SSDT_COUNT: usize = 0;
 static mut AML_TABLES_READY: bool = false;
+static mut AML_TABLES_FAILURE_STAGE: u8 = 0;
+static mut AML_TABLES_OBSERVED_SSDTS: usize = 0;
 
 @system
 fn aml_tables_reset() -> void {
@@ -36,16 +38,20 @@ fn aml_tables_reset() -> void {
 @system
 pub fn aml_tables_init() -> bool {
     aml_tables_reset();
+    unsafe { AML_TABLES_FAILURE_STAGE = 1; AML_TABLES_OBSERVED_SSDTS = 0; }
     if !acpi_is_ready() || !acpi_uses_post_cutover_direct_map() { return false; }
+    unsafe { AML_TABLES_FAILURE_STAGE = 2; }
     let dsdt = fadt_dsdt_table();
     if dsdt == (null as *const u8) || acpi_table_length(dsdt) <= ACPI_SDT_HEADER_LENGTH {
         return false;
     }
     let count = acpi_table_count(ACPI_SIG_SSDT);
+    unsafe { AML_TABLES_OBSERVED_SSDTS = count; AML_TABLES_FAILURE_STAGE = 3; }
     if count > AML_MAX_SSDT_COUNT { return false; }
     let mut index: usize = 0;
     unsafe { AML_DSDT = dsdt; }
     while index < count {
+        unsafe { AML_TABLES_FAILURE_STAGE = 4; }
         let ssdt = acpi_find_table_at(ACPI_SIG_SSDT, index);
         if ssdt == (null as *const u8) ||
            acpi_table_length(ssdt) <= ACPI_SDT_HEADER_LENGTH {
@@ -62,6 +68,12 @@ pub fn aml_tables_init() -> bool {
     }
     return true;
 }
+
+@system
+pub fn aml_tables_failure_stage() -> u8 { unsafe { return AML_TABLES_FAILURE_STAGE; } }
+
+@system
+pub fn aml_tables_observed_ssdt_count() -> usize { unsafe { return AML_TABLES_OBSERVED_SSDTS; } }
 
 @system
 pub fn aml_tables_is_ready() -> bool { unsafe { return AML_TABLES_READY; } }

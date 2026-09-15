@@ -48,6 +48,8 @@ import kernel::drivers::hda_controller::*;
 
 static mut NATIVE_LAST_FRAME_TSC: u64 = 0;
 static mut EARLY_BOOT_DIAGNOSTICS_READY: bool = false;
+static mut EARLY_BOOT_FAILURE_COUNT: usize = 0;
+static mut EARLY_BOOT_FAILURE_COUNT_VALID: bool = false;
 
 // Diagnóstico visual disponível imediatamente após o trampoline pós-cutover.
 // Usa somente o framebuffer GOP já mapeado e assets embutidos; não depende de
@@ -99,12 +101,31 @@ pub fn baken_early_boot_fail(code: *const u8, stage: *const u8) -> ! {
             raster_draw_text(116, 66, stage, 0x00FFFFFF);
             raster_draw_text(28, 104, "CODE: \0".as_ptr(), 0x00FB7185);
             raster_draw_text(96, 104, code, 0x00FFFFFF);
+            if EARLY_BOOT_FAILURE_COUNT_VALID {
+                let count = EARLY_BOOT_FAILURE_COUNT;
+                let mut digits: [u8; 6] = [0; 6];
+                digits[0] = ('0' as u8) + ((count / 10000) % 10) as u8;
+                digits[1] = ('0' as u8) + ((count / 1000) % 10) as u8;
+                digits[2] = ('0' as u8) + ((count / 100) % 10) as u8;
+                digits[3] = ('0' as u8) + ((count / 10) % 10) as u8;
+                digits[4] = ('0' as u8) + (count % 10) as u8;
+                raster_draw_text(28, 128, "VALID SSDTS: \0".as_ptr(), 0x00FFFFFF);
+                raster_draw_text(205, 128, digits.as_ptr(), 0x00FFFFFF);
+            }
             raster_draw_text(28, 152, "Photograph this screen and report the code.\0".as_ptr(), 0x00FFFFFF);
             raster_draw_text(28, 184, "The machine is halted safely; disk data was not changed.\0".as_ptr(), 0x00CBD5E1);
             display_swap_buffers_rect(0, 0, display_get_width(), 230);
         }
     }
     loop { x86_cpu_pause(); }
+}
+
+@system
+pub fn baken_early_boot_failure_count(count: usize) -> void {
+    unsafe {
+        EARLY_BOOT_FAILURE_COUNT = count;
+        EARLY_BOOT_FAILURE_COUNT_VALID = true;
+    }
 }
 
 @system
@@ -267,7 +288,21 @@ pub fn baken_native_kernel_run(framebuffer: *mut u32, width: u32,
 
     // Fase 2/AML: catálogo -> decoder/data -> namespace -> loader -> discovery.
     // AML-5 apenas consulta objetos estáticos; Method/OperationRegion não são executados.
-    if !aml_tables_init() || !aml_tables_emit_ready_marker() { baken_early_boot_fail("E-AML-001\0".as_ptr(), "AML TABLE CATALOG\0".as_ptr()); }
+    if !aml_tables_init() {
+        let failure = aml_tables_failure_stage();
+        if failure == 1 { baken_early_boot_fail("E-AML-ACPI\0".as_ptr(), "ACPI CATALOG PRECONDITION\0".as_ptr()); }
+        if failure == 2 { baken_early_boot_fail("E-AML-DSDT\0".as_ptr(), "FADT DSDT VALIDATION\0".as_ptr()); }
+        if failure == 3 {
+            baken_early_boot_failure_count(aml_tables_observed_ssdt_count());
+            baken_early_boot_fail("E-AML-SSDT-LIMIT\0".as_ptr(), "SSDT CATALOG CAPACITY\0".as_ptr());
+        }
+        if failure == 4 {
+            baken_early_boot_failure_count(aml_tables_observed_ssdt_count());
+            baken_early_boot_fail("E-AML-SSDT\0".as_ptr(), "SSDT ENUMERATION\0".as_ptr());
+        }
+        baken_early_boot_fail("E-AML-001\0".as_ptr(), "AML TABLE CATALOG\0".as_ptr());
+    }
+    if !aml_tables_emit_ready_marker() { baken_early_boot_fail("E-AML-MARKER\0".as_ptr(), "AML TABLE SERIAL MARKER\0".as_ptr()); }
     if !aml_decoder_self_test() || !aml_decoder_emit_ready_marker() { baken_early_boot_fail("E-AML-002\0".as_ptr(), "AML DECODER\0".as_ptr()); }
     if !aml_namespace_foundation_init() || !aml_namespace_emit_ready_marker() { baken_early_boot_fail("E-AML-003\0".as_ptr(), "AML NAMESPACE\0".as_ptr()); }
     if !aml_loader_init() {
