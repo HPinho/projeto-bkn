@@ -5,6 +5,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = {
     "scheduler_diagnostics": ROOT / "kernel/src/scheduler/diagnostics.sotlas",
+    "scheduler_smp_probe": ROOT / "kernel/src/scheduler/smp_probe.sotlas",
     "sleep": ROOT / "kernel/src/scheduler/sleep.sotlas",
     "wait_queue": ROOT / "kernel/src/scheduler/wait_queue.sotlas",
     "wait_queue_probe": ROOT / "kernel/src/scheduler/wait_queue_probe.sotlas",
