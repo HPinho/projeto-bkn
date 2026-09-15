@@ -92,8 +92,13 @@ fn xapic_ipi_write(offset: u64, value: u32) -> bool {
 pub fn xapic_ipi_current_id() -> u8 {
     if !xapic_ipi_is_ready() { return 0; }
     let raw = xapic_ipi_read(XAPIC_IPI_REG_ID);
-    if raw > 255 { return 0; }
-    if xapic_ipi_is_x2apic() { return raw as u8; }
+    if xapic_ipi_is_x2apic() {
+        if raw > 255 { return 0; }
+        return raw as u8;
+    }
+    // Em xAPIC o ID ocupa bits 31:24. Validar o valor bruto antes do shift
+    // faria qualquer AP diferente do BSP parecer APIC ID 0 e quebraria o
+    // reconhecimento do requester/handler no TLB shootdown SMP.
     return ((raw >> 24) & 0xFF) as u8;
 }
 
