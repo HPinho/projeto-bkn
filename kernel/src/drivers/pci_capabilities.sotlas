@@ -253,3 +253,183 @@ pub fn pci_extended_capability_find(segment: u16, bus: u8, slot: u8, func: u8,
 
     return pci_capability_invalid();
 }
+
+// DF-6a — modelo read-only da capability MSI convencional.
+//
+// Este corte NAO reserva vetores, NAO escreve Message Address/Data, NAO altera
+// MSI Enable/MME, NAO mascara INTx e NAO toca LAPIC/IOAPIC/IDT/EOI. Ele apenas
+// valida o layout anunciado pelo dispositivo e publica offsets seguros para os
+// proximos microcortes transacionais da Driver Foundation.
+pub const PCI_MSI_CONTROL_REL: u16 = 0x0002;
+pub const PCI_MSI_ADDRESS_LOW_REL: u16 = 0x0004;
+pub const PCI_MSI_ADDRESS_HIGH_64_REL: u16 = 0x0008;
+pub const PCI_MSI_DATA_32_REL: u16 = 0x0008;
+pub const PCI_MSI_DATA_64_REL: u16 = 0x000C;
+pub const PCI_MSI_MASK_32_REL: u16 = 0x000C;
+pub const PCI_MSI_PENDING_32_REL: u16 = 0x0010;
+pub const PCI_MSI_MASK_64_REL: u16 = 0x0010;
+pub const PCI_MSI_PENDING_64_REL: u16 = 0x0014;
+pub const PCI_MSI_OFFSET_NONE: u16 = 0xFFFF;
+
+pub const PCI_MSI_CONTROL_ENABLE: u16 = 0x0001;
+pub const PCI_MSI_CONTROL_MMC_MASK: u16 = 0x000E;
+pub const PCI_MSI_CONTROL_MME_MASK: u16 = 0x0070;
+pub const PCI_MSI_CONTROL_64BIT: u16 = 0x0080;
+pub const PCI_MSI_CONTROL_PVM: u16 = 0x0100;
+pub const PCI_MSI_MAX_VECTOR_ENCODING: u8 = 5;
+
+pub struct PciMsiCapability {
+    pub capability_offset: u16;
+    pub control: u16;
+    pub multiple_message_capable: u8;
+    pub multiple_message_enable: u8;
+    pub max_vectors: u16;
+    pub configured_vectors: u16;
+    pub enabled: bool;
+    pub address_64: bool;
+    pub per_vector_masking: bool;
+    pub message_address_low_offset: u16;
+    pub message_address_high_offset: u16;
+    pub message_data_offset: u16;
+    pub mask_bits_offset: u16;
+    pub pending_bits_offset: u16;
+    pub last_offset: u16;
+    pub valid: bool;
+}
+
+@system
+pub fn pci_msi_capability_invalid() -> PciMsiCapability {
+    return PciMsiCapability {
+        capability_offset: PCI_MSI_OFFSET_NONE,
+        control: 0,
+        multiple_message_capable: 0,
+        multiple_message_enable: 0,
+        max_vectors: 0,
+        configured_vectors: 0,
+        enabled: false,
+        address_64: false,
+        per_vector_masking: false,
+        message_address_low_offset: PCI_MSI_OFFSET_NONE,
+        message_address_high_offset: PCI_MSI_OFFSET_NONE,
+        message_data_offset: PCI_MSI_OFFSET_NONE,
+        mask_bits_offset: PCI_MSI_OFFSET_NONE,
+        pending_bits_offset: PCI_MSI_OFFSET_NONE,
+        last_offset: PCI_MSI_OFFSET_NONE,
+        valid: false
+    };
+}
+
+@system
+fn pci_msi_vector_count(encoding: u8) -> u16 {
+    if encoding == 0 { return 1; }
+    if encoding == 1 { return 2; }
+    if encoding == 2 { return 4; }
+    if encoding == 3 { return 8; }
+    if encoding == 4 { return 16; }
+    if encoding == 5 { return 32; }
+    return 0;
+}
+
+@system
+fn pci_msi_last_relative_offset(address_64: bool, per_vector_masking: bool) -> u16 {
+    if address_64 {
+        if per_vector_masking { return 0x0017; }
+        return 0x000D;
+    }
+    if per_vector_masking { return 0x0013; }
+    return 0x0009;
+}
+
+// Faz snapshot estrutural da capability MSI sem qualquer efeito colateral.
+// A capability e revalidada depois do walker para falhar fechado se o BDF
+// desaparecer/mudar entre aquisicoes do PCI_CONFIG_LOCK.
+@system
+pub fn pci_msi_capability_probe(segment: u16, bus: u8, slot: u8, func: u8) -> PciMsiCapability {
+    let capability = pci_capability_find(segment, bus, slot, func, PCI_CAP_ID_MSI);
+    if !capability.valid || capability.extended || capability.id != PCI_CAP_ID_MSI as u16 {
+        return pci_msi_capability_invalid();
+    }
+
+    let header = pci_config_read16(segment, bus, slot, func, capability.offset);
+    if header == 0xFFFF || (header & 0x00FF) as u8 != PCI_CAP_ID_MSI {
+        return pci_msi_capability_invalid();
+    }
+    let revalidated_next = ((header >> 8) & 0x00FF) as u16;
+    if revalidated_next != capability.next_offset {
+        return pci_msi_capability_invalid();
+    }
+
+    let control_offset = capability.offset + PCI_MSI_CONTROL_REL;
+    let control = pci_config_read16(segment, bus, slot, func, control_offset);
+    if control == 0xFFFF { return pci_msi_capability_invalid(); }
+
+    let mmc = ((control & PCI_MSI_CONTROL_MMC_MASK) >> 1) as u8;
+    let mme = ((control & PCI_MSI_CONTROL_MME_MASK) >> 4) as u8;
+    if mmc > PCI_MSI_MAX_VECTOR_ENCODING ||
+       mme > PCI_MSI_MAX_VECTOR_ENCODING || mme > mmc {
+        return pci_msi_capability_invalid();
+    }
+
+    let max_vectors = pci_msi_vector_count(mmc);
+    let configured_vectors = pci_msi_vector_count(mme);
+    if max_vectors == 0 || configured_vectors == 0 {
+        return pci_msi_capability_invalid();
+    }
+
+    let address_64 = (control & PCI_MSI_CONTROL_64BIT) != 0;
+    let per_vector_masking = (control & PCI_MSI_CONTROL_PVM) != 0;
+    let last_relative = pci_msi_last_relative_offset(address_64, per_vector_masking);
+    if last_relative > PCI_CONFIG_LEGACY_MAX_OFFSET ||
+       capability.offset > PCI_CONFIG_LEGACY_MAX_OFFSET - last_relative {
+        return pci_msi_capability_invalid();
+    }
+
+    let address_low = capability.offset + PCI_MSI_ADDRESS_LOW_REL;
+    let address_high = if address_64 {
+        capability.offset + PCI_MSI_ADDRESS_HIGH_64_REL
+    } else {
+        PCI_MSI_OFFSET_NONE
+    };
+    let message_data = if address_64 {
+        capability.offset + PCI_MSI_DATA_64_REL
+    } else {
+        capability.offset + PCI_MSI_DATA_32_REL
+    };
+    let mask_bits = if per_vector_masking {
+        if address_64 {
+            capability.offset + PCI_MSI_MASK_64_REL
+        } else {
+            capability.offset + PCI_MSI_MASK_32_REL
+        }
+    } else {
+        PCI_MSI_OFFSET_NONE
+    };
+    let pending_bits = if per_vector_masking {
+        if address_64 {
+            capability.offset + PCI_MSI_PENDING_64_REL
+        } else {
+            capability.offset + PCI_MSI_PENDING_32_REL
+        }
+    } else {
+        PCI_MSI_OFFSET_NONE
+    };
+
+    return PciMsiCapability {
+        capability_offset: capability.offset,
+        control: control,
+        multiple_message_capable: mmc,
+        multiple_message_enable: mme,
+        max_vectors: max_vectors,
+        configured_vectors: configured_vectors,
+        enabled: (control & PCI_MSI_CONTROL_ENABLE) != 0,
+        address_64: address_64,
+        per_vector_masking: per_vector_masking,
+        message_address_low_offset: address_low,
+        message_address_high_offset: address_high,
+        message_data_offset: message_data,
+        mask_bits_offset: mask_bits,
+        pending_bits_offset: pending_bits,
+        last_offset: capability.offset + last_relative,
+        valid: true
+    };
+}
