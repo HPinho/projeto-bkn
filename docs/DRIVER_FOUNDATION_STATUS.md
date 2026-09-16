@@ -28,19 +28,19 @@ PLANNED -> IMPLEMENTED -> VALIDATING -> CERTIFIED
 ## Baseline funcional certificada
 
 ```text
-5e03f98eb17abf2c2328b1b1dd8de37132c57665
-feat(pci): bridge devices into driver foundation
+4de09d94ab3681dd6d02da5cdec63fcade942586
+feat(pci): add read-only MSI capability model
 ```
 
 Gates desse mesmo SHA:
 
-- CI/CD + QEMU #1287: PASS
-- SMP Bring-up #390: PASS
-- NVMe-only Bare-Metal #487: PASS
-- HID Dual-device #146: PASS
-- SMP Fault Diagnostic #52: PASS
+- CI/CD + QEMU #1288: PASS
+- SMP Bring-up #391: PASS
+- NVMe-only Bare-Metal #488: PASS
+- HID Dual-device #147: PASS
+- SMP Fault Diagnostic #53: PASS
 
-Essa baseline fecha o PCI Core v2 sem MSI/MSI-X programados.
+Essa baseline preserva o PCI Core v2 e certifica o DF-6a sem programar MSI/MSI-X.
 
 ## Driver Foundation
 
@@ -59,48 +59,88 @@ DF-5  PCI Core v2                            CERTIFIED
   DF-5c bounded capability walkers           CERTIFIED
   DF-5d Device/Resource bridge               CERTIFIED
 DF-6  MSI                                    IN PROGRESS
-  DF-6a read-only MSI capability model       IMPLEMENTED / VALIDATING
-  DF-6b vector + ownership bridge            PLANNED
+  DF-6a read-only MSI capability model       CERTIFIED
+  DF-6b vector + ownership bridge            IMPLEMENTED / VALIDATING
   DF-6c transactional MSI programming        PLANNED
   DF-6d disable/teardown + runtime proof     PLANNED
 DF-7  MSI-X                                  PLANNED
 ```
 
-## DF-6a — escopo deliberadamente nao invasivo
+## DF-6a — certificado
 
-O DF-6a apenas interpreta a capability convencional MSI `0x05` sobre o walker bounded do DF-5c.
+O DF-6a interpreta a capability convencional MSI `0x05` sobre o walker bounded do DF-5c.
+
+Ele:
+
+- valida Message Control;
+- distingue layout MSI 32-bit e 64-bit;
+- identifica Per-Vector Masking;
+- valida MMC/MME e expoe 1/2/4/8/16/32 mensagens;
+- calcula offsets de Message Address/Data/Mask/Pending sem ultrapassar `0xFF`;
+- falha fechado se BDF/capability mudar entre leituras;
+- permanece estritamente read-only.
+
+## DF-6b — single-vector reservation bridge
+
+O DF-6b reutiliza o Generic IRQ Registry como unica autoridade sobre os vetores dinamicos `0x50..0xEF`.
 
 Ele pode:
 
-- validar Message Control;
-- distinguir layout MSI 32-bit e 64-bit;
-- identificar Per-Vector Masking;
-- validar MMC/MME e expor 1/2/4/8/16/32 mensagens;
-- calcular offsets de Message Address/Data/Mask/Pending sem ultrapassar `0xFF`;
-- falhar fechado se BDF/capability mudar entre leituras.
+- exigir `DeviceHandle + DriverHandle` validos e ownership PCI exato;
+- exigir capability MSI valida e ainda desabilitada;
+- reservar exatamente um `IrqHandle` via `irq_registry_register()`;
+- publicar `vector + BDF + capability_offset` em uma `PciMsiReservation`;
+- revalidar ownership e layout MSI depois do claim para fechar TOCTOU;
+- fazer rollback do `IrqHandle` se qualquer revalidacao falhar;
+- liberar reserva nao armada durante `BINDING`, `ACTIVE` ou `UNBINDING`;
+- recusar liberar o vetor se a capability MSI estiver habilitada.
 
 Ele nao pode:
 
+- chamar `resource_claim()` diretamente para escolher vetor;
+- criar tabela/allocator paralelo de MSI;
 - escrever PCI config space;
-- reservar vetor;
-- registrar handler;
 - programar Message Address ou Message Data;
-- alterar MSI Enable ou Multiple Message Enable;
+- alterar Multiple Message Enable;
+- alterar MSI Enable;
 - desabilitar INTx;
 - tocar LAPIC, IOAPIC, IDT ou EOI;
-- habilitar Memory Space ou Bus Master;
 - introduzir chamada nova no caminho de boot.
+
+## Invariante de lifecycle para MSI
+
+Reserva e armamento ficam deliberadamente separados:
+
+```text
+BINDING
+  -> detectar MSI
+  -> reservar IrqHandle
+  -> NAO habilitar MSI
+
+ACTIVE
+  -> DF-6c podera programar endereco/dado
+  -> MSI Enable somente por ultimo
+
+UNBINDING
+  -> DF-6d deve desabilitar a fonte primeiro
+  -> confirmar MSI Enable = 0
+  -> somente entao liberar IrqHandle
+```
+
+Isso impede que um dispositivo emita MSI para um vetor que ja voltou ao pool dinamico.
 
 ## Sequencia de continuacao
 
-Somente se o SHA do DF-6a fechar os gates obrigatorios:
+Somente se o SHA candidato do DF-6b fechar os gates obrigatorios:
 
-1. marcar DF-6a `CERTIFIED`;
-2. iniciar DF-6b com **single-vector MSI primeiro**;
-3. integrar o ownership ao Generic IRQ Registry + Device/Driver/Resource sem duplicar o interrupt core;
-4. manter Message Address/Data e MSI Enable ainda fora do DF-6b se isso puder ser separado;
-5. programacao de hardware somente no DF-6c, transacionalmente, com enable por ultimo e rollback completo;
-6. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
+1. marcar DF-6b `CERTIFIED`;
+2. manter single-vector como unico modo inicialmente suportado;
+3. iniciar DF-6c sem criar segundo interrupt core;
+4. derivar Message Address/Data a partir do LAPIC existente e do vetor reservado;
+5. fazer programacao transacional com snapshots, verificacao e rollback;
+6. escrever MSI Enable somente depois de address/data/MME estarem consistentes;
+7. manter INTx e politica de fallback separados e explicitamente auditados;
+8. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
 
 ## Regra de retomada
 

@@ -11,9 +11,11 @@ module kernel::drivers::pci_device_bridge;
 
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
 import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 
@@ -25,6 +27,18 @@ pub struct PciBarClaim {
     pub logical: ResourceHandle;
     pub physical: ResourceHandle;
     pub bar_index: u8;
+    pub valid: bool;
+}
+
+// DF-6b: uma reserva MSI ainda e apenas ownership logico de um IrqHandle
+// generation-safe. Nenhum estado global paralelo ao Generic IRQ Registry e criado.
+@repr(C)
+pub struct PciMsiReservation {
+    pub irq: IrqHandle;
+    pub vector: u16;
+    pub bdf: u32;
+    pub capability_offset: u16;
+    pub max_vectors: u16;
     pub valid: bool;
 }
 
@@ -43,6 +57,18 @@ pub fn pci_bar_invalid_claim() -> PciBarClaim {
         logical: resource_invalid_handle(),
         physical: resource_invalid_handle(),
         bar_index: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn pci_msi_invalid_reservation() -> PciMsiReservation {
+    return PciMsiReservation {
+        irq: irq_invalid_handle(),
+        vector: 0,
+        bdf: PCI_BRIDGE_BDF_INVALID,
+        capability_offset: PCI_MSI_OFFSET_NONE,
+        max_vectors: 0,
         valid: false
     };
 }
@@ -299,6 +325,52 @@ fn pci_bridge_owned_device(device: DeviceHandle, driver: DriverHandle,
     return true;
 }
 
+// Release precisa funcionar dentro do callback remove(), quando o Device Core ja
+// esta em UNBINDING. Esta variante e usada somente para teardown; nunca para claims.
+@system
+fn pci_bridge_owned_device_for_release(device: DeviceHandle, driver: DriverHandle,
+                                       out_index: *mut u32, out_bdf: *mut u32) -> bool {
+    if !pci_device_bridge_is_ready() || !device.valid || !driver.valid ||
+       out_index == (null as *mut u32) || out_bdf == (null as *mut u32) {
+        return false;
+    }
+
+    let mut flags: u64 = 0;
+    if !pci_bridge_lock_irq(&mut flags) { return false; }
+    let slot = pci_bridge_find_handle_locked(device);
+    if slot >= PCI_MAX_DISCOVERED {
+        pci_bridge_unlock_irq(flags);
+        return false;
+    }
+    let index = unsafe { PCI_BRIDGE_INDEXES[slot] };
+    let bdf = unsafe { PCI_BRIDGE_BDFS[slot] };
+    pci_bridge_unlock_irq(flags);
+
+    let snapshot = device_core_snapshot(device);
+    if !snapshot.valid || snapshot.bus != DEVICE_BUS_PCI ||
+       snapshot.bus_instance != bdf ||
+       !driver_handle_equal(snapshot.driver, driver) ||
+       (snapshot.state != DEVICE_STATE_BINDING &&
+        snapshot.state != DEVICE_STATE_ACTIVE &&
+        snapshot.state != DEVICE_STATE_UNBINDING) {
+        return false;
+    }
+
+    if !pci_bridge_lock_irq(&mut flags) { return false; }
+    let verify_slot = pci_bridge_find_handle_locked(device);
+    let same = verify_slot < PCI_MAX_DISCOVERED &&
+               unsafe { PCI_BRIDGE_INDEXES[verify_slot] == index &&
+                        PCI_BRIDGE_BDFS[verify_slot] == bdf };
+    pci_bridge_unlock_irq(flags);
+    if !same { return false; }
+
+    unsafe {
+        *out_index = index;
+        *out_bdf = bdf;
+    }
+    return true;
+}
+
 // Claim BAR = ownership logico (BDF,BAR) + ownership da faixa fisica.
 // Nenhum sizing destrutivo e feito aqui. Se pci_probe_bar() ainda nao conhece o
 // tamanho, o driver deve fornecer explicitamente a extensao que realmente usa.
@@ -388,4 +460,121 @@ pub fn pci_enable_memory(device: DeviceHandle, driver: DriverHandle) -> bool {
 @system
 pub fn pci_enable_bus_master(device: DeviceHandle, driver: DriverHandle) -> bool {
     return pci_enable_owned_command_bit(device, driver, PCI_COMMAND_BUS_MASTER);
+}
+
+// DF-6b — reserva single-vector sem programar a capability MSI.
+//
+// O Generic IRQ Registry continua sendo a unica autoridade de vetores dinamicos.
+// O dispositivo deve anunciar MSI valido e DESABILITADO; hardware pre-armado e
+// rejeitado para que este microcorte nunca herde uma fonte que possa interromper.
+@system
+pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
+                              descriptor: IrqDescriptor) -> PciMsiReservation {
+    let mut index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_bridge_owned_device(device, driver, &mut index, &mut bdf) {
+        return pci_msi_invalid_reservation();
+    }
+
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return pci_msi_invalid_reservation(); }
+    let bus = unsafe { (*pci).bus };
+    let slot_id = unsafe { (*pci).slot };
+    let func = unsafe { (*pci).func };
+    if pci_bdf_pack(0, bus, slot_id, func) != bdf {
+        return pci_msi_invalid_reservation();
+    }
+
+    let capability = pci_msi_capability_probe(0, bus, slot_id, func);
+    if !capability.valid || capability.enabled || capability.max_vectors == 0 {
+        return pci_msi_invalid_reservation();
+    }
+
+    let irq = irq_registry_register(device, driver, descriptor);
+    if !irq.valid { return pci_msi_invalid_reservation(); }
+    let vector = irq_registry_vector(irq);
+    if vector < IRQ_DYNAMIC_VECTOR_FIRST || vector > IRQ_DYNAMIC_VECTOR_LAST {
+        irq_registry_unregister(irq, device, driver);
+        return pci_msi_invalid_reservation();
+    }
+
+    // Revalida ownership e layout depois do claim do IRQ para fechar a janela
+    // entre os locks independentes PCI_BRIDGE/DEVICE/RESOURCE/IRQ_REGISTRY.
+    let mut verify_index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut verify_bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_bridge_owned_device(device, driver, &mut verify_index, &mut verify_bdf) ||
+       verify_index != index || verify_bdf != bdf {
+        irq_registry_unregister(irq, device, driver);
+        return pci_msi_invalid_reservation();
+    }
+
+    let verify_pci = pci_get_device(verify_index);
+    if verify_pci == (null as *const PciDevice) ||
+       pci_bdf_pack(0, unsafe { (*verify_pci).bus }, unsafe { (*verify_pci).slot },
+                    unsafe { (*verify_pci).func }) != bdf {
+        irq_registry_unregister(irq, device, driver);
+        return pci_msi_invalid_reservation();
+    }
+
+    let verify = pci_msi_capability_probe(
+        0, unsafe { (*verify_pci).bus }, unsafe { (*verify_pci).slot }, unsafe { (*verify_pci).func }
+    );
+    if !verify.valid || verify.enabled ||
+       verify.capability_offset != capability.capability_offset ||
+       verify.control != capability.control ||
+       verify.address_64 != capability.address_64 ||
+       verify.per_vector_masking != capability.per_vector_masking ||
+       verify.max_vectors != capability.max_vectors {
+        irq_registry_unregister(irq, device, driver);
+        return pci_msi_invalid_reservation();
+    }
+
+    return PciMsiReservation {
+        irq: irq,
+        vector: vector,
+        bdf: bdf,
+        capability_offset: capability.capability_offset,
+        max_vectors: capability.max_vectors,
+        valid: true
+    };
+}
+
+// Esta liberacao e apenas para reserva ainda nao armada. Se a capability estiver
+// atualmente habilitada, recusamos soltar o vetor: DF-6c/DF-6d deverao primeiro
+// desabilitar e confirmar a fonte para impedir MSI contra um vetor sem owner.
+@system
+pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
+                                            device: DeviceHandle,
+                                            driver: DriverHandle) -> bool {
+    if !reservation.valid || !reservation.irq.valid ||
+       reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+       reservation.vector > IRQ_DYNAMIC_VECTOR_LAST ||
+       irq_registry_vector(reservation.irq) != reservation.vector {
+        return false;
+    }
+
+    let mut index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_bridge_owned_device_for_release(device, driver, &mut index, &mut bdf) ||
+       bdf != reservation.bdf {
+        return false;
+    }
+
+    let pci = pci_get_device(index);
+    if pci != (null as *const PciDevice) {
+        if pci_bdf_pack(0, unsafe { (*pci).bus }, unsafe { (*pci).slot },
+                        unsafe { (*pci).func }) != bdf {
+            return false;
+        }
+        let capability = pci_msi_capability_probe(
+            0, unsafe { (*pci).bus }, unsafe { (*pci).slot }, unsafe { (*pci).func }
+        );
+        if capability.valid {
+            if capability.capability_offset != reservation.capability_offset || capability.enabled {
+                return false;
+            }
+        }
+    }
+
+    return irq_registry_unregister(reservation.irq, device, driver);
 }
