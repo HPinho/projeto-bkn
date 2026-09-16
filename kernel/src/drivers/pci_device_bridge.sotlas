@@ -33,6 +33,14 @@ pub struct PciBarClaim {
 // DF-6b: a reserva MSI combina ownership logico exclusivo da fonte PCI com
 // um IrqHandle generation-safe. O Generic IRQ Registry continua sendo a unica
 // autoridade sobre vetores dinamicos.
+//
+// READY significa que fonte+IRQ pertencem ao caller e uma leitura recente provou
+// MSI Enable = 0. QUARANTINED preserva qualquer ownership remanescente quando a
+// quiescencia ou o rollback nao puderem ser provados; nunca implica hardware livre.
+pub const PCI_MSI_RESERVATION_INVALID: u8 = 0;
+pub const PCI_MSI_RESERVATION_READY: u8 = 1;
+pub const PCI_MSI_RESERVATION_QUARANTINED: u8 = 2;
+
 @repr(C)
 pub struct PciMsiReservation {
     pub source: ResourceHandle;
@@ -41,6 +49,7 @@ pub struct PciMsiReservation {
     pub bdf: u32;
     pub capability_offset: u16;
     pub max_vectors: u16;
+    pub state: u8;
     pub valid: bool;
 }
 
@@ -72,6 +81,7 @@ pub fn pci_msi_invalid_reservation() -> PciMsiReservation {
         bdf: PCI_BRIDGE_BDF_INVALID,
         capability_offset: PCI_MSI_OFFSET_NONE,
         max_vectors: 0,
+        state: PCI_MSI_RESERVATION_INVALID,
         valid: false
     };
 }
@@ -465,14 +475,145 @@ pub fn pci_enable_bus_master(device: DeviceHandle, driver: DriverHandle) -> bool
     return pci_enable_owned_command_bit(device, driver, PCI_COMMAND_BUS_MASTER);
 }
 
-// Rollback em ordem inversa da aquisicao. Se o unregister do IRQ falhar, o
-// claim logico da fonte fica retido para impedir outra reserva concorrente.
+// Constroi uma reserva em quarentena sem inventar ownership. A reserva permanece
+// valida enquanto ao menos um handle generation-safe ainda precisa ser reconciliado.
 @system
-fn pci_msi_rollback_unarmed_claims(irq: IrqHandle, source: ResourceHandle,
-                                   device: DeviceHandle, driver: DriverHandle) -> bool {
-    if irq.valid && !irq_registry_unregister(irq, device, driver) { return false; }
-    if source.valid && !resource_release(source, device, driver) { return false; }
-    return true;
+fn pci_msi_quarantined_reservation(source: ResourceHandle, irq: IrqHandle,
+                                    vector: u16, bdf: u32,
+                                    capability_offset: u16,
+                                    max_vectors: u16) -> PciMsiReservation {
+    let retained = source.valid || irq.valid;
+    if !retained { return pci_msi_invalid_reservation(); }
+    return PciMsiReservation {
+        source: source,
+        irq: irq,
+        vector: vector,
+        bdf: bdf,
+        capability_offset: capability_offset,
+        max_vectors: max_vectors,
+        state: PCI_MSI_RESERVATION_QUARANTINED,
+        valid: true
+    };
+}
+
+@system
+pub fn pci_msi_reservation_is_ready(reservation: PciMsiReservation) -> bool {
+    return reservation.valid &&
+           reservation.state == PCI_MSI_RESERVATION_READY &&
+           reservation.source.valid && reservation.irq.valid &&
+           reservation.vector >= IRQ_DYNAMIC_VECTOR_FIRST &&
+           reservation.vector <= IRQ_DYNAMIC_VECTOR_LAST;
+}
+
+@system
+pub fn pci_msi_reservation_is_quarantined(reservation: PciMsiReservation) -> bool {
+    return reservation.valid &&
+           reservation.state == PCI_MSI_RESERVATION_QUARANTINED &&
+           (reservation.source.valid || reservation.irq.valid);
+}
+
+// Confirma que o claim logico ainda pertence exatamente ao mesmo Device/Driver/BDF.
+@system
+fn pci_msi_source_owned(source: ResourceHandle, bdf: u32,
+                        device: DeviceHandle, driver: DriverHandle) -> bool {
+    if !source.valid || bdf == PCI_BRIDGE_BDF_INVALID { return false; }
+    let claim = resource_snapshot(source);
+    return claim.valid &&
+           device_handle_equal(claim.owner_device, device) &&
+           driver_handle_equal(claim.owner_driver, driver) &&
+           claim.request.kind == RESOURCE_KIND_PCI_MSI &&
+           claim.request.start == bdf as u64 &&
+           claim.request.length == 1 && claim.request.auxiliary == 0;
+}
+
+// Prova positiva de quiescencia. Ausencia, leitura invalida, capability movida ou
+// MSI Enable = 1 significam "nao provado" e portanto bloqueiam qualquer devolucao.
+@system
+fn pci_msi_quiescence_proven(index: u32, bdf: u32,
+                              capability_offset: u16,
+                              max_vectors: u16) -> bool {
+    if index == PCI_BRIDGE_INDEX_INVALID || bdf == PCI_BRIDGE_BDF_INVALID ||
+       capability_offset == PCI_MSI_OFFSET_NONE || max_vectors == 0 {
+        return false;
+    }
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return false; }
+    let bus = unsafe { (*pci).bus };
+    let slot_id = unsafe { (*pci).slot };
+    let func = unsafe { (*pci).func };
+    if pci_bdf_pack(0, bus, slot_id, func) != bdf { return false; }
+
+    let capability = pci_msi_capability_probe(0, bus, slot_id, func);
+    return capability.valid &&
+           capability.capability_offset == capability_offset &&
+           capability.max_vectors == max_vectors &&
+           !capability.enabled;
+}
+
+// Cleanup transacional de claims ainda nao armados. Antes de tocar IRQ/source,
+// uma leitura NOVA precisa provar MSI Enable = 0. Qualquer incerteza preserva
+// ownership em QUARANTINED. Se IRQ sair mas source falhar, o retorno carrega
+// somente o source restante, permitindo retry sem usar handle IRQ stale.
+@system
+fn pci_msi_cleanup_unarmed_claims(irq: IrqHandle, source: ResourceHandle,
+                                  vector: u16, index: u32, bdf: u32,
+                                  capability_offset: u16, max_vectors: u16,
+                                  device: DeviceHandle,
+                                  driver: DriverHandle) -> PciMsiReservation {
+    if !source.valid && !irq.valid { return pci_msi_invalid_reservation(); }
+
+    // Um IRQ sem o claim exclusivo da fonte e um estado impossivel no DF-6b.
+    // Nao tentamos "consertar" liberando metade: preservamos fail-closed.
+    if irq.valid && !source.valid {
+        return pci_msi_quarantined_reservation(
+            source, irq, vector, bdf, capability_offset, max_vectors
+        );
+    }
+    if source.valid && !pci_msi_source_owned(source, bdf, device, driver) {
+        return pci_msi_quarantined_reservation(
+            source, irq, vector, bdf, capability_offset, max_vectors
+        );
+    }
+    if !pci_msi_quiescence_proven(index, bdf, capability_offset, max_vectors) {
+        return pci_msi_quarantined_reservation(
+            source, irq, vector, bdf, capability_offset, max_vectors
+        );
+    }
+
+    let mut remaining_irq = irq;
+    let mut remaining_source = source;
+    let mut remaining_vector = vector;
+
+    if remaining_irq.valid {
+        if remaining_vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+           remaining_vector > IRQ_DYNAMIC_VECTOR_LAST ||
+           irq_registry_vector(remaining_irq) != remaining_vector {
+            return pci_msi_quarantined_reservation(
+                remaining_source, remaining_irq, remaining_vector,
+                bdf, capability_offset, max_vectors
+            );
+        }
+        if !irq_registry_unregister(remaining_irq, device, driver) {
+            return pci_msi_quarantined_reservation(
+                remaining_source, remaining_irq, remaining_vector,
+                bdf, capability_offset, max_vectors
+            );
+        }
+        remaining_irq = irq_invalid_handle();
+        remaining_vector = 0;
+    }
+
+    if remaining_source.valid {
+        if !resource_release(remaining_source, device, driver) {
+            return pci_msi_quarantined_reservation(
+                remaining_source, remaining_irq, remaining_vector,
+                bdf, capability_offset, max_vectors
+            );
+        }
+        remaining_source = resource_invalid_handle();
+    }
+
+    return pci_msi_invalid_reservation();
 }
 
 // DF-6b — reserva single-vector sem programar a capability MSI.
@@ -515,13 +656,20 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
 
     let irq = irq_registry_register(device, driver, descriptor);
     if !irq.valid {
-        resource_release(source, device, driver);
-        return pci_msi_invalid_reservation();
+        return pci_msi_cleanup_unarmed_claims(
+            irq, source, 0, index, bdf,
+            capability.capability_offset, capability.max_vectors,
+            device, driver
+        );
     }
+
     let vector = irq_registry_vector(irq);
     if vector < IRQ_DYNAMIC_VECTOR_FIRST || vector > IRQ_DYNAMIC_VECTOR_LAST {
-        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
-        return pci_msi_invalid_reservation();
+        return pci_msi_cleanup_unarmed_claims(
+            irq, source, vector, index, bdf,
+            capability.capability_offset, capability.max_vectors,
+            device, driver
+        );
     }
 
     // Revalida ownership e layout depois dos claims para fechar a janela entre os
@@ -530,31 +678,33 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
     let mut verify_bdf: u32 = PCI_BRIDGE_BDF_INVALID;
     if !pci_bridge_owned_device(device, driver, &mut verify_index, &mut verify_bdf) ||
        verify_index != index || verify_bdf != bdf {
-        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
-        return pci_msi_invalid_reservation();
+        return pci_msi_cleanup_unarmed_claims(
+            irq, source, vector, index, bdf,
+            capability.capability_offset, capability.max_vectors,
+            device, driver
+        );
     }
 
-    let verify_source = resource_snapshot(source);
-    if !verify_source.valid ||
-       !device_handle_equal(verify_source.owner_device, device) ||
-       !driver_handle_equal(verify_source.owner_driver, driver) ||
-       verify_source.request.kind != RESOURCE_KIND_PCI_MSI ||
-       verify_source.request.start != bdf as u64 ||
-       verify_source.request.length != 1 || verify_source.request.auxiliary != 0 {
-        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
-        return pci_msi_invalid_reservation();
+    if !pci_msi_source_owned(source, bdf, device, driver) {
+        return pci_msi_quarantined_reservation(
+            source, irq, vector, bdf,
+            capability.capability_offset, capability.max_vectors
+        );
     }
 
     let verify_pci = pci_get_device(verify_index);
     if verify_pci == (null as *const PciDevice) ||
        pci_bdf_pack(0, unsafe { (*verify_pci).bus }, unsafe { (*verify_pci).slot },
                     unsafe { (*verify_pci).func }) != bdf {
-        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
-        return pci_msi_invalid_reservation();
+        return pci_msi_quarantined_reservation(
+            source, irq, vector, bdf,
+            capability.capability_offset, capability.max_vectors
+        );
     }
 
     let verify = pci_msi_capability_probe(
-        0, unsafe { (*verify_pci).bus }, unsafe { (*verify_pci).slot }, unsafe { (*verify_pci).func }
+        0, unsafe { (*verify_pci).bus }, unsafe { (*verify_pci).slot },
+        unsafe { (*verify_pci).func }
     );
     if !verify.valid || verify.enabled ||
        verify.capability_offset != capability.capability_offset ||
@@ -562,8 +712,11 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
        verify.address_64 != capability.address_64 ||
        verify.per_vector_masking != capability.per_vector_masking ||
        verify.max_vectors != capability.max_vectors {
-        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
-        return pci_msi_invalid_reservation();
+        return pci_msi_cleanup_unarmed_claims(
+            irq, source, vector, index, bdf,
+            capability.capability_offset, capability.max_vectors,
+            device, driver
+        );
     }
 
     return PciMsiReservation {
@@ -573,60 +726,76 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
         bdf: bdf,
         capability_offset: capability.capability_offset,
         max_vectors: capability.max_vectors,
+        state: PCI_MSI_RESERVATION_READY,
         valid: true
     };
 }
 
-// Esta liberacao e apenas para reserva ainda nao armada. Sem uma leitura MSI
-// valida e uma confirmacao explicita de MSI Enable = 0, o vetor permanece retido.
-// Hot-unplug fisico tera um caminho separado; esta API nunca infere quiescencia.
+// Release de uma reserva READY ainda nao armada. O retorno e a NOVA posse:
+// INVALID = cleanup completo; QUARANTINED = caller deve preservar o objeto e retry.
+// Nunca devolvemos bool porque uma falha parcial poderia esconder handles restantes.
 @system
 pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
                                             device: DeviceHandle,
-                                            driver: DriverHandle) -> bool {
-    if !reservation.valid || !reservation.source.valid || !reservation.irq.valid ||
-       reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
-       reservation.vector > IRQ_DYNAMIC_VECTOR_LAST ||
-       irq_registry_vector(reservation.irq) != reservation.vector {
-        return false;
+                                            driver: DriverHandle) -> PciMsiReservation {
+    if !pci_msi_reservation_is_ready(reservation) {
+        return reservation;
+    }
+
+    if irq_registry_vector(reservation.irq) != reservation.vector {
+        return pci_msi_quarantined_reservation(
+            reservation.source, reservation.irq, reservation.vector,
+            reservation.bdf, reservation.capability_offset,
+            reservation.max_vectors
+        );
     }
 
     let mut index: u32 = PCI_BRIDGE_INDEX_INVALID;
     let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
     if !pci_bridge_owned_device_for_release(device, driver, &mut index, &mut bdf) ||
        bdf != reservation.bdf {
-        return false;
+        return pci_msi_quarantined_reservation(
+            reservation.source, reservation.irq, reservation.vector,
+            reservation.bdf, reservation.capability_offset,
+            reservation.max_vectors
+        );
     }
 
-    let source = resource_snapshot(reservation.source);
-    if !source.valid ||
-       !device_handle_equal(source.owner_device, device) ||
-       !driver_handle_equal(source.owner_driver, driver) ||
-       source.request.kind != RESOURCE_KIND_PCI_MSI ||
-       source.request.start != bdf as u64 ||
-       source.request.length != 1 || source.request.auxiliary != 0 {
-        return false;
-    }
-
-    let pci = pci_get_device(index);
-    if pci == (null as *const PciDevice) { return false; }
-    if pci_bdf_pack(0, unsafe { (*pci).bus }, unsafe { (*pci).slot },
-                    unsafe { (*pci).func }) != bdf {
-        return false;
-    }
-
-    let capability = pci_msi_capability_probe(
-        0, unsafe { (*pci).bus }, unsafe { (*pci).slot }, unsafe { (*pci).func }
+    return pci_msi_cleanup_unarmed_claims(
+        reservation.irq, reservation.source, reservation.vector,
+        index, bdf, reservation.capability_offset, reservation.max_vectors,
+        device, driver
     );
-    if !capability.valid ||
-       capability.capability_offset != reservation.capability_offset ||
-       capability.max_vectors != reservation.max_vectors ||
-       capability.enabled {
-        return false;
+}
+
+// Retry de cleanup apos incerteza/rollback parcial. O caller deve substituir sua
+// copia pela reserva retornada. INVALID encerra ownership; QUARANTINED preserva
+// somente os handles que ainda nao puderam ser reconciliados com seguranca.
+@system
+pub fn pci_msi_retry_quarantined_cleanup(reservation: PciMsiReservation,
+                                         device: DeviceHandle,
+                                         driver: DriverHandle) -> PciMsiReservation {
+    if !pci_msi_reservation_is_quarantined(reservation) {
+        return reservation;
     }
 
-    // Ordem inversa: primeiro o vetor/handler, depois a exclusividade da fonte.
-    if !irq_registry_unregister(reservation.irq, device, driver) { return false; }
-    if !resource_release(reservation.source, device, driver) { return false; }
-    return true;
+    let mut index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_bridge_owned_device_for_release(device, driver, &mut index, &mut bdf) ||
+       bdf != reservation.bdf {
+        return reservation;
+    }
+
+    if reservation.irq.valid &&
+       (reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+        reservation.vector > IRQ_DYNAMIC_VECTOR_LAST ||
+        irq_registry_vector(reservation.irq) != reservation.vector) {
+        return reservation;
+    }
+
+    return pci_msi_cleanup_unarmed_claims(
+        reservation.irq, reservation.source, reservation.vector,
+        index, bdf, reservation.capability_offset, reservation.max_vectors,
+        device, driver
+    );
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""DF-6b correction: unarmed MSI release must prove the source is quiescent."""
+"""DF-6b: release nao pode liberar MSI sem prova positiva de quiescencia."""
 
 import unittest
 from pathlib import Path
@@ -9,19 +9,19 @@ BRIDGE = (ROOT / "kernel/src/drivers/pci_device_bridge.sotlas").read_text(encodi
 
 
 class PciMsiReleaseFailClosedTests(unittest.TestCase):
-    def test_release_requires_live_pci_identity_and_valid_msi_probe(self):
-        body = BRIDGE.split("pub fn pci_msi_release_unarmed_reservation", 1)[1]
-        self.assertIn("if pci == (null as *const PciDevice) { return false; }", body)
-        self.assertIn("if !capability.valid ||", body)
-        self.assertIn("capability.capability_offset != reservation.capability_offset", body)
-        self.assertIn("capability.max_vectors != reservation.max_vectors", body)
-        self.assertIn("capability.enabled", body)
-        self.assertLess(body.index("if !capability.valid ||"), body.index("irq_registry_unregister"))
+    def test_release_delegates_to_quiescence_gated_cleanup(self):
+        body = BRIDGE.split("pub fn pci_msi_release_unarmed_reservation", 1)[1].split("\n@system", 1)[0]
+        self.assertIn("pci_msi_reservation_is_ready", body)
+        self.assertIn("pci_bridge_owned_device_for_release", body)
+        self.assertIn("pci_msi_cleanup_unarmed_claims", body)
+        self.assertNotIn("irq_registry_unregister", body)
+        self.assertNotIn("resource_release(", body)
 
-    def test_release_has_no_invalid_probe_bypass(self):
-        body = BRIDGE.split("pub fn pci_msi_release_unarmed_reservation", 1)[1]
-        self.assertNotIn("if capability.valid {", body)
-        self.assertNotIn("if pci != (null as *const PciDevice) {", body)
+    def test_no_invalid_probe_bypass_exists_in_cleanup(self):
+        cleanup = BRIDGE.split("fn pci_msi_cleanup_unarmed_claims", 1)[1].split("\n@system", 1)[0]
+        self.assertIn("if !pci_msi_quiescence_proven", cleanup)
+        self.assertLess(cleanup.index("if !pci_msi_quiescence_proven"),
+                        cleanup.index("irq_registry_unregister"))
 
 
 if __name__ == "__main__":

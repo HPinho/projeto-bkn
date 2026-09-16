@@ -96,18 +96,39 @@ Generic IRQ Registry
 
 O claim `RESOURCE_KIND_PCI_MSI` nao escolhe nem representa vetor. Ele apenas impede que duas CPUs/rotinas reservem simultaneamente duas IRQs para a mesma fonte MSI convencional.
 
+A reserva possui estado explicito:
+
+```text
+INVALID
+  -> nenhum ownership MSI pendente
+
+READY
+  -> source claim + IrqHandle pertencem ao caller
+  -> uma leitura recente provou MSI Enable = 0
+  -> unico estado que DF-6c podera aceitar para armamento
+
+QUARANTINED
+  -> existe ownership ainda nao reconciliado
+  -> quiescencia ou rollback nao puderam ser provados
+  -> nenhum handle pode voltar ao pool ate nova prova positiva
+```
+
 Ele pode:
 
 - exigir `DeviceHandle + DriverHandle` validos e ownership PCI exato;
 - exigir capability MSI valida e ainda desabilitada;
 - adquirir um claim logico exclusivo da fonte MSI keyed por BDF;
 - reservar exatamente um `IrqHandle` via `irq_registry_register()`;
-- publicar `source + irq + vector + BDF + capability_offset` em uma `PciMsiReservation`;
+- publicar `source + irq + vector + BDF + capability_offset + state` em uma `PciMsiReservation`;
 - revalidar ownership PCI, ownership da fonte e layout MSI depois dos claims para fechar TOCTOU;
-- fazer rollback em ordem inversa: IRQ primeiro, fonte MSI por ultimo;
-- manter o claim da fonte retido se o unregister da IRQ falhar;
+- publicar `READY` somente depois da revalidacao final;
+- exigir uma NOVA prova de `MSI Enable = 0` antes de qualquer cleanup/rollback;
+- fazer cleanup em ordem inversa: IRQ primeiro, fonte MSI por ultimo;
+- retornar `QUARANTINED` se config space/capability nao puderem provar quiescencia;
+- retornar `QUARANTINED` se unregister da IRQ ou release da fonte falharem;
+- preservar somente os handles ainda vivos quando o rollback for parcial;
+- permitir retry explicito de cleanup de uma reserva `QUARANTINED`;
 - liberar reserva nao armada durante `BINDING`, `ACTIVE` ou `UNBINDING`;
-- liberar o vetor somente quando uma leitura MSI valida provar `MSI Enable = 0`;
 - falhar fechado se o config space ou a capability deixarem de ser verificaveis.
 
 Ele nao pode:
@@ -131,10 +152,18 @@ BINDING
   -> detectar MSI
   -> claim exclusivo da fonte por BDF
   -> reservar IrqHandle
+  -> provar MSI Enable = 0
+  -> READY
   -> NAO habilitar MSI
 
+qualquer incerteza antes do armamento
+  -> QUARANTINED
+  -> manter source/IRQ ainda vivos
+  -> retry somente apos nova prova de quiescencia
+
 ACTIVE
-  -> DF-6c podera programar endereco/dado
+  -> DF-6c podera aceitar somente READY
+  -> programar endereco/dado
   -> MSI Enable somente por ultimo
 
 UNBINDING
@@ -144,7 +173,7 @@ UNBINDING
   -> liberar ownership logico da fonte MSI
 ```
 
-Isso impede tanto MSI contra vetor devolvido ao pool quanto dupla reserva concorrente da mesma fonte.
+Isso impede MSI contra vetor devolvido ao pool, dupla reserva concorrente da mesma fonte e perda silenciosa de ownership durante rollback parcial.
 
 ## Sequencia de continuacao
 
@@ -153,12 +182,13 @@ Somente se o SHA candidato do DF-6b fechar os gates obrigatorios:
 1. marcar DF-6b `CERTIFIED`;
 2. manter single-vector como unico modo inicialmente suportado;
 3. iniciar DF-6c sem criar segundo interrupt core;
-4. exigir `DEVICE_STATE_ACTIVE` para qualquer armamento;
+4. exigir `DEVICE_STATE_ACTIVE` e reserva `READY` para qualquer armamento;
 5. derivar Message Address/Data a partir do LAPIC existente e do vetor reservado;
 6. fazer programacao transacional com snapshots, verificacao e rollback;
-7. manter MME=0 no primeiro corte e escrever MSI Enable somente por ultimo;
-8. manter INTx, Bus Master, Memory Space e politica de fallback fora do DF-6c;
-9. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
+7. qualquer incerteza de rollback deve preservar ownership em quarentena;
+8. manter MME=0 no primeiro corte e escrever MSI Enable somente por ultimo;
+9. manter INTx, Bus Master, Memory Space e politica de fallback fora do DF-6c;
+10. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
 
 ## Regra de retomada
 
