@@ -42,6 +42,14 @@ fn df_self_test_irq_handler(device: DeviceHandle, vector: u16) -> bool {
     return true;
 }
 
+// O bootstrap atual aceita callbacks de primeira classe em inicializadores
+// estaticos, mas ainda nao tipa o nome de uma funcao como valor dentro de uma
+// expressao local. Mantemos o descriptor como dado estatico para que o DF-4a
+// exercite a ABI real de callback sem depender dessa lacuna do frontend.
+static DF_SELF_TEST_IRQ_DESCRIPTOR: IrqDescriptor = IrqDescriptor {
+    handler: df_self_test_irq_handler
+};
+
 @system
 fn df_self_test_probe(device: DeviceHandle) -> bool {
     let driver = unsafe { DF_SELF_TEST_DRIVER };
@@ -64,9 +72,7 @@ fn df_self_test_probe(device: DeviceHandle) -> bool {
     unsafe { DF_SELF_TEST_IRQ = irq; }
 
     // DF-4a precisa funcionar durante BINDING, antes do commit para ACTIVE.
-    let generic_irq = irq_registry_register(device, driver, IrqDescriptor {
-        handler: df_self_test_irq_handler
-    });
+    let generic_irq = irq_registry_register(device, driver, DF_SELF_TEST_IRQ_DESCRIPTOR);
     if !generic_irq.valid {
         resource_release(irq, device, driver);
         resource_release(mmio, device, driver);
