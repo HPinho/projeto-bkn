@@ -204,8 +204,8 @@ fn pci_msi_device_active(device: DeviceHandle, driver: DriverHandle,
 }
 
 @system
-fn pci_msi_source_owned(reservation: PciMsiReservation,
-                        device: DeviceHandle, driver: DriverHandle) -> bool {
+fn pci_msi_reservation_source_owned(reservation: PciMsiReservation,
+                                    device: DeviceHandle, driver: DriverHandle) -> bool {
     if !reservation.source.valid { return false; }
     let claim = resource_snapshot(reservation.source);
     return claim.valid &&
@@ -232,7 +232,7 @@ fn pci_msi_reservation_owned(reservation: PciMsiReservation,
     return reservation.valid &&
            reservation.state == PCI_MSI_RESERVATION_READY &&
            pci_msi_device_owned(device, driver, reservation.bdf) &&
-           pci_msi_source_owned(reservation, device, driver) &&
+           pci_msi_reservation_source_owned(reservation, device, driver) &&
            pci_msi_irq_owned(reservation);
 }
 
@@ -438,7 +438,7 @@ fn pci_msi_failure_after_write(reservation: PciMsiReservation,
                                data: u16, destination: u8) -> PciMsiArmResult {
     if pci_msi_restore_snapshot(reservation, snapshot) &&
        pci_msi_device_owned(device, driver, reservation.bdf) &&
-       pci_msi_source_owned(reservation, device, driver) &&
+       pci_msi_reservation_source_owned(reservation, device, driver) &&
        pci_msi_irq_owned(reservation) {
         return pci_msi_arm_result(
             reservation, snapshot, address_low, address_high, data, destination,
@@ -604,7 +604,7 @@ pub fn pci_msi_arm_single(reservation: PciMsiReservation,
            address_low, address_high, data
        ) ||
        !pci_msi_device_active(device, driver, reservation.bdf) ||
-       !pci_msi_source_owned(reservation, device, driver) ||
+       !pci_msi_reservation_source_owned(reservation, device, driver) ||
        !pci_msi_irq_owned(reservation) {
         let result = pci_msi_failure_after_write(
             reservation, snapshot, device, driver,
@@ -637,7 +637,7 @@ pub fn pci_msi_arm_single(reservation: PciMsiReservation,
            address_low, address_high, data
        ) ||
        !pci_msi_device_active(device, driver, reservation.bdf) ||
-       !pci_msi_source_owned(reservation, device, driver) ||
+       !pci_msi_reservation_source_owned(reservation, device, driver) ||
        !pci_msi_irq_owned(reservation) {
         let result = pci_msi_failure_after_write(
             reservation, snapshot, device, driver,

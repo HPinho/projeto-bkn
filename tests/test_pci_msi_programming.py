@@ -6,6 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MSI = (ROOT / "kernel/src/drivers/pci_msi.sotlas").read_text(encoding="utf-8")
+BRIDGE = (ROOT / "kernel/src/drivers/pci_device_bridge.sotlas").read_text(encoding="utf-8")
 MAIN = (ROOT / "kernel/src/main.sotlas").read_text(encoding="utf-8")
 
 
@@ -17,6 +18,11 @@ class PciMsiProgrammingTests(unittest.TestCase):
         self.assertIn("import kernel::drivers::pci_msi::*;", MAIN)
         self.assertNotIn("pci_msi_arm_single(", MAIN)
         self.assertEqual(MSI.count("pub fn pci_msi_arm_single"), 1)
+
+    def test_private_helper_does_not_collide_with_df6b_bridge_symbol(self):
+        self.assertIn("fn pci_msi_source_owned(", BRIDGE)
+        self.assertNotIn("fn pci_msi_source_owned(", MSI)
+        self.assertEqual(MSI.count("fn pci_msi_reservation_source_owned("), 1)
 
     def test_x86_msi_message_format_is_single_vector_fixed_edge(self):
         for token in (
@@ -47,9 +53,9 @@ class PciMsiProgrammingTests(unittest.TestCase):
         self.assertGreaterEqual(body.count("pci_msi_reservation_owned"), 2)
         owned = self._body("pci_msi_reservation_owned")
         self.assertIn("reservation.state == PCI_MSI_RESERVATION_READY", owned)
-        self.assertIn("pci_msi_source_owned", owned)
+        self.assertIn("pci_msi_reservation_source_owned", owned)
         self.assertIn("pci_msi_irq_owned", owned)
-        source = self._body("pci_msi_source_owned")
+        source = self._body("pci_msi_reservation_source_owned")
         self.assertIn("resource_snapshot(reservation.source)", source)
         self.assertIn("RESOURCE_KIND_PCI_MSI", source)
         irq = self._body("pci_msi_irq_owned")
@@ -90,7 +96,7 @@ class PciMsiProgrammingTests(unittest.TestCase):
         enable_write = body.index("control_offset, enabled_single", enable_decl)
         self.assertLess(body.index("let programmed = pci_msi_capability_probe"), enable_decl)
         self.assertLess(body.index("pci_msi_raw_config_matches", body.index("let programmed")), enable_decl)
-        self.assertLess(body.index("pci_msi_source_owned", body.index("let programmed")), enable_decl)
+        self.assertLess(body.index("pci_msi_reservation_source_owned", body.index("let programmed")), enable_decl)
         self.assertLess(body.index("pci_msi_irq_owned", body.index("let programmed")), enable_decl)
         self.assertGreater(enable_write, body.index("snapshot.message_data_offset, data"))
         armed = body.index("let armed = pci_msi_capability_probe", enable_write)
