@@ -1,0 +1,391 @@
+// Baken OS — DF-5d: ponte PCI -> Device Core -> Resource Manager.
+//
+// Este modulo nao enumera hardware, nao dimensiona BARs e nao programa MSI/MSI-X.
+// Ele publica BDFs ja descobertos como DeviceHandle generation-safe e concentra
+// ownership de BAR/command register para drivers vinculados transacionalmente.
+//
+// Lock order local: PCI_BRIDGE_LOCK pode chamar DEVICE_CORE_LOCK. O caminho
+// inverso e proibido. RESOURCE_LOCK nunca e adquirido enquanto PCI_BRIDGE_LOCK
+// estiver retido; claims sao feitos somente depois de copiar/revalidar a identidade.
+module kernel::drivers::pci_device_bridge;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const PCI_BRIDGE_BDF_INVALID: u32 = 0xFFFFFFFF;
+pub const PCI_BRIDGE_INDEX_INVALID: u32 = 0xFFFFFFFF;
+
+@repr(C)
+pub struct PciBarClaim {
+    pub logical: ResourceHandle;
+    pub physical: ResourceHandle;
+    pub bar_index: u8;
+    pub valid: bool;
+}
+
+static mut PCI_BRIDGE_HANDLES: [DeviceHandle; PCI_MAX_DISCOVERED] = [
+    DeviceHandle { device_id: 0, generation: 0, valid: false }; PCI_MAX_DISCOVERED
+];
+static mut PCI_BRIDGE_BDFS: [u32; PCI_MAX_DISCOVERED] = [0xFFFFFFFF; PCI_MAX_DISCOVERED];
+static mut PCI_BRIDGE_INDEXES: [u32; PCI_MAX_DISCOVERED] = [0xFFFFFFFF; PCI_MAX_DISCOVERED];
+static mut PCI_BRIDGE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut PCI_BRIDGE_LOCK_READY: bool = false;
+static mut PCI_BRIDGE_READY: bool = false;
+
+@system
+pub fn pci_bar_invalid_claim() -> PciBarClaim {
+    return PciBarClaim {
+        logical: resource_invalid_handle(),
+        physical: resource_invalid_handle(),
+        bar_index: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn pci_bdf_pack(segment: u16, bus: u8, slot: u8, func: u8) -> u32 {
+    if slot >= 32 || func >= 8 { return PCI_BRIDGE_BDF_INVALID; }
+    return ((segment as u32) << 16) |
+           ((bus as u32) << 8) |
+           (((slot & 0x1F) as u32) << 3) |
+           ((func & 0x07) as u32);
+}
+
+@system
+pub fn pci_device_class(class_code: u8) -> u8 {
+    if class_code == 0x01 { return DEVICE_CLASS_BLOCK; }
+    if class_code == 0x02 { return DEVICE_CLASS_NETWORK; }
+    if class_code == 0x03 { return DEVICE_CLASS_DISPLAY; }
+    if class_code == 0x04 { return DEVICE_CLASS_AUDIO; }
+    if class_code == 0x06 { return DEVICE_CLASS_BUS; }
+    if class_code == 0x0C { return DEVICE_CLASS_CONTROLLER; }
+    return DEVICE_CLASS_CONTROLLER;
+}
+
+@system
+fn pci_bridge_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PCI_BRIDGE_LOCK_READY || !spinlock_lock(&mut PCI_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn pci_bridge_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PCI_BRIDGE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn pci_bridge_clear_slot_locked(slot: usize) -> void {
+    unsafe {
+        PCI_BRIDGE_HANDLES[slot] = device_invalid_handle();
+        PCI_BRIDGE_BDFS[slot] = PCI_BRIDGE_BDF_INVALID;
+        PCI_BRIDGE_INDEXES[slot] = PCI_BRIDGE_INDEX_INVALID;
+    }
+}
+
+@system
+fn pci_bridge_find_handle_locked(handle: DeviceHandle) -> usize {
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < PCI_MAX_DISCOVERED {
+            if device_handle_equal(PCI_BRIDGE_HANDLES[slot], handle) {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return PCI_MAX_DISCOVERED;
+}
+
+@system
+fn pci_bridge_find_bdf_locked(bdf: u32) -> usize {
+    if bdf == PCI_BRIDGE_BDF_INVALID { return PCI_MAX_DISCOVERED; }
+    unsafe {
+        let mut slot: usize = 0;
+        while slot < PCI_MAX_DISCOVERED {
+            if PCI_BRIDGE_HANDLES[slot].valid && PCI_BRIDGE_BDFS[slot] == bdf {
+                return slot;
+            }
+            slot += 1;
+        }
+    }
+    return PCI_MAX_DISCOVERED;
+}
+
+@system
+pub fn pci_device_bridge_init() -> bool {
+    if !device_core_init() || !resource_manager_init() { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PCI_BRIDGE_LOCK_READY {
+            if !spinlock_init(&mut PCI_BRIDGE_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            PCI_BRIDGE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut PCI_BRIDGE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if !PCI_BRIDGE_READY {
+            let mut slot: usize = 0;
+            while slot < PCI_MAX_DISCOVERED {
+                pci_bridge_clear_slot_locked(slot);
+                slot += 1;
+            }
+            PCI_BRIDGE_READY = true;
+        }
+        let released = spinlock_unlock(&mut PCI_BRIDGE_LOCK);
+        if !released {
+            x86_irq_restore(flags);
+            loop { x86_cpu_pause(); }
+        }
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+pub fn pci_device_bridge_is_ready() -> bool {
+    unsafe { return PCI_BRIDGE_READY; }
+}
+
+// Publica um BDF descoberto no Device Core. A operacao e idempotente para a
+// mesma identidade PCI enquanto o DeviceHandle generation-safe continuar vivo.
+@system
+pub fn pci_claim_device(index: u32) -> DeviceHandle {
+    if !pci_device_bridge_init() { return device_invalid_handle(); }
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return device_invalid_handle(); }
+
+    let bus = unsafe { (*pci).bus };
+    let slot_id = unsafe { (*pci).slot };
+    let func = unsafe { (*pci).func };
+    let bdf = pci_bdf_pack(0, bus, slot_id, func);
+    if bdf == PCI_BRIDGE_BDF_INVALID { return device_invalid_handle(); }
+
+    let mut flags: u64 = 0;
+    if !pci_bridge_lock_irq(&mut flags) { return device_invalid_handle(); }
+
+    let existing_slot = pci_bridge_find_bdf_locked(bdf);
+    if existing_slot < PCI_MAX_DISCOVERED {
+        let existing = unsafe { PCI_BRIDGE_HANDLES[existing_slot] };
+        let snapshot = device_core_snapshot(existing);
+        if snapshot.valid && snapshot.bus == DEVICE_BUS_PCI &&
+           snapshot.bus_instance == bdf {
+            pci_bridge_unlock_irq(flags);
+            return existing;
+        }
+        pci_bridge_clear_slot_locked(existing_slot);
+    }
+
+    let mut free_slot: usize = 0;
+    unsafe {
+        while free_slot < PCI_MAX_DISCOVERED && PCI_BRIDGE_HANDLES[free_slot].valid {
+            free_slot += 1;
+        }
+    }
+    if free_slot >= PCI_MAX_DISCOVERED {
+        pci_bridge_unlock_irq(flags);
+        return device_invalid_handle();
+    }
+
+    let class_code = pci_device_class(unsafe { (*pci).class_code });
+    let handle = device_core_attach(
+        device_invalid_handle(), DEVICE_BUS_PCI, class_code,
+        unsafe { (*pci).vendor_id as u32 }, unsafe { (*pci).device_id as u32 }, bdf
+    );
+    if handle.valid {
+        unsafe {
+            PCI_BRIDGE_HANDLES[free_slot] = handle;
+            PCI_BRIDGE_BDFS[free_slot] = bdf;
+            PCI_BRIDGE_INDEXES[free_slot] = index;
+        }
+    }
+    pci_bridge_unlock_irq(flags);
+    return handle;
+}
+
+@system
+pub fn pci_publish_discovered_devices() -> u32 {
+    if !pci_device_bridge_init() { return 0; }
+    let count = pci_get_device_count();
+    let mut published: u32 = 0;
+    let mut index: u32 = 0;
+    while index < count {
+        if pci_claim_device(index).valid { published += 1; }
+        index += 1;
+    }
+    return published;
+}
+
+// Detach nunca faz teardown implicito de driver/recurso. Device Core recusa a
+// operacao enquanto houver owner, filhos ou claims, preservando fail-closed.
+@system
+pub fn pci_release_device(handle: DeviceHandle) -> bool {
+    if !pci_device_bridge_is_ready() || !handle.valid { return false; }
+    let mut flags: u64 = 0;
+    if !pci_bridge_lock_irq(&mut flags) { return false; }
+    let slot = pci_bridge_find_handle_locked(handle);
+    if slot >= PCI_MAX_DISCOVERED {
+        pci_bridge_unlock_irq(flags);
+        return false;
+    }
+    if !device_core_detach(handle) {
+        pci_bridge_unlock_irq(flags);
+        return false;
+    }
+    pci_bridge_clear_slot_locked(slot);
+    pci_bridge_unlock_irq(flags);
+    return true;
+}
+
+// Copia/revalida a identidade sem manter PCI_BRIDGE_LOCK durante Resource Manager.
+@system
+fn pci_bridge_owned_device(device: DeviceHandle, driver: DriverHandle,
+                           out_index: *mut u32, out_bdf: *mut u32) -> bool {
+    if !pci_device_bridge_is_ready() || !device.valid || !driver.valid ||
+       out_index == (null as *mut u32) || out_bdf == (null as *mut u32) {
+        return false;
+    }
+
+    let mut flags: u64 = 0;
+    if !pci_bridge_lock_irq(&mut flags) { return false; }
+    let slot = pci_bridge_find_handle_locked(device);
+    if slot >= PCI_MAX_DISCOVERED {
+        pci_bridge_unlock_irq(flags);
+        return false;
+    }
+    let index = unsafe { PCI_BRIDGE_INDEXES[slot] };
+    let bdf = unsafe { PCI_BRIDGE_BDFS[slot] };
+    pci_bridge_unlock_irq(flags);
+
+    let snapshot = device_core_snapshot(device);
+    if !snapshot.valid || snapshot.bus != DEVICE_BUS_PCI ||
+       snapshot.bus_instance != bdf ||
+       !driver_handle_equal(snapshot.driver, driver) ||
+       (snapshot.state != DEVICE_STATE_BINDING && snapshot.state != DEVICE_STATE_ACTIVE) {
+        return false;
+    }
+
+    if !pci_bridge_lock_irq(&mut flags) { return false; }
+    let verify_slot = pci_bridge_find_handle_locked(device);
+    let same = verify_slot < PCI_MAX_DISCOVERED &&
+               unsafe { PCI_BRIDGE_INDEXES[verify_slot] == index &&
+                        PCI_BRIDGE_BDFS[verify_slot] == bdf };
+    pci_bridge_unlock_irq(flags);
+    if !same { return false; }
+
+    unsafe {
+        *out_index = index;
+        *out_bdf = bdf;
+    }
+    return true;
+}
+
+// Claim BAR = ownership logico (BDF,BAR) + ownership da faixa fisica.
+// Nenhum sizing destrutivo e feito aqui. Se pci_probe_bar() ainda nao conhece o
+// tamanho, o driver deve fornecer explicitamente a extensao que realmente usa.
+@system
+pub fn pci_claim_bar(device: DeviceHandle, driver: DriverHandle,
+                     bar_index: u8, length: u64) -> PciBarClaim {
+    if bar_index >= 6 || length == 0 { return pci_bar_invalid_claim(); }
+    let mut index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_bridge_owned_device(device, driver, &mut index, &mut bdf) {
+        return pci_bar_invalid_claim();
+    }
+
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return pci_bar_invalid_claim(); }
+    let base = unsafe { (*pci).bars[bar_index as usize].base_address };
+    let known_size = unsafe { (*pci).bars[bar_index as usize].size };
+    let is_io = unsafe { (*pci).bars[bar_index as usize].is_io };
+    if base == 0 || (known_size != 0 && known_size != length) {
+        return pci_bar_invalid_claim();
+    }
+
+    let logical = resource_claim(device, driver, ResourceRequest {
+        kind: RESOURCE_KIND_PCI_BAR,
+        start: bdf as u64,
+        length: 1,
+        auxiliary: bar_index as u32
+    });
+    if !logical.valid { return pci_bar_invalid_claim(); }
+
+    let physical_kind: u8 = if is_io { RESOURCE_KIND_IO_PORT } else { RESOURCE_KIND_MMIO };
+    let physical = resource_claim(device, driver, ResourceRequest {
+        kind: physical_kind,
+        start: base,
+        length: length,
+        auxiliary: 0
+    });
+    if !physical.valid {
+        resource_release(logical, device, driver);
+        return pci_bar_invalid_claim();
+    }
+
+    return PciBarClaim {
+        logical: logical,
+        physical: physical,
+        bar_index: bar_index,
+        valid: true
+    };
+}
+
+// Ordem inversa da aquisicao: faixa fisica primeiro, ownership logico por ultimo.
+// Falha parcial retorna false; resource_epoch impede rollback inseguro para ACTIVE.
+@system
+pub fn pci_release_bar(claim: PciBarClaim, device: DeviceHandle,
+                       driver: DriverHandle) -> bool {
+    if !claim.valid || !claim.logical.valid || !claim.physical.valid || claim.bar_index >= 6 {
+        return false;
+    }
+    if !resource_release(claim.physical, device, driver) { return false; }
+    if !resource_release(claim.logical, device, driver) { return false; }
+    return true;
+}
+
+@system
+fn pci_enable_owned_command_bit(device: DeviceHandle, driver: DriverHandle, bit: u16) -> bool {
+    let mut index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_bridge_owned_device(device, driver, &mut index, &mut bdf) { return false; }
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return false; }
+    if pci_bdf_pack(0, unsafe { (*pci).bus }, unsafe { (*pci).slot }, unsafe { (*pci).func }) != bdf {
+        return false;
+    }
+    return pci_config_set16_bits(
+        0, unsafe { (*pci).bus }, unsafe { (*pci).slot }, unsafe { (*pci).func },
+        0x04, bit
+    );
+}
+
+// Habilitacoes sao estreitas e ownership-gated. Nunca ligamos I/O Space ou
+// Bus Master como efeito colateral de outra operacao.
+@system
+pub fn pci_enable_memory(device: DeviceHandle, driver: DriverHandle) -> bool {
+    return pci_enable_owned_command_bit(device, driver, PCI_COMMAND_MEMORY_SPACE);
+}
+
+@system
+pub fn pci_enable_bus_master(device: DeviceHandle, driver: DriverHandle) -> bool {
+    return pci_enable_owned_command_bit(device, driver, PCI_COMMAND_BUS_MASTER);
+}
