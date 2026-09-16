@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MCFG = ROOT / "kernel/src/acpi/mcfg.sotlas"
 POST = ROOT / "kernel/src/arch/x86_64/post_cutover.sotlas"
 PCI = ROOT / "kernel/src/drivers/pci_bus.sotlas"
+PCI_CONFIG = ROOT / "kernel/src/drivers/pci_config.sotlas"
 
 
 class AcpiMcfgTests(unittest.TestCase):
@@ -30,7 +31,8 @@ class AcpiMcfgTests(unittest.TestCase):
 
     def test_mcfg_does_not_access_ecam_or_program_pci(self):
         text = MCFG.read_text(encoding="utf-8")
-        for forbidden in ("__in", "__out", "pci_write", "pci_enable", "volatile"): self.assertNotIn(forbidden, text)
+        for forbidden in ("__in", "__out", "pci_write", "pci_enable", "volatile"):
+            self.assertNotIn(forbidden, text)
 
     def test_mcfg_inventory_is_optional_while_native_pci_uses_legacy_config_io(self):
         mcfg = MCFG.read_text(encoding="utf-8")
@@ -39,11 +41,16 @@ class AcpiMcfgTests(unittest.TestCase):
         self.assertIn("pci_scan_all()", post)
         self.assertNotIn("mcfg_init();", post)
 
-    def test_legacy_pci_mechanism_remains_until_vmm_ecam_cutover(self):
-        text = PCI.read_text(encoding="utf-8")
-        self.assertIn("PCI_CONFIG_ADDRESS_PORT", text)
-        self.assertIn("PCI_CONFIG_DATA_PORT", text)
-        self.assertNotIn("mcfg_ecam_address", text)
+    def test_df5a_keeps_legacy_backend_until_ecam_cutover(self):
+        pci = PCI.read_text(encoding="utf-8")
+        config = PCI_CONFIG.read_text(encoding="utf-8")
+        self.assertIn("import kernel::drivers::pci_config::*;", pci)
+        self.assertIn("PCI_CONFIG_ADDRESS_PORT", config)
+        self.assertIn("PCI_CONFIG_DATA_PORT", config)
+        self.assertIn("PCI_CONFIG_BACKEND_LEGACY_CF8CFC", config)
+        self.assertIn("pci_config_uses_legacy_cf8cfc()", pci)
+        self.assertNotIn("mcfg_ecam_address", pci)
+        self.assertNotIn("mcfg_ecam_address", config)
 
 
 if __name__ == "__main__":
