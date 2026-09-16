@@ -32,6 +32,16 @@ static mut PCI_CONFIG_ECAM_PAGES: [u64; PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY] =
     [0; PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY];
 static mut PCI_CONFIG_ECAM_PAGE_COUNT: u32 = 0;
 
+@repr(C)
+pub struct PciBarSizeMeasurement {
+    pub base: u64;
+    pub size: u64;
+    pub bar_index: u8;
+    pub is_64bit: bool;
+    pub restored: bool;
+    pub valid: bool;
+}
+
 @system
 fn pci_config_lock_irq(saved_flags: *mut u64) -> bool {
     if saved_flags == (null as *mut u64) { return false; }
@@ -54,9 +64,6 @@ fn pci_config_unlock_irq(flags: u64) -> void {
     x86_irq_restore(flags);
 }
 
-// Inicializado no BSP antes da primeira enumeracao PCI. MCFG e inventariada
-// aqui, mas o transporte continua legado ate pci_config_promote_ecam(), chamado
-// somente depois do scan bootstrap. Isso mantem o custo de descoberta bounded.
 @system
 pub fn pci_config_init() -> bool {
     let flags = x86_irq_save_disable();
@@ -96,27 +103,17 @@ pub fn pci_config_init() -> bool {
 }
 
 @system
-pub fn pci_config_is_ready() -> bool {
-    unsafe { return PCI_CONFIG_READY; }
-}
-
+pub fn pci_config_is_ready() -> bool { unsafe { return PCI_CONFIG_READY; } }
 @system
-pub fn pci_config_backend() -> u8 {
-    unsafe { return PCI_CONFIG_BACKEND; }
-}
-
+pub fn pci_config_backend() -> u8 { unsafe { return PCI_CONFIG_BACKEND; } }
 @system
 pub fn pci_config_ecam_available() -> bool {
     unsafe { return PCI_CONFIG_READY && PCI_CONFIG_ECAM_AVAILABLE; }
 }
-
 @system
 pub fn pci_config_uses_legacy_cf8cfc() -> bool {
-    unsafe {
-        return PCI_CONFIG_READY && PCI_CONFIG_BACKEND == PCI_CONFIG_BACKEND_LEGACY_CF8CFC;
-    }
+    unsafe { return PCI_CONFIG_READY && PCI_CONFIG_BACKEND == PCI_CONFIG_BACKEND_LEGACY_CF8CFC; }
 }
-
 @system
 pub fn pci_config_uses_ecam() -> bool {
     unsafe {
@@ -124,14 +121,9 @@ pub fn pci_config_uses_ecam() -> bool {
                PCI_CONFIG_BACKEND == PCI_CONFIG_BACKEND_ECAM;
     }
 }
-
 @system
-pub fn pci_config_supports_extended_space() -> bool {
-    return pci_config_uses_ecam();
-}
+pub fn pci_config_supports_extended_space() -> bool { return pci_config_uses_ecam(); }
 
-// Promocao one-way durante o boot normal. O fallback CF8/CFC continua interno
-// para segmento 0 / primeiros 256 bytes caso um BDF nao esteja coberto pela MCFG.
 @system
 pub fn pci_config_promote_ecam() -> bool {
     if !pci_config_is_ready() { return false; }
@@ -149,21 +141,16 @@ pub fn pci_config_promote_ecam() -> bool {
 }
 
 @system
-pub fn pci_config_ecam_mapped_pages() -> u32 {
-    unsafe { return PCI_CONFIG_ECAM_PAGE_COUNT; }
-}
+pub fn pci_config_ecam_mapped_pages() -> u32 { unsafe { return PCI_CONFIG_ECAM_PAGE_COUNT; } }
 
 @system
 fn pci_config_target_valid(slot: u8, func: u8, offset: u16) -> bool {
     return slot < 32 && func < 8 && offset <= PCI_CONFIG_EXTENDED_MAX_OFFSET;
 }
-
 @system
 fn pci_config_legacy_target_valid(segment: u16, slot: u8, func: u8, offset: u16) -> bool {
-    return segment == 0 && slot < 32 && func < 8 &&
-           offset <= PCI_CONFIG_LEGACY_MAX_OFFSET;
+    return segment == 0 && slot < 32 && func < 8 && offset <= PCI_CONFIG_LEGACY_MAX_OFFSET;
 }
-
 @system
 fn pci_config_legacy_address(bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
     return 0x80000000 |
@@ -173,7 +160,6 @@ fn pci_config_legacy_address(bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
         (((offset as u32) & 0xFC) as u32);
 }
 
-// Chamado somente com PCI_CONFIG_LOCK adquirido.
 @system
 fn pci_config_legacy_read32_locked(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
     if !pci_config_legacy_target_valid(segment, slot, func, offset) { return 0xFFFFFFFF; }
@@ -181,8 +167,6 @@ fn pci_config_legacy_read32_locked(segment: u16, bus: u8, slot: u8, func: u8, of
     baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
     return baken_pci_in32(PCI_CONFIG_DATA_PORT);
 }
-
-// Chamado somente com PCI_CONFIG_LOCK adquirido.
 @system
 fn pci_config_legacy_write32_locked(segment: u16, bus: u8, slot: u8, func: u8,
                                     offset: u16, value: u32) -> bool {
@@ -204,17 +188,12 @@ fn pci_config_ecam_page_cached_locked(page: u64) -> bool {
     }
     return false;
 }
-
-// O mapping identity usa politica MMIO UC (PWT+PCD+NX) do VMM. A cache impede
-// novo page-table update/TLB shootdown para a mesma funcao PCIe de 4 KiB.
 @system
 fn pci_config_ecam_map_page_locked(page: u64) -> bool {
     if page == 0 || (page & 0xFFF) != 0 { return false; }
     if pci_config_ecam_page_cached_locked(page) { return true; }
     unsafe {
-        if PCI_CONFIG_ECAM_PAGE_COUNT >= PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY as u32 {
-            return false;
-        }
+        if PCI_CONFIG_ECAM_PAGE_COUNT >= PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY as u32 { return false; }
     }
     if !active_page_tables_map_mmio_identity_4k(page) { return false; }
     unsafe {
@@ -224,16 +203,11 @@ fn pci_config_ecam_map_page_locked(page: u64) -> bool {
     }
     return true;
 }
-
-// Resolve o dword ECAM e materializa apenas a pagina da funcao realmente usada.
-// Chamado somente com PCI_CONFIG_LOCK adquirido.
 @system
 fn pci_config_ecam_address_locked(segment: u16, bus: u8, slot: u8, func: u8,
                                   offset: u16) -> u64 {
     unsafe {
-        if PCI_CONFIG_BACKEND != PCI_CONFIG_BACKEND_ECAM || !PCI_CONFIG_ECAM_AVAILABLE {
-            return 0;
-        }
+        if PCI_CONFIG_BACKEND != PCI_CONFIG_BACKEND_ECAM || !PCI_CONFIG_ECAM_AVAILABLE { return 0; }
     }
     if !pci_config_target_valid(slot, func, offset) { return 0; }
     let aligned_offset: u16 = offset & 0xFFFC;
@@ -243,17 +217,12 @@ fn pci_config_ecam_address_locked(segment: u16, bus: u8, slot: u8, func: u8,
     if !pci_config_ecam_map_page_locked(page) { return 0; }
     return address;
 }
-
-// ECAM e preferido depois da promocao. Se o BDF nao estiver coberto pela MCFG
-// ou o mapping falhar, Configuration Mechanism #1 continua sendo fallback para
-// segmento 0 e config space convencional.
 @system
 fn pci_config_read32_locked(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
     let ecam = pci_config_ecam_address_locked(segment, bus, slot, func, offset);
     if ecam != 0 { return x86_mmio_read32(ecam); }
     return pci_config_legacy_read32_locked(segment, bus, slot, func, offset);
 }
-
 @system
 fn pci_config_write32_locked(segment: u16, bus: u8, slot: u8, func: u8,
                              offset: u16, value: u32) -> bool {
@@ -265,8 +234,6 @@ fn pci_config_write32_locked(segment: u16, bus: u8, slot: u8, func: u8,
     return pci_config_legacy_write32_locked(segment, bus, slot, func, offset, value);
 }
 
-// Leitura legada explicita usada pelo scan bootstrap. Mesmo depois da promocao
-// ECAM, uma nova enumeracao nao mapeia BDFs ausentes apenas para ler Vendor ID.
 @system
 pub fn pci_config_read32_legacy(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
     if !pci_config_is_ready() || !pci_config_legacy_target_valid(segment, slot, func, offset) {
@@ -278,33 +245,27 @@ pub fn pci_config_read32_legacy(segment: u16, bus: u8, slot: u8, func: u8, offse
     pci_config_unlock_irq(flags);
     return value;
 }
-
 @system
 pub fn pci_config_read16_legacy(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u16 {
     let dword = pci_config_read32_legacy(segment, bus, slot, func, offset);
     let shift: u32 = ((offset & 2) as u32) * 8;
     return ((dword >> shift) & 0xFFFF) as u16;
 }
-
 @system
 pub fn pci_config_read8_legacy(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u8 {
     let dword = pci_config_read32_legacy(segment, bus, slot, func, offset);
     let shift: u32 = ((offset & 3) as u32) * 8;
     return ((dword >> shift) & 0xFF) as u8;
 }
-
 @system
 pub fn pci_config_read32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
-    if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) {
-        return 0xFFFFFFFF;
-    }
+    if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return 0xFFFFFFFF; }
     let mut flags: u64 = 0;
     if !pci_config_lock_irq(&mut flags) { return 0xFFFFFFFF; }
     let value = pci_config_read32_locked(segment, bus, slot, func, offset);
     pci_config_unlock_irq(flags);
     return value;
 }
-
 @system
 pub fn pci_config_write32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, value: u32) -> bool {
     if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return false; }
@@ -314,22 +275,18 @@ pub fn pci_config_write32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16
     pci_config_unlock_irq(flags);
     return written;
 }
-
 @system
 pub fn pci_config_read16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u16 {
     let dword = pci_config_read32(segment, bus, slot, func, offset);
     let shift: u32 = ((offset & 2) as u32) * 8;
     return ((dword >> shift) & 0xFFFF) as u16;
 }
-
 @system
 pub fn pci_config_read8(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u8 {
     let dword = pci_config_read32(segment, bus, slot, func, offset);
     let shift: u32 = ((offset & 3) as u32) * 8;
     return ((dword >> shift) & 0xFF) as u8;
 }
-
-// RMW de 16 bits sob o MESMO lock para preservar o outro halfword do dword.
 @system
 pub fn pci_config_write16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, value: u16) -> bool {
     if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return false; }
@@ -344,7 +301,6 @@ pub fn pci_config_write16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16
     pci_config_unlock_irq(flags);
     return written;
 }
-
 @system
 pub fn pci_config_set16_bits(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, bits: u16) -> bool {
     if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return false; }
@@ -360,4 +316,142 @@ pub fn pci_config_set16_bits(segment: u16, bus: u8, slot: u8, func: u8, offset: 
     let written = pci_config_write32_locked(segment, bus, slot, func, offset, updated);
     pci_config_unlock_irq(flags);
     return written;
+}
+
+@system
+pub fn pci_config_invalid_bar_size_measurement() -> PciBarSizeMeasurement {
+    return PciBarSizeMeasurement {
+        base: 0, size: 0, bar_index: 0xFF,
+        is_64bit: false, restored: false, valid: false
+    };
+}
+@system
+fn pci_config_bar_size_power_of_two(value: u64) -> bool {
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+// DF-7b1: sizing controlado de BAR de memoria. A janela destrutiva usa sempre
+// CF8/CFC sob o MESMO PCI_CONFIG_LOCK. Decode I/O, Memory e Bus Master devem
+// estar todos desligados antes da primeira escrita; o helper nunca toca Command.
+@system
+pub fn pci_config_measure_memory_bar(segment: u16, bus: u8, slot: u8, func: u8,
+                                     bar_index: u8) -> PciBarSizeMeasurement {
+    let invalid = pci_config_invalid_bar_size_measurement();
+    if !pci_config_is_ready() || segment != 0 || slot >= 32 || func >= 8 || bar_index >= 6 {
+        return invalid;
+    }
+    let mut flags: u64 = 0;
+    if !pci_config_lock_irq(&mut flags) { return invalid; }
+
+    let vendor = pci_config_legacy_read32_locked(segment, bus, slot, func, 0x00) & 0xFFFF;
+    if vendor == 0 || vendor == 0xFFFF {
+        pci_config_unlock_irq(flags); return invalid;
+    }
+    let command_status = pci_config_legacy_read32_locked(segment, bus, slot, func, 0x04);
+    let command = (command_status & 0xFFFF) as u16;
+    if (command & 0x0007) != 0 {
+        pci_config_unlock_irq(flags); return invalid;
+    }
+
+    let mut cursor: u8 = 0;
+    let mut target_low: u32 = 0;
+    let mut target_high: u32 = 0;
+    let mut target_64 = false;
+    let mut found = false;
+    while cursor < 6 {
+        let offset: u16 = 0x0010 + ((cursor as u16) * 4);
+        let low = pci_config_legacy_read32_locked(segment, bus, slot, func, offset);
+        if cursor == bar_index {
+            if low == 0 || low == 0xFFFFFFFF || (low & 1) != 0 {
+                pci_config_unlock_irq(flags); return invalid;
+            }
+            let kind = (low >> 1) & 3;
+            if kind != 0 && kind != 2 {
+                pci_config_unlock_irq(flags); return invalid;
+            }
+            if kind == 2 && cursor >= 5 {
+                pci_config_unlock_irq(flags); return invalid;
+            }
+            target_low = low;
+            target_64 = kind == 2;
+            if target_64 {
+                target_high = pci_config_legacy_read32_locked(segment, bus, slot, func, offset + 4);
+            }
+            found = true;
+            break;
+        }
+        if low != 0 && low != 0xFFFFFFFF && (low & 1) == 0 {
+            let kind = (low >> 1) & 3;
+            if kind == 2 {
+                if cursor >= 5 { pci_config_unlock_irq(flags); return invalid; }
+                cursor += 2;
+            } else {
+                if kind != 0 { pci_config_unlock_irq(flags); return invalid; }
+                cursor += 1;
+            }
+        } else { cursor += 1; }
+    }
+    if !found { pci_config_unlock_irq(flags); return invalid; }
+
+    let bar_offset: u16 = 0x0010 + ((bar_index as u16) * 4);
+    let mut wrote_low = false;
+    let mut wrote_high = false;
+    let mut measured_low: u32 = 0;
+    let mut measured_high: u32 = 0;
+    if pci_config_legacy_write32_locked(segment, bus, slot, func, bar_offset, 0xFFFFFFFF) {
+        wrote_low = true;
+        if target_64 {
+            wrote_high = pci_config_legacy_write32_locked(
+                segment, bus, slot, func, bar_offset + 4, 0xFFFFFFFF);
+        } else { wrote_high = true; }
+        if wrote_high {
+            measured_low = pci_config_legacy_read32_locked(segment, bus, slot, func, bar_offset);
+            if target_64 {
+                measured_high = pci_config_legacy_read32_locked(segment, bus, slot, func, bar_offset + 4);
+            }
+        }
+    }
+
+    let mut restored_high = true;
+    if target_64 && wrote_low {
+        restored_high = pci_config_legacy_write32_locked(
+            segment, bus, slot, func, bar_offset + 4, target_high);
+    }
+    let mut restored_low = true;
+    if wrote_low {
+        restored_low = pci_config_legacy_write32_locked(
+            segment, bus, slot, func, bar_offset, target_low);
+    }
+    let verify_low = pci_config_legacy_read32_locked(segment, bus, slot, func, bar_offset);
+    let mut verify_high: u32 = 0;
+    if target_64 {
+        verify_high = pci_config_legacy_read32_locked(segment, bus, slot, func, bar_offset + 4);
+    }
+    let verify_command = (pci_config_legacy_read32_locked(
+        segment, bus, slot, func, 0x04) & 0xFFFF) as u16;
+    let restored = restored_low && restored_high && verify_low == target_low &&
+                   (!target_64 || verify_high == target_high) && verify_command == command;
+    if !wrote_low || !wrote_high || !restored {
+        pci_config_unlock_irq(flags); return invalid;
+    }
+
+    let mut base: u64 = (target_low & 0xFFFFFFF0) as u64;
+    let mut mask: u64 = (measured_low & 0xFFFFFFF0) as u64;
+    let mut size: u64 = 0;
+    if target_64 {
+        base |= (target_high as u64) << 32;
+        mask |= (measured_high as u64) << 32;
+        size = (~mask) + 1;
+    } else {
+        let mask32 = (mask & 0xFFFFFFFF) as u32;
+        size = (((~mask32) as u64) + 1) & 0xFFFFFFFF;
+    }
+    let valid_size = size >= 16 && pci_config_bar_size_power_of_two(size) &&
+                     base != 0 && (base & (size - 1)) == 0;
+    pci_config_unlock_irq(flags);
+    if !valid_size { return invalid; }
+    return PciBarSizeMeasurement {
+        base: base, size: size, bar_index: bar_index,
+        is_64bit: target_64, restored: true, valid: true
+    };
 }

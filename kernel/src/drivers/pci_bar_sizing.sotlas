@@ -1,0 +1,187 @@
+// Baken OS — DF-7b1: sizing controlado de BAR PCI com ownership generation-safe.
+//
+// Este modulo NAO publica tamanho no inventario global, NAO acessa MSI-X Table/PBA
+// e NAO habilita decode/DMA. Ele produz apenas uma prova efemera depois que o
+// Config Core dimensiona o BAR e comprova restauracao exata do hardware.
+module kernel::drivers::pci_bar_sizing;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_msix_capability::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+
+@repr(C)
+pub struct PciBarSizeProof {
+    pub bdf: u32;
+    pub bar_index: u8;
+    pub base: u64;
+    pub size: u64;
+    pub is_64bit: bool;
+    pub logical: ResourceHandle;
+    pub physical: ResourceHandle;
+    pub valid: bool;
+}
+
+@system
+pub fn pci_bar_size_invalid_proof() -> PciBarSizeProof {
+    return PciBarSizeProof {
+        bdf: PCI_BRIDGE_BDF_INVALID,
+        bar_index: 0xFF,
+        base: 0,
+        size: 0,
+        is_64bit: false,
+        logical: resource_invalid_handle(),
+        physical: resource_invalid_handle(),
+        valid: false
+    };
+}
+
+@system
+fn pci_bar_size_bus(bdf: u32) -> u8 { return ((bdf >> 8) & 0xFF) as u8; }
+@system
+fn pci_bar_size_slot(bdf: u32) -> u8 { return ((bdf >> 3) & 0x1F) as u8; }
+@system
+fn pci_bar_size_function(bdf: u32) -> u8 { return (bdf & 0x07) as u8; }
+
+@system
+fn pci_bar_size_inventory(index: u32, bar_index: u8,
+                          expected_bdf: u32, expected_base: u64) -> bool {
+    if index >= pci_get_device_count() || bar_index >= 6 { return false; }
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return false; }
+    let bdf = pci_bdf_pack(0, unsafe { (*pci).bus },
+                           unsafe { (*pci).slot }, unsafe { (*pci).func });
+    if bdf != expected_bdf { return false; }
+    unsafe {
+        return !(*pci).bars[bar_index as usize].is_io &&
+               (*pci).bars[bar_index as usize].base_address == expected_base &&
+               (*pci).bars[bar_index as usize].size == 0;
+    }
+}
+
+@system
+fn pci_bar_size_claim_owned(claim: PciBarClaim, device: DeviceHandle,
+                            driver: DriverHandle, bdf: u32,
+                            bar_index: u8, expected_base: u64) -> bool {
+    if !claim.valid || claim.bar_index != bar_index ||
+       !claim.logical.valid || !claim.physical.valid {
+        return false;
+    }
+    let logical = resource_snapshot(claim.logical);
+    if !logical.valid ||
+       !device_handle_equal(logical.owner_device, device) ||
+       !driver_handle_equal(logical.owner_driver, driver) ||
+       logical.request.kind != RESOURCE_KIND_PCI_BAR ||
+       logical.request.start != bdf as u64 || logical.request.length != 1 ||
+       logical.request.auxiliary != bar_index as u32 {
+        return false;
+    }
+    let physical = resource_snapshot(claim.physical);
+    if !physical.valid ||
+       !device_handle_equal(physical.owner_device, device) ||
+       !driver_handle_equal(physical.owner_driver, driver) ||
+       physical.request.kind != RESOURCE_KIND_MMIO ||
+       physical.request.start != expected_base || physical.request.length == 0 ||
+       physical.request.auxiliary != 0 {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_bar_size_sources_quiet(bus: u8, slot: u8, func: u8) -> bool {
+    let msi = pci_msi_capability_probe(0, bus, slot, func);
+    if msi.valid && msi.enabled { return false; }
+    let msix = pci_msix_capability_probe(0, bus, slot, func);
+    if msix.valid && msix.enabled { return false; }
+    return true;
+}
+
+// Produz uma prova efemera de aperture para um BAR ja possuido pelo driver.
+// Restricoes deliberadas deste microcorte:
+// - somente DEVICE_STATE_BINDING;
+// - exatamente os dois resources do PciBarClaim;
+// - BAR ainda nao dimensionado no inventario;
+// - MSI e MSI-X desligados;
+// - PCI Command decode + Bus Master desligados (revalidado atomicamente pelo
+//   Config Core antes da primeira escrita destrutiva).
+@system
+pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
+                             claim: PciBarClaim) -> PciBarSizeProof {
+    let invalid = pci_bar_size_invalid_proof();
+    if !device.valid || !driver.valid || !claim.valid || claim.bar_index >= 6 {
+        return invalid;
+    }
+
+    let owner = device_core_snapshot(device);
+    if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
+       !driver_handle_equal(owner.driver, driver) ||
+       owner.state != DEVICE_STATE_BINDING || owner.resource_count != 2 {
+        return invalid;
+    }
+    let bdf = owner.bus_instance;
+    if bdf == PCI_BRIDGE_BDF_INVALID || ((bdf >> 16) & 0xFFFF) != 0 {
+        return invalid;
+    }
+
+    let bus = pci_bar_size_bus(bdf);
+    let slot = pci_bar_size_slot(bdf);
+    let func = pci_bar_size_function(bdf);
+
+    // Localiza o mesmo BDF no inventario sem confiar no length do MMIO claim.
+    let mut index: u32 = 0;
+    let mut found_index: u32 = PCI_BRIDGE_INDEX_INVALID;
+    let mut base: u64 = 0;
+    while index < pci_get_device_count() {
+        let pci = pci_get_device(index);
+        if pci != (null as *const PciDevice) &&
+           unsafe { (*pci).bus == bus && (*pci).slot == slot && (*pci).func == func } {
+            base = unsafe { (*pci).bars[claim.bar_index as usize].base_address };
+            found_index = index;
+            break;
+        }
+        index += 1;
+    }
+    if found_index == PCI_BRIDGE_INDEX_INVALID || base == 0 ||
+       !pci_bar_size_inventory(found_index, claim.bar_index, bdf, base) ||
+       !pci_bar_size_claim_owned(claim, device, driver, bdf, claim.bar_index, base) ||
+       !pci_bar_size_sources_quiet(bus, slot, func) {
+        return invalid;
+    }
+
+    let measurement = pci_config_measure_memory_bar(
+        0, bus, slot, func, claim.bar_index);
+    if !measurement.valid || !measurement.restored ||
+       measurement.base != base || measurement.size == 0 ||
+       measurement.bar_index != claim.bar_index {
+        return invalid;
+    }
+
+    // Segunda validacao completa: a prova so e publicada se lifecycle, claims,
+    // identidade PCI, BAR atual e fontes de interrupcao continuarem iguais.
+    let verify_owner = device_core_snapshot(device);
+    if !verify_owner.valid || verify_owner.bus != DEVICE_BUS_PCI ||
+       verify_owner.bus_instance != bdf ||
+       !driver_handle_equal(verify_owner.driver, driver) ||
+       verify_owner.state != DEVICE_STATE_BINDING || verify_owner.resource_count != 2 ||
+       !pci_bar_size_inventory(found_index, claim.bar_index, bdf, base) ||
+       !pci_bar_size_claim_owned(claim, device, driver, bdf, claim.bar_index, base) ||
+       !pci_bar_size_sources_quiet(bus, slot, func) {
+        return invalid;
+    }
+
+    return PciBarSizeProof {
+        bdf: bdf,
+        bar_index: claim.bar_index,
+        base: measurement.base,
+        size: measurement.size,
+        is_64bit: measurement.is_64bit,
+        logical: claim.logical,
+        physical: claim.physical,
+        valid: true
+    };
+}
