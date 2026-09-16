@@ -10,6 +10,7 @@ import kernel::arch::x86_64::tss::*;
 import kernel::interrupts::lapic::*;
 import kernel::interrupts::ioapic::*;
 import kernel::interrupts::route::*;
+import kernel::interrupts::registry::*;
 import kernel::drivers::i8042::*;
 import kernel::drivers::gpio_physical::*;
 import kernel::memory::tlb_shootdown::*;
@@ -36,6 +37,8 @@ static mut IRQ_GPIO_COUNT: u64 = 0;
 static mut IRQ_SPURIOUS_COUNT: u64 = 0;
 static mut IRQ_RESCHEDULE_IPI_COUNT: u64 = 0;
 static mut IRQ_TLB_SHOOTDOWN_IPI_COUNT: u64 = 0;
+static mut IRQ_DYNAMIC_COUNT: u64 = 0;
+static mut IRQ_DYNAMIC_UNHANDLED_COUNT: u64 = 0;
 
 @system
 fn irq_install_gate(vector: u16) -> bool {
@@ -51,10 +54,24 @@ fn irq_install_user_gate(vector: u16) -> bool {
     return idt_set_user_irq_gate(vector, handler);
 }
 
+// DF-4b1: a janela dinamica recebe gates DPL0 previamente, enquanto a politica
+// de ownership/handler permanece no Generic IRQ Registry. Nenhuma rota de
+// hardware e criada aqui; IOAPIC/MSI/MSI-X continuam em microcortes proprios.
+@system
+fn irq_install_dynamic_gates() -> bool {
+    let mut vector: u16 = IRQ_DYNAMIC_VECTOR_FIRST;
+    while vector <= IRQ_DYNAMIC_VECTOR_LAST {
+        if !irq_install_gate(vector) { return false; }
+        vector = vector + 1;
+    }
+    return true;
+}
+
 @system
 pub fn irq_prepare_idt() -> bool {
     unsafe { IRQ_IDT_READY = false; }
     if !idt_exceptions_ready() || !tlb_shootdown_is_ready() { return false; }
+    if !irq_registry_init() || !irq_registry_is_ready() { return false; }
     if !irq_install_gate(IRQ_VECTOR_TIMER) { return false; }
     if !irq_install_gate(IRQ_VECTOR_KEYBOARD) { return false; }
     if !irq_install_gate(IRQ_VECTOR_MOUSE) { return false; }
@@ -62,6 +79,7 @@ pub fn irq_prepare_idt() -> bool {
     if !irq_install_gate(IRQ_VECTOR_RESCHEDULE_IPI) { return false; }
     if !irq_install_gate(IRQ_VECTOR_TLB_SHOOTDOWN_IPI) { return false; }
     if !irq_install_gate(IRQ_VECTOR_GPIO) { return false; }
+    if !irq_install_dynamic_gates() { return false; }
     if !irq_install_gate(IRQ_VECTOR_SPURIOUS) { return false; }
     unsafe { IRQ_IDT_READY = true; }
     return true;
@@ -97,6 +115,8 @@ pub fn irq_timer_count_for_cpu(cpu_slot: usize) -> u64 {
 @system pub fn irq_spurious_count() -> u64 { unsafe { return IRQ_SPURIOUS_COUNT; } }
 @system pub fn irq_reschedule_ipi_count() -> u64 { unsafe { return IRQ_RESCHEDULE_IPI_COUNT; } }
 @system pub fn irq_tlb_shootdown_ipi_count() -> u64 { unsafe { return IRQ_TLB_SHOOTDOWN_IPI_COUNT; } }
+@system pub fn irq_dynamic_count() -> u64 { unsafe { return IRQ_DYNAMIC_COUNT; } }
+@system pub fn irq_dynamic_unhandled_count() -> u64 { unsafe { return IRQ_DYNAMIC_UNHANDLED_COUNT; } }
 
 // Caminho sem FPU: publica o CR3 somente depois que o scheduler terminou de
 // selecionar o frame/root. O scheduler continua sem importar memory.
@@ -223,6 +243,19 @@ pub fn sotlas_x86_irq_dispatch(vector: u64, frame_address: u64) -> u64 {
     if vector == IRQ_VECTOR_GPIO as u64 {
         let handled = gpio_physical_irq_dispatch();
         unsafe { IRQ_GPIO_COUNT += handled as u64; }
+        lapic_eoi();
+        return frame_address;
+    }
+
+    // Generic device IRQs ficam no intervalo reservado 0x50..0xEF. O handler
+    // roda primeiro para poder limpar a causa de uma interrupcao level-triggered;
+    // o EOI fica centralizado no core e ocorre inclusive para vetor nao reclamado.
+    if vector >= IRQ_DYNAMIC_VECTOR_FIRST as u64 && vector <= IRQ_DYNAMIC_VECTOR_LAST as u64 {
+        let handled = irq_registry_dispatch(vector as u16);
+        unsafe {
+            IRQ_DYNAMIC_COUNT += 1;
+            if !handled { IRQ_DYNAMIC_UNHANDLED_COUNT += 1; }
+        }
         lapic_eoi();
         return frame_address;
     }
