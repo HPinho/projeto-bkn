@@ -1,0 +1,443 @@
+// Baken OS — DF-6d2 CI fixture: prova MSI end-to-end no QEMU EDU.
+//
+// Este modulo NAO faz parte do grafo de producao. O workflow dedicado copia esta
+// fixture para kernel/src/drivers e a injeta temporariamente no runtime do runner.
+// Assim o notebook real continua usando exatamente os fontes certificados.
+//
+// Lifecycle provado:
+// BINDING -> BAR + reserva MSI passiva -> ACTIVE -> map MMIO -> Memory Space
+// -> arm MSI -> IRQ real/ACK -> UNBINDING -> source-off -> release IRQ/source/BAR.
+module kernel::drivers::pci_msi_edu_proof;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msi::*;
+import kernel::drivers::pci_msi_teardown::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::driver_registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+import kernel::interrupts::interrupt_enable::*;
+import kernel::memory::active_page_tables::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const PCI_MSI_EDU_VENDOR_ID: u16 = 0x1234;
+pub const PCI_MSI_EDU_DEVICE_ID: u16 = 0x11E8;
+pub const PCI_MSI_EDU_BAR_INDEX: u8 = 0;
+pub const PCI_MSI_EDU_BAR_CLAIM_LENGTH: u64 = 4096;
+pub const PCI_MSI_EDU_LIVENESS: u64 = 0x04;
+pub const PCI_MSI_EDU_IRQ_STATUS: u64 = 0x24;
+pub const PCI_MSI_EDU_IRQ_RAISE: u64 = 0x60;
+pub const PCI_MSI_EDU_IRQ_ACK: u64 = 0x64;
+pub const PCI_MSI_EDU_IRQ_TEST_BIT: u32 = 1;
+pub const PCI_MSI_EDU_LIVENESS_PATTERN: u32 = 0x13579BDF;
+pub const PCI_MSI_EDU_LIVENESS_EXPECTED: u32 = 0xECA86420;
+pub const PCI_MSI_EDU_SPIN_LIMIT: u32 = 10000000;
+
+static mut PCI_MSI_EDU_DRIVER: DriverHandle = DriverHandle {
+    driver_id: 0, generation: 0, valid: false
+};
+static mut PCI_MSI_EDU_DEVICE: DeviceHandle = DeviceHandle {
+    device_id: 0, generation: 0, valid: false
+};
+static mut PCI_MSI_EDU_BAR: PciBarClaim = PciBarClaim {
+    logical: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    physical: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    bar_index: 0,
+    valid: false
+};
+static mut PCI_MSI_EDU_RESERVATION: PciMsiReservation = PciMsiReservation {
+    source: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    irq: IrqHandle { irq_id: 0, generation: 0, valid: false },
+    vector: 0,
+    bdf: 0xFFFFFFFF,
+    capability_offset: 0xFFFF,
+    max_vectors: 0,
+    state: 0,
+    valid: false
+};
+static mut PCI_MSI_EDU_ARM: PciMsiArmResult = PciMsiArmResult {
+    reservation: PciMsiReservation {
+        source: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+        irq: IrqHandle { irq_id: 0, generation: 0, valid: false },
+        vector: 0,
+        bdf: 0xFFFFFFFF,
+        capability_offset: 0xFFFF,
+        max_vectors: 0,
+        state: 0,
+        valid: false
+    },
+    original_control: 0,
+    original_address_low: 0,
+    original_address_high: 0,
+    original_data: 0,
+    programmed_address_low: 0,
+    programmed_address_high: 0,
+    programmed_data: 0,
+    destination_apic_id: 0,
+    state: 0,
+    valid: false
+};
+static mut PCI_MSI_EDU_BDF: u32 = PCI_BRIDGE_BDF_INVALID;
+static mut PCI_MSI_EDU_MMIO_BASE: u64 = 0;
+static mut PCI_MSI_EDU_ORIGINAL_COMMAND: u16 = 0;
+static mut PCI_MSI_EDU_COMMAND_VALID: bool = false;
+static mut PCI_MSI_EDU_IRQ_COUNT: u32 = 0;
+static mut PCI_MSI_EDU_IRQ_LAST_STATUS: u32 = 0;
+
+@system
+fn pci_msi_edu_invalid_arm() -> PciMsiArmResult {
+    return PciMsiArmResult {
+        reservation: pci_msi_invalid_reservation(),
+        original_control: 0,
+        original_address_low: 0,
+        original_address_high: 0,
+        original_data: 0,
+        programmed_address_low: 0,
+        programmed_address_high: 0,
+        programmed_data: 0,
+        destination_apic_id: 0,
+        state: PCI_MSI_ARM_STATE_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn pci_msi_edu_reset_state() -> void {
+    unsafe {
+        PCI_MSI_EDU_DRIVER = driver_invalid_handle();
+        PCI_MSI_EDU_DEVICE = device_invalid_handle();
+        PCI_MSI_EDU_BAR = pci_bar_invalid_claim();
+        PCI_MSI_EDU_RESERVATION = pci_msi_invalid_reservation();
+        PCI_MSI_EDU_ARM = pci_msi_edu_invalid_arm();
+        PCI_MSI_EDU_BDF = PCI_BRIDGE_BDF_INVALID;
+        PCI_MSI_EDU_MMIO_BASE = 0;
+        PCI_MSI_EDU_ORIGINAL_COMMAND = 0;
+        PCI_MSI_EDU_COMMAND_VALID = false;
+        PCI_MSI_EDU_IRQ_COUNT = 0;
+        PCI_MSI_EDU_IRQ_LAST_STATUS = 0;
+    }
+}
+
+@system
+fn pci_msi_edu_bdf_segment(bdf: u32) -> u16 {
+    return ((bdf >> 16) & 0xFFFF) as u16;
+}
+
+@system
+fn pci_msi_edu_bdf_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msi_edu_bdf_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msi_edu_bdf_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+@system
+fn pci_msi_edu_irq_handler(device: DeviceHandle, vector: u16) -> bool {
+    let expected_device = unsafe { PCI_MSI_EDU_DEVICE };
+    let reservation = unsafe { PCI_MSI_EDU_RESERVATION };
+    let base = unsafe { PCI_MSI_EDU_MMIO_BASE };
+    if !device_handle_equal(device, expected_device) ||
+       !reservation.valid || vector != reservation.vector || base == 0 {
+        return false;
+    }
+
+    let status = x86_mmio_read32(base + PCI_MSI_EDU_IRQ_STATUS);
+    if status == 0 { return false; }
+    x86_mmio_write32(base + PCI_MSI_EDU_IRQ_ACK, status);
+    unsafe {
+        PCI_MSI_EDU_IRQ_LAST_STATUS = status;
+        PCI_MSI_EDU_IRQ_COUNT += 1;
+    }
+    return true;
+}
+
+static PCI_MSI_EDU_IRQ_DESCRIPTOR: IrqDescriptor = IrqDescriptor {
+    handler: pci_msi_edu_irq_handler
+};
+
+@system
+fn pci_msi_edu_probe(device: DeviceHandle) -> bool {
+    let driver = unsafe { PCI_MSI_EDU_DRIVER };
+    if !driver.valid { return false; }
+
+    let bar = pci_claim_bar(
+        device, driver, PCI_MSI_EDU_BAR_INDEX, PCI_MSI_EDU_BAR_CLAIM_LENGTH
+    );
+    if !bar.valid { return false; }
+    unsafe { PCI_MSI_EDU_BAR = bar; }
+
+    let reservation = pci_msi_reserve_single(
+        device, driver, PCI_MSI_EDU_IRQ_DESCRIPTOR
+    );
+    unsafe { PCI_MSI_EDU_RESERVATION = reservation; }
+
+    if pci_msi_reservation_is_ready(reservation) { return true; }
+    // QUARANTINED precisa chegar ao remove() para cleanup fail-closed; retornar
+    // false faria o cleanup generico perder a semantica de quiescencia do DF-6b.
+    return pci_msi_reservation_is_quarantined(reservation);
+}
+
+@system
+fn pci_msi_edu_restore_memory_space(device: DeviceHandle,
+                                    driver: DriverHandle) -> bool {
+    let bdf = unsafe { PCI_MSI_EDU_BDF };
+    let command_valid = unsafe { PCI_MSI_EDU_COMMAND_VALID };
+    let original = unsafe { PCI_MSI_EDU_ORIGINAL_COMMAND };
+    if !command_valid || bdf == PCI_BRIDGE_BDF_INVALID { return false; }
+
+    let owner = device_core_snapshot(device);
+    if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
+       owner.state != DEVICE_STATE_UNBINDING ||
+       owner.bus_instance != bdf ||
+       !driver_handle_equal(owner.driver, driver) {
+        return false;
+    }
+
+    let segment = pci_msi_edu_bdf_segment(bdf);
+    let bus = pci_msi_edu_bdf_bus(bdf);
+    let slot_id = pci_msi_edu_bdf_slot(bdf);
+    let func = pci_msi_edu_bdf_function(bdf);
+    if segment != 0 ||
+       pci_config_read16(segment, bus, slot_id, func, 0x00) != PCI_MSI_EDU_VENDOR_ID ||
+       pci_config_read16(segment, bus, slot_id, func, 0x02) != PCI_MSI_EDU_DEVICE_ID {
+        return false;
+    }
+
+    let current = pci_config_read16(segment, bus, slot_id, func, 0x04);
+    let desired = if (original & PCI_COMMAND_MEMORY_SPACE) != 0 {
+        current | PCI_COMMAND_MEMORY_SPACE
+    } else {
+        current & ~PCI_COMMAND_MEMORY_SPACE
+    };
+    if desired != current &&
+       !pci_config_write16(segment, bus, slot_id, func, 0x04, desired) {
+        return false;
+    }
+    let verified = pci_config_read16(segment, bus, slot_id, func, 0x04);
+    return (verified & PCI_COMMAND_MEMORY_SPACE) ==
+           (original & PCI_COMMAND_MEMORY_SPACE);
+}
+
+@system
+fn pci_msi_edu_remove(device: DeviceHandle) -> bool {
+    let driver = unsafe { PCI_MSI_EDU_DRIVER };
+    let arm = unsafe { PCI_MSI_EDU_ARM };
+    let mut reservation = unsafe { PCI_MSI_EDU_RESERVATION };
+
+    if arm.valid && arm.state == PCI_MSI_ARM_STATE_ARMED {
+        reservation = pci_msi_disarm_and_release(arm, device, driver);
+    } else if pci_msi_reservation_is_ready(reservation) {
+        reservation = pci_msi_release_unarmed_reservation(
+            reservation, device, driver
+        );
+    } else if pci_msi_reservation_is_quarantined(reservation) {
+        reservation = pci_msi_retry_quarantined_cleanup(
+            reservation, device, driver
+        );
+    }
+
+    unsafe { PCI_MSI_EDU_RESERVATION = reservation; }
+    if reservation.valid { return false; }
+
+    unsafe {
+        if PCI_MSI_EDU_COMMAND_VALID {
+            if !pci_msi_edu_restore_memory_space(device, driver) { return false; }
+            PCI_MSI_EDU_COMMAND_VALID = false;
+        }
+    }
+
+    let bar = unsafe { PCI_MSI_EDU_BAR };
+    if !bar.valid || !pci_release_bar(bar, device, driver) { return false; }
+    unsafe {
+        PCI_MSI_EDU_BAR = pci_bar_invalid_claim();
+        PCI_MSI_EDU_ARM = pci_msi_edu_invalid_arm();
+        PCI_MSI_EDU_MMIO_BASE = 0;
+        PCI_MSI_EDU_BDF = PCI_BRIDGE_BDF_INVALID;
+    }
+    return true;
+}
+
+static PCI_MSI_EDU_DRIVER_DESCRIPTOR: DriverDescriptor = DriverDescriptor {
+    match_rule: DriverMatch {
+        bus: DEVICE_BUS_PCI,
+        class_code: DEVICE_CLASS_CONTROLLER,
+        vendor_id: 0x1234,
+        hardware_id: 0x11E8
+    },
+    priority: 1000,
+    probe: pci_msi_edu_probe,
+    remove: pci_msi_edu_remove
+};
+
+@system
+fn pci_msi_edu_find_index() -> u32 {
+    let count = pci_get_device_count();
+    let mut index: u32 = 0;
+    while index < count {
+        let pci = pci_get_device(index);
+        if pci != (null as *const PciDevice) &&
+           unsafe { (*pci).vendor_id == PCI_MSI_EDU_VENDOR_ID &&
+                    (*pci).device_id == PCI_MSI_EDU_DEVICE_ID } {
+            return index;
+        }
+        index += 1;
+    }
+    return PCI_BRIDGE_INDEX_INVALID;
+}
+
+@system
+fn pci_msi_edu_fail_after_bind(device: DeviceHandle,
+                               driver: DriverHandle) -> bool {
+    let owner = device_core_snapshot(device);
+    if owner.valid && owner.state == DEVICE_STATE_ACTIVE &&
+       driver_handle_equal(owner.driver, driver) {
+        driver_unbind(device, driver);
+    }
+    return false;
+}
+
+// Retorna true em hardware sem EDU sem tocar ownership/config/MMIO. O workflow
+// dedicado exige a presenca do marker, portanto apenas QEMU -device edu certifica.
+@system
+pub fn pci_msi_edu_runtime_proof() -> bool {
+    let index = pci_msi_edu_find_index();
+    if index == PCI_BRIDGE_INDEX_INVALID { return true; }
+    if !external_interrupts_enabled() { return false; }
+
+    let before_resources = resource_active_count();
+    let before_irqs = irq_registry_active_count();
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return false; }
+    let base = unsafe { (*pci).bars[PCI_MSI_EDU_BAR_INDEX as usize].base_address };
+    let is_io = unsafe { (*pci).bars[PCI_MSI_EDU_BAR_INDEX as usize].is_io };
+    if base == 0 || is_io || (base & 0xFFF) != 0 { return false; }
+
+    pci_msi_edu_reset_state();
+    let device = pci_claim_device(index);
+    if !device.valid { return false; }
+    let before_device = device_core_snapshot(device);
+    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||
+       before_device.driver.valid { return false; }
+
+    let driver = driver_register(PCI_MSI_EDU_DRIVER_DESCRIPTOR);
+    if !driver.valid { return false; }
+    unsafe {
+        PCI_MSI_EDU_DRIVER = driver;
+        PCI_MSI_EDU_DEVICE = device;
+        PCI_MSI_EDU_MMIO_BASE = base;
+        PCI_MSI_EDU_IRQ_COUNT = 0;
+        PCI_MSI_EDU_IRQ_LAST_STATUS = 0;
+    }
+
+    let bound = driver_bind(device);
+    if !driver_handle_equal(bound, driver) {
+        driver_unregister(driver);
+        return false;
+    }
+
+    let active = device_core_snapshot(device);
+    let reservation = unsafe { PCI_MSI_EDU_RESERVATION };
+    if !active.valid || active.state != DEVICE_STATE_ACTIVE ||
+       !driver_handle_equal(active.driver, driver) ||
+       !pci_msi_reservation_is_ready(reservation) {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+    unsafe { PCI_MSI_EDU_BDF = reservation.bdf; }
+
+    let bus = unsafe { (*pci).bus };
+    let slot_id = unsafe { (*pci).slot };
+    let func = unsafe { (*pci).func };
+    if pci_bdf_pack(0, bus, slot_id, func) != reservation.bdf {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+
+    let original_command = pci_config_read16(0, bus, slot_id, func, 0x04);
+    if original_command == 0xFFFF {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+    unsafe {
+        PCI_MSI_EDU_ORIGINAL_COMMAND = original_command;
+        PCI_MSI_EDU_COMMAND_VALID = true;
+    }
+
+    if !active_page_tables_map_mmio_identity_4k(base) {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+    if (original_command & PCI_COMMAND_MEMORY_SPACE) == 0 {
+        if !pci_enable_memory(device, driver) ||
+           (pci_config_read16(0, bus, slot_id, func, 0x04) &
+            PCI_COMMAND_MEMORY_SPACE) == 0 {
+            return pci_msi_edu_fail_after_bind(device, driver);
+        }
+    }
+
+    // QEMU EDU: offset 0x04 devolve o complemento de 32 bits escrito.
+    x86_mmio_write32(base + PCI_MSI_EDU_LIVENESS, PCI_MSI_EDU_LIVENESS_PATTERN);
+    if x86_mmio_read32(base + PCI_MSI_EDU_LIVENESS) !=
+       PCI_MSI_EDU_LIVENESS_EXPECTED {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+
+    let stale = x86_mmio_read32(base + PCI_MSI_EDU_IRQ_STATUS);
+    if stale != 0 { x86_mmio_write32(base + PCI_MSI_EDU_IRQ_ACK, stale); }
+    if x86_mmio_read32(base + PCI_MSI_EDU_IRQ_STATUS) != 0 {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+
+    let arm = pci_msi_arm_single(reservation, device, driver);
+    unsafe {
+        PCI_MSI_EDU_ARM = arm;
+        PCI_MSI_EDU_RESERVATION = arm.reservation;
+    }
+    if !arm.valid || arm.state != PCI_MSI_ARM_STATE_ARMED {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+
+    let vector = arm.reservation.vector;
+    x86_mmio_write32(base + PCI_MSI_EDU_IRQ_RAISE, PCI_MSI_EDU_IRQ_TEST_BIT);
+    let mut spins: u32 = 0;
+    loop {
+        let count = unsafe { PCI_MSI_EDU_IRQ_COUNT };
+        if count != 0 || spins >= PCI_MSI_EDU_SPIN_LIMIT { break; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+
+    unsafe {
+        if PCI_MSI_EDU_IRQ_COUNT != 1 ||
+           (PCI_MSI_EDU_IRQ_LAST_STATUS & PCI_MSI_EDU_IRQ_TEST_BIT) == 0 {
+            return pci_msi_edu_fail_after_bind(device, driver);
+        }
+    }
+    if x86_mmio_read32(base + PCI_MSI_EDU_IRQ_STATUS) != 0 {
+        return pci_msi_edu_fail_after_bind(device, driver);
+    }
+
+    if !driver_unbind(device, driver) { return false; }
+    let attached = device_core_snapshot(device);
+    if !attached.valid || attached.state != DEVICE_STATE_ATTACHED ||
+       attached.driver.valid || attached.resource_count != 0 ||
+       resource_active_count() != before_resources ||
+       irq_registry_active_count() != before_irqs {
+        return false;
+    }
+    if irq_registry_dispatch(vector) { return false; }
+    if !driver_unregister(driver) { return false; }
+
+    pci_msi_edu_reset_state();
+    if x86_serial_is_ready() {
+        return x86_serial_write_buffer("BAKEN:PCI_MSI_EDU_READY\n".as_ptr(), 24);
+    }
+    return true;
+}
