@@ -1,0 +1,315 @@
+// Baken OS — DF-7b: prova read-only de janelas MSI-X contra BAR ownership.
+//
+// DF-7a interpreta a capability MSI-X. Este corte vincula Table/PBA a BAR claims
+// ja adquiridos pelo driver e prova que cada janela cabe integralmente na faixa
+// MMIO pertencente ao mesmo Device/Driver. Nao cria claim, nao mapeia MMIO, nao
+// le/escreve Table/PBA e nao altera MSI-X Enable/Function Mask.
+module kernel::drivers::pci_msix_layout;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msix_capability::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+
+@repr(C)
+pub struct PciMsixLayout {
+    pub bdf: u32;
+    pub capability_offset: u16;
+    pub table_size: u16;
+    pub enabled: bool;
+    pub function_masked: bool;
+    pub table_bar_index: u8;
+    pub table_bar_base: u64;
+    pub table_offset: u64;
+    pub table_physical: u64;
+    pub table_bytes: u64;
+    pub pba_bar_index: u8;
+    pub pba_bar_base: u64;
+    pub pba_offset: u64;
+    pub pba_physical: u64;
+    pub pba_bytes: u64;
+    pub valid: bool;
+}
+
+@repr(C)
+struct PciMsixBarSnapshot {
+    pub base: u64;
+    pub valid: bool;
+}
+
+@repr(C)
+struct PciMsixWindowProof {
+    pub bar_base: u64;
+    pub physical: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn pci_msix_layout_invalid() -> PciMsixLayout {
+    return PciMsixLayout {
+        bdf: PCI_BRIDGE_BDF_INVALID,
+        capability_offset: PCI_CAPABILITY_OFFSET_INVALID,
+        table_size: 0,
+        enabled: false,
+        function_masked: false,
+        table_bar_index: 0xFF,
+        table_bar_base: 0,
+        table_offset: 0,
+        table_physical: 0,
+        table_bytes: 0,
+        pba_bar_index: 0xFF,
+        pba_bar_base: 0,
+        pba_offset: 0,
+        pba_physical: 0,
+        pba_bytes: 0,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_layout_invalid_bar() -> PciMsixBarSnapshot {
+    return PciMsixBarSnapshot { base: 0, valid: false };
+}
+
+@system
+fn pci_msix_layout_invalid_window() -> PciMsixWindowProof {
+    return PciMsixWindowProof { bar_base: 0, physical: 0, valid: false };
+}
+
+@system
+fn pci_msix_layout_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msix_layout_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msix_layout_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+// Faz somente sanity-check do valor ATUAL dos BAR registers. Nao executa sizing.
+// O scan sequencial impede aceitar como BIR o dword alto de um BAR 64-bit e
+// rejeita tipos de Memory BAR reservados. DF-7b permanece limitado ao segmento 0,
+// igual ao inventario/bridge PCI atual.
+@system
+fn pci_msix_layout_bar_snapshot(bus: u8, slot: u8, func: u8,
+                                target_bar: u8) -> PciMsixBarSnapshot {
+    if target_bar >= 6 { return pci_msix_layout_invalid_bar(); }
+    let mut bar: u8 = 0;
+    while bar < 6 {
+        let offset: u16 = 0x0010 + ((bar as u16) * 4);
+        let low = pci_config_read32(0, bus, slot, func, offset);
+
+        if bar == target_bar {
+            if low == 0 || low == 0xFFFFFFFF || (low & 1) != 0 {
+                return pci_msix_layout_invalid_bar();
+            }
+            let bar_type = (low >> 1) & 3;
+            if bar_type != 0 && bar_type != 2 {
+                return pci_msix_layout_invalid_bar();
+            }
+            if bar_type == 2 && bar >= 5 {
+                return pci_msix_layout_invalid_bar();
+            }
+
+            let mut base = (low & 0xFFFFFFF0) as u64;
+            if bar_type == 2 {
+                let high = pci_config_read32(0, bus, slot, func, offset + 4);
+                base |= (high as u64) << 32;
+            }
+            if base == 0 { return pci_msix_layout_invalid_bar(); }
+            return PciMsixBarSnapshot { base: base, valid: true };
+        }
+
+        // Para localizar target_bar corretamente precisamos pular o dword alto
+        // de qualquer Memory BAR 64-bit anterior.
+        if low != 0 && low != 0xFFFFFFFF && (low & 1) == 0 {
+            let bar_type = (low >> 1) & 3;
+            if bar_type == 2 {
+                if bar >= 5 { return pci_msix_layout_invalid_bar(); }
+                bar += 2;
+            } else {
+                if bar_type != 0 { return pci_msix_layout_invalid_bar(); }
+                bar += 1;
+            }
+        } else {
+            bar += 1;
+        }
+    }
+    return pci_msix_layout_invalid_bar();
+}
+
+@system
+fn pci_msix_layout_window_proof(claim: PciBarClaim, expected_bir: u8,
+                                offset: u64, bytes: u64, bdf: u32,
+                                device: DeviceHandle,
+                                driver: DriverHandle) -> PciMsixWindowProof {
+    if !claim.valid || !claim.logical.valid || !claim.physical.valid ||
+       claim.bar_index != expected_bir || expected_bir > PCI_MSIX_MAX_BIR ||
+       bytes == 0 {
+        return pci_msix_layout_invalid_window();
+    }
+
+    let logical = resource_snapshot(claim.logical);
+    if !logical.valid ||
+       !device_handle_equal(logical.owner_device, device) ||
+       !driver_handle_equal(logical.owner_driver, driver) ||
+       logical.request.kind != RESOURCE_KIND_PCI_BAR ||
+       logical.request.start != bdf as u64 || logical.request.length != 1 ||
+       logical.request.auxiliary != expected_bir as u32 {
+        return pci_msix_layout_invalid_window();
+    }
+
+    let physical = resource_snapshot(claim.physical);
+    if !physical.valid ||
+       !device_handle_equal(physical.owner_device, device) ||
+       !driver_handle_equal(physical.owner_driver, driver) ||
+       physical.request.kind != RESOURCE_KIND_MMIO ||
+       physical.request.length == 0 || physical.request.auxiliary != 0 {
+        return pci_msix_layout_invalid_window();
+    }
+
+    // A faixa fisica de pci_claim_bar() sempre comeca na base atual do BAR.
+    // Revalidar o BAR fecha stale claims caso firmware/hardware/config tenha mudado.
+    let bar = pci_msix_layout_bar_snapshot(
+        pci_msix_layout_bus(bdf), pci_msix_layout_slot(bdf),
+        pci_msix_layout_function(bdf), expected_bir
+    );
+    if !bar.valid || physical.request.start != bar.base {
+        return pci_msix_layout_invalid_window();
+    }
+
+    // Nao usamos soma potencialmente overflow-prone para provar containment.
+    if offset > physical.request.length ||
+       bytes > physical.request.length - offset {
+        return pci_msix_layout_invalid_window();
+    }
+    let address = physical.request.start + offset;
+    if address < physical.request.start || address + bytes < address {
+        return pci_msix_layout_invalid_window();
+    }
+    return PciMsixWindowProof {
+        bar_base: bar.base,
+        physical: address,
+        valid: true
+    };
+}
+
+@system
+fn pci_msix_layout_capability_equal(left: PciMsixCapability,
+                                    right: PciMsixCapability) -> bool {
+    return left.valid && right.valid &&
+           left.capability_offset == right.capability_offset &&
+           left.control == right.control && left.table_size == right.table_size &&
+           left.enabled == right.enabled &&
+           left.function_masked == right.function_masked &&
+           left.table_bir == right.table_bir &&
+           left.table_offset == right.table_offset &&
+           left.table_bytes == right.table_bytes &&
+           left.pba_bir == right.pba_bir &&
+           left.pba_offset == right.pba_offset &&
+           left.pba_bytes == right.pba_bytes;
+}
+
+// DF-7b — resolve Table/PBA somente se o caller ja possuir BAR claim(s) MMIO
+// suficientemente grandes. Se Table e PBA usam o mesmo BIR, o mesmo PciBarClaim
+// generation-safe deve ser fornecido para ambos.
+@system
+pub fn pci_msix_layout_probe(device: DeviceHandle, driver: DriverHandle,
+                             table_claim: PciBarClaim,
+                             pba_claim: PciBarClaim) -> PciMsixLayout {
+    if !device.valid || !driver.valid { return pci_msix_layout_invalid(); }
+
+    let owner = device_core_snapshot(device);
+    if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
+       !driver_handle_equal(owner.driver, driver) ||
+       (owner.state != DEVICE_STATE_BINDING && owner.state != DEVICE_STATE_ACTIVE) {
+        return pci_msix_layout_invalid();
+    }
+    let bdf = owner.bus_instance;
+    // O bridge PCI atual publica inventario do segmento 0. Suporte multi-segmento
+    // so podera ser aberto quando o proprio bridge carregar segment_group.
+    if bdf == PCI_BRIDGE_BDF_INVALID || ((bdf >> 16) & 0xFFFF) != 0 {
+        return pci_msix_layout_invalid();
+    }
+
+    let bus = pci_msix_layout_bus(bdf);
+    let slot = pci_msix_layout_slot(bdf);
+    let func = pci_msix_layout_function(bdf);
+    let capability = pci_msix_capability_probe(0, bus, slot, func);
+    if !capability.valid { return pci_msix_layout_invalid(); }
+
+    if capability.table_bir == capability.pba_bir &&
+       (!resource_handle_equal(table_claim.logical, pba_claim.logical) ||
+        !resource_handle_equal(table_claim.physical, pba_claim.physical)) {
+        return pci_msix_layout_invalid();
+    }
+
+    let table = pci_msix_layout_window_proof(
+        table_claim, capability.table_bir, capability.table_offset,
+        capability.table_bytes, bdf, device, driver
+    );
+    if !table.valid { return pci_msix_layout_invalid(); }
+    let pba = pci_msix_layout_window_proof(
+        pba_claim, capability.pba_bir, capability.pba_offset,
+        capability.pba_bytes, bdf, device, driver
+    );
+    if !pba.valid { return pci_msix_layout_invalid(); }
+
+    // Revalida lifecycle, capability, ResourceHandles e BAR registers antes de
+    // publicar enderecos fisicos. ACTIVE->UNBINDING durante a prova falha fechado.
+    let verify_owner = device_core_snapshot(device);
+    if !verify_owner.valid || verify_owner.bus != DEVICE_BUS_PCI ||
+       verify_owner.bus_instance != bdf ||
+       !driver_handle_equal(verify_owner.driver, driver) ||
+       (verify_owner.state != DEVICE_STATE_BINDING &&
+        verify_owner.state != DEVICE_STATE_ACTIVE) {
+        return pci_msix_layout_invalid();
+    }
+    let verify_capability = pci_msix_capability_probe(0, bus, slot, func);
+    if !pci_msix_layout_capability_equal(capability, verify_capability) {
+        return pci_msix_layout_invalid();
+    }
+    let verify_table = pci_msix_layout_window_proof(
+        table_claim, verify_capability.table_bir, verify_capability.table_offset,
+        verify_capability.table_bytes, bdf, device, driver
+    );
+    let verify_pba = pci_msix_layout_window_proof(
+        pba_claim, verify_capability.pba_bir, verify_capability.pba_offset,
+        verify_capability.pba_bytes, bdf, device, driver
+    );
+    if !verify_table.valid || !verify_pba.valid ||
+       verify_table.bar_base != table.bar_base ||
+       verify_table.physical != table.physical ||
+       verify_pba.bar_base != pba.bar_base ||
+       verify_pba.physical != pba.physical {
+        return pci_msix_layout_invalid();
+    }
+
+    return PciMsixLayout {
+        bdf: bdf,
+        capability_offset: capability.capability_offset,
+        table_size: capability.table_size,
+        enabled: capability.enabled,
+        function_masked: capability.function_masked,
+        table_bar_index: capability.table_bir,
+        table_bar_base: table.bar_base,
+        table_offset: capability.table_offset,
+        table_physical: table.physical,
+        table_bytes: capability.table_bytes,
+        pba_bar_index: capability.pba_bir,
+        pba_bar_base: pba.bar_base,
+        pba_offset: capability.pba_offset,
+        pba_physical: pba.physical,
+        pba_bytes: capability.pba_bytes,
+        valid: true
+    };
+}
