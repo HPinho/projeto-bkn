@@ -1,14 +1,13 @@
-// Baken OS - enumeracao PCI legada por Configuration Mechanism #1.
+// Baken OS - enumeracao PCI read-only sobre o PCI Config Core.
 //
-// A varredura e deliberadamente READ-ONLY. Enumerar um dispositivo nao deve
-// habilitar Bus Master, I/O Space ou Memory Space, nem escrever 0xFFFFFFFF em
-// BARs ativos. Drivers proprietarios do dispositivo fazem essas transicoes
-// explicitamente depois de validar classe, recursos, DMA e MMIO.
-
+// DF-5a mantém Configuration Mechanism #1 como backend ativo, agora
+// serializado pela camada pci_config. A varredura global continua READ-ONLY:
+// enumerar um dispositivo nao habilita Bus Master, I/O Space ou Memory Space,
+// nem escreve 0xFFFFFFFF em BARs ativos. Drivers proprietarios fazem essas
+// transicoes explicitamente depois de validar classe, recursos, DMA e MMIO.
 module kernel::drivers::pci_bus;
 
-pub const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0CF8;
-pub const PCI_CONFIG_DATA_PORT: u16    = 0x0CFC;
+import kernel::drivers::pci_config::*;
 
 pub const PCI_MAX_BUSES: u16 = 256;
 pub const PCI_MAX_SLOTS: u8  = 32;
@@ -73,47 +72,31 @@ static mut PCI_DEVICES: [PciDevice; PCI_MAX_DISCOVERED] = [
 static mut PCI_DEVICE_COUNT: u32 = 0;
 static mut PCI_DISPLAY_DEVICE_INDEX: i32 = -1;
 
+// Compatibilidade da API histórica: o PCI Bus atual opera no segmento 0.
+// DF-5b passará a expor BDF segment-aware quando ECAM entrar em produção.
 @system
 pub fn pci_read_config32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
-    let address: u32 = 0x80000000 |
-        ((bus as u32) << 16) |
-        (((slot & 0x1F) as u32) << 11) |
-        (((func & 0x07) as u32) << 8) |
-        ((offset & 0xFC) as u32);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    return baken_pci_in32(PCI_CONFIG_DATA_PORT);
+    return pci_config_read32(0, bus, slot, func, offset as u16);
 }
 
 @system
 pub fn pci_write_config32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) -> void {
-    let address: u32 = 0x80000000 |
-        ((bus as u32) << 16) |
-        (((slot & 0x1F) as u32) << 11) |
-        (((func & 0x07) as u32) << 8) |
-        ((offset & 0xFC) as u32);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    baken_pci_out32(PCI_CONFIG_DATA_PORT, value);
+    if !pci_config_write32(0, bus, slot, func, offset as u16, value) { return; }
 }
 
 @system
 pub fn pci_read_config16(bus: u8, slot: u8, func: u8, offset: u8) -> u16 {
-    let dword = pci_read_config32(bus, slot, func, offset);
-    let shift: u32 = ((offset & 2) as u32) * 8;
-    return ((dword >> shift) & 0xFFFF) as u16;
+    return pci_config_read16(0, bus, slot, func, offset as u16);
 }
 
 @system
 pub fn pci_read_config8(bus: u8, slot: u8, func: u8, offset: u8) -> u8 {
-    let dword = pci_read_config32(bus, slot, func, offset);
-    let shift: u32 = ((offset & 3) as u32) * 8;
-    return ((dword >> shift) & 0xFF) as u8;
+    return pci_config_read8(0, bus, slot, func, offset as u16);
 }
 
 @system
 pub fn pci_write_command(bus: u8, slot: u8, func: u8, command: u16) -> void {
-    let current = pci_read_config32(bus, slot, func, 0x04);
-    let updated = (current & 0xFFFF0000) | (command as u32);
-    pci_write_config32(bus, slot, func, 0x04, updated);
+    if !pci_config_write16(0, bus, slot, func, 0x04, command) { return; }
 }
 
 // Compatibilidade de API: habilita somente Memory Space + Bus Master.
@@ -129,8 +112,8 @@ pub fn pci_enable_device(bus: u8, slot: u8, func: u8) -> void {
 pub fn pci_enable_command_bits(bus: u8, slot: u8, func: u8, bits: u16) -> void {
     let allowed: u16 = PCI_COMMAND_IO_SPACE | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
     let requested: u16 = bits & allowed;
-    let current: u16 = pci_read_config16(bus, slot, func, 0x04);
-    pci_write_command(bus, slot, func, current | requested);
+    if requested == 0 { return; }
+    if !pci_config_set16_bits(0, bus, slot, func, 0x04, requested) { return; }
 }
 
 // Decodifica o valor ATUAL do BAR sem alterar o dispositivo. size permanece
@@ -185,6 +168,8 @@ pub fn pci_probe_bar(bus: u8, slot: u8, func: u8, bar_index: u8, out_bar: *mut P
 
 @system
 pub fn pci_scan_all() -> u32 {
+    if !pci_config_init() || !pci_config_uses_legacy_cf8cfc() { return 0; }
+
     unsafe {
         PCI_DEVICE_COUNT = 0;
         PCI_DISPLAY_DEVICE_INDEX = -1;
