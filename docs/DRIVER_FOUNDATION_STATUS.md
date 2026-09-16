@@ -10,12 +10,12 @@ O Baken OS ja atingiu boot em notebook real. A Driver Foundation deve preservar 
 
 - zero dependencia de firmware UEFI depois do cutover;
 - CR3, PMM/VMM/DMA, ACPI/APIC/IRQ, xHCI/HID e storage bare-metal permanecem ownership do kernel;
-- nenhum microcorte de driver redesenha boot, allocator, interrupt core ou page tables sem necessidade provada;
+- nenhum microcorte redesenha boot, allocator, interrupt core ou page tables sem necessidade provada;
 - Generic IRQ Registry permanece a unica autoridade de vetores dinamicos;
 - EOI permanece centralizado no dispatcher x86 existente;
 - PCI/MSI/MSI-X evoluem em microcortes pequenos, fail-closed e reversiveis;
-- nao empilhar funcionalidade sobre SHA candidato vermelho;
-- feature so vira `CERTIFIED` depois de todos os gates obrigatorios no mesmo SHA.
+- nao empilhar funcionalidade sobre SHA candidato vermelho ou superseded por auditoria;
+- feature so vira `CERTIFIED` depois dos seis gates obrigatorios no mesmo SHA.
 
 ## Estados formais
 
@@ -23,6 +23,7 @@ O Baken OS ja atingiu boot em notebook real. A Driver Foundation deve preservar 
 PLANNED -> IMPLEMENTED -> VALIDATING -> CERTIFIED
                            |
                            +-> FAILED -> correction-only -> VALIDATING
+                           +-> SUPERSEDED_BY_AUDIT -> correction-only -> VALIDATING
 ```
 
 `IMPLEMENTED` significa somente que o codigo existe. Nao equivale a baseline certificada.
@@ -52,7 +53,7 @@ b6cf5725439d946d017f6cd23e2ff14970d85a6b
 test(pci): add QEMU EDU MSI runtime proof
 ```
 
-Gates no mesmo SHA: CI #1296, SMP #399, NVMe #496, HID #155, Fault #61 e MSI EDU #1, todos PASS. O gate MSI EDU compilou o kernel Sotlas instrumentado, executou QEMU EDU, observou `BAKEN:PCI_MSI_EDU_READY`, nao observou excecao de CPU e terminou com `stop_reason=complete`.
+Gates: CI #1296, SMP #399, NVMe #496, HID #155, Fault #61 e MSI EDU #1, todos PASS. O MSI EDU observou `BAKEN:PCI_MSI_EDU_READY`, nenhuma excecao de CPU e `stop_reason=complete`.
 
 ## Driver Foundation
 
@@ -79,111 +80,109 @@ DF-6  MSI                                          CERTIFIED
 DF-7  MSI-X                                        IN PROGRESS
   DF-7a read-only capability model                 CERTIFIED
   DF-7b BAR-backed Table/PBA layout proof          IMPLEMENTED / VALIDATING
-  DF-7c source/vector ownership                    PLANNED
+  DF-7b1 controlled quiescent BAR sizing           PLANNED
+  DF-7c source/vector ownership                    BLOCKED BY DF-7b/DF-7b1
   DF-7d masked table-entry programming             PLANNED
   DF-7e activation/teardown/runtime proof          PLANNED
 ```
 
-## DF-6 — MSI convencional — fechado
-
-O caminho certificado separa deliberadamente reserva, armamento e teardown:
-
-```text
-BINDING
-  -> capability MSI read-only
-  -> ownership logico exclusivo da fonte por BDF
-  -> IrqHandle no Generic IRQ Registry
-  -> MSI Enable comprovadamente 0
-
-ACTIVE
-  -> programacao single-vector transacional
-  -> Message Address/Data com readback
-  -> MSI Enable somente por ultimo
-
-UNBINDING
-  -> desabilitar fonte primeiro
-  -> provar MSI Enable = 0
-  -> restaurar snapshot quando aplicavel
-  -> liberar IRQ
-  -> liberar ownership logico da fonte
-```
-
-Qualquer incerteza de quiescencia/rollback preserva ownership em estado fail-closed; nenhum vetor pode voltar ao pool enquanto a fonte puder continuar ativa.
-
 ## DF-7a — MSI-X capability model — certificado
 
-`kernel/src/drivers/pci_msix_capability.sotlas` interpreta somente a capability convencional MSI-X `0x11` no config space.
+`kernel/src/drivers/pci_msix_capability.sotlas` interpreta somente a capability MSI-X `0x11` no config space:
 
-O modelo certificado:
+- Message Control, Table Size, Enable e Function Mask;
+- BIR/offset de Table e PBA;
+- Table Size de 1..2048;
+- Table span `entries * 16`;
+- PBA span `ceil(entries / 64) * 8`;
+- overflow/bounds checks;
+- releitura integral antes de publicar;
+- zero MMIO/IRQ/config write/runtime call.
 
-- interpreta Message Control, Table Size, MSI-X Enable e Function Mask;
-- aceita no maximo 2048 entradas;
-- interpreta BIR + offset de Table e PBA;
-- aceita somente BAR0..BAR5;
-- calcula Table span como `entries * 16` bytes;
-- calcula PBA span como `ceil(entries / 64) * 8` bytes;
-- faz bounds/overflow checks;
-- relê header/control/Table/PBA antes de publicar o snapshot;
-- nao mapeia nem acessa MMIO;
-- nao reserva IRQ;
-- nao altera MSI-X, INTx, Memory Space ou Bus Master;
-- nao introduz chamada no boot.
+## DF-7b — layout Table/PBA contra BAR — correction-only
 
-## DF-7b — BAR-backed Table/PBA layout proof — candidato
-
-O DF-7b nao executa sizing destrutivo de BAR. A enumeracao global continua read-only e `PciBar.size == 0` permanece valido quando o tamanho nao foi medido.
-
-A autoridade para provar os limites de Table/PBA passa a ser o `PciBarClaim` ja pertencente ao driver:
+O primeiro candidato DF-7b:
 
 ```text
-PciBarClaim.logical
-  -> RESOURCE_KIND_PCI_BAR
-  -> owner Device/Driver
-  -> BDF + BAR index
-
-PciBarClaim.physical
-  -> RESOURCE_KIND_MMIO
-  -> BAR base + length efetivamente reivindicado
+e6bbc3bf1b3b85545a4cedca63b191dc08ce8e7c
+feat(pci): bind MSI-X windows to BAR ownership
 ```
 
-`pci_msix_layout_probe()` somente publica um layout quando:
+foi **superseded antes de certificacao por auditoria**, independentemente do resultado eventual dos gates.
 
-- Device/Driver ainda coincidem e o Device Core esta BINDING ou ACTIVE;
-- o BDF pertence ao segmento 0, coerente com o bridge PCI atual;
-- DF-7a ainda publica exatamente a mesma capability MSI-X;
-- BIR da Table/PBA coincide com os claims fornecidos;
-- o claim logico prova `(BDF,BAR)` e o claim fisico prova MMIO do mesmo owner;
-- o BAR atual ainda possui a mesma base do claim;
-- BIR nunca aponta para I/O BAR, tipo reservado ou dword alto de BAR 64-bit;
-- `offset + span` cabe integralmente no comprimento do claim MMIO sem overflow;
-- quando Table e PBA usam o mesmo BIR, ambos recebem o mesmo claim generation-safe;
-- lifecycle, capability, claims e BARs sao revalidados antes da publicacao final.
+### Motivo da auditoria
 
-O DF-7b nao pode:
+`pci_probe_bar()` mantem a enumeracao global estritamente read-only e inicializa `PciBar.size = 0`. `pci_claim_bar()` aceita o `length` fornecido pelo driver quando `known_size == 0`.
 
-- chamar `pci_claim_bar()` ou `resource_claim()`;
-- mapear, ler ou escrever Table/PBA MMIO;
-- reservar/liberar IRQ;
+Portanto:
+
+```text
+PciBarClaim.physical.length
+!= prova automatica da aperture real do BAR
+```
+
+Um caller poderia reivindicar um extent maior que a aperture fisica quando o tamanho ainda fosse desconhecido. O DF-7b nao pode usar esse valor sozinho para declarar Table/PBA seguras.
+
+### Contrato corrigido do DF-7b
+
+O correction-only atual mantem o corte passivo, mas agora `pci_msix_layout_probe()` somente publica quando:
+
+- o inventario PCI contem `PciBar.size > 0` para o mesmo BDF/BIR;
+- o BAR atual continua Memory BAR valido, 32 ou 64-bit, com a mesma base;
+- `PciBarClaim.logical` prova owner + BDF + BAR index;
+- `PciBarClaim.physical` e MMIO do mesmo owner;
+- `physical.start == BAR.base`;
+- `physical.length == PciBar.size` **exatamente**;
+- Table/PBA cabem em `PciBar.size`, nao em um extent escolhido pelo caller;
+- mesmo BIR para Table/PBA exige os mesmos ResourceHandles generation-safe;
+- lifecycle, capability, claims, BAR base e BAR size sao revalidados antes da publicacao.
+
+Enquanto `PciBar.size == 0`, o DF-7b deve falhar fechado. Isso e intencional.
+
+O DF-7b continua proibido de:
+
+- executar BAR sizing;
 - escrever PCI config space;
-- alterar MSI-X Enable ou Function Mask;
-- habilitar Memory Space ou Bus Master;
-- tocar LAPIC, IOAPIC, IDT ou EOI;
-- adicionar chamada runtime/boot.
+- chamar `pci_claim_bar()`/`resource_claim()`/`resource_release()`;
+- mapear/ler/escrever MSI-X Table/PBA;
+- reservar/liberar IRQ;
+- alterar MSI-X Enable/Function Mask;
+- habilitar Memory Space/Bus Master;
+- tocar LAPIC/IOAPIC/IDT/EOI;
+- entrar no boot/runtime.
 
-Enquanto os gates do commit que contem DF-7b nao fecharem verdes, a baseline funcional continua `a34434aad5c1a795cdac70458efe26adb8b3a50a`.
+## DF-7b1 — controlled quiescent BAR sizing — proximo pre-requisito
 
-## Continuacao bloqueada ate certificacao do DF-7b
+A aperture real devera ser medida em microcorte separado. Requisitos de desenho antes de qualquer implementacao:
 
-Somente depois dos seis gates no mesmo SHA:
+- nunca inserir sizing destrutivo no scan global;
+- somente device ownership generation-safe;
+- exigir dispositivo quiescente e lifecycle apropriado;
+- snapshot completo de Command + BAR low/high;
+- nenhuma medicao enquanto DMA/Bus Master puder estar ativo;
+- decode Memory/I/O tratado de forma explicita e restaurado exatamente;
+- BAR 64-bit tratado atomica/transacionalmente como par low/high;
+- write-all-ones/read-mask/restore com readback de restauracao;
+- qualquer incerteza = falha fechada, sem publicar size;
+- `PciBar.size` so recebe valor depois de restauracao comprovada;
+- nenhum MSI-X MMIO e programado neste microcorte.
 
-1. promover DF-7b a `CERTIFIED`;
-2. manter o layout read-only separado de ownership/programacao;
-3. desenhar DF-7c sem criar allocator de vetor paralelo;
-4. reutilizar Generic IRQ Registry para cada vetor MSI-X suportado;
-5. manter Table/PBA sem escrita ate ownership de fonte/vetores estar provado;
-6. manter INTx, Memory Space e Bus Master como politicas explicitas e separadas;
-7. exigir teardown source-off antes de qualquer devolucao de vetor;
-8. criar prova runtime dedicada antes de fechar DF-7.
+DF-7c permanece bloqueado ate DF-7b estar certificado e existir caminho seguro para obter `PciBar.size` quando necessario.
+
+## Gates obrigatorios
+
+Para todo candidato funcional da Driver Foundation:
+
+```text
+1. CI/CD + QEMU
+2. SMP Bring-up
+3. NVMe-only Bare-Metal
+4. HID Dual-device
+5. SMP Fault Diagnostic
+6. MSI EDU Runtime
+```
+
+O candidato correction-only que contem este status deve fechar os seis gates no mesmo SHA antes de qualquer promocao.
 
 ## Regra de retomada
 
@@ -191,12 +190,13 @@ Somente depois dos seis gates no mesmo SHA:
 main HEAD
 -> functional baseline certificada
 -> candidate SHA
+-> auditorias conhecidas do candidate
 -> seis gates do candidate
--> correction-only se qualquer gate falhar
+-> correction-only se qualquer gate falhar OU auditoria invalidar a garantia
 -> somente entao escolher o proximo microcorte
 ```
 
-Documentacao complementar atual:
+Documentacao complementar:
 
 - `BAKEN_OS_DRIVER_FOUNDATION_ROADMAP_APPENDIX.md`
 - `KERNEL_DRIVER_FOUNDATION_HANDOFF_APPENDIX.md`
