@@ -168,7 +168,33 @@ SOTLAS_X86_IRQ_STUB(69)
 SOTLAS_X86_IRQ_STUB(70)
 SOTLAS_X86_IRQ_STUB(255)
 #undef SOTLAS_X86_IRQ_STUB
+
+/* DF-4b0: tabela de stubs DPL0 para a janela dinâmica 0x50..0xEF.
+ * Cada entrada começa em um boundary de 16 bytes. O push usa opcode imm32
+ * explícito para não depender da escolha imm8/imm32 do assembler; o padding
+ * mantém o stride estável mesmo se o JMP for relaxado pelo GAS. */
+#define SOTLAS_X86_DYNAMIC_IRQ_FIRST 80u
+#define SOTLAS_X86_DYNAMIC_IRQ_LAST 239u
+#define SOTLAS_X86_DYNAMIC_IRQ_COUNT 160u
+#define SOTLAS_X86_DYNAMIC_IRQ_STRIDE 16u
+__attribute__((naked,used,aligned(16))) static void __sotlas_x86_irq_dynamic_table(void) {
+    __asm__(
+        ".set sotlas_irq_vector, 80\n\t"
+        ".rept 160\n\t"
+        ".byte 0x68\n\t"
+        ".long sotlas_irq_vector\n\t"
+        "jmp __sotlas_x86_irq_common\n\t"
+        ".p2align 4\n\t"
+        ".set sotlas_irq_vector, sotlas_irq_vector + 1\n\t"
+        ".endr\n\t"
+    );
+}
+
 static inline uint64_t __irq_stub_address(uint16_t vector) {
+    if (vector >= SOTLAS_X86_DYNAMIC_IRQ_FIRST && vector <= SOTLAS_X86_DYNAMIC_IRQ_LAST) {
+        return (uint64_t)(uintptr_t)&__sotlas_x86_irq_dynamic_table +
+               ((uint64_t)(vector - SOTLAS_X86_DYNAMIC_IRQ_FIRST) * SOTLAS_X86_DYNAMIC_IRQ_STRIDE);
+    }
     switch(vector) {
         case 64:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_64;
         case 65:return(uint64_t)(uintptr_t)&__sotlas_x86_irq_65;
