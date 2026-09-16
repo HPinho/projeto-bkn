@@ -30,10 +30,12 @@ pub struct PciBarClaim {
     pub valid: bool;
 }
 
-// DF-6b: uma reserva MSI ainda e apenas ownership logico de um IrqHandle
-// generation-safe. Nenhum estado global paralelo ao Generic IRQ Registry e criado.
+// DF-6b: a reserva MSI combina ownership logico exclusivo da fonte PCI com
+// um IrqHandle generation-safe. O Generic IRQ Registry continua sendo a unica
+// autoridade sobre vetores dinamicos.
 @repr(C)
 pub struct PciMsiReservation {
+    pub source: ResourceHandle;
     pub irq: IrqHandle;
     pub vector: u16;
     pub bdf: u32;
@@ -64,6 +66,7 @@ pub fn pci_bar_invalid_claim() -> PciBarClaim {
 @system
 pub fn pci_msi_invalid_reservation() -> PciMsiReservation {
     return PciMsiReservation {
+        source: resource_invalid_handle(),
         irq: irq_invalid_handle(),
         vector: 0,
         bdf: PCI_BRIDGE_BDF_INVALID,
@@ -462,11 +465,21 @@ pub fn pci_enable_bus_master(device: DeviceHandle, driver: DriverHandle) -> bool
     return pci_enable_owned_command_bit(device, driver, PCI_COMMAND_BUS_MASTER);
 }
 
+// Rollback em ordem inversa da aquisicao. Se o unregister do IRQ falhar, o
+// claim logico da fonte fica retido para impedir outra reserva concorrente.
+@system
+fn pci_msi_rollback_unarmed_claims(irq: IrqHandle, source: ResourceHandle,
+                                   device: DeviceHandle, driver: DriverHandle) -> bool {
+    if irq.valid && !irq_registry_unregister(irq, device, driver) { return false; }
+    if source.valid && !resource_release(source, device, driver) { return false; }
+    return true;
+}
+
 // DF-6b — reserva single-vector sem programar a capability MSI.
 //
-// O Generic IRQ Registry continua sendo a unica autoridade de vetores dinamicos.
-// O dispositivo deve anunciar MSI valido e DESABILITADO; hardware pre-armado e
-// rejeitado para que este microcorte nunca herde uma fonte que possa interromper.
+// O Resource Manager garante uma unica fonte MSI convencional por BDF; o Generic
+// IRQ Registry continua sendo a unica autoridade de vetores dinamicos. O dispositivo
+// deve anunciar MSI valido e DESABILITADO, portanto esta API nunca arma hardware.
 @system
 pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
                               descriptor: IrqDescriptor) -> PciMsiReservation {
@@ -490,21 +503,45 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
         return pci_msi_invalid_reservation();
     }
 
+    // Claim logico exclusivo da fonte MSI. Como o start e o BDF e length=1,
+    // chamadas concorrentes para o mesmo dispositivo conflitam no Resource Manager.
+    let source = resource_claim(device, driver, ResourceRequest {
+        kind: RESOURCE_KIND_PCI_MSI,
+        start: bdf as u64,
+        length: 1,
+        auxiliary: 0
+    });
+    if !source.valid { return pci_msi_invalid_reservation(); }
+
     let irq = irq_registry_register(device, driver, descriptor);
-    if !irq.valid { return pci_msi_invalid_reservation(); }
+    if !irq.valid {
+        resource_release(source, device, driver);
+        return pci_msi_invalid_reservation();
+    }
     let vector = irq_registry_vector(irq);
     if vector < IRQ_DYNAMIC_VECTOR_FIRST || vector > IRQ_DYNAMIC_VECTOR_LAST {
-        irq_registry_unregister(irq, device, driver);
+        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
         return pci_msi_invalid_reservation();
     }
 
-    // Revalida ownership e layout depois do claim do IRQ para fechar a janela
-    // entre os locks independentes PCI_BRIDGE/DEVICE/RESOURCE/IRQ_REGISTRY.
+    // Revalida ownership e layout depois dos claims para fechar a janela entre os
+    // locks independentes PCI_BRIDGE/DEVICE/RESOURCE/IRQ_REGISTRY.
     let mut verify_index: u32 = PCI_BRIDGE_INDEX_INVALID;
     let mut verify_bdf: u32 = PCI_BRIDGE_BDF_INVALID;
     if !pci_bridge_owned_device(device, driver, &mut verify_index, &mut verify_bdf) ||
        verify_index != index || verify_bdf != bdf {
-        irq_registry_unregister(irq, device, driver);
+        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
+        return pci_msi_invalid_reservation();
+    }
+
+    let verify_source = resource_snapshot(source);
+    if !verify_source.valid ||
+       !device_handle_equal(verify_source.owner_device, device) ||
+       !driver_handle_equal(verify_source.owner_driver, driver) ||
+       verify_source.request.kind != RESOURCE_KIND_PCI_MSI ||
+       verify_source.request.start != bdf as u64 ||
+       verify_source.request.length != 1 || verify_source.request.auxiliary != 0 {
+        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
         return pci_msi_invalid_reservation();
     }
 
@@ -512,7 +549,7 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
     if verify_pci == (null as *const PciDevice) ||
        pci_bdf_pack(0, unsafe { (*verify_pci).bus }, unsafe { (*verify_pci).slot },
                     unsafe { (*verify_pci).func }) != bdf {
-        irq_registry_unregister(irq, device, driver);
+        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
         return pci_msi_invalid_reservation();
     }
 
@@ -525,11 +562,12 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
        verify.address_64 != capability.address_64 ||
        verify.per_vector_masking != capability.per_vector_masking ||
        verify.max_vectors != capability.max_vectors {
-        irq_registry_unregister(irq, device, driver);
+        pci_msi_rollback_unarmed_claims(irq, source, device, driver);
         return pci_msi_invalid_reservation();
     }
 
     return PciMsiReservation {
+        source: source,
         irq: irq,
         vector: vector,
         bdf: bdf,
@@ -546,7 +584,7 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
 pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
                                             device: DeviceHandle,
                                             driver: DriverHandle) -> bool {
-    if !reservation.valid || !reservation.irq.valid ||
+    if !reservation.valid || !reservation.source.valid || !reservation.irq.valid ||
        reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
        reservation.vector > IRQ_DYNAMIC_VECTOR_LAST ||
        irq_registry_vector(reservation.irq) != reservation.vector {
@@ -557,6 +595,16 @@ pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
     let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
     if !pci_bridge_owned_device_for_release(device, driver, &mut index, &mut bdf) ||
        bdf != reservation.bdf {
+        return false;
+    }
+
+    let source = resource_snapshot(reservation.source);
+    if !source.valid ||
+       !device_handle_equal(source.owner_device, device) ||
+       !driver_handle_equal(source.owner_driver, driver) ||
+       source.request.kind != RESOURCE_KIND_PCI_MSI ||
+       source.request.start != bdf as u64 ||
+       source.request.length != 1 || source.request.auxiliary != 0 {
         return false;
     }
 
@@ -577,5 +625,8 @@ pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
         return false;
     }
 
-    return irq_registry_unregister(reservation.irq, device, driver);
+    // Ordem inversa: primeiro o vetor/handler, depois a exclusividade da fonte.
+    if !irq_registry_unregister(reservation.irq, device, driver) { return false; }
+    if !resource_release(reservation.source, device, driver) { return false; }
+    return true;
 }

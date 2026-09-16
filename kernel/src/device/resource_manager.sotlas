@@ -4,6 +4,8 @@
 // inverso e proibido; callbacks rodam sem qualquer lock destes registros.
 // PCI_BAR identifica ownership logico de (BDF, BAR): start e o BDF empacotado,
 // length vale 1 e auxiliary e o indice 0..5. A faixa fisica e um claim MMIO.
+// PCI_MSI identifica ownership logico exclusivo da fonte MSI convencional de um BDF;
+// o vetor continua pertencendo exclusivamente ao Generic IRQ Registry.
 module kernel::device::resource_manager;
 
 import kernel::device::types::*;
@@ -66,7 +68,7 @@ fn resource_unlock_irq(flags: u64) -> void {
 
 @system
 fn resource_request_valid(request: ResourceRequest) -> bool {
-    if request.kind == RESOURCE_KIND_NONE || request.kind > RESOURCE_KIND_DMA ||
+    if request.kind == RESOURCE_KIND_NONE || request.kind > RESOURCE_KIND_PCI_MSI ||
        request.length == 0 || request.start + request.length < request.start {
         return false;
     }
@@ -75,6 +77,9 @@ fn resource_request_valid(request: ResourceRequest) -> bool {
     }
     if request.kind == RESOURCE_KIND_PCI_BAR {
         return request.length == 1 && request.auxiliary < 6;
+    }
+    if request.kind == RESOURCE_KIND_PCI_MSI {
+        return request.length == 1 && request.auxiliary == 0;
     }
     return request.auxiliary == 0;
 }
@@ -91,7 +96,9 @@ fn resource_requests_conflict(left: ResourceRequest, right: ResourceRequest) -> 
     if left.kind == RESOURCE_KIND_PCI_BAR {
         return left.start == right.start && left.auxiliary == right.auxiliary;
     }
-    if left.kind == RESOURCE_KIND_IRQ { return left.start == right.start; }
+    if left.kind == RESOURCE_KIND_IRQ || left.kind == RESOURCE_KIND_PCI_MSI {
+        return left.start == right.start;
+    }
     return resource_ranges_overlap(left, right);
 }
 

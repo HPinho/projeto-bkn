@@ -44,6 +44,7 @@ pub const RESOURCE_KIND_IO_PORT: u8 = 2;
 pub const RESOURCE_KIND_PCI_BAR: u8 = 3;
 pub const RESOURCE_KIND_IRQ: u8 = 4;
 pub const RESOURCE_KIND_DMA: u8 = 5;
+pub const RESOURCE_KIND_PCI_MSI: u8 = 6;
 
 @repr(C)
 pub struct ResourceHandle {

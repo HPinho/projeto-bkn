@@ -82,22 +82,37 @@ Ele:
 
 ## DF-6b — single-vector reservation bridge
 
-O DF-6b reutiliza o Generic IRQ Registry como unica autoridade sobre os vetores dinamicos `0x50..0xEF`.
+O DF-6b usa duas fundacoes ja existentes, com responsabilidades separadas:
+
+```text
+Resource Manager
+  -> RESOURCE_KIND_PCI_MSI
+  -> ownership logico exclusivo da fonte MSI por BDF
+
+Generic IRQ Registry
+  -> RESOURCE_KIND_IRQ
+  -> unica autoridade sobre vetores dinamicos 0x50..0xEF
+```
+
+O claim `RESOURCE_KIND_PCI_MSI` nao escolhe nem representa vetor. Ele apenas impede que duas CPUs/rotinas reservem simultaneamente duas IRQs para a mesma fonte MSI convencional.
 
 Ele pode:
 
 - exigir `DeviceHandle + DriverHandle` validos e ownership PCI exato;
 - exigir capability MSI valida e ainda desabilitada;
+- adquirir um claim logico exclusivo da fonte MSI keyed por BDF;
 - reservar exatamente um `IrqHandle` via `irq_registry_register()`;
-- publicar `vector + BDF + capability_offset` em uma `PciMsiReservation`;
-- revalidar ownership e layout MSI depois do claim para fechar TOCTOU;
-- fazer rollback do `IrqHandle` se qualquer revalidacao falhar;
+- publicar `source + irq + vector + BDF + capability_offset` em uma `PciMsiReservation`;
+- revalidar ownership PCI, ownership da fonte e layout MSI depois dos claims para fechar TOCTOU;
+- fazer rollback em ordem inversa: IRQ primeiro, fonte MSI por ultimo;
+- manter o claim da fonte retido se o unregister da IRQ falhar;
 - liberar reserva nao armada durante `BINDING`, `ACTIVE` ou `UNBINDING`;
-- recusar liberar o vetor se a capability MSI estiver habilitada.
+- liberar o vetor somente quando uma leitura MSI valida provar `MSI Enable = 0`;
+- falhar fechado se o config space ou a capability deixarem de ser verificaveis.
 
 Ele nao pode:
 
-- chamar `resource_claim()` diretamente para escolher vetor;
+- usar `resource_claim()` para escolher vetor;
 - criar tabela/allocator paralelo de MSI;
 - escrever PCI config space;
 - programar Message Address ou Message Data;
@@ -114,6 +129,7 @@ Reserva e armamento ficam deliberadamente separados:
 ```text
 BINDING
   -> detectar MSI
+  -> claim exclusivo da fonte por BDF
   -> reservar IrqHandle
   -> NAO habilitar MSI
 
@@ -124,10 +140,11 @@ ACTIVE
 UNBINDING
   -> DF-6d deve desabilitar a fonte primeiro
   -> confirmar MSI Enable = 0
-  -> somente entao liberar IrqHandle
+  -> liberar IrqHandle
+  -> liberar ownership logico da fonte MSI
 ```
 
-Isso impede que um dispositivo emita MSI para um vetor que ja voltou ao pool dinamico.
+Isso impede tanto MSI contra vetor devolvido ao pool quanto dupla reserva concorrente da mesma fonte.
 
 ## Sequencia de continuacao
 
@@ -136,11 +153,12 @@ Somente se o SHA candidato do DF-6b fechar os gates obrigatorios:
 1. marcar DF-6b `CERTIFIED`;
 2. manter single-vector como unico modo inicialmente suportado;
 3. iniciar DF-6c sem criar segundo interrupt core;
-4. derivar Message Address/Data a partir do LAPIC existente e do vetor reservado;
-5. fazer programacao transacional com snapshots, verificacao e rollback;
-6. escrever MSI Enable somente depois de address/data/MME estarem consistentes;
-7. manter INTx e politica de fallback separados e explicitamente auditados;
-8. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
+4. exigir `DEVICE_STATE_ACTIVE` para qualquer armamento;
+5. derivar Message Address/Data a partir do LAPIC existente e do vetor reservado;
+6. fazer programacao transacional com snapshots, verificacao e rollback;
+7. manter MME=0 no primeiro corte e escrever MSI Enable somente por ultimo;
+8. manter INTx, Bus Master, Memory Space e politica de fallback fora do DF-6c;
+9. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
 
 ## Regra de retomada
 
