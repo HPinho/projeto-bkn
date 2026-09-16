@@ -1,0 +1,255 @@
+// Baken OS — DF-6d1: teardown transacional de MSI single-vector.
+//
+// Este modulo NAO aloca vetores, NAO arma MSI e NAO altera INTx, Bus Master
+// ou Memory Space. Ele aceita somente um armamento DF-6c provado e um device
+// ja em UNBINDING, desabilita a fonte primeiro, restaura o snapshot original
+// e so entao delega a devolucao de IRQ/source ao bridge DF-6b.
+module kernel::drivers::pci_msi_teardown;
+
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msi::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+
+@system
+fn pci_msi_teardown_quarantined(reservation: PciMsiReservation) -> PciMsiReservation {
+    if !reservation.valid { return reservation; }
+    return PciMsiReservation {
+        source: reservation.source,
+        irq: reservation.irq,
+        vector: reservation.vector,
+        bdf: reservation.bdf,
+        capability_offset: reservation.capability_offset,
+        max_vectors: reservation.max_vectors,
+        state: PCI_MSI_RESERVATION_QUARANTINED,
+        valid: true
+    };
+}
+
+@system
+fn pci_msi_teardown_segment(bdf: u32) -> u16 {
+    return ((bdf >> 16) & 0xFFFF) as u16;
+}
+
+@system
+fn pci_msi_teardown_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msi_teardown_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msi_teardown_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+@system
+fn pci_msi_teardown_owner_matches(reservation: PciMsiReservation,
+                                  device: DeviceHandle,
+                                  driver: DriverHandle) -> bool {
+    if !reservation.valid || !reservation.source.valid || !reservation.irq.valid ||
+       !device.valid || !driver.valid || reservation.bdf == PCI_BRIDGE_BDF_INVALID {
+        return false;
+    }
+
+    // DF-6d1 e deliberadamente teardown-only. Exigir UNBINDING evita corrida
+    // com pci_msi_arm_single(), cuja operacao ACTIVE precisa terminar antes da
+    // transicao de lifecycle ser publicada pelo Device Core.
+    let owner = device_core_snapshot(device);
+    if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
+       owner.bus_instance != reservation.bdf ||
+       owner.state != DEVICE_STATE_UNBINDING ||
+       !driver_handle_equal(owner.driver, driver) {
+        return false;
+    }
+
+    let source = resource_snapshot(reservation.source);
+    if !source.valid ||
+       !device_handle_equal(source.owner_device, device) ||
+       !driver_handle_equal(source.owner_driver, driver) ||
+       source.request.kind != RESOURCE_KIND_PCI_MSI ||
+       source.request.start != reservation.bdf as u64 ||
+       source.request.length != 1 || source.request.auxiliary != 0 {
+        return false;
+    }
+
+    if reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+       reservation.vector > IRQ_DYNAMIC_VECTOR_LAST ||
+       irq_registry_vector(reservation.irq) != reservation.vector {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msi_teardown_layout_matches(capability: PciMsiCapability,
+                                   arm: PciMsiArmResult) -> bool {
+    return capability.valid && arm.valid && arm.reservation.valid &&
+           capability.capability_offset == arm.reservation.capability_offset &&
+           capability.max_vectors == arm.reservation.max_vectors &&
+           capability.message_address_low_offset != PCI_MSI_OFFSET_NONE &&
+           capability.message_data_offset != PCI_MSI_OFFSET_NONE &&
+           (!capability.address_64 ||
+            capability.message_address_high_offset != PCI_MSI_OFFSET_NONE);
+}
+
+@system
+fn pci_msi_teardown_programmed_payload_matches(capability: PciMsiCapability,
+                                                arm: PciMsiArmResult) -> bool {
+    if !pci_msi_teardown_layout_matches(capability, arm) { return false; }
+    let bdf = arm.reservation.bdf;
+    let segment = pci_msi_teardown_segment(bdf);
+    let bus = pci_msi_teardown_bus(bdf);
+    let slot_id = pci_msi_teardown_slot(bdf);
+    let func = pci_msi_teardown_function(bdf);
+
+    if pci_config_read32(segment, bus, slot_id, func,
+                         capability.message_address_low_offset) != arm.programmed_address_low {
+        return false;
+    }
+    if capability.address_64 &&
+       pci_config_read32(segment, bus, slot_id, func,
+                         capability.message_address_high_offset) != arm.programmed_address_high {
+        return false;
+    }
+    if pci_config_read16(segment, bus, slot_id, func,
+                         capability.message_data_offset) != arm.programmed_data {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msi_teardown_restore_original(capability: PciMsiCapability,
+                                     arm: PciMsiArmResult) -> bool {
+    if !pci_msi_teardown_layout_matches(capability, arm) ||
+       (arm.original_control & PCI_MSI_CONTROL_ENABLE) != 0 {
+        return false;
+    }
+    let bdf = arm.reservation.bdf;
+    let segment = pci_msi_teardown_segment(bdf);
+    let bus = pci_msi_teardown_bus(bdf);
+    let slot_id = pci_msi_teardown_slot(bdf);
+    let func = pci_msi_teardown_function(bdf);
+
+    // A fonte ja precisa estar comprovadamente OFF antes de tocar payload.
+    let before = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_teardown_layout_matches(before, arm) || before.enabled {
+        return false;
+    }
+
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           capability.message_data_offset, arm.original_data) {
+        return false;
+    }
+    if capability.address_64 &&
+       !pci_config_write32(segment, bus, slot_id, func,
+                           capability.message_address_high_offset,
+                           arm.original_address_high) {
+        return false;
+    }
+    if !pci_config_write32(segment, bus, slot_id, func,
+                           capability.message_address_low_offset,
+                           arm.original_address_low) {
+        return false;
+    }
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           capability.capability_offset + PCI_MSI_CONTROL_REL,
+                           arm.original_control) {
+        return false;
+    }
+
+    let after = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_teardown_layout_matches(after, arm) || after.enabled ||
+       after.control != arm.original_control {
+        return false;
+    }
+    if pci_config_read32(segment, bus, slot_id, func,
+                         after.message_address_low_offset) != arm.original_address_low {
+        return false;
+    }
+    if after.address_64 &&
+       pci_config_read32(segment, bus, slot_id, func,
+                         after.message_address_high_offset) != arm.original_address_high {
+        return false;
+    }
+    if pci_config_read16(segment, bus, slot_id, func,
+                         after.message_data_offset) != arm.original_data {
+        return false;
+    }
+    return true;
+}
+
+// DF-6d1 — source-off antes de qualquer devolucao de ownership.
+//
+// Retorno:
+//   INVALID      -> teardown integral concluido; nenhum ownership MSI restante.
+//   QUARANTINED  -> hardware/ownership nao puderam ser integralmente provados;
+//                   caller deve preservar a reserva e falhar fechado.
+@system
+pub fn pci_msi_disarm_and_release(arm: PciMsiArmResult,
+                                  device: DeviceHandle,
+                                  driver: DriverHandle) -> PciMsiReservation {
+    if !arm.valid || arm.state != PCI_MSI_ARM_STATE_ARMED ||
+       !pci_msi_reservation_is_ready(arm.reservation) ||
+       (arm.original_control & PCI_MSI_CONTROL_ENABLE) != 0 ||
+       !pci_msi_teardown_owner_matches(arm.reservation, device, driver) {
+        return pci_msi_teardown_quarantined(arm.reservation);
+    }
+
+    let bdf = arm.reservation.bdf;
+    let segment = pci_msi_teardown_segment(bdf);
+    let bus = pci_msi_teardown_bus(bdf);
+    let slot_id = pci_msi_teardown_slot(bdf);
+    let func = pci_msi_teardown_function(bdf);
+    let capability = pci_msi_capability_probe(segment, bus, slot_id, func);
+    let expected_enabled = (arm.original_control &
+                            ~PCI_MSI_CONTROL_ENABLE &
+                            ~PCI_MSI_CONTROL_MME_MASK) |
+                           PCI_MSI_CONTROL_ENABLE;
+
+    // Antes da primeira escrita, exige prova de que ainda estamos desmontando
+    // exatamente o armamento produzido pelo DF-6c.
+    if !pci_msi_teardown_layout_matches(capability, arm) ||
+       !capability.enabled || capability.multiple_message_enable != 0 ||
+       capability.control != expected_enabled ||
+       !pci_msi_teardown_programmed_payload_matches(capability, arm) {
+        return pci_msi_teardown_quarantined(arm.reservation);
+    }
+
+    // Primeira e mais importante mutacao: cortar a fonte MSI.
+    let disabled = capability.control & ~PCI_MSI_CONTROL_ENABLE;
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           capability.capability_offset + PCI_MSI_CONTROL_REL,
+                           disabled) {
+        return pci_msi_teardown_quarantined(arm.reservation);
+    }
+
+    // Uma leitura nova precisa provar source-off antes de qualquer restore/release.
+    let quiescent = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_teardown_layout_matches(quiescent, arm) || quiescent.enabled ||
+       quiescent.control != disabled {
+        return pci_msi_teardown_quarantined(arm.reservation);
+    }
+    if !pci_msi_teardown_owner_matches(arm.reservation, device, driver) {
+        return pci_msi_teardown_quarantined(arm.reservation);
+    }
+
+    // Depois de source-off comprovado, devolvemos o config space ao snapshot
+    // anterior ao armamento. Falha aqui ainda preserva source+IRQ em quarentena.
+    if !pci_msi_teardown_restore_original(quiescent, arm) ||
+       !pci_msi_teardown_owner_matches(arm.reservation, device, driver) {
+        return pci_msi_teardown_quarantined(arm.reservation);
+    }
+
+    // O bridge revalida novamente MSI Enable = 0 e libera em ordem segura:
+    // IRQ primeiro, ownership logico da fonte MSI por ultimo.
+    return pci_msi_release_unarmed_reservation(arm.reservation, device, driver);
+}
