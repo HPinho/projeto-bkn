@@ -1,0 +1,255 @@
+// Baken OS — DF-5c: walker read-only de capabilities PCI/PCIe.
+//
+// Nenhuma capability e programada aqui. O walker apenas percorre config space
+// convencional/estendido por meio do PCI Config Core, com bounds estritos e
+// deteccao de ciclos. Isso prepara MSI/MSI-X sem acoplar politica de interrupcao
+// ao enumerador PCI.
+module kernel::drivers::pci_capabilities;
+
+import kernel::drivers::pci_config::*;
+
+pub const PCI_STATUS_CAPABILITIES_LIST: u16 = 0x0010;
+pub const PCI_CAPABILITY_POINTER_TYPE0_1: u16 = 0x0034;
+pub const PCI_CAPABILITY_POINTER_CARDBUS: u16 = 0x0014;
+pub const PCI_CAPABILITY_MIN_OFFSET: u16 = 0x0040;
+pub const PCI_CAPABILITY_MAX_OFFSET: u16 = 0x00FC;
+pub const PCI_CAPABILITY_MAX_STEPS: u16 = 48;
+
+pub const PCI_EXT_CAPABILITY_FIRST_OFFSET: u16 = 0x0100;
+pub const PCI_EXT_CAPABILITY_MAX_OFFSET: u16 = 0x0FFC;
+pub const PCI_EXT_CAPABILITY_MAX_STEPS: u16 = 960;
+pub const PCI_CAPABILITY_OFFSET_INVALID: u16 = 0xFFFF;
+
+// IDs convencionais usados pelas proximas etapas da Driver Foundation.
+pub const PCI_CAP_ID_MSI: u8 = 0x05;
+pub const PCI_CAP_ID_PCIE: u8 = 0x10;
+pub const PCI_CAP_ID_MSIX: u8 = 0x11;
+
+// Alguns IDs estendidos uteis para diagnostico/expansao futura.
+pub const PCI_EXT_CAP_ID_AER: u16 = 0x0001;
+pub const PCI_EXT_CAP_ID_DSN: u16 = 0x0003;
+
+pub struct PciCapability {
+    pub id: u16;
+    pub version: u8;
+    pub offset: u16;
+    pub next_offset: u16;
+    pub extended: bool;
+    pub valid: bool;
+}
+
+@system
+pub fn pci_capability_invalid() -> PciCapability {
+    return PciCapability {
+        id: 0,
+        version: 0,
+        offset: 0,
+        next_offset: 0,
+        extended: false,
+        valid: false
+    };
+}
+
+@system
+fn pci_capability_standard_offset_valid(offset: u16) -> bool {
+    return offset >= PCI_CAPABILITY_MIN_OFFSET &&
+           offset <= PCI_CAPABILITY_MAX_OFFSET &&
+           (offset & 3) == 0;
+}
+
+@system
+fn pci_capability_standard_visit_bit(offset: u16) -> u64 {
+    if !pci_capability_standard_offset_valid(offset) { return 0; }
+    let index: u32 = ((offset - PCI_CAPABILITY_MIN_OFFSET) / 4) as u32;
+    if index >= 64 { return 0; }
+    return (1 as u64) << index;
+}
+
+@system
+fn pci_capability_pointer_register(segment: u16, bus: u8, slot: u8, func: u8) -> u16 {
+    let header_type = pci_config_read8(segment, bus, slot, func, 0x000E) & 0x7F;
+    if header_type == 0 || header_type == 1 {
+        return PCI_CAPABILITY_POINTER_TYPE0_1;
+    }
+    if header_type == 2 { return PCI_CAPABILITY_POINTER_CARDBUS; }
+    return PCI_CAPABILITY_OFFSET_INVALID;
+}
+
+// Procura uma capability convencional (MSI, PCIe, MSI-X etc.).
+// O bitmap cabe em u64 porque o espaco convencional possui no maximo 48
+// offsets de 4 bytes entre 0x40 e 0xFC. Qualquer repeticao falha closed.
+@system
+pub fn pci_capability_find(segment: u16, bus: u8, slot: u8, func: u8,
+                           requested_id: u8) -> PciCapability {
+    if requested_id == 0 || requested_id == 0xFF || !pci_config_is_ready() {
+        return pci_capability_invalid();
+    }
+
+    let status = pci_config_read16(segment, bus, slot, func, 0x0006);
+    if status == 0xFFFF || (status & PCI_STATUS_CAPABILITIES_LIST) == 0 {
+        return pci_capability_invalid();
+    }
+
+    let pointer_register = pci_capability_pointer_register(segment, bus, slot, func);
+    if pointer_register == PCI_CAPABILITY_OFFSET_INVALID {
+        return pci_capability_invalid();
+    }
+
+    let raw_pointer = pci_config_read8(segment, bus, slot, func, pointer_register) as u16;
+    if raw_pointer == 0 || !pci_capability_standard_offset_valid(raw_pointer) {
+        return pci_capability_invalid();
+    }
+
+    let mut current: u16 = raw_pointer;
+    let mut visited: u64 = 0;
+    let mut steps: u16 = 0;
+
+    while current != 0 && steps < PCI_CAPABILITY_MAX_STEPS {
+        let bit = pci_capability_standard_visit_bit(current);
+        if bit == 0 || (visited & bit) != 0 { return pci_capability_invalid(); }
+        visited |= bit;
+
+        let header = pci_config_read16(segment, bus, slot, func, current);
+        if header == 0xFFFF { return pci_capability_invalid(); }
+
+        let capability_id = (header & 0x00FF) as u8;
+        let next = ((header >> 8) & 0x00FF) as u16;
+        if capability_id == requested_id {
+            if next != 0 && !pci_capability_standard_offset_valid(next) {
+                return pci_capability_invalid();
+            }
+            return PciCapability {
+                id: capability_id as u16,
+                version: 0,
+                offset: current,
+                next_offset: next,
+                extended: false,
+                valid: true
+            };
+        }
+
+        if next == 0 { return pci_capability_invalid(); }
+        if !pci_capability_standard_offset_valid(next) {
+            return pci_capability_invalid();
+        }
+        current = next;
+        steps += 1;
+    }
+
+    return pci_capability_invalid();
+}
+
+@system
+fn pci_extended_capability_offset_valid(offset: u16) -> bool {
+    return offset >= PCI_EXT_CAPABILITY_FIRST_OFFSET &&
+           offset <= PCI_EXT_CAPABILITY_MAX_OFFSET &&
+           (offset & 3) == 0;
+}
+
+// Retorna 0 no fim normal da lista e 0xFFFF para header/pointer malformado.
+@system
+fn pci_extended_capability_next(segment: u16, bus: u8, slot: u8, func: u8,
+                                current: u16) -> u16 {
+    if !pci_extended_capability_offset_valid(current) {
+        return PCI_CAPABILITY_OFFSET_INVALID;
+    }
+
+    let header = pci_config_read32(segment, bus, slot, func, current);
+    if header == 0 || header == 0xFFFFFFFF { return 0; }
+
+    let capability_id = (header & 0x0000FFFF) as u16;
+    if capability_id == 0 || capability_id == 0xFFFF { return 0; }
+
+    let next = ((header >> 20) & 0x00000FFF) as u16;
+    if next == 0 { return 0; }
+    if !pci_extended_capability_offset_valid(next) {
+        return PCI_CAPABILITY_OFFSET_INVALID;
+    }
+    return next;
+}
+
+// Floyd tortoise/hare: nenhum estado global e necessario e um ciclo nunca pode
+// prender o kernel. O bound de 960 cobre todo o espaco 0x100..0xFFC a cada 4 B.
+@system
+pub fn pci_extended_capability_chain_valid(segment: u16, bus: u8, slot: u8,
+                                            func: u8) -> bool {
+    if !pci_config_is_ready() || !pci_config_supports_extended_space() {
+        return false;
+    }
+
+    let first_header = pci_config_read32(
+        segment, bus, slot, func, PCI_EXT_CAPABILITY_FIRST_OFFSET);
+    if first_header == 0 || first_header == 0xFFFFFFFF { return true; }
+
+    let first_id = (first_header & 0x0000FFFF) as u16;
+    if first_id == 0 || first_id == 0xFFFF { return true; }
+
+    let mut slow: u16 = PCI_EXT_CAPABILITY_FIRST_OFFSET;
+    let mut fast: u16 = PCI_EXT_CAPABILITY_FIRST_OFFSET;
+    let mut steps: u16 = 0;
+
+    while steps < PCI_EXT_CAPABILITY_MAX_STEPS {
+        slow = pci_extended_capability_next(segment, bus, slot, func, slow);
+        if slow == PCI_CAPABILITY_OFFSET_INVALID { return false; }
+        if slow == 0 { return true; }
+
+        fast = pci_extended_capability_next(segment, bus, slot, func, fast);
+        if fast == PCI_CAPABILITY_OFFSET_INVALID { return false; }
+        if fast == 0 { return true; }
+        fast = pci_extended_capability_next(segment, bus, slot, func, fast);
+        if fast == PCI_CAPABILITY_OFFSET_INVALID { return false; }
+        if fast == 0 { return true; }
+
+        if slow == fast { return false; }
+        steps += 1;
+    }
+
+    return false;
+}
+
+// Procura capability PCIe estendida. A lista inteira e validada contra ciclos
+// antes de qualquer resultado ser publicado, mantendo comportamento fail-closed.
+@system
+pub fn pci_extended_capability_find(segment: u16, bus: u8, slot: u8, func: u8,
+                                    requested_id: u16) -> PciCapability {
+    if requested_id == 0 || requested_id == 0xFFFF ||
+       !pci_extended_capability_chain_valid(segment, bus, slot, func) {
+        return pci_capability_invalid();
+    }
+
+    let mut current: u16 = PCI_EXT_CAPABILITY_FIRST_OFFSET;
+    let mut steps: u16 = 0;
+
+    while steps < PCI_EXT_CAPABILITY_MAX_STEPS {
+        let header = pci_config_read32(segment, bus, slot, func, current);
+        if header == 0 || header == 0xFFFFFFFF { return pci_capability_invalid(); }
+
+        let capability_id = (header & 0x0000FFFF) as u16;
+        if capability_id == 0 || capability_id == 0xFFFF {
+            return pci_capability_invalid();
+        }
+        let version = ((header >> 16) & 0x0000000F) as u8;
+        let next = ((header >> 20) & 0x00000FFF) as u16;
+
+        if next != 0 && !pci_extended_capability_offset_valid(next) {
+            return pci_capability_invalid();
+        }
+
+        if capability_id == requested_id {
+            return PciCapability {
+                id: capability_id,
+                version: version,
+                offset: current,
+                next_offset: next,
+                extended: true,
+                valid: true
+            };
+        }
+
+        if next == 0 { return pci_capability_invalid(); }
+        current = next;
+        steps += 1;
+    }
+
+    return pci_capability_invalid();
+}
