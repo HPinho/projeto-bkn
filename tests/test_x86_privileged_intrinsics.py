@@ -67,6 +67,24 @@ class X86PrivilegedIntrinsicTests(unittest.TestCase):
         self.assertIn("static inline uint64_t __irq_stub_address", preamble)
         self.assertIn("sotlas_x86_irq_dispatch", preamble)
 
+    def test_dynamic_irq_window_has_fixed_stride_stubs(self):
+        preamble = bootstrap.PREAMBLE
+        self.assertIn("SOTLAS_X86_DYNAMIC_IRQ_FIRST 80u", preamble)
+        self.assertIn("SOTLAS_X86_DYNAMIC_IRQ_LAST 239u", preamble)
+        self.assertIn("SOTLAS_X86_DYNAMIC_IRQ_COUNT 160u", preamble)
+        self.assertIn("SOTLAS_X86_DYNAMIC_IRQ_STRIDE 16u", preamble)
+        self.assertIn("__sotlas_x86_irq_dynamic_table", preamble)
+        self.assertIn('".rept 160\\n\\t"', preamble)
+        self.assertIn('".byte 0x68\\n\\t"', preamble)
+        self.assertIn('".long sotlas_irq_vector\\n\\t"', preamble)
+        self.assertIn('".p2align 4\\n\\t"', preamble)
+        self.assertIn("vector >= SOTLAS_X86_DYNAMIC_IRQ_FIRST", preamble)
+        self.assertIn("vector <= SOTLAS_X86_DYNAMIC_IRQ_LAST", preamble)
+        self.assertIn("* SOTLAS_X86_DYNAMIC_IRQ_STRIDE", preamble)
+        # Vetores bootstrap continuam com stubs dedicados.
+        for vector in (64, 65, 66, 67, 68, 69, 70, 255):
+            self.assertIn(f"SOTLAS_X86_IRQ_STUB({vector})", preamble)
+
     def test_install_is_idempotent(self):
         x86_intrinsics.install(bootstrap)
         x86_intrinsics.install(bootstrap)
