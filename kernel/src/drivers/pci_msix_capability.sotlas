@@ -1,0 +1,154 @@
+// Baken OS — DF-7a: modelo read-only da capability MSI-X convencional.
+//
+// Este modulo interpreta somente os 12 bytes da capability PCI MSI-X no config
+// space. Table e PBA vivem em BARs e NAO sao mapeadas, lidas ou escritas aqui.
+// Nenhum vetor e reservado; MSI-X Enable/Function Mask permanecem intocados.
+module kernel::drivers::pci_msix_capability;
+
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+
+pub const PCI_MSIX_CONTROL_REL: u16 = 0x0002;
+pub const PCI_MSIX_TABLE_REL: u16 = 0x0004;
+pub const PCI_MSIX_PBA_REL: u16 = 0x0008;
+pub const PCI_MSIX_LAST_REL: u16 = 0x000B;
+
+pub const PCI_MSIX_CONTROL_TABLE_SIZE_MASK: u16 = 0x07FF;
+pub const PCI_MSIX_CONTROL_FUNCTION_MASK: u16 = 0x4000;
+pub const PCI_MSIX_CONTROL_ENABLE: u16 = 0x8000;
+pub const PCI_MSIX_BIR_MASK: u32 = 0x00000007;
+pub const PCI_MSIX_OFFSET_MASK: u32 = 0xFFFFFFF8;
+pub const PCI_MSIX_MAX_BIR: u8 = 5;
+pub const PCI_MSIX_MAX_TABLE_ENTRIES: u16 = 2048;
+pub const PCI_MSIX_TABLE_ENTRY_BYTES: u64 = 16;
+pub const PCI_MSIX_PBA_WORD_BITS: u64 = 64;
+pub const PCI_MSIX_PBA_WORD_BYTES: u64 = 8;
+
+pub struct PciMsixCapability {
+    pub capability_offset: u16;
+    pub control: u16;
+    pub table_size: u16;
+    pub enabled: bool;
+    pub function_masked: bool;
+    pub table_bir: u8;
+    pub table_offset: u64;
+    pub table_bytes: u64;
+    pub pba_bir: u8;
+    pub pba_offset: u64;
+    pub pba_bytes: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn pci_msix_capability_invalid() -> PciMsixCapability {
+    return PciMsixCapability {
+        capability_offset: PCI_CAPABILITY_OFFSET_INVALID,
+        control: 0,
+        table_size: 0,
+        enabled: false,
+        function_masked: false,
+        table_bir: 0xFF,
+        table_offset: 0,
+        table_bytes: 0,
+        pba_bir: 0xFF,
+        pba_offset: 0,
+        pba_bytes: 0,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_table_span(table_size: u16) -> u64 {
+    if table_size == 0 || table_size > PCI_MSIX_MAX_TABLE_ENTRIES { return 0; }
+    return (table_size as u64) * PCI_MSIX_TABLE_ENTRY_BYTES;
+}
+
+@system
+fn pci_msix_pba_span(table_size: u16) -> u64 {
+    if table_size == 0 || table_size > PCI_MSIX_MAX_TABLE_ENTRIES { return 0; }
+    let vectors = table_size as u64;
+    let words = (vectors + (PCI_MSIX_PBA_WORD_BITS - 1)) / PCI_MSIX_PBA_WORD_BITS;
+    return words * PCI_MSIX_PBA_WORD_BYTES;
+}
+
+// Snapshot estrutural sem efeitos colaterais. A capability e todos os campos
+// observados sao relidos antes da publicacao para fechar TOCTOU entre aquisicoes
+// do PCI_CONFIG_LOCK. BIR 6/7 falha fechado porque o header PCI expoe BAR0..BAR5.
+@system
+pub fn pci_msix_capability_probe(segment: u16, bus: u8, slot: u8,
+                                 func: u8) -> PciMsixCapability {
+    let capability = pci_capability_find(segment, bus, slot, func, PCI_CAP_ID_MSIX);
+    if !capability.valid || capability.extended ||
+       capability.id != PCI_CAP_ID_MSIX as u16 {
+        return pci_msix_capability_invalid();
+    }
+    if PCI_MSIX_LAST_REL > PCI_CONFIG_LEGACY_MAX_OFFSET ||
+       capability.offset > PCI_CONFIG_LEGACY_MAX_OFFSET - PCI_MSIX_LAST_REL {
+        return pci_msix_capability_invalid();
+    }
+
+    let header = pci_config_read16(segment, bus, slot, func, capability.offset);
+    if header == 0xFFFF || (header & 0x00FF) as u8 != PCI_CAP_ID_MSIX ||
+       ((header >> 8) & 0x00FF) as u16 != capability.next_offset {
+        return pci_msix_capability_invalid();
+    }
+
+    let control = pci_config_read16(
+        segment, bus, slot, func, capability.offset + PCI_MSIX_CONTROL_REL);
+    let table_raw = pci_config_read32(
+        segment, bus, slot, func, capability.offset + PCI_MSIX_TABLE_REL);
+    let pba_raw = pci_config_read32(
+        segment, bus, slot, func, capability.offset + PCI_MSIX_PBA_REL);
+    if control == 0xFFFF || table_raw == 0xFFFFFFFF || pba_raw == 0xFFFFFFFF {
+        return pci_msix_capability_invalid();
+    }
+
+    let table_size = ((control & PCI_MSIX_CONTROL_TABLE_SIZE_MASK) + 1) as u16;
+    if table_size == 0 || table_size > PCI_MSIX_MAX_TABLE_ENTRIES {
+        return pci_msix_capability_invalid();
+    }
+    let table_bir = (table_raw & PCI_MSIX_BIR_MASK) as u8;
+    let pba_bir = (pba_raw & PCI_MSIX_BIR_MASK) as u8;
+    if table_bir > PCI_MSIX_MAX_BIR || pba_bir > PCI_MSIX_MAX_BIR {
+        return pci_msix_capability_invalid();
+    }
+
+    let table_offset = (table_raw & PCI_MSIX_OFFSET_MASK) as u64;
+    let pba_offset = (pba_raw & PCI_MSIX_OFFSET_MASK) as u64;
+    let table_bytes = pci_msix_table_span(table_size);
+    let pba_bytes = pci_msix_pba_span(table_size);
+    if table_bytes == 0 || pba_bytes == 0 ||
+       table_offset + table_bytes <= table_offset ||
+       pba_offset + pba_bytes <= pba_offset {
+        return pci_msix_capability_invalid();
+    }
+
+    // Relitura integral: qualquer mudanca em header/control/Table/PBA invalida
+    // o snapshot em vez de publicar um layout potencialmente stale.
+    let verify_header = pci_config_read16(segment, bus, slot, func, capability.offset);
+    let verify_control = pci_config_read16(
+        segment, bus, slot, func, capability.offset + PCI_MSIX_CONTROL_REL);
+    let verify_table = pci_config_read32(
+        segment, bus, slot, func, capability.offset + PCI_MSIX_TABLE_REL);
+    let verify_pba = pci_config_read32(
+        segment, bus, slot, func, capability.offset + PCI_MSIX_PBA_REL);
+    if verify_header != header || verify_control != control ||
+       verify_table != table_raw || verify_pba != pba_raw {
+        return pci_msix_capability_invalid();
+    }
+
+    return PciMsixCapability {
+        capability_offset: capability.offset,
+        control: control,
+        table_size: table_size,
+        enabled: (control & PCI_MSIX_CONTROL_ENABLE) != 0,
+        function_masked: (control & PCI_MSIX_CONTROL_FUNCTION_MASK) != 0,
+        table_bir: table_bir,
+        table_offset: table_offset,
+        table_bytes: table_bytes,
+        pba_bir: pba_bir,
+        pba_offset: pba_offset,
+        pba_bytes: pba_bytes,
+        valid: true
+    };
+}
