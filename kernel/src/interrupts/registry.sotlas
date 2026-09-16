@@ -299,6 +299,55 @@ pub fn irq_registry_vector(handle: IrqHandle) -> u16 {
     return vector;
 }
 
+// Pin de operacao externo para programacao de hardware associada a um IrqHandle.
+// Reutiliza operations_in_flight do dispatcher: unregister/release_all ja exigem
+// zero, portanto o vetor nao pode ser devolvido ao pool enquanto o pin estiver vivo.
+@system
+pub fn irq_registry_begin_operation(handle: IrqHandle,
+                                    device: DeviceHandle,
+                                    driver: DriverHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !irq_lock_irq(&mut flags) { return false; }
+    let mut started = false;
+    if irq_handle_live_locked(handle) {
+        unsafe {
+            let slot = irq_slot(handle.irq_id);
+            if IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_ACTIVE &&
+               IRQ_RECORDS[slot].operations_in_flight != 0xFFFFFFFF &&
+               device_handle_equal(IRQ_RECORDS[slot].owner_device, device) &&
+               driver_handle_equal(IRQ_RECORDS[slot].owner_driver, driver) {
+                IRQ_RECORDS[slot].operations_in_flight += 1;
+                started = true;
+            }
+        }
+    }
+    irq_unlock_irq(flags);
+    return started;
+}
+
+@system
+pub fn irq_registry_end_operation(handle: IrqHandle,
+                                  device: DeviceHandle,
+                                  driver: DriverHandle) -> bool {
+    let mut flags: u64 = 0;
+    if !irq_lock_irq(&mut flags) { return false; }
+    let mut ended = false;
+    if irq_handle_live_locked(handle) {
+        unsafe {
+            let slot = irq_slot(handle.irq_id);
+            if IRQ_RECORDS[slot].state == IRQ_REGISTRY_STATE_ACTIVE &&
+               IRQ_RECORDS[slot].operations_in_flight > 0 &&
+               device_handle_equal(IRQ_RECORDS[slot].owner_device, device) &&
+               driver_handle_equal(IRQ_RECORDS[slot].owner_driver, driver) {
+                IRQ_RECORDS[slot].operations_in_flight -= 1;
+                ended = true;
+            }
+        }
+    }
+    irq_unlock_irq(flags);
+    return ended;
+}
+
 @system
 pub fn irq_registry_unregister(handle: IrqHandle, device: DeviceHandle,
                                driver: DriverHandle) -> bool {

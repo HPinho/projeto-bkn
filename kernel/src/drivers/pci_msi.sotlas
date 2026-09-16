@@ -1,0 +1,658 @@
+// Baken OS — DF-6c: programacao transacional de MSI single-vector.
+//
+// Este modulo NAO aloca vetores, NAO libera ownership e NAO altera INTx,
+// Bus Master ou Memory Space. Ele consome uma PciMsiReservation READY do DF-6b,
+// exige Device Core ACTIVE e programa somente Message Address/Data + MSI Enable.
+//
+// Invariante de seguranca: MSI Enable e escrito por ultimo. Qualquer falha depois
+// da primeira escrita tenta restaurar o snapshot original com MSI desligado; se a
+// restauracao nao puder ser provada, a reserva retornada fica QUARANTINED e nenhum
+// ownership e devolvido ao pool.
+module kernel::drivers::pci_msi;
+
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+import kernel::interrupts::lapic::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const PCI_MSI_MESSAGE_ADDRESS_BASE: u32 = 0xFEE00000;
+pub const PCI_MSI_MESSAGE_DEST_SHIFT: u32 = 12;
+pub const PCI_MSI_MESSAGE_DEST_MASK: u32 = 0x000FF000;
+pub const PCI_MSI_MESSAGE_DATA_VECTOR_MASK: u16 = 0x00FF;
+pub const PCI_MSI_MESSAGE_DATA_DELIVERY_MASK: u16 = 0x0700;
+pub const PCI_MSI_MESSAGE_DATA_RESERVED_MASK: u16 = 0x3800;
+pub const PCI_MSI_MESSAGE_DATA_LEVEL_ASSERT: u16 = 0x4000;
+pub const PCI_MSI_MESSAGE_DATA_TRIGGER_LEVEL: u16 = 0x8000;
+
+pub const PCI_MSI_ARM_STATE_INVALID: u8 = 0;
+pub const PCI_MSI_ARM_STATE_READY: u8 = 1;
+pub const PCI_MSI_ARM_STATE_ARMED: u8 = 2;
+pub const PCI_MSI_ARM_STATE_QUARANTINED: u8 = 3;
+
+pub struct PciMsiConfigSnapshot {
+    pub capability_offset: u16;
+    pub control: u16;
+    pub address_64: bool;
+    pub per_vector_masking: bool;
+    pub max_vectors: u16;
+    pub message_address_low_offset: u16;
+    pub message_address_high_offset: u16;
+    pub message_data_offset: u16;
+    pub address_low: u32;
+    pub address_high: u32;
+    pub data: u16;
+    pub valid: bool;
+}
+
+pub struct PciMsiArmResult {
+    pub reservation: PciMsiReservation;
+    pub original_control: u16;
+    pub original_address_low: u32;
+    pub original_address_high: u32;
+    pub original_data: u16;
+    pub programmed_address_low: u32;
+    pub programmed_address_high: u32;
+    pub programmed_data: u16;
+    pub destination_apic_id: u8;
+    pub state: u8;
+    pub valid: bool;
+}
+
+static mut PCI_MSI_PROGRAM_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+
+@system
+fn pci_msi_invalid_snapshot() -> PciMsiConfigSnapshot {
+    return PciMsiConfigSnapshot {
+        capability_offset: PCI_MSI_OFFSET_NONE,
+        control: 0,
+        address_64: false,
+        per_vector_masking: false,
+        max_vectors: 0,
+        message_address_low_offset: PCI_MSI_OFFSET_NONE,
+        message_address_high_offset: PCI_MSI_OFFSET_NONE,
+        message_data_offset: PCI_MSI_OFFSET_NONE,
+        address_low: 0,
+        address_high: 0,
+        data: 0,
+        valid: false
+    };
+}
+
+@system
+fn pci_msi_invalid_arm_result(reservation: PciMsiReservation) -> PciMsiArmResult {
+    return PciMsiArmResult {
+        reservation: reservation,
+        original_control: 0,
+        original_address_low: 0,
+        original_address_high: 0,
+        original_data: 0,
+        programmed_address_low: 0,
+        programmed_address_high: 0,
+        programmed_data: 0,
+        destination_apic_id: 0,
+        state: PCI_MSI_ARM_STATE_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn pci_msi_quarantined_copy(reservation: PciMsiReservation) -> PciMsiReservation {
+    if !reservation.valid { return reservation; }
+    return PciMsiReservation {
+        source: reservation.source,
+        irq: reservation.irq,
+        vector: reservation.vector,
+        bdf: reservation.bdf,
+        capability_offset: reservation.capability_offset,
+        max_vectors: reservation.max_vectors,
+        state: PCI_MSI_RESERVATION_QUARANTINED,
+        valid: true
+    };
+}
+
+@system
+fn pci_msi_arm_result(reservation: PciMsiReservation,
+                      snapshot: PciMsiConfigSnapshot,
+                      address_low: u32, address_high: u32,
+                      data: u16, destination: u8,
+                      state: u8) -> PciMsiArmResult {
+    return PciMsiArmResult {
+        reservation: reservation,
+        original_control: snapshot.control,
+        original_address_low: snapshot.address_low,
+        original_address_high: snapshot.address_high,
+        original_data: snapshot.data,
+        programmed_address_low: address_low,
+        programmed_address_high: address_high,
+        programmed_data: data,
+        destination_apic_id: destination,
+        state: state,
+        valid: state != PCI_MSI_ARM_STATE_INVALID
+    };
+}
+
+@system
+fn pci_msi_program_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut PCI_MSI_PROGRAM_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn pci_msi_program_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PCI_MSI_PROGRAM_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn pci_msi_bdf_segment(bdf: u32) -> u16 {
+    return ((bdf >> 16) & 0xFFFF) as u16;
+}
+
+@system
+fn pci_msi_bdf_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msi_bdf_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msi_bdf_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+@system
+fn pci_msi_device_owned(device: DeviceHandle, driver: DriverHandle,
+                        bdf: u32) -> bool {
+    if !device.valid || !driver.valid || bdf == PCI_BRIDGE_BDF_INVALID { return false; }
+    let snapshot = device_core_snapshot(device);
+    return snapshot.valid && snapshot.bus == DEVICE_BUS_PCI &&
+           snapshot.bus_instance == bdf &&
+           driver_handle_equal(snapshot.driver, driver) &&
+           (snapshot.state == DEVICE_STATE_BINDING ||
+            snapshot.state == DEVICE_STATE_ACTIVE ||
+            snapshot.state == DEVICE_STATE_UNBINDING);
+}
+
+@system
+fn pci_msi_device_active(device: DeviceHandle, driver: DriverHandle,
+                         bdf: u32) -> bool {
+    if !device.valid || !driver.valid || bdf == PCI_BRIDGE_BDF_INVALID { return false; }
+    let snapshot = device_core_snapshot(device);
+    return snapshot.valid && snapshot.bus == DEVICE_BUS_PCI &&
+           snapshot.bus_instance == bdf &&
+           driver_handle_equal(snapshot.driver, driver) &&
+           snapshot.state == DEVICE_STATE_ACTIVE;
+}
+
+@system
+fn pci_msi_source_owned(reservation: PciMsiReservation,
+                        device: DeviceHandle, driver: DriverHandle) -> bool {
+    if !reservation.source.valid { return false; }
+    let claim = resource_snapshot(reservation.source);
+    return claim.valid &&
+           device_handle_equal(claim.owner_device, device) &&
+           driver_handle_equal(claim.owner_driver, driver) &&
+           claim.request.kind == RESOURCE_KIND_PCI_MSI &&
+           claim.request.start == reservation.bdf as u64 &&
+           claim.request.length == 1 && claim.request.auxiliary == 0;
+}
+
+@system
+fn pci_msi_irq_owned(reservation: PciMsiReservation) -> bool {
+    if !reservation.irq.valid ||
+       reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+       reservation.vector > IRQ_DYNAMIC_VECTOR_LAST {
+        return false;
+    }
+    return irq_registry_vector(reservation.irq) == reservation.vector;
+}
+
+@system
+fn pci_msi_reservation_owned(reservation: PciMsiReservation,
+                             device: DeviceHandle, driver: DriverHandle) -> bool {
+    return reservation.valid &&
+           reservation.state == PCI_MSI_RESERVATION_READY &&
+           pci_msi_device_owned(device, driver, reservation.bdf) &&
+           pci_msi_source_owned(reservation, device, driver) &&
+           pci_msi_irq_owned(reservation);
+}
+
+// Os pins sao adquiridos sem manter locks de registry. Device pin lineariza com
+// ACTIVE->UNBINDING/FAILED; IRQ pin reutiliza operations_in_flight e bloqueia
+// unregister/release_all ate o fim da transacao de config-space.
+@system
+fn pci_msi_begin_operation_pins(reservation: PciMsiReservation,
+                                device: DeviceHandle,
+                                driver: DriverHandle) -> bool {
+    if !device_core_begin_active_operation(device, driver) { return false; }
+    if !irq_registry_begin_operation(reservation.irq, device, driver) {
+        if !device_core_end_active_operation(device, driver) {
+            loop { x86_cpu_pause(); }
+        }
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msi_end_operation_pins(reservation: PciMsiReservation,
+                              device: DeviceHandle,
+                              driver: DriverHandle) -> void {
+    // Falhar ao devolver um pin adquirido quebraria a prova de ownership. Assim
+    // como unlock de spinlock invalido, tratamos isso como invariante fatal local.
+    if !irq_registry_end_operation(reservation.irq, device, driver) {
+        loop { x86_cpu_pause(); }
+    }
+    if !device_core_end_active_operation(device, driver) {
+        loop { x86_cpu_pause(); }
+    }
+}
+
+@system
+fn pci_msi_capability_layout_matches_snapshot(capability: PciMsiCapability,
+                                               snapshot: PciMsiConfigSnapshot) -> bool {
+    return capability.valid && snapshot.valid &&
+           capability.capability_offset == snapshot.capability_offset &&
+           capability.address_64 == snapshot.address_64 &&
+           capability.per_vector_masking == snapshot.per_vector_masking &&
+           capability.max_vectors == snapshot.max_vectors &&
+           capability.message_address_low_offset == snapshot.message_address_low_offset &&
+           capability.message_address_high_offset == snapshot.message_address_high_offset &&
+           capability.message_data_offset == snapshot.message_data_offset;
+}
+
+@system
+fn pci_msi_snapshot_config(reservation: PciMsiReservation) -> PciMsiConfigSnapshot {
+    let segment = pci_msi_bdf_segment(reservation.bdf);
+    let bus = pci_msi_bdf_bus(reservation.bdf);
+    let slot_id = pci_msi_bdf_slot(reservation.bdf);
+    let func = pci_msi_bdf_function(reservation.bdf);
+
+    let first = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !first.valid ||
+       first.capability_offset != reservation.capability_offset ||
+       first.max_vectors != reservation.max_vectors ||
+       first.message_address_low_offset == PCI_MSI_OFFSET_NONE ||
+       first.message_data_offset == PCI_MSI_OFFSET_NONE {
+        return pci_msi_invalid_snapshot();
+    }
+
+    let address_low = pci_config_read32(
+        segment, bus, slot_id, func, first.message_address_low_offset
+    );
+    let mut address_high: u32 = 0;
+    if first.address_64 {
+        if first.message_address_high_offset == PCI_MSI_OFFSET_NONE {
+            return pci_msi_invalid_snapshot();
+        }
+        address_high = pci_config_read32(
+            segment, bus, slot_id, func, first.message_address_high_offset
+        );
+    }
+    let data = pci_config_read16(
+        segment, bus, slot_id, func, first.message_data_offset
+    );
+
+    let second = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !second.valid || second.control != first.control ||
+       second.capability_offset != first.capability_offset ||
+       second.address_64 != first.address_64 ||
+       second.per_vector_masking != first.per_vector_masking ||
+       second.max_vectors != first.max_vectors ||
+       second.message_address_low_offset != first.message_address_low_offset ||
+       second.message_address_high_offset != first.message_address_high_offset ||
+       second.message_data_offset != first.message_data_offset {
+        return pci_msi_invalid_snapshot();
+    }
+
+    return PciMsiConfigSnapshot {
+        capability_offset: first.capability_offset,
+        control: first.control,
+        address_64: first.address_64,
+        per_vector_masking: first.per_vector_masking,
+        max_vectors: first.max_vectors,
+        message_address_low_offset: first.message_address_low_offset,
+        message_address_high_offset: first.message_address_high_offset,
+        message_data_offset: first.message_data_offset,
+        address_low: address_low,
+        address_high: address_high,
+        data: data,
+        valid: true
+    };
+}
+
+@system
+fn pci_msi_raw_config_matches(reservation: PciMsiReservation,
+                              snapshot: PciMsiConfigSnapshot,
+                              expected_control: u16,
+                              expected_address_low: u32,
+                              expected_address_high: u32,
+                              expected_data: u16) -> bool {
+    if !snapshot.valid { return false; }
+    let segment = pci_msi_bdf_segment(reservation.bdf);
+    let bus = pci_msi_bdf_bus(reservation.bdf);
+    let slot_id = pci_msi_bdf_slot(reservation.bdf);
+    let func = pci_msi_bdf_function(reservation.bdf);
+
+    let capability = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_capability_layout_matches_snapshot(capability, snapshot) ||
+       capability.control != expected_control {
+        return false;
+    }
+    if pci_config_read32(segment, bus, slot_id, func,
+                         snapshot.message_address_low_offset) != expected_address_low {
+        return false;
+    }
+    if snapshot.address_64 &&
+       pci_config_read32(segment, bus, slot_id, func,
+                         snapshot.message_address_high_offset) != expected_address_high {
+        return false;
+    }
+    if pci_config_read16(segment, bus, slot_id, func,
+                         snapshot.message_data_offset) != expected_data {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msi_restore_snapshot(reservation: PciMsiReservation,
+                            snapshot: PciMsiConfigSnapshot) -> bool {
+    if !snapshot.valid || (snapshot.control & PCI_MSI_CONTROL_ENABLE) != 0 {
+        return false;
+    }
+
+    let segment = pci_msi_bdf_segment(reservation.bdf);
+    let bus = pci_msi_bdf_bus(reservation.bdf);
+    let slot_id = pci_msi_bdf_slot(reservation.bdf);
+    let func = pci_msi_bdf_function(reservation.bdf);
+    let current = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_capability_layout_matches_snapshot(current, snapshot) {
+        return false;
+    }
+
+    // Desarma primeiro, mesmo que a escrita final tenha ocorrido e sua verificacao
+    // tenha falhado. Depois restaura payload e por ultimo o control original.
+    let disabled = current.control & ~PCI_MSI_CONTROL_ENABLE;
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           snapshot.capability_offset + PCI_MSI_CONTROL_REL,
+                           disabled) {
+        return false;
+    }
+    if (pci_config_read16(segment, bus, slot_id, func,
+                          snapshot.capability_offset + PCI_MSI_CONTROL_REL) &
+        PCI_MSI_CONTROL_ENABLE) != 0 {
+        return false;
+    }
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           snapshot.message_data_offset, snapshot.data) {
+        return false;
+    }
+    if snapshot.address_64 &&
+       !pci_config_write32(segment, bus, slot_id, func,
+                           snapshot.message_address_high_offset,
+                           snapshot.address_high) {
+        return false;
+    }
+    if !pci_config_write32(segment, bus, slot_id, func,
+                           snapshot.message_address_low_offset,
+                           snapshot.address_low) {
+        return false;
+    }
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           snapshot.capability_offset + PCI_MSI_CONTROL_REL,
+                           snapshot.control) {
+        return false;
+    }
+
+    return pci_msi_raw_config_matches(
+        reservation, snapshot, snapshot.control,
+        snapshot.address_low, snapshot.address_high, snapshot.data
+    );
+}
+
+@system
+fn pci_msi_failure_after_write(reservation: PciMsiReservation,
+                               snapshot: PciMsiConfigSnapshot,
+                               device: DeviceHandle, driver: DriverHandle,
+                               address_low: u32, address_high: u32,
+                               data: u16, destination: u8) -> PciMsiArmResult {
+    if pci_msi_restore_snapshot(reservation, snapshot) &&
+       pci_msi_device_owned(device, driver, reservation.bdf) &&
+       pci_msi_source_owned(reservation, device, driver) &&
+       pci_msi_irq_owned(reservation) {
+        return pci_msi_arm_result(
+            reservation, snapshot, address_low, address_high, data, destination,
+            PCI_MSI_ARM_STATE_READY
+        );
+    }
+    return pci_msi_arm_result(
+        pci_msi_quarantined_copy(reservation), snapshot,
+        address_low, address_high, data, destination,
+        PCI_MSI_ARM_STATE_QUARANTINED
+    );
+}
+
+// DF-6c — programa exatamente um vetor MSI para o BSP.
+// Fixed delivery, physical destination, edge-triggered e MME=0. Bits reservados
+// de Message Data sao preservados a partir do snapshot anterior a programacao.
+@system
+pub fn pci_msi_arm_single(reservation: PciMsiReservation,
+                          device: DeviceHandle,
+                          driver: DriverHandle) -> PciMsiArmResult {
+    if !pci_msi_reservation_is_ready(reservation) ||
+       !pci_msi_device_active(device, driver, reservation.bdf) ||
+       !lapic_is_ready() {
+        return pci_msi_invalid_arm_result(reservation);
+    }
+
+    // Device pin impede ACTIVE->UNBINDING/FAILED; IRQ pin impede unregister e
+    // reutilizacao do vetor durante toda a janela de programacao/rollback.
+    if !pci_msi_begin_operation_pins(reservation, device, driver) {
+        let empty = pci_msi_invalid_snapshot();
+        return pci_msi_arm_result(
+            pci_msi_quarantined_copy(reservation), empty,
+            0, 0, 0, lapic_id(), PCI_MSI_ARM_STATE_QUARANTINED
+        );
+    }
+
+    if !pci_msi_reservation_owned(reservation, device, driver) {
+        let empty = pci_msi_invalid_snapshot();
+        let result = pci_msi_arm_result(
+            pci_msi_quarantined_copy(reservation), empty,
+            0, 0, 0, lapic_id(), PCI_MSI_ARM_STATE_QUARANTINED
+        );
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let destination = lapic_id();
+    let address_low = PCI_MSI_MESSAGE_ADDRESS_BASE |
+                      (((destination as u32) << PCI_MSI_MESSAGE_DEST_SHIFT) &
+                       PCI_MSI_MESSAGE_DEST_MASK);
+    let address_high: u32 = 0;
+
+    let mut flags: u64 = 0;
+    if !pci_msi_program_lock_irq(&mut flags) {
+        let result = pci_msi_invalid_arm_result(reservation);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    // Revalidacao dentro do lock fecha a janela entre preflight e primeira escrita.
+    if !pci_msi_device_active(device, driver, reservation.bdf) ||
+       !pci_msi_reservation_owned(reservation, device, driver) {
+        let empty = pci_msi_invalid_snapshot();
+        let result = pci_msi_arm_result(
+            pci_msi_quarantined_copy(reservation), empty,
+            address_low, address_high, 0, destination,
+            PCI_MSI_ARM_STATE_QUARANTINED
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let snapshot = pci_msi_snapshot_config(reservation);
+    if !snapshot.valid || (snapshot.control & PCI_MSI_CONTROL_ENABLE) != 0 {
+        let result = pci_msi_arm_result(
+            pci_msi_quarantined_copy(reservation), snapshot,
+            address_low, address_high, 0, destination,
+            PCI_MSI_ARM_STATE_QUARANTINED
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    // Intel APIC MSI: vector 7:0, Fixed Delivery=000, Trigger=edge=0. Somente os
+    // bits reservados 13:11 sao preservados do registro anterior.
+    let data = (snapshot.data & PCI_MSI_MESSAGE_DATA_RESERVED_MASK) |
+               (reservation.vector & PCI_MSI_MESSAGE_DATA_VECTOR_MASK);
+
+    let segment = pci_msi_bdf_segment(reservation.bdf);
+    let bus = pci_msi_bdf_bus(reservation.bdf);
+    let slot_id = pci_msi_bdf_slot(reservation.bdf);
+    let func = pci_msi_bdf_function(reservation.bdf);
+    let control_offset = snapshot.capability_offset + PCI_MSI_CONTROL_REL;
+
+    // Single-vector: MME=000. Enable continua 0 durante toda a programacao.
+    let disabled_single = snapshot.control &
+                          ~PCI_MSI_CONTROL_ENABLE &
+                          ~PCI_MSI_CONTROL_MME_MASK;
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           control_offset, disabled_single) ||
+       pci_config_read16(segment, bus, slot_id, func,
+                         control_offset) != disabled_single {
+        let result = pci_msi_failure_after_write(
+            reservation, snapshot, device, driver,
+            address_low, address_high, data, destination
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    if !pci_config_write32(segment, bus, slot_id, func,
+                           snapshot.message_address_low_offset,
+                           address_low) ||
+       pci_config_read32(segment, bus, slot_id, func,
+                         snapshot.message_address_low_offset) != address_low {
+        let result = pci_msi_failure_after_write(
+            reservation, snapshot, device, driver,
+            address_low, address_high, data, destination
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    if snapshot.address_64 {
+        if !pci_config_write32(segment, bus, slot_id, func,
+                               snapshot.message_address_high_offset,
+                               address_high) ||
+           pci_config_read32(segment, bus, slot_id, func,
+                             snapshot.message_address_high_offset) != address_high {
+            let result = pci_msi_failure_after_write(
+                reservation, snapshot, device, driver,
+                address_low, address_high, data, destination
+            );
+            pci_msi_program_unlock_irq(flags);
+            pci_msi_end_operation_pins(reservation, device, driver);
+            return result;
+        }
+    }
+
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           snapshot.message_data_offset, data) ||
+       pci_config_read16(segment, bus, slot_id, func,
+                         snapshot.message_data_offset) != data {
+        let result = pci_msi_failure_after_write(
+            reservation, snapshot, device, driver,
+            address_low, address_high, data, destination
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let programmed = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_capability_layout_matches_snapshot(programmed, snapshot) ||
+       programmed.enabled || programmed.multiple_message_enable != 0 ||
+       programmed.control != disabled_single ||
+       !pci_msi_raw_config_matches(
+           reservation, snapshot, disabled_single,
+           address_low, address_high, data
+       ) ||
+       !pci_msi_device_active(device, driver, reservation.bdf) ||
+       !pci_msi_source_owned(reservation, device, driver) ||
+       !pci_msi_irq_owned(reservation) {
+        let result = pci_msi_failure_after_write(
+            reservation, snapshot, device, driver,
+            address_low, address_high, data, destination
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    // Ultima escrita da transacao: somente agora a fonte MSI pode gerar interrupcao.
+    let enabled_single = disabled_single | PCI_MSI_CONTROL_ENABLE;
+    if !pci_config_write16(segment, bus, slot_id, func,
+                           control_offset, enabled_single) {
+        let result = pci_msi_failure_after_write(
+            reservation, snapshot, device, driver,
+            address_low, address_high, data, destination
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let armed = pci_msi_capability_probe(segment, bus, slot_id, func);
+    if !pci_msi_capability_layout_matches_snapshot(armed, snapshot) ||
+       !armed.enabled || armed.multiple_message_enable != 0 ||
+       armed.control != enabled_single ||
+       !pci_msi_raw_config_matches(
+           reservation, snapshot, enabled_single,
+           address_low, address_high, data
+       ) ||
+       !pci_msi_device_active(device, driver, reservation.bdf) ||
+       !pci_msi_source_owned(reservation, device, driver) ||
+       !pci_msi_irq_owned(reservation) {
+        let result = pci_msi_failure_after_write(
+            reservation, snapshot, device, driver,
+            address_low, address_high, data, destination
+        );
+        pci_msi_program_unlock_irq(flags);
+        pci_msi_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let result = pci_msi_arm_result(
+        reservation, snapshot, address_low, address_high, data, destination,
+        PCI_MSI_ARM_STATE_ARMED
+    );
+    pci_msi_program_unlock_irq(flags);
+    pci_msi_end_operation_pins(reservation, device, driver);
+    return result;
+}

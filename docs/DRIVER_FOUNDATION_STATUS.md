@@ -28,19 +28,26 @@ PLANNED -> IMPLEMENTED -> VALIDATING -> CERTIFIED
 ## Baseline funcional certificada
 
 ```text
-4de09d94ab3681dd6d02da5cdec63fcade942586
-feat(pci): add read-only MSI capability model
+27a7ea6253c909617b7687532b5afea55f9f81e1
+fix(pci): quarantine uncertain MSI reservations
 ```
 
 Gates desse mesmo SHA:
 
-- CI/CD + QEMU #1288: PASS
-- SMP Bring-up #391: PASS
-- NVMe-only Bare-Metal #488: PASS
-- HID Dual-device #147: PASS
-- SMP Fault Diagnostic #53: PASS
+- CI/CD + QEMU #1292: PASS
+- SMP Bring-up #395: PASS
+- NVMe-only Bare-Metal #492: PASS
+- HID Dual-device #151: PASS
+- SMP Fault Diagnostic #57: PASS
 
-Essa baseline preserva o PCI Core v2 e certifica o DF-6a sem programar MSI/MSI-X.
+Essa baseline certifica o DF-6b completo: ownership exclusivo da fonte MSI por BDF, vetor generation-safe no Generic IRQ Registry e rollback/cleanup fail-closed com estado `QUARANTINED` quando a quiescencia nao pode ser provada.
+
+Baseline anterior do DF-6a:
+
+```text
+4de09d94ab3681dd6d02da5cdec63fcade942586
+feat(pci): add read-only MSI capability model
+```
 
 ## Driver Foundation
 
@@ -60,8 +67,8 @@ DF-5  PCI Core v2                            CERTIFIED
   DF-5d Device/Resource bridge               CERTIFIED
 DF-6  MSI                                    IN PROGRESS
   DF-6a read-only MSI capability model       CERTIFIED
-  DF-6b vector + ownership bridge            IMPLEMENTED / VALIDATING
-  DF-6c transactional MSI programming        PLANNED
+  DF-6b vector + ownership bridge            CERTIFIED
+  DF-6c transactional MSI programming        IMPLEMENTED / VALIDATING
   DF-6d disable/teardown + runtime proof     PLANNED
 DF-7  MSI-X                                  PLANNED
 ```
@@ -80,7 +87,7 @@ Ele:
 - falha fechado se BDF/capability mudar entre leituras;
 - permanece estritamente read-only.
 
-## DF-6b — single-vector reservation bridge
+## DF-6b — single-vector reservation bridge — certificado
 
 O DF-6b usa duas fundacoes ja existentes, com responsabilidades separadas:
 
@@ -105,7 +112,7 @@ INVALID
 READY
   -> source claim + IrqHandle pertencem ao caller
   -> uma leitura recente provou MSI Enable = 0
-  -> unico estado que DF-6c podera aceitar para armamento
+  -> unico estado aceito pelo DF-6c para armamento
 
 QUARANTINED
   -> existe ownership ainda nao reconciliado
@@ -143,9 +150,58 @@ Ele nao pode:
 - tocar LAPIC, IOAPIC, IDT ou EOI;
 - introduzir chamada nova no caminho de boot.
 
+## DF-6c — transactional single-vector MSI programming
+
+O DF-6c e o primeiro corte que escreve a capability MSI. Ele permanece separado de reserva e teardown.
+
+Pre-condicoes obrigatorias:
+
+```text
+PciMsiReservation == READY
+Device Core == ACTIVE
+DeviceHandle + DriverHandle + BDF ainda coincidem
+RESOURCE_KIND_PCI_MSI ainda pertence ao mesmo owner
+IrqHandle ainda resolve para o mesmo vetor dinamico
+LAPIC do BSP esta READY
+```
+
+Programacao:
+
+```text
+snapshot control/address/data
+-> confirmar MSI Enable = 0
+-> MME = 000 mantendo MSI desligado
+-> Message Address low = 0xFEE00000 | (BSP APIC ID << 12)
+-> Message Address high = 0 para layout 64-bit
+-> Message Data = reserved[13:11] preservado | vector[7:0]
+-> readback + revalidacao de ownership/layout
+-> MSI Enable = 1 SOMENTE POR ULTIMO
+-> readback final + revalidacao completa
+```
+
+Politica inicial:
+
+- exatamente um vetor;
+- destination fisico no BSP publicado por `lapic_id()`;
+- Fixed Delivery;
+- edge-triggered;
+- `MME=0` mesmo quando MMC anuncia multiplas mensagens;
+- bits reservados do Message Data sao preservados do snapshot;
+- nenhum `lapic_eoi()` novo: EOI continua centralizado no dispatcher x86 existente;
+- nenhuma alteracao implicita de INTx, Bus Master ou Memory Space;
+- nenhuma chamada de `pci_msi_arm_single()` entra no boot neste microcorte.
+
+Rollback:
+
+- qualquer falha depois da primeira escrita tenta desabilitar MSI primeiro;
+- restaura Message Data, Address High quando aplicavel, Address Low e Message Control original;
+- somente um readback completo permite retornar estado de operacao `READY` para retry;
+- qualquer incerteza retorna a reserva em `QUARANTINED`;
+- DF-6c nunca faz `irq_registry_unregister()` nem `resource_release()`.
+
 ## Invariante de lifecycle para MSI
 
-Reserva e armamento ficam deliberadamente separados:
+Reserva, armamento e teardown permanecem deliberadamente separados:
 
 ```text
 BINDING
@@ -162,8 +218,9 @@ qualquer incerteza antes do armamento
   -> retry somente apos nova prova de quiescencia
 
 ACTIVE
-  -> DF-6c podera aceitar somente READY
-  -> programar endereco/dado
+  -> DF-6c aceita somente READY
+  -> programa Address/Data com MSI Enable = 0
+  -> revalida ownership/layout/readback
   -> MSI Enable somente por ultimo
 
 UNBINDING
@@ -177,18 +234,17 @@ Isso impede MSI contra vetor devolvido ao pool, dupla reserva concorrente da mes
 
 ## Sequencia de continuacao
 
-Somente se o SHA candidato do DF-6b fechar os gates obrigatorios:
+Somente se o SHA candidato do DF-6c fechar os gates obrigatorios:
 
-1. marcar DF-6b `CERTIFIED`;
-2. manter single-vector como unico modo inicialmente suportado;
-3. iniciar DF-6c sem criar segundo interrupt core;
-4. exigir `DEVICE_STATE_ACTIVE` e reserva `READY` para qualquer armamento;
-5. derivar Message Address/Data a partir do LAPIC existente e do vetor reservado;
-6. fazer programacao transacional com snapshots, verificacao e rollback;
-7. qualquer incerteza de rollback deve preservar ownership em quarentena;
-8. manter MME=0 no primeiro corte e escrever MSI Enable somente por ultimo;
-9. manter INTx, Bus Master, Memory Space e politica de fallback fora do DF-6c;
-10. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
+1. marcar DF-6c `CERTIFIED`;
+2. manter single-vector como unico modo suportado;
+3. iniciar DF-6d sem criar segundo interrupt core;
+4. implementar disable transacional antes de qualquer release;
+5. confirmar `MSI Enable = 0` antes de unregister/release;
+6. usar o snapshot do armamento para restauracao segura quando aplicavel;
+7. manter INTx, Bus Master e Memory Space fora da politica implicita de MSI;
+8. criar prova runtime real antes de fechar DF-6;
+9. MSI-X continua bloqueado ate DF-6 inteiro estar certificado.
 
 ## Regra de retomada
 

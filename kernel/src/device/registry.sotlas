@@ -18,6 +18,10 @@ static mut DEVICE_RECORDS: [DeviceRecord; DEVICE_CORE_CAPACITY] = [
     }; DEVICE_CORE_CAPACITY
 ];
 static mut DEVICE_GENERATIONS: [u32; DEVICE_CORE_CAPACITY] = [0; DEVICE_CORE_CAPACITY];
+// Operacoes de hardware iniciadas em ACTIVE pinam a identidade/lifecycle sem
+// manter DEVICE_CORE_LOCK durante MMIO/config-space. Transicoes para fora de
+// ACTIVE falham enquanto houver pins, fechando TOCTOU com teardown concorrente.
+static mut DEVICE_ACTIVE_OPERATIONS: [u32; DEVICE_CORE_CAPACITY] = [0; DEVICE_CORE_CAPACITY];
 static mut DEVICE_CORE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 static mut DEVICE_CORE_LOCK_READY: bool = false;
 static mut DEVICE_CORE_READY: bool = false;
@@ -44,8 +48,7 @@ fn device_lock_irq(saved_flags: *mut u64) -> bool {
     let flags = x86_irq_save_disable();
     unsafe {
         if !DEVICE_CORE_LOCK_READY || !spinlock_lock(&mut DEVICE_CORE_LOCK) {
-            x86_irq_restore(flags);
-            return false;
+            x86_irq_restore(flags); return false;
         }
         *saved_flags = flags;
     }
@@ -90,6 +93,7 @@ pub fn device_core_init() -> bool {
             while slot < DEVICE_CORE_CAPACITY {
                 DEVICE_RECORDS[slot] = device_invalid_record();
                 DEVICE_GENERATIONS[slot] = 0;
+                DEVICE_ACTIVE_OPERATIONS[slot] = 0;
                 slot += 1;
             }
             DEVICE_CORE_ATTACHED_COUNT = 0;
@@ -124,6 +128,7 @@ pub fn device_core_attach(parent: DeviceHandle, bus: u8, class_code: u8,
                DEVICE_RECORDS[slot].state == DEVICE_STATE_DETACHED {
                 let generation = device_generation_next(DEVICE_GENERATIONS[slot]);
                 DEVICE_GENERATIONS[slot] = generation;
+                DEVICE_ACTIVE_OPERATIONS[slot] = 0;
                 result = DeviceHandle { device_id: (slot + 1) as u32,
                                         generation: generation, valid: true };
                 DEVICE_RECORDS[slot] = DeviceRecord {
@@ -170,6 +175,64 @@ pub fn device_core_attached_count() -> u32 {
     return count;
 }
 
+// Pin generico para uma operacao de hardware que exige DEVICE_STATE_ACTIVE.
+// O caller nunca mantem DEVICE_CORE_LOCK durante a operacao; o contador faz a
+// ponte atomica com prepare_unbind()/mark_failed().
+@system
+pub fn device_core_begin_active_operation(handle: DeviceHandle,
+                                          driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return false; }
+    let mut started = false;
+    if device_handle_live_locked(handle) {
+        unsafe {
+            let slot = device_slot(handle.device_id);
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE &&
+               DEVICE_ACTIVE_OPERATIONS[slot] != 0xFFFFFFFF {
+                DEVICE_ACTIVE_OPERATIONS[slot] += 1;
+                started = true;
+            }
+        }
+    }
+    device_unlock_irq(flags);
+    return started;
+}
+
+@system
+pub fn device_core_end_active_operation(handle: DeviceHandle,
+                                        driver: DriverHandle) -> bool {
+    if !driver.valid { return false; }
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return false; }
+    let mut ended = false;
+    if device_handle_live_locked(handle) {
+        unsafe {
+            let slot = device_slot(handle.device_id);
+            if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
+               DEVICE_ACTIVE_OPERATIONS[slot] > 0 {
+                DEVICE_ACTIVE_OPERATIONS[slot] -= 1;
+                ended = true;
+            }
+        }
+    }
+    device_unlock_irq(flags);
+    return ended;
+}
+
+@system
+pub fn device_core_active_operation_count(handle: DeviceHandle) -> u32 {
+    let mut flags: u64 = 0;
+    if !device_lock_irq(&mut flags) { return 0; }
+    let mut count: u32 = 0;
+    if device_handle_live_locked(handle) {
+        unsafe { count = DEVICE_ACTIVE_OPERATIONS[device_slot(handle.device_id)]; }
+    }
+    device_unlock_irq(flags);
+    return count;
+}
+
 // DF-3.1a: falha e uma transicao conservadora; ACTIVE nunca e promovido por
 // uma API generica. A unica promocao para ACTIVE pertence a commit_bind().
 @system
@@ -181,7 +244,8 @@ pub fn device_core_mark_failed(handle: DeviceHandle) -> bool {
         unsafe {
             let slot = device_slot(handle.device_id);
             if DEVICE_RECORDS[slot].state == DEVICE_STATE_ATTACHED ||
-               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE {
+               (DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE &&
+                DEVICE_ACTIVE_OPERATIONS[slot] == 0) {
                 DEVICE_RECORDS[slot].state = DEVICE_STATE_FAILED;
                 changed = true;
             }
@@ -265,7 +329,8 @@ pub fn device_core_prepare_unbind(handle: DeviceHandle, driver: DriverHandle,
         unsafe {
             let slot = device_slot(handle.device_id);
             if driver_handle_equal(DEVICE_RECORDS[slot].driver, driver) &&
-               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE {
+               DEVICE_RECORDS[slot].state == DEVICE_STATE_ACTIVE &&
+               DEVICE_ACTIVE_OPERATIONS[slot] == 0 {
                 DEVICE_RECORDS[slot].state = DEVICE_STATE_UNBINDING;
                 *initial_epoch = DEVICE_RECORDS[slot].resource_epoch;
                 prepared = true;
@@ -366,11 +431,13 @@ pub fn device_core_detach(handle: DeviceHandle) -> bool {
             let slot = device_slot(handle.device_id);
             if DEVICE_RECORDS[slot].child_count == 0 &&
                DEVICE_RECORDS[slot].resource_count == 0 &&
+               DEVICE_ACTIVE_OPERATIONS[slot] == 0 &&
                !DEVICE_RECORDS[slot].driver.valid &&
                DEVICE_RECORDS[slot].state == DEVICE_STATE_ATTACHED {
                 let parent = DEVICE_RECORDS[slot].parent;
                 DEVICE_RECORDS[slot].state = DEVICE_STATE_DETACHED;
                 DEVICE_RECORDS[slot].driver = driver_invalid_handle();
+                DEVICE_ACTIVE_OPERATIONS[slot] = 0;
                 DEVICE_CORE_ATTACHED_COUNT -= 1;
                 if parent.valid && device_handle_live_locked(parent) {
                     let parent_slot = device_slot(parent.device_id);
