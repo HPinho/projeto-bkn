@@ -1,13 +1,17 @@
-// Baken OS — DF-5a: backend de acesso ao PCI Configuration Space.
+// Baken OS — DF-5b: PCI Configuration Space com ECAM preferencial e fallback CF8/CFC.
 //
-// Este corte preserva Configuration Mechanism #1 (CF8/CFC) como backend ativo,
-// mas concentra o acesso em uma camada SMP/IRQ-safe. O par address/data precisa
-// ser serializado: sem isso duas CPUs podem trocar 0xCF8 entre si e ler/escrever
-// o BDF errado. ECAM fica explicitamente reservado para o próximo microcorte.
+// O bootstrap continua enumerando por Configuration Mechanism #1 para evitar
+// mapear milhares de paginas ECAM de BDFs ausentes. Depois da enumeracao, se a
+// ACPI MCFG estiver valida, o backend e promovido para ECAM. Cada funcao PCIe
+// tocada recebe no maximo um mapping MMIO UC identity de 4 KiB, mantido em cache.
+// Acesso padrao de segmento 0 conserva fallback CF8/CFC caso a janela ECAM nao
+// exista ou nao possa ser mapeada; extended config space exige ECAM.
 module kernel::drivers::pci_config;
 
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
+import kernel::acpi::mcfg::*;
+import kernel::memory::active_page_tables::*;
 
 pub const PCI_CONFIG_BACKEND_NONE: u8 = 0;
 pub const PCI_CONFIG_BACKEND_LEGACY_CF8CFC: u8 = 1;
@@ -17,11 +21,16 @@ pub const PCI_CONFIG_ADDRESS_PORT: u16 = 0x0CF8;
 pub const PCI_CONFIG_DATA_PORT: u16 = 0x0CFC;
 pub const PCI_CONFIG_LEGACY_MAX_OFFSET: u16 = 0x00FF;
 pub const PCI_CONFIG_EXTENDED_MAX_OFFSET: u16 = 0x0FFF;
+pub const PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY: usize = 128;
 
 static mut PCI_CONFIG_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
 static mut PCI_CONFIG_LOCK_READY: bool = false;
 static mut PCI_CONFIG_READY: bool = false;
 static mut PCI_CONFIG_BACKEND: u8 = PCI_CONFIG_BACKEND_NONE;
+static mut PCI_CONFIG_ECAM_AVAILABLE: bool = false;
+static mut PCI_CONFIG_ECAM_PAGES: [u64; PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY] =
+    [0; PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY];
+static mut PCI_CONFIG_ECAM_PAGE_COUNT: u32 = 0;
 
 @system
 fn pci_config_lock_irq(saved_flags: *mut u64) -> bool {
@@ -45,8 +54,9 @@ fn pci_config_unlock_irq(flags: u64) -> void {
     x86_irq_restore(flags);
 }
 
-// Inicializado no BSP antes da enumeração PCI e antes do bring-up SMP. Depois
-// disso todos os acessos usam o lock IRQ-safe; nenhuma CPU reinicializa o lock.
+// Inicializado no BSP antes da primeira enumeracao PCI. MCFG e inventariada
+// aqui, mas o transporte continua legado ate pci_config_promote_ecam(), chamado
+// somente depois do scan bootstrap. Isso mantem o custo de descoberta bounded.
 @system
 pub fn pci_config_init() -> bool {
     let flags = x86_irq_save_disable();
@@ -63,7 +73,16 @@ pub fn pci_config_init() -> bool {
             return false;
         }
         if !PCI_CONFIG_READY {
+            let mcfg_ready = mcfg_init();
+            PCI_CONFIG_ECAM_AVAILABLE =
+                active_page_tables_is_ready() && mcfg_ready && mcfg_is_ready();
             PCI_CONFIG_BACKEND = PCI_CONFIG_BACKEND_LEGACY_CF8CFC;
+            PCI_CONFIG_ECAM_PAGE_COUNT = 0;
+            let mut index: usize = 0;
+            while index < PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY {
+                PCI_CONFIG_ECAM_PAGES[index] = 0;
+                index += 1;
+            }
             PCI_CONFIG_READY = true;
         }
         let released = spinlock_unlock(&mut PCI_CONFIG_LOCK);
@@ -87,6 +106,11 @@ pub fn pci_config_backend() -> u8 {
 }
 
 @system
+pub fn pci_config_ecam_available() -> bool {
+    unsafe { return PCI_CONFIG_READY && PCI_CONFIG_ECAM_AVAILABLE; }
+}
+
+@system
 pub fn pci_config_uses_legacy_cf8cfc() -> bool {
     unsafe {
         return PCI_CONFIG_READY && PCI_CONFIG_BACKEND == PCI_CONFIG_BACKEND_LEGACY_CF8CFC;
@@ -94,18 +118,50 @@ pub fn pci_config_uses_legacy_cf8cfc() -> bool {
 }
 
 @system
-pub fn pci_config_supports_extended_space() -> bool {
+pub fn pci_config_uses_ecam() -> bool {
     unsafe {
-        return PCI_CONFIG_READY && PCI_CONFIG_BACKEND == PCI_CONFIG_BACKEND_ECAM;
+        return PCI_CONFIG_READY && PCI_CONFIG_ECAM_AVAILABLE &&
+               PCI_CONFIG_BACKEND == PCI_CONFIG_BACKEND_ECAM;
     }
 }
 
 @system
-fn pci_config_legacy_target_valid(segment: u16, slot: u8, func: u8, offset: u16) -> bool {
-    if segment != 0 || slot >= 32 || func >= 8 || offset > PCI_CONFIG_LEGACY_MAX_OFFSET {
-        return false;
+pub fn pci_config_supports_extended_space() -> bool {
+    return pci_config_uses_ecam();
+}
+
+// Promocao one-way durante o boot normal. O fallback CF8/CFC continua interno
+// para segmento 0 / primeiros 256 bytes caso um BDF nao esteja coberto pela MCFG.
+@system
+pub fn pci_config_promote_ecam() -> bool {
+    if !pci_config_is_ready() { return false; }
+    let mut flags: u64 = 0;
+    if !pci_config_lock_irq(&mut flags) { return false; }
+    let mut promoted = false;
+    unsafe {
+        if PCI_CONFIG_ECAM_AVAILABLE && mcfg_is_ready() {
+            PCI_CONFIG_BACKEND = PCI_CONFIG_BACKEND_ECAM;
+            promoted = true;
+        }
     }
-    return true;
+    pci_config_unlock_irq(flags);
+    return promoted;
+}
+
+@system
+pub fn pci_config_ecam_mapped_pages() -> u32 {
+    unsafe { return PCI_CONFIG_ECAM_PAGE_COUNT; }
+}
+
+@system
+fn pci_config_target_valid(slot: u8, func: u8, offset: u16) -> bool {
+    return slot < 32 && func < 8 && offset <= PCI_CONFIG_EXTENDED_MAX_OFFSET;
+}
+
+@system
+fn pci_config_legacy_target_valid(segment: u16, slot: u8, func: u8, offset: u16) -> bool {
+    return segment == 0 && slot < 32 && func < 8 &&
+           offset <= PCI_CONFIG_LEGACY_MAX_OFFSET;
 }
 
 @system
@@ -117,36 +173,146 @@ fn pci_config_legacy_address(bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
         (((offset as u32) & 0xFC) as u32);
 }
 
+// Chamado somente com PCI_CONFIG_LOCK adquirido.
 @system
-pub fn pci_config_read32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
-    if !pci_config_uses_legacy_cf8cfc() ||
-       !pci_config_legacy_target_valid(segment, slot, func, offset) {
-        return 0xFFFFFFFF;
-    }
-
-    let mut flags: u64 = 0;
-    if !pci_config_lock_irq(&mut flags) { return 0xFFFFFFFF; }
+fn pci_config_legacy_read32_locked(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
+    if !pci_config_legacy_target_valid(segment, slot, func, offset) { return 0xFFFFFFFF; }
     let address = pci_config_legacy_address(bus, slot, func, offset);
     baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    let value = baken_pci_in32(PCI_CONFIG_DATA_PORT);
+    return baken_pci_in32(PCI_CONFIG_DATA_PORT);
+}
+
+// Chamado somente com PCI_CONFIG_LOCK adquirido.
+@system
+fn pci_config_legacy_write32_locked(segment: u16, bus: u8, slot: u8, func: u8,
+                                    offset: u16, value: u32) -> bool {
+    if !pci_config_legacy_target_valid(segment, slot, func, offset) { return false; }
+    let address = pci_config_legacy_address(bus, slot, func, offset);
+    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
+    baken_pci_out32(PCI_CONFIG_DATA_PORT, value);
+    return true;
+}
+
+@system
+fn pci_config_ecam_page_cached_locked(page: u64) -> bool {
+    unsafe {
+        let mut index: u32 = 0;
+        while index < PCI_CONFIG_ECAM_PAGE_COUNT {
+            if PCI_CONFIG_ECAM_PAGES[index as usize] == page { return true; }
+            index += 1;
+        }
+    }
+    return false;
+}
+
+// O mapping identity usa politica MMIO UC (PWT+PCD+NX) do VMM. A cache impede
+// novo page-table update/TLB shootdown para a mesma funcao PCIe de 4 KiB.
+@system
+fn pci_config_ecam_map_page_locked(page: u64) -> bool {
+    if page == 0 || (page & 0xFFF) != 0 { return false; }
+    if pci_config_ecam_page_cached_locked(page) { return true; }
+    unsafe {
+        if PCI_CONFIG_ECAM_PAGE_COUNT >= PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY as u32 {
+            return false;
+        }
+    }
+    if !active_page_tables_map_mmio_identity_4k(page) { return false; }
+    unsafe {
+        let index = PCI_CONFIG_ECAM_PAGE_COUNT as usize;
+        PCI_CONFIG_ECAM_PAGES[index] = page;
+        PCI_CONFIG_ECAM_PAGE_COUNT += 1;
+    }
+    return true;
+}
+
+// Resolve o dword ECAM e materializa apenas a pagina da funcao realmente usada.
+// Chamado somente com PCI_CONFIG_LOCK adquirido.
+@system
+fn pci_config_ecam_address_locked(segment: u16, bus: u8, slot: u8, func: u8,
+                                  offset: u16) -> u64 {
+    unsafe {
+        if PCI_CONFIG_BACKEND != PCI_CONFIG_BACKEND_ECAM || !PCI_CONFIG_ECAM_AVAILABLE {
+            return 0;
+        }
+    }
+    if !pci_config_target_valid(slot, func, offset) { return 0; }
+    let aligned_offset: u16 = offset & 0xFFFC;
+    let address = mcfg_ecam_address(segment, bus, slot, func, aligned_offset);
+    if address == 0 { return 0; }
+    let page = address & 0xFFFFFFFFFFFFF000;
+    if !pci_config_ecam_map_page_locked(page) { return 0; }
+    return address;
+}
+
+// ECAM e preferido depois da promocao. Se o BDF nao estiver coberto pela MCFG
+// ou o mapping falhar, Configuration Mechanism #1 continua sendo fallback para
+// segmento 0 e config space convencional.
+@system
+fn pci_config_read32_locked(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
+    let ecam = pci_config_ecam_address_locked(segment, bus, slot, func, offset);
+    if ecam != 0 { return x86_mmio_read32(ecam); }
+    return pci_config_legacy_read32_locked(segment, bus, slot, func, offset);
+}
+
+@system
+fn pci_config_write32_locked(segment: u16, bus: u8, slot: u8, func: u8,
+                             offset: u16, value: u32) -> bool {
+    let ecam = pci_config_ecam_address_locked(segment, bus, slot, func, offset);
+    if ecam != 0 {
+        x86_mmio_write32(ecam, value);
+        return true;
+    }
+    return pci_config_legacy_write32_locked(segment, bus, slot, func, offset, value);
+}
+
+// Leitura legada explicita usada pelo scan bootstrap. Mesmo depois da promocao
+// ECAM, uma nova enumeracao nao mapeia BDFs ausentes apenas para ler Vendor ID.
+@system
+pub fn pci_config_read32_legacy(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
+    if !pci_config_is_ready() || !pci_config_legacy_target_valid(segment, slot, func, offset) {
+        return 0xFFFFFFFF;
+    }
+    let mut flags: u64 = 0;
+    if !pci_config_lock_irq(&mut flags) { return 0xFFFFFFFF; }
+    let value = pci_config_legacy_read32_locked(segment, bus, slot, func, offset);
+    pci_config_unlock_irq(flags);
+    return value;
+}
+
+@system
+pub fn pci_config_read16_legacy(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u16 {
+    let dword = pci_config_read32_legacy(segment, bus, slot, func, offset);
+    let shift: u32 = ((offset & 2) as u32) * 8;
+    return ((dword >> shift) & 0xFFFF) as u16;
+}
+
+@system
+pub fn pci_config_read8_legacy(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u8 {
+    let dword = pci_config_read32_legacy(segment, bus, slot, func, offset);
+    let shift: u32 = ((offset & 3) as u32) * 8;
+    return ((dword >> shift) & 0xFF) as u8;
+}
+
+@system
+pub fn pci_config_read32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
+    if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) {
+        return 0xFFFFFFFF;
+    }
+    let mut flags: u64 = 0;
+    if !pci_config_lock_irq(&mut flags) { return 0xFFFFFFFF; }
+    let value = pci_config_read32_locked(segment, bus, slot, func, offset);
     pci_config_unlock_irq(flags);
     return value;
 }
 
 @system
 pub fn pci_config_write32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, value: u32) -> bool {
-    if !pci_config_uses_legacy_cf8cfc() ||
-       !pci_config_legacy_target_valid(segment, slot, func, offset) {
-        return false;
-    }
-
+    if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return false; }
     let mut flags: u64 = 0;
     if !pci_config_lock_irq(&mut flags) { return false; }
-    let address = pci_config_legacy_address(bus, slot, func, offset);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    baken_pci_out32(PCI_CONFIG_DATA_PORT, value);
+    let written = pci_config_write32_locked(segment, bus, slot, func, offset, value);
     pci_config_unlock_irq(flags);
-    return true;
+    return written;
 }
 
 @system
@@ -163,50 +329,35 @@ pub fn pci_config_read8(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) 
     return ((dword >> shift) & 0xFF) as u8;
 }
 
-// RMW de 16 bits sob o MESMO lock. Isso evita perder bits do dword vizinho se
-// outra CPU também alterar o registro de configuração entre read e write.
+// RMW de 16 bits sob o MESMO lock para preservar o outro halfword do dword.
 @system
 pub fn pci_config_write16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, value: u16) -> bool {
-    if !pci_config_uses_legacy_cf8cfc() ||
-       !pci_config_legacy_target_valid(segment, slot, func, offset) {
-        return false;
-    }
-
+    if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return false; }
     let mut flags: u64 = 0;
     if !pci_config_lock_irq(&mut flags) { return false; }
-    let address = pci_config_legacy_address(bus, slot, func, offset);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    let current = baken_pci_in32(PCI_CONFIG_DATA_PORT);
+    let current = pci_config_read32_locked(segment, bus, slot, func, offset);
     let shift: u32 = ((offset & 2) as u32) * 8;
     let mask: u32 = 0xFFFF << shift;
     let clear_mask: u32 = ~mask;
     let updated = (current & clear_mask) | (((value as u32) << shift) & mask);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    baken_pci_out32(PCI_CONFIG_DATA_PORT, updated);
+    let written = pci_config_write32_locked(segment, bus, slot, func, offset, updated);
     pci_config_unlock_irq(flags);
-    return true;
+    return written;
 }
 
 @system
 pub fn pci_config_set16_bits(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, bits: u16) -> bool {
-    if !pci_config_uses_legacy_cf8cfc() ||
-       !pci_config_legacy_target_valid(segment, slot, func, offset) {
-        return false;
-    }
-
+    if !pci_config_is_ready() || !pci_config_target_valid(slot, func, offset) { return false; }
     let mut flags: u64 = 0;
     if !pci_config_lock_irq(&mut flags) { return false; }
-    let address = pci_config_legacy_address(bus, slot, func, offset);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    let current = baken_pci_in32(PCI_CONFIG_DATA_PORT);
+    let current = pci_config_read32_locked(segment, bus, slot, func, offset);
     let shift: u32 = ((offset & 2) as u32) * 8;
     let mask: u32 = 0xFFFF << shift;
     let clear_mask: u32 = ~mask;
     let current16 = ((current >> shift) & 0xFFFF) as u16;
     let updated16 = current16 | bits;
     let updated = (current & clear_mask) | (((updated16 as u32) << shift) & mask);
-    baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
-    baken_pci_out32(PCI_CONFIG_DATA_PORT, updated);
+    let written = pci_config_write32_locked(segment, bus, slot, func, offset, updated);
     pci_config_unlock_irq(flags);
-    return true;
+    return written;
 }

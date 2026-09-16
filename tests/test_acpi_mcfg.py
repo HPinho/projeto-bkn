@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails para inventário ACPI MCFG e cálculo ECAM."""
+"""Guardrails para inventário ACPI MCFG e transporte PCIe ECAM."""
 
 from pathlib import Path
 import unittest
@@ -29,28 +29,34 @@ class AcpiMcfgTests(unittest.TestCase):
         self.assertIn("((function as u64) << 12)", text)
         self.assertIn("(offset as u64)", text)
 
-    def test_mcfg_does_not_access_ecam_or_program_pci(self):
+    def test_mcfg_remains_read_only_inventory(self):
         text = MCFG.read_text(encoding="utf-8")
-        for forbidden in ("__in", "__out", "pci_write", "pci_enable", "volatile"):
+        for forbidden in ("__in", "__out", "pci_write", "pci_enable", "volatile",
+                          "x86_mmio_read32", "x86_mmio_write32"):
             self.assertNotIn(forbidden, text)
 
-    def test_mcfg_inventory_is_optional_while_native_pci_uses_legacy_config_io(self):
+    def test_pci_config_core_owns_mcfg_activation_not_post_cutover(self):
         mcfg = MCFG.read_text(encoding="utf-8")
         post = POST.read_text(encoding="utf-8")
+        config = PCI_CONFIG.read_text(encoding="utf-8")
         self.assertIn("pub fn mcfg_init() -> bool", mcfg)
         self.assertIn("pci_scan_all()", post)
         self.assertNotIn("mcfg_init();", post)
+        self.assertIn("mcfg_init()", config)
+        self.assertIn("mcfg_ecam_address", config)
 
-    def test_df5a_keeps_legacy_backend_until_ecam_cutover(self):
+    def test_df5b_keeps_cf8_fallback_after_ecam_promotion(self):
         pci = PCI.read_text(encoding="utf-8")
         config = PCI_CONFIG.read_text(encoding="utf-8")
         self.assertIn("import kernel::drivers::pci_config::*;", pci)
         self.assertIn("PCI_CONFIG_ADDRESS_PORT", config)
         self.assertIn("PCI_CONFIG_DATA_PORT", config)
         self.assertIn("PCI_CONFIG_BACKEND_LEGACY_CF8CFC", config)
-        self.assertIn("pci_config_uses_legacy_cf8cfc()", pci)
+        self.assertIn("PCI_CONFIG_BACKEND_ECAM", config)
+        self.assertIn("pci_config_promote_ecam()", pci)
+        self.assertIn("pci_config_legacy_read32_locked", config)
+        self.assertIn("pci_config_legacy_write32_locked", config)
         self.assertNotIn("mcfg_ecam_address", pci)
-        self.assertNotIn("mcfg_ecam_address", config)
 
 
 if __name__ == "__main__":

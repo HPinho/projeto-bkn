@@ -1,10 +1,9 @@
 // Baken OS - enumeracao PCI read-only sobre o PCI Config Core.
 //
-// DF-5a mantém Configuration Mechanism #1 como backend ativo, agora
-// serializado pela camada pci_config. A varredura global continua READ-ONLY:
-// enumerar um dispositivo nao habilita Bus Master, I/O Space ou Memory Space,
-// nem escreve 0xFFFFFFFF em BARs ativos. Drivers proprietarios fazem essas
-// transicoes explicitamente depois de validar classe, recursos, DMA e MMIO.
+// DF-5b preserva Configuration Mechanism #1 durante o scan bootstrap e promove
+// o config core para ECAM somente depois que a enumeracao terminou. Assim BDFs
+// ausentes nao consomem mappings MMIO; drivers posteriores podem usar ECAM com
+// fallback legado para segmento 0/config space convencional.
 module kernel::drivers::pci_bus;
 
 import kernel::drivers::pci_config::*;
@@ -72,8 +71,8 @@ static mut PCI_DEVICES: [PciDevice; PCI_MAX_DISCOVERED] = [
 static mut PCI_DEVICE_COUNT: u32 = 0;
 static mut PCI_DISPLAY_DEVICE_INDEX: i32 = -1;
 
-// Compatibilidade da API histórica: o PCI Bus atual opera no segmento 0.
-// DF-5b passará a expor BDF segment-aware quando ECAM entrar em produção.
+// Compatibilidade da API historica: consumidores atuais operam no segmento 0.
+// O config core ja aceita segment_group para o capability walker/PCI Core v2.
 @system
 pub fn pci_read_config32(bus: u8, slot: u8, func: u8, offset: u8) -> u32 {
     return pci_config_read32(0, bus, slot, func, offset as u16);
@@ -168,7 +167,7 @@ pub fn pci_probe_bar(bus: u8, slot: u8, func: u8, bar_index: u8, out_bar: *mut P
 
 @system
 pub fn pci_scan_all() -> u32 {
-    if !pci_config_init() || !pci_config_uses_legacy_cf8cfc() { return 0; }
+    if !pci_config_init() { return 0; }
 
     unsafe {
         PCI_DEVICE_COUNT = 0;
@@ -176,14 +175,17 @@ pub fn pci_scan_all() -> u32 {
 
         for mut bus in 0..256 {
             for mut slot in 0..32 {
-                let vendor0 = pci_read_config16(bus as u8, slot as u8, 0, 0x00);
+                // Vendor/Header do scan usam sempre CF8/CFC. Isso evita criar
+                // um mapping ECAM por BDF ausente em rescans futuros.
+                let vendor0 = pci_config_read16_legacy(0, bus as u8, slot as u8, 0, 0x00);
                 if vendor0 == 0xFFFF || vendor0 == 0 { continue; }
 
-                let header0 = pci_read_config8(bus as u8, slot as u8, 0, 0x0E);
+                let header0 = pci_config_read8_legacy(0, bus as u8, slot as u8, 0, 0x0E);
                 let functions: u8 = if (header0 & 0x80) != 0 { 8 } else { 1 };
 
                 for mut func in 0..functions {
-                    let vendor = pci_read_config16(bus as u8, slot as u8, func as u8, 0x00);
+                    let vendor = pci_config_read16_legacy(
+                        0, bus as u8, slot as u8, func as u8, 0x00);
                     if vendor == 0xFFFF || vendor == 0 { continue; }
                     if PCI_DEVICE_COUNT >= (PCI_MAX_DISCOVERED as u32) { continue; }
 
@@ -224,7 +226,11 @@ pub fn pci_scan_all() -> u32 {
                 }
             }
         }
-        return PCI_DEVICE_COUNT;
+
+        let discovered = PCI_DEVICE_COUNT;
+        // Promocao e best-effort: sem MCFG valida o backend legado permanece.
+        if pci_config_ecam_available() { pci_config_promote_ecam(); }
+        return discovered;
     }
 }
 
