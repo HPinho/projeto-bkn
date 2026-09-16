@@ -45,6 +45,8 @@ fn pci_config_unlock_irq(flags: u64) -> void {
     x86_irq_restore(flags);
 }
 
+// Inicializado no BSP antes da enumeração PCI e antes do bring-up SMP. Depois
+// disso todos os acessos usam o lock IRQ-safe; nenhuma CPU reinicializa o lock.
 @system
 pub fn pci_config_init() -> bool {
     let flags = x86_irq_save_disable();
@@ -117,7 +119,6 @@ fn pci_config_legacy_address(bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
 
 @system
 pub fn pci_config_read32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) -> u32 {
-    if !pci_config_is_ready() && !pci_config_init() { return 0xFFFFFFFF; }
     if !pci_config_uses_legacy_cf8cfc() ||
        !pci_config_legacy_target_valid(segment, slot, func, offset) {
         return 0xFFFFFFFF;
@@ -134,7 +135,6 @@ pub fn pci_config_read32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16)
 
 @system
 pub fn pci_config_write32(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, value: u32) -> bool {
-    if !pci_config_is_ready() && !pci_config_init() { return false; }
     if !pci_config_uses_legacy_cf8cfc() ||
        !pci_config_legacy_target_valid(segment, slot, func, offset) {
         return false;
@@ -167,7 +167,6 @@ pub fn pci_config_read8(segment: u16, bus: u8, slot: u8, func: u8, offset: u16) 
 // outra CPU também alterar o registro de configuração entre read e write.
 @system
 pub fn pci_config_write16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, value: u16) -> bool {
-    if !pci_config_is_ready() && !pci_config_init() { return false; }
     if !pci_config_uses_legacy_cf8cfc() ||
        !pci_config_legacy_target_valid(segment, slot, func, offset) {
         return false;
@@ -180,7 +179,8 @@ pub fn pci_config_write16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16
     let current = baken_pci_in32(PCI_CONFIG_DATA_PORT);
     let shift: u32 = ((offset & 2) as u32) * 8;
     let mask: u32 = 0xFFFF << shift;
-    let updated = (current & !mask) | (((value as u32) << shift) & mask);
+    let clear_mask: u32 = ~mask;
+    let updated = (current & clear_mask) | (((value as u32) << shift) & mask);
     baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
     baken_pci_out32(PCI_CONFIG_DATA_PORT, updated);
     pci_config_unlock_irq(flags);
@@ -189,7 +189,6 @@ pub fn pci_config_write16(segment: u16, bus: u8, slot: u8, func: u8, offset: u16
 
 @system
 pub fn pci_config_set16_bits(segment: u16, bus: u8, slot: u8, func: u8, offset: u16, bits: u16) -> bool {
-    if !pci_config_is_ready() && !pci_config_init() { return false; }
     if !pci_config_uses_legacy_cf8cfc() ||
        !pci_config_legacy_target_valid(segment, slot, func, offset) {
         return false;
@@ -202,9 +201,10 @@ pub fn pci_config_set16_bits(segment: u16, bus: u8, slot: u8, func: u8, offset: 
     let current = baken_pci_in32(PCI_CONFIG_DATA_PORT);
     let shift: u32 = ((offset & 2) as u32) * 8;
     let mask: u32 = 0xFFFF << shift;
+    let clear_mask: u32 = ~mask;
     let current16 = ((current >> shift) & 0xFFFF) as u16;
     let updated16 = current16 | bits;
-    let updated = (current & !mask) | (((updated16 as u32) << shift) & mask);
+    let updated = (current & clear_mask) | (((updated16 as u32) << shift) & mask);
     baken_pci_out32(PCI_CONFIG_ADDRESS_PORT, address);
     baken_pci_out32(PCI_CONFIG_DATA_PORT, updated);
     pci_config_unlock_irq(flags);
