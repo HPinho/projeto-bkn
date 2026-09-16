@@ -539,9 +539,9 @@ pub fn pci_msi_reserve_single(device: DeviceHandle, driver: DriverHandle,
     };
 }
 
-// Esta liberacao e apenas para reserva ainda nao armada. Se a capability estiver
-// atualmente habilitada, recusamos soltar o vetor: DF-6c/DF-6d deverao primeiro
-// desabilitar e confirmar a fonte para impedir MSI contra um vetor sem owner.
+// Esta liberacao e apenas para reserva ainda nao armada. Sem uma leitura MSI
+// valida e uma confirmacao explicita de MSI Enable = 0, o vetor permanece retido.
+// Hot-unplug fisico tera um caminho separado; esta API nunca infere quiescencia.
 @system
 pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
                                             device: DeviceHandle,
@@ -561,19 +561,20 @@ pub fn pci_msi_release_unarmed_reservation(reservation: PciMsiReservation,
     }
 
     let pci = pci_get_device(index);
-    if pci != (null as *const PciDevice) {
-        if pci_bdf_pack(0, unsafe { (*pci).bus }, unsafe { (*pci).slot },
-                        unsafe { (*pci).func }) != bdf {
-            return false;
-        }
-        let capability = pci_msi_capability_probe(
-            0, unsafe { (*pci).bus }, unsafe { (*pci).slot }, unsafe { (*pci).func }
-        );
-        if capability.valid {
-            if capability.capability_offset != reservation.capability_offset || capability.enabled {
-                return false;
-            }
-        }
+    if pci == (null as *const PciDevice) { return false; }
+    if pci_bdf_pack(0, unsafe { (*pci).bus }, unsafe { (*pci).slot },
+                    unsafe { (*pci).func }) != bdf {
+        return false;
+    }
+
+    let capability = pci_msi_capability_probe(
+        0, unsafe { (*pci).bus }, unsafe { (*pci).slot }, unsafe { (*pci).func }
+    );
+    if !capability.valid ||
+       capability.capability_offset != reservation.capability_offset ||
+       capability.max_vectors != reservation.max_vectors ||
+       capability.enabled {
+        return false;
     }
 
     return irq_registry_unregister(reservation.irq, device, driver);
