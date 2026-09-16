@@ -1,10 +1,10 @@
 // Baken OS — DF-7b: prova read-only de janelas MSI-X contra BAR ownership.
 //
 // DF-7a interpreta a capability MSI-X. Este corte vincula Table/PBA a BAR claims
-// ja adquiridos pelo driver, mas somente publica um layout quando o inventario PCI
-// ja possui o tamanho REAL conhecido do BAR. Um comprimento escolhido pelo caller
-// nunca e tratado como aperture de hardware. Nao cria claim, nao faz BAR sizing,
-// nao mapeia MMIO, nao le/escreve Table/PBA e nao altera MSI-X Enable/Function Mask.
+// ja adquiridos pelo driver e a uma aperture previamente medida/restaurada pelo
+// DF-7b1. Um comprimento escolhido pelo caller nunca e tratado como aperture de
+// hardware. Nao cria claim, nao faz BAR sizing, nao mapeia MMIO, nao le/escreve
+// Table/PBA e nao altera MSI-X Enable/Function Mask.
 module kernel::drivers::pci_msix_layout;
 
 import kernel::drivers::pci_bus::*;
@@ -12,6 +12,7 @@ import kernel::drivers::pci_config::*;
 import kernel::drivers::pci_capabilities::*;
 import kernel::drivers::pci_device_bridge::*;
 import kernel::drivers::pci_msix_capability::*;
+import kernel::drivers::pci_bar_aperture::*;
 import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::resource_manager::*;
@@ -102,40 +103,29 @@ fn pci_msix_layout_function(bdf: u32) -> u8 {
     return (bdf & 0x07) as u8;
 }
 
-// Retorna tamanho somente quando o inventario do PCI Core possui uma medida
-// positiva para exatamente o mesmo BDF/BAR. Hoje o scan global deixa size=0;
-// portanto DF-7b falha fechado ate um microcorte separado realizar sizing
-// controlado com o dispositivo quiescente e publicar a medida no inventario.
+// Retorna tamanho somente quando o DF-7b1 publicou uma medida positiva para
+// exatamente o mesmo BDF/BAR/base e o tipo 32/64-bit continua consistente.
 @system
-fn pci_msix_layout_known_bar_size(bus: u8, slot: u8, func: u8,
-                                  target_bar: u8) -> u64 {
-    if target_bar >= 6 { return 0; }
-    let count = pci_get_device_count();
-    let mut index: u32 = 0;
-    while index < count {
-        let pci = pci_get_device(index);
-        if pci != (null as *const PciDevice) &&
-           unsafe { (*pci).bus == bus && (*pci).slot == slot && (*pci).func == func } {
-            let base = unsafe { (*pci).bars[target_bar as usize].base_address };
-            let size = unsafe { (*pci).bars[target_bar as usize].size };
-            let is_io = unsafe { (*pci).bars[target_bar as usize].is_io };
-            if base == 0 || size == 0 || is_io { return 0; }
-            return size;
-        }
-        index += 1;
+fn pci_msix_layout_known_bar_size(bdf: u32, target_bar: u8,
+                                  expected_base: u64, expected_64bit: bool) -> u64 {
+    let aperture = pci_bar_aperture_snapshot(bdf, target_bar, expected_base);
+    if !aperture.valid || aperture.size == 0 ||
+       aperture.is_64bit != expected_64bit {
+        return 0;
     }
-    return 0;
+    return aperture.size;
 }
 
 // Faz sanity-check do valor ATUAL dos BAR registers sem executar sizing.
 // O scan sequencial impede aceitar como BIR o dword alto de um BAR 64-bit e
-// rejeita tipos de Memory BAR reservados. A publicacao exige tambem size conhecido
-// no inventario, impedindo que um claim arbitrariamente grande seja confundido
-// com a aperture real do hardware.
+// rejeita tipos de Memory BAR reservados. A publicacao exige tambem uma aperture
+// previamente medida no registry DF-7b1.
 @system
-fn pci_msix_layout_bar_snapshot(bus: u8, slot: u8, func: u8,
+fn pci_msix_layout_bar_snapshot(bdf: u32, bus: u8, slot: u8, func: u8,
                                 target_bar: u8) -> PciMsixBarSnapshot {
-    if target_bar >= 6 { return pci_msix_layout_invalid_bar(); }
+    if target_bar >= 6 || pci_bdf_pack(0, bus, slot, func) != bdf {
+        return pci_msix_layout_invalid_bar();
+    }
     let mut bar: u8 = 0;
     while bar < 6 {
         let offset: u16 = 0x0010 + ((bar as u16) * 4);
@@ -158,7 +148,9 @@ fn pci_msix_layout_bar_snapshot(bus: u8, slot: u8, func: u8,
                 let high = pci_config_read32(0, bus, slot, func, offset + 4);
                 base |= (high as u64) << 32;
             }
-            let size = pci_msix_layout_known_bar_size(bus, slot, func, target_bar);
+            let is_64bit = bar_type == 2;
+            let size = pci_msix_layout_known_bar_size(
+                bdf, target_bar, base, is_64bit);
             if base == 0 || size == 0 { return pci_msix_layout_invalid_bar(); }
             return PciMsixBarSnapshot { base: base, size: size, valid: true };
         }
@@ -214,18 +206,15 @@ fn pci_msix_layout_window_proof(claim: PciBarClaim, expected_bir: u8,
     let bus = pci_msix_layout_bus(bdf);
     let slot = pci_msix_layout_slot(bdf);
     let func = pci_msix_layout_function(bdf);
-    let bar = pci_msix_layout_bar_snapshot(bus, slot, func, expected_bir);
+    let bar = pci_msix_layout_bar_snapshot(bdf, bus, slot, func, expected_bir);
 
-    // O claim fisico so se torna uma prova de aperture quando seu comprimento
-    // coincide EXATAMENTE com o tamanho conhecido pelo inventario. Se size=0,
-    // bar.valid ja e false e nenhuma janela MSI-X e publicada.
+    // O claim fisico so se torna uma prova de ownership da aperture quando seu
+    // comprimento coincide EXATAMENTE com a medida publicada pelo DF-7b1.
     if !bar.valid || physical.request.start != bar.base ||
        physical.request.length != bar.size {
         return pci_msix_layout_invalid_window();
     }
 
-    // Containment e provado contra o tamanho conhecido do BAR, nao contra um
-    // extent arbitrario fornecido pelo caller.
     if offset > bar.size || bytes > bar.size - offset {
         return pci_msix_layout_invalid_window();
     }
@@ -258,7 +247,7 @@ fn pci_msix_layout_capability_equal(left: PciMsixCapability,
 }
 
 // DF-7b — resolve Table/PBA somente se o caller possuir BAR claim(s) MMIO
-// generation-safe E o PCI Core ja conhecer a aperture real desses BARs.
+// generation-safe E o DF-7b1 ja tiver publicado a aperture real desses BARs.
 @system
 pub fn pci_msix_layout_probe(device: DeviceHandle, driver: DriverHandle,
                              table_claim: PciBarClaim,
@@ -272,8 +261,6 @@ pub fn pci_msix_layout_probe(device: DeviceHandle, driver: DriverHandle,
         return pci_msix_layout_invalid();
     }
     let bdf = owner.bus_instance;
-    // O bridge PCI atual publica inventario do segmento 0. Suporte multi-segmento
-    // so podera ser aberto quando o proprio bridge carregar segment_group.
     if bdf == PCI_BRIDGE_BDF_INVALID || ((bdf >> 16) & 0xFFFF) != 0 {
         return pci_msix_layout_invalid();
     }
@@ -301,8 +288,8 @@ pub fn pci_msix_layout_probe(device: DeviceHandle, driver: DriverHandle,
     );
     if !pba.valid { return pci_msix_layout_invalid(); }
 
-    // Revalida lifecycle, capability, ResourceHandles, BAR registers e size
-    // conhecido antes de publicar enderecos fisicos.
+    // Revalida lifecycle, capability, ResourceHandles, BAR registers e aperture
+    // publicada antes de expor enderecos fisicos.
     let verify_owner = device_core_snapshot(device);
     if !verify_owner.valid || verify_owner.bus != DEVICE_BUS_PCI ||
        verify_owner.bus_instance != bdf ||

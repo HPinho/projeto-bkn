@@ -1,0 +1,179 @@
+// Baken OS — DF-7b1 bridge: registry persistente de apertures BAR medidas.
+//
+// O scan PCI global continua estritamente read-only e PciBar.size permanece 0.
+// Somente uma medicao controlada/restaurada pode publicar aqui. O registro guarda
+// metadado de hardware, nao ownership: Device/Driver/Resource continuam sob o
+// Device Core/Resource Manager. Uma vez publicada, uma entrada e imutavel; qualquer
+// medida conflitante falha fechada.
+module kernel::drivers::pci_bar_aperture;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const PCI_BAR_APERTURE_CAPACITY: usize = 384;
+pub const PCI_BAR_APERTURE_BDF_INVALID: u32 = 0xFFFFFFFF;
+
+@repr(C)
+pub struct PciBarAperture {
+    pub bdf: u32;
+    pub bar_index: u8;
+    pub base: u64;
+    pub size: u64;
+    pub is_64bit: bool;
+    pub valid: bool;
+}
+
+static mut PCI_BAR_APERTURES: [PciBarAperture; PCI_BAR_APERTURE_CAPACITY] = [
+    PciBarAperture {
+        bdf: PCI_BAR_APERTURE_BDF_INVALID,
+        bar_index: 0xFF,
+        base: 0,
+        size: 0,
+        is_64bit: false,
+        valid: false
+    }; PCI_BAR_APERTURE_CAPACITY
+];
+static mut PCI_BAR_APERTURE_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+static mut PCI_BAR_APERTURE_LOCK_READY: bool = false;
+static mut PCI_BAR_APERTURE_READY: bool = false;
+
+@system
+pub fn pci_bar_aperture_invalid() -> PciBarAperture {
+    return PciBarAperture {
+        bdf: PCI_BAR_APERTURE_BDF_INVALID,
+        bar_index: 0xFF,
+        base: 0,
+        size: 0,
+        is_64bit: false,
+        valid: false
+    };
+}
+
+@system
+fn pci_bar_aperture_size_valid(size: u64) -> bool {
+    return size >= 16 && (size & (size - 1)) == 0;
+}
+
+@system
+pub fn pci_bar_aperture_init() -> bool {
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PCI_BAR_APERTURE_LOCK_READY {
+            if !spinlock_init(&mut PCI_BAR_APERTURE_LOCK) {
+                x86_irq_restore(flags);
+                return false;
+            }
+            PCI_BAR_APERTURE_LOCK_READY = true;
+        }
+        if !spinlock_lock(&mut PCI_BAR_APERTURE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        if !PCI_BAR_APERTURE_READY {
+            let mut slot: usize = 0;
+            while slot < PCI_BAR_APERTURE_CAPACITY {
+                PCI_BAR_APERTURES[slot] = pci_bar_aperture_invalid();
+                slot += 1;
+            }
+            PCI_BAR_APERTURE_READY = true;
+        }
+        let released = spinlock_unlock(&mut PCI_BAR_APERTURE_LOCK);
+        if !released {
+            x86_irq_restore(flags);
+            loop { x86_cpu_pause(); }
+        }
+    }
+    x86_irq_restore(flags);
+    return true;
+}
+
+@system
+fn pci_bar_aperture_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) || !pci_bar_aperture_init() { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !PCI_BAR_APERTURE_READY || !PCI_BAR_APERTURE_LOCK_READY ||
+           !spinlock_lock(&mut PCI_BAR_APERTURE_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn pci_bar_aperture_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PCI_BAR_APERTURE_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+// Publicacao write-once por (BDF,BAR). Repetir exatamente a mesma medida e
+// idempotente; qualquer divergencia e tratada como estado de hardware incerto.
+@system
+pub fn pci_bar_aperture_publish(bdf: u32, bar_index: u8, base: u64,
+                                size: u64, is_64bit: bool) -> bool {
+    if bdf == PCI_BAR_APERTURE_BDF_INVALID || bar_index >= 6 || base == 0 ||
+       !pci_bar_aperture_size_valid(size) || (base & (size - 1)) != 0 {
+        return false;
+    }
+    let mut flags: u64 = 0;
+    if !pci_bar_aperture_lock_irq(&mut flags) { return false; }
+    let mut free_slot: usize = PCI_BAR_APERTURE_CAPACITY;
+    let mut slot: usize = 0;
+    while slot < PCI_BAR_APERTURE_CAPACITY {
+        let entry = unsafe { PCI_BAR_APERTURES[slot] };
+        if entry.valid && entry.bdf == bdf && entry.bar_index == bar_index {
+            let same = entry.base == base && entry.size == size &&
+                       entry.is_64bit == is_64bit;
+            pci_bar_aperture_unlock_irq(flags);
+            return same;
+        }
+        if !entry.valid && free_slot == PCI_BAR_APERTURE_CAPACITY {
+            free_slot = slot;
+        }
+        slot += 1;
+    }
+    if free_slot >= PCI_BAR_APERTURE_CAPACITY {
+        pci_bar_aperture_unlock_irq(flags);
+        return false;
+    }
+    unsafe {
+        PCI_BAR_APERTURES[free_slot] = PciBarAperture {
+            bdf: bdf,
+            bar_index: bar_index,
+            base: base,
+            size: size,
+            is_64bit: is_64bit,
+            valid: true
+        };
+    }
+    pci_bar_aperture_unlock_irq(flags);
+    return true;
+}
+
+// Snapshot somente de metadado. Nenhum handle de ownership e armazenado aqui;
+// consumidores devem revalidar Device/Driver/Resource separadamente.
+@system
+pub fn pci_bar_aperture_snapshot(bdf: u32, bar_index: u8,
+                                 expected_base: u64) -> PciBarAperture {
+    if bdf == PCI_BAR_APERTURE_BDF_INVALID || bar_index >= 6 || expected_base == 0 {
+        return pci_bar_aperture_invalid();
+    }
+    let mut flags: u64 = 0;
+    if !pci_bar_aperture_lock_irq(&mut flags) { return pci_bar_aperture_invalid(); }
+    let mut result = pci_bar_aperture_invalid();
+    let mut slot: usize = 0;
+    while slot < PCI_BAR_APERTURE_CAPACITY {
+        let entry = unsafe { PCI_BAR_APERTURES[slot] };
+        if entry.valid && entry.bdf == bdf && entry.bar_index == bar_index {
+            if entry.base == expected_base { result = entry; }
+            break;
+        }
+        slot += 1;
+    }
+    pci_bar_aperture_unlock_irq(flags);
+    return result;
+}

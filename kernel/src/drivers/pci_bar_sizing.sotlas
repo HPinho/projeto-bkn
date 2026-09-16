@@ -1,8 +1,8 @@
 // Baken OS — DF-7b1: sizing controlado de BAR PCI com ownership generation-safe.
 //
-// Este modulo NAO publica tamanho no inventario global, NAO acessa MSI-X Table/PBA
-// e NAO habilita decode/DMA. Ele produz apenas uma prova efemera depois que o
-// Config Core dimensiona o BAR e comprova restauracao exata do hardware.
+// Este modulo NAO altera a enumeracao PCI global, NAO acessa MSI-X Table/PBA
+// e NAO habilita decode/DMA. Depois de restauracao exata e revalidacao completa,
+// publica somente a aperture medida no registry de metadados DF-7b1.
 module kernel::drivers::pci_bar_sizing;
 
 import kernel::drivers::pci_bus::*;
@@ -10,6 +10,7 @@ import kernel::drivers::pci_config::*;
 import kernel::drivers::pci_device_bridge::*;
 import kernel::drivers::pci_capabilities::*;
 import kernel::drivers::pci_msix_capability::*;
+import kernel::drivers::pci_bar_aperture::*;
 import kernel::device::types::*;
 import kernel::device::registry::*;
 import kernel::device::resource_manager::*;
@@ -101,11 +102,12 @@ fn pci_bar_size_sources_quiet(bus: u8, slot: u8, func: u8) -> bool {
     return true;
 }
 
-// Produz uma prova efemera de aperture para um BAR ja possuido pelo driver.
+// Produz uma prova efemera de aperture para um BAR ja possuido pelo driver e,
+// somente depois da restauracao/revalidacao, publica a mesma medida no registry.
 // Restricoes deliberadas deste microcorte:
 // - somente DEVICE_STATE_BINDING;
 // - exatamente os dois resources do PciBarClaim;
-// - BAR ainda nao dimensionado no inventario;
+// - BAR ainda nao dimensionado no inventario global;
 // - MSI e MSI-X desligados;
 // - PCI Command decode + Bus Master desligados (revalidado atomicamente pelo
 //   Config Core antes da primeira escrita destrutiva).
@@ -153,6 +155,11 @@ pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
         return invalid;
     }
 
+    // Aperture ja publicada nao e medida novamente por este caminho. Isso evita
+    // reabrir desnecessariamente a janela destrutiva write-all-ones.
+    let cached = pci_bar_aperture_snapshot(bdf, claim.bar_index, base);
+    if cached.valid { return invalid; }
+
     let measurement = pci_config_measure_memory_bar(
         0, bus, slot, func, claim.bar_index);
     if !measurement.valid || !measurement.restored ||
@@ -161,8 +168,8 @@ pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
         return invalid;
     }
 
-    // Segunda validacao completa: a prova so e publicada se lifecycle, claims,
-    // identidade PCI, BAR atual e fontes de interrupcao continuarem iguais.
+    // Segunda validacao completa: a medida so pode ser publicada se lifecycle,
+    // claims, identidade PCI, BAR atual e fontes de interrupcao continuarem iguais.
     let verify_owner = device_core_snapshot(device);
     if !verify_owner.valid || verify_owner.bus != DEVICE_BUS_PCI ||
        verify_owner.bus_instance != bdf ||
@@ -171,6 +178,16 @@ pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
        !pci_bar_size_inventory(found_index, claim.bar_index, bdf, base) ||
        !pci_bar_size_claim_owned(claim, device, driver, bdf, claim.bar_index, base) ||
        !pci_bar_size_sources_quiet(bus, slot, func) {
+        return invalid;
+    }
+
+    if !pci_bar_aperture_publish(
+        bdf, claim.bar_index, measurement.base, measurement.size, measurement.is_64bit) {
+        return invalid;
+    }
+    let aperture = pci_bar_aperture_snapshot(bdf, claim.bar_index, measurement.base);
+    if !aperture.valid || aperture.size != measurement.size ||
+       aperture.is_64bit != measurement.is_64bit {
         return invalid;
     }
 
