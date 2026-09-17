@@ -152,8 +152,10 @@ pub fn nvme_initialize_first() -> bool {
                 x86_mmio_write32(NVME_BASE + 0x0C, 0xFFFFFFFF);
                 x86_mmio_write32(NVME_BASE + 0x14, 0);
                 if !nvme_wait_ready(0) { return false; }
-                let mut arena = dma_alloc_for_device(20480, 4096, 0xFFFFFFFFFFFFFFFF, 0);
-                if !dma_buffer_cpu_owned(&arena) { return false; }
+                let constraints = dma_device_constraints(4096, 0xFFFFFFFFFFFFFFFF, 0);
+                if !dma_device_constraints_valid(&constraints) { return false; }
+                let mut arena = dma_alloc_for_constraints(20480, &constraints);
+                if !dma_buffer_cpu_owned(&arena) || !dma_buffer_satisfies_device_constraints(&arena, &constraints) { return false; }
                 NVME_VIRTUAL = arena.virtual_address as u64;
                 NVME_PHYSICAL = arena.physical_address;
                 nvme_zero(NVME_VIRTUAL, arena.size);
