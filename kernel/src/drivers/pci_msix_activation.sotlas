@@ -1,0 +1,1051 @@
+// Baken OS — DF-7e1: ativacao e teardown transacionais de MSI-X single-vector.
+//
+// Consome DF-7d (Table entry programada e mascarada), habilita MSI-X com
+// Function Mask global durante a transicao, desmascara somente a entry possuida
+// e publica ARMED apenas apos readback integral. O teardown executa no callback
+// remove() em UNBINDING: mascara globalmente, mascara a entry, desabilita MSI-X,
+// restaura Table/control originais e so entao devolve IRQ/source.
+// PBA permanece read-only; INTx, Bus Master e BAR config nao sao alterados.
+module kernel::drivers::pci_msix_activation;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msi::*;
+import kernel::drivers::pci_msix_capability::*;
+import kernel::drivers::pci_msix_layout::*;
+import kernel::drivers::pci_msix_release_layout::*;
+import kernel::drivers::pci_msix::*;
+import kernel::drivers::pci_msix_table::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+import kernel::memory::active_page_tables::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const PCI_MSIX_ARM_STATE_INVALID: u8 = 0;
+pub const PCI_MSIX_ARM_STATE_ROLLED_BACK: u8 = 1;
+pub const PCI_MSIX_ARM_STATE_ARMED: u8 = 2;
+pub const PCI_MSIX_ARM_STATE_QUARANTINED: u8 = 3;
+pub const PCI_MSIX_ARM_STATE_RELEASED: u8 = 4;
+
+@repr(C)
+pub struct PciMsixArmResult {
+    pub reservation: PciMsixReservation;
+    pub table: PciMsixTableProgramResult;
+    pub original_control: u16;
+    pub masked_enabled_control: u16;
+    pub active_control: u16;
+    pub active_vector_control: u32;
+    pub state: u8;
+    pub valid: bool;
+}
+
+static mut PCI_MSIX_ACTIVATION_LOCK: SpinLock = SpinLock {
+    state: SPINLOCK_UNLOCKED
+};
+
+@system
+fn pci_msix_activation_quarantined_copy(
+    reservation: PciMsixReservation
+) -> PciMsixReservation {
+    if !reservation.valid { return reservation; }
+    return PciMsixReservation {
+        source: reservation.source,
+        irq: reservation.irq,
+        vector: reservation.vector,
+        bdf: reservation.bdf,
+        capability_offset: reservation.capability_offset,
+        table_size: reservation.table_size,
+        state: PCI_MSIX_RESERVATION_QUARANTINED,
+        valid: true
+    };
+}
+
+@system
+fn pci_msix_activation_result(reservation: PciMsixReservation,
+                              table: PciMsixTableProgramResult,
+                              original_control: u16,
+                              masked_enabled_control: u16,
+                              active_control: u16,
+                              active_vector_control: u32,
+                              state: u8) -> PciMsixArmResult {
+    return PciMsixArmResult {
+        reservation: reservation,
+        table: table,
+        original_control: original_control,
+        masked_enabled_control: masked_enabled_control,
+        active_control: active_control,
+        active_vector_control: active_vector_control,
+        state: state,
+        valid: state != PCI_MSIX_ARM_STATE_INVALID
+    };
+}
+
+@system
+fn pci_msix_activation_invalid(
+    table: PciMsixTableProgramResult
+) -> PciMsixArmResult {
+    return pci_msix_activation_result(
+        table.reservation, table, 0, 0, 0, 0,
+        PCI_MSIX_ARM_STATE_INVALID
+    );
+}
+
+@system
+fn pci_msix_activation_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msix_activation_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msix_activation_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+@system
+fn pci_msix_activation_device_state(device: DeviceHandle,
+                                    driver: DriverHandle,
+                                    bdf: u32,
+                                    state: u8) -> bool {
+    if !device.valid || !driver.valid || bdf == PCI_BRIDGE_BDF_INVALID {
+        return false;
+    }
+    let owner = device_core_snapshot(device);
+    return owner.valid &&
+           owner.bus == DEVICE_BUS_PCI &&
+           owner.bus_instance == bdf &&
+           owner.state == state &&
+           driver_handle_equal(owner.driver, driver);
+}
+
+@system
+fn pci_msix_activation_source_owned(reservation: PciMsixReservation,
+                                    device: DeviceHandle,
+                                    driver: DriverHandle) -> bool {
+    if !reservation.source.valid { return false; }
+    let source = resource_snapshot(reservation.source);
+    return source.valid &&
+           source.request.kind == RESOURCE_KIND_PCI_MSIX &&
+           source.request.start == reservation.bdf as u64 &&
+           source.request.length == 1 &&
+           source.request.auxiliary == 0 &&
+           device_handle_equal(source.owner_device, device) &&
+           driver_handle_equal(source.owner_driver, driver);
+}
+
+@system
+fn pci_msix_activation_irq_owned(reservation: PciMsixReservation,
+                                 device: DeviceHandle,
+                                 driver: DriverHandle) -> bool {
+    if !reservation.irq.valid ||
+       reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+       reservation.vector > IRQ_DYNAMIC_VECTOR_LAST {
+        return false;
+    }
+    if irq_registry_vector(reservation.irq) != reservation.vector {
+        return false;
+    }
+    if !irq_registry_begin_operation(reservation.irq, device, driver) {
+        return false;
+    }
+    return irq_registry_end_operation(reservation.irq, device, driver);
+}
+
+@system
+fn pci_msix_activation_owned_active(reservation: PciMsixReservation,
+                                    device: DeviceHandle,
+                                    driver: DriverHandle) -> bool {
+    return pci_msix_reservation_is_ready(reservation) &&
+           pci_msix_activation_device_state(
+               device, driver, reservation.bdf, DEVICE_STATE_ACTIVE) &&
+           pci_msix_activation_source_owned(reservation, device, driver) &&
+           pci_msix_activation_irq_owned(reservation, device, driver);
+}
+
+@system
+fn pci_msix_activation_owned_unbinding(reservation: PciMsixReservation,
+                                       device: DeviceHandle,
+                                       driver: DriverHandle) -> bool {
+    return reservation.valid &&
+           reservation.source.valid &&
+           reservation.irq.valid &&
+           reservation.vector >= IRQ_DYNAMIC_VECTOR_FIRST &&
+           reservation.vector <= IRQ_DYNAMIC_VECTOR_LAST &&
+           pci_msix_activation_device_state(
+               device, driver, reservation.bdf, DEVICE_STATE_UNBINDING) &&
+           pci_msix_activation_source_owned(reservation, device, driver) &&
+           irq_registry_vector(reservation.irq) == reservation.vector;
+}
+
+@system
+fn pci_msix_activation_begin_pins(reservation: PciMsixReservation,
+                                  device: DeviceHandle,
+                                  driver: DriverHandle) -> bool {
+    if !device_core_begin_active_operation(device, driver) {
+        return false;
+    }
+    if !irq_registry_begin_operation(reservation.irq, device, driver) {
+        if !device_core_end_active_operation(device, driver) {
+            loop { x86_cpu_pause(); }
+        }
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msix_activation_end_pins(reservation: PciMsixReservation,
+                                device: DeviceHandle,
+                                driver: DriverHandle) -> void {
+    if !irq_registry_end_operation(reservation.irq, device, driver) {
+        loop { x86_cpu_pause(); }
+    }
+    if !device_core_end_active_operation(device, driver) {
+        loop { x86_cpu_pause(); }
+    }
+}
+
+@system
+fn pci_msix_activation_layout_geometry_equal(left: PciMsixLayout,
+                                             right: PciMsixLayout) -> bool {
+    return left.valid && right.valid &&
+           left.bdf == right.bdf &&
+           left.capability_offset == right.capability_offset &&
+           left.table_size == right.table_size &&
+           left.table_bar_index == right.table_bar_index &&
+           left.table_bar_base == right.table_bar_base &&
+           left.table_bar_size == right.table_bar_size &&
+           left.table_offset == right.table_offset &&
+           left.table_physical == right.table_physical &&
+           left.table_bytes == right.table_bytes &&
+           left.pba_bar_index == right.pba_bar_index &&
+           left.pba_bar_base == right.pba_bar_base &&
+           left.pba_bar_size == right.pba_bar_size &&
+           left.pba_offset == right.pba_offset &&
+           left.pba_physical == right.pba_physical &&
+           left.pba_bytes == right.pba_bytes;
+}
+
+@system
+fn pci_msix_activation_layout_matches(
+    layout: PciMsixLayout,
+    reservation: PciMsixReservation,
+    table: PciMsixTableProgramResult
+) -> bool {
+    if !layout.valid || !reservation.valid || !table.valid ||
+       layout.bdf != reservation.bdf ||
+       layout.capability_offset != reservation.capability_offset ||
+       layout.table_size != reservation.table_size ||
+       table.entry_index >= layout.table_size ||
+       layout.table_physical == 0 ||
+       layout.table_bytes < PCI_MSIX_TABLE_ENTRY_SIZE {
+        return false;
+    }
+
+    let offset = (table.entry_index as u64) * PCI_MSIX_TABLE_ENTRY_SIZE;
+    if offset > layout.table_bytes ||
+       PCI_MSIX_TABLE_ENTRY_SIZE > layout.table_bytes - offset {
+        return false;
+    }
+    let expected = layout.table_physical + offset;
+    if expected < layout.table_physical {
+        return false;
+    }
+    return table.entry_physical == expected;
+}
+
+@system
+fn pci_msix_activation_capability_matches(
+    capability: PciMsixCapability,
+    layout: PciMsixLayout,
+    reservation: PciMsixReservation
+) -> bool {
+    return capability.valid &&
+           capability.capability_offset == reservation.capability_offset &&
+           capability.table_size == reservation.table_size &&
+           capability.table_bir == layout.table_bar_index &&
+           capability.table_offset == layout.table_offset &&
+           capability.table_bytes == layout.table_bytes &&
+           capability.pba_bir == layout.pba_bar_index &&
+           capability.pba_offset == layout.pba_offset &&
+           capability.pba_bytes == layout.pba_bytes;
+}
+
+@system
+fn pci_msix_activation_memory_decode_on(bdf: u32) -> bool {
+    let bus = pci_msix_activation_bus(bdf);
+    let slot = pci_msix_activation_slot(bdf);
+    let func = pci_msix_activation_function(bdf);
+    if pci_bdf_pack(0, bus, slot, func) != bdf { return false; }
+    let command = pci_config_read16(0, bus, slot, func, 0x0004);
+    return (command & PCI_COMMAND_MEMORY_SPACE) != 0;
+}
+
+@system
+fn pci_msix_activation_msi_off(bdf: u32) -> bool {
+    let bus = pci_msix_activation_bus(bdf);
+    let slot = pci_msix_activation_slot(bdf);
+    let func = pci_msix_activation_function(bdf);
+    if pci_bdf_pack(0, bus, slot, func) != bdf { return false; }
+    let msi = pci_msi_capability_probe(0, bus, slot, func);
+    return !msi.valid || !msi.enabled;
+}
+
+@system
+fn pci_msix_activation_map_entry(entry_physical: u64) -> bool {
+    if entry_physical == 0 { return false; }
+    let last_byte = entry_physical + PCI_MSIX_TABLE_ENTRY_SIZE - 1;
+    if last_byte < entry_physical { return false; }
+
+    let first_page = x86_page_align_down(entry_physical);
+    let last_page = x86_page_align_down(last_byte);
+    if first_page == 0 || last_page == 0 { return false; }
+    if !active_page_tables_map_mmio_identity_4k(first_page) { return false; }
+    if last_page != first_page &&
+       !active_page_tables_map_mmio_identity_4k(last_page) {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msix_activation_snapshot(
+    entry_physical: u64
+) -> PciMsixTableEntrySnapshot {
+    return PciMsixTableEntrySnapshot {
+        address_low: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_ADDRESS_LOW_REL),
+        address_high: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_ADDRESS_HIGH_REL),
+        message_data: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_MESSAGE_DATA_REL),
+        vector_control: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL),
+        valid: entry_physical != 0
+    };
+}
+
+@system
+fn pci_msix_activation_snapshot_equal(left: PciMsixTableEntrySnapshot,
+                                      right: PciMsixTableEntrySnapshot) -> bool {
+    return left.valid && right.valid &&
+           left.address_low == right.address_low &&
+           left.address_high == right.address_high &&
+           left.message_data == right.message_data &&
+           left.vector_control == right.vector_control;
+}
+
+@system
+fn pci_msix_activation_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut PCI_MSIX_ACTIVATION_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn pci_msix_activation_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PCI_MSIX_ACTIVATION_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn pci_msix_activation_write_control(bdf: u32,
+                                     capability_offset: u16,
+                                     control: u16) -> bool {
+    let bus = pci_msix_activation_bus(bdf);
+    let slot = pci_msix_activation_slot(bdf);
+    let func = pci_msix_activation_function(bdf);
+    return pci_config_write16(
+        0, bus, slot, func,
+        capability_offset + PCI_MSIX_CONTROL_REL,
+        control
+    );
+}
+
+@system
+fn pci_msix_activation_probe_capability(
+    bdf: u32
+) -> PciMsixCapability {
+    let bus = pci_msix_activation_bus(bdf);
+    let slot = pci_msix_activation_slot(bdf);
+    let func = pci_msix_activation_function(bdf);
+    return pci_msix_capability_probe(0, bus, slot, func);
+}
+
+@system
+fn pci_msix_activation_restore_masked_state(
+    table: PciMsixTableProgramResult,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim,
+    expected_layout: PciMsixLayout,
+    original_control: u16
+) -> bool {
+    if !pci_msix_table_program_is_masked(table) ||
+       (original_control & PCI_MSIX_CONTROL_ENABLE) != 0 ||
+       !pci_msix_activation_owned_active(table.reservation, device, driver) {
+        return false;
+    }
+
+    let live = pci_msix_layout_probe(device, driver, table_claim, pba_claim);
+    if !pci_msix_activation_layout_geometry_equal(expected_layout, live) ||
+       !pci_msix_activation_layout_matches(live, table.reservation, table) ||
+       !pci_msix_activation_memory_decode_on(table.reservation.bdf) ||
+       !pci_msix_activation_msi_off(table.reservation.bdf) {
+        return false;
+    }
+
+    let current = pci_msix_activation_probe_capability(table.reservation.bdf);
+    if !pci_msix_activation_capability_matches(
+        current, live, table.reservation) {
+        return false;
+    }
+    let source_masked = current.control | PCI_MSIX_CONTROL_FUNCTION_MASK;
+    if !pci_msix_activation_write_control(
+        table.reservation.bdf, table.reservation.capability_offset,
+        source_masked) {
+        return false;
+    }
+    let masked_cap = pci_msix_activation_probe_capability(
+        table.reservation.bdf);
+    if !pci_msix_activation_capability_matches(
+        masked_cap, live, table.reservation) ||
+       masked_cap.control != source_masked ||
+       !masked_cap.function_masked {
+        return false;
+    }
+
+    x86_mmio_write32(
+        table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL,
+        table.programmed.vector_control | PCI_MSIX_TABLE_VECTOR_MASK);
+    __dma_fence();
+
+    let masked_entry = pci_msix_activation_snapshot(table.entry_physical);
+    if !pci_msix_activation_snapshot_equal(masked_entry, table.programmed) {
+        return false;
+    }
+
+    if !pci_msix_activation_write_control(
+        table.reservation.bdf, table.reservation.capability_offset,
+        original_control) {
+        return false;
+    }
+    let restored = pci_msix_activation_probe_capability(
+        table.reservation.bdf);
+    return pci_msix_activation_capability_matches(
+               restored, live, table.reservation) &&
+           restored.control == original_control &&
+           !restored.enabled &&
+           pci_msix_activation_snapshot_equal(
+               pci_msix_activation_snapshot(table.entry_physical),
+               table.programmed);
+}
+
+@system
+fn pci_msix_activation_failure_after_mutation(
+    table: PciMsixTableProgramResult,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim,
+    layout: PciMsixLayout,
+    original_control: u16,
+    masked_enabled_control: u16,
+    active_control: u16,
+    active_vector_control: u32
+) -> PciMsixArmResult {
+    if pci_msix_activation_restore_masked_state(
+        table, device, driver, table_claim, pba_claim,
+        layout, original_control
+    ) {
+        return pci_msix_activation_result(
+            table.reservation, table,
+            original_control, masked_enabled_control,
+            active_control, active_vector_control,
+            PCI_MSIX_ARM_STATE_ROLLED_BACK
+        );
+    }
+    return pci_msix_activation_result(
+        pci_msix_activation_quarantined_copy(table.reservation),
+        table,
+        original_control, masked_enabled_control,
+        active_control, active_vector_control,
+        PCI_MSIX_ARM_STATE_QUARANTINED
+    );
+}
+
+@system
+pub fn pci_msix_activate_single(
+    table: PciMsixTableProgramResult,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim
+) -> PciMsixArmResult {
+    if !pci_msix_table_program_is_masked(table) ||
+       !pci_msix_reservation_is_ready(table.reservation) ||
+       !active_page_tables_is_ready() ||
+       !pci_msix_activation_device_state(
+           device, driver, table.reservation.bdf, DEVICE_STATE_ACTIVE) {
+        return pci_msix_activation_invalid(table);
+    }
+
+    if !pci_msix_activation_begin_pins(
+        table.reservation, device, driver) {
+        return pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(table.reservation),
+            table, 0, 0, 0, 0,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+    }
+
+    let layout = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_activation_layout_matches(
+            layout, table.reservation, table) ||
+       layout.enabled ||
+       !pci_msix_activation_owned_active(
+           table.reservation, device, driver) ||
+       !pci_msix_activation_memory_decode_on(table.reservation.bdf) ||
+       !pci_msix_activation_msi_off(table.reservation.bdf) ||
+       !pci_msix_activation_map_entry(table.entry_physical) {
+        let result = pci_msix_activation_invalid(table);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let mapped = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_activation_layout_geometry_equal(layout, mapped) ||
+       mapped.enabled ||
+       !pci_msix_activation_layout_matches(
+           mapped, table.reservation, table) ||
+       !pci_msix_activation_owned_active(
+           table.reservation, device, driver) {
+        let result = pci_msix_activation_invalid(table);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let mut flags: u64 = 0;
+    if !pci_msix_activation_lock_irq(&mut flags) {
+        let result = pci_msix_activation_invalid(table);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let locked = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    let capability = pci_msix_activation_probe_capability(
+        table.reservation.bdf);
+    let entry = pci_msix_activation_snapshot(table.entry_physical);
+    if !pci_msix_activation_layout_geometry_equal(layout, locked) ||
+       locked.enabled ||
+       !pci_msix_activation_layout_matches(
+           locked, table.reservation, table) ||
+       !pci_msix_activation_capability_matches(
+           capability, locked, table.reservation) ||
+       capability.enabled ||
+       !pci_msix_activation_owned_active(
+           table.reservation, device, driver) ||
+       !pci_msix_activation_snapshot_equal(entry, table.programmed) ||
+       (entry.vector_control & PCI_MSIX_TABLE_VECTOR_MASK) == 0 {
+        let result = pci_msix_activation_invalid(table);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let original_control = capability.control;
+    if (original_control & PCI_MSIX_CONTROL_ENABLE) != 0 {
+        let result = pci_msix_activation_invalid(table);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let masked_enabled_control =
+        original_control |
+        PCI_MSIX_CONTROL_ENABLE |
+        PCI_MSIX_CONTROL_FUNCTION_MASK;
+    if !pci_msix_activation_write_control(
+        table.reservation.bdf,
+        table.reservation.capability_offset,
+        masked_enabled_control) {
+        let result = pci_msix_activation_failure_after_mutation(
+            table, device, driver, table_claim, pba_claim,
+            layout, original_control, masked_enabled_control,
+            0, table.programmed.vector_control);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let masked_enabled = pci_msix_activation_probe_capability(
+        table.reservation.bdf);
+    if !pci_msix_activation_capability_matches(
+            masked_enabled, layout, table.reservation) ||
+       masked_enabled.control != masked_enabled_control ||
+       !masked_enabled.enabled || !masked_enabled.function_masked {
+        let result = pci_msix_activation_failure_after_mutation(
+            table, device, driver, table_claim, pba_claim,
+            layout, original_control, masked_enabled_control,
+            0, table.programmed.vector_control);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let active_vector_control =
+        table.programmed.vector_control & ~PCI_MSIX_TABLE_VECTOR_MASK;
+    x86_mmio_write32(
+        table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL,
+        active_vector_control);
+    __dma_fence();
+
+    let active_entry = PciMsixTableEntrySnapshot {
+        address_low: table.programmed.address_low,
+        address_high: table.programmed.address_high,
+        message_data: table.programmed.message_data,
+        vector_control: active_vector_control,
+        valid: true
+    };
+    if !pci_msix_activation_snapshot_equal(
+        pci_msix_activation_snapshot(table.entry_physical),
+        active_entry) {
+        let result = pci_msix_activation_failure_after_mutation(
+            table, device, driver, table_claim, pba_claim,
+            layout, original_control, masked_enabled_control,
+            0, active_vector_control);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let active_control =
+        masked_enabled_control & ~PCI_MSIX_CONTROL_FUNCTION_MASK;
+    if !pci_msix_activation_write_control(
+        table.reservation.bdf,
+        table.reservation.capability_offset,
+        active_control) {
+        let result = pci_msix_activation_failure_after_mutation(
+            table, device, driver, table_claim, pba_claim,
+            layout, original_control, masked_enabled_control,
+            active_control, active_vector_control);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let active_capability = pci_msix_activation_probe_capability(
+        table.reservation.bdf);
+    let final_layout = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_activation_capability_matches(
+            active_capability, layout, table.reservation) ||
+       active_capability.control != active_control ||
+       !active_capability.enabled || active_capability.function_masked ||
+       !pci_msix_activation_layout_geometry_equal(layout, final_layout) ||
+       !final_layout.enabled || final_layout.function_masked ||
+       !pci_msix_activation_owned_active(
+           table.reservation, device, driver) ||
+       !pci_msix_activation_snapshot_equal(
+           pci_msix_activation_snapshot(table.entry_physical),
+           active_entry) {
+        let result = pci_msix_activation_failure_after_mutation(
+            table, device, driver, table_claim, pba_claim,
+            layout, original_control, masked_enabled_control,
+            active_control, active_vector_control);
+        pci_msix_activation_unlock_irq(flags);
+        pci_msix_activation_end_pins(table.reservation, device, driver);
+        return result;
+    }
+
+    let result = pci_msix_activation_result(
+        table.reservation, table,
+        original_control, masked_enabled_control,
+        active_control, active_vector_control,
+        PCI_MSIX_ARM_STATE_ARMED
+    );
+    pci_msix_activation_unlock_irq(flags);
+    pci_msix_activation_end_pins(table.reservation, device, driver);
+    return result;
+}
+
+@system
+fn pci_msix_teardown_restore_original_entry(
+    arm: PciMsixArmResult
+) -> bool {
+    let masked_original =
+        arm.table.original.vector_control | PCI_MSIX_TABLE_VECTOR_MASK;
+    x86_mmio_write32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL,
+        masked_original);
+    __dma_fence();
+    if x86_mmio_read32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL
+    ) != masked_original {
+        return false;
+    }
+
+    x86_mmio_write32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_ADDRESS_LOW_REL,
+        arm.table.original.address_low);
+    x86_mmio_write32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_ADDRESS_HIGH_REL,
+        arm.table.original.address_high);
+    x86_mmio_write32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_MESSAGE_DATA_REL,
+        arm.table.original.message_data);
+    __dma_fence();
+
+    x86_mmio_write32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL,
+        arm.table.original.vector_control);
+    __dma_fence();
+
+    return pci_msix_activation_snapshot_equal(
+        pci_msix_activation_snapshot(arm.table.entry_physical),
+        arm.table.original);
+}
+
+@system
+fn pci_msix_teardown_internal(
+    arm: PciMsixArmResult,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim,
+    strict_active_snapshot: bool
+) -> PciMsixArmResult {
+    if !arm.valid ||
+       (arm.original_control & PCI_MSIX_CONTROL_ENABLE) != 0 ||
+       !arm.table.original.valid || !arm.table.programmed.valid ||
+       !pci_msix_activation_owned_unbinding(
+           arm.reservation, device, driver) ||
+       !active_page_tables_is_ready() {
+        return pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+    }
+
+    let layout = pci_msix_release_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_activation_layout_matches(
+            layout, arm.reservation, arm.table) ||
+       !pci_msix_activation_memory_decode_on(arm.reservation.bdf) ||
+       !pci_msix_activation_msi_off(arm.reservation.bdf) ||
+       !pci_msix_activation_map_entry(arm.table.entry_physical) {
+        return pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+    }
+
+    let mut flags: u64 = 0;
+    if !pci_msix_activation_lock_irq(&mut flags) {
+        return pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+    }
+
+    let locked = pci_msix_release_layout_probe(
+        device, driver, table_claim, pba_claim);
+    let capability = pci_msix_activation_probe_capability(
+        arm.reservation.bdf);
+    let current_entry = pci_msix_activation_snapshot(
+        arm.table.entry_physical);
+
+    if !pci_msix_activation_layout_geometry_equal(layout, locked) ||
+       !pci_msix_activation_layout_matches(
+           locked, arm.reservation, arm.table) ||
+       !pci_msix_activation_capability_matches(
+           capability, locked, arm.reservation) ||
+       !pci_msix_activation_owned_unbinding(
+           arm.reservation, device, driver) {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    if strict_active_snapshot {
+        let expected_entry = PciMsixTableEntrySnapshot {
+            address_low: arm.table.programmed.address_low,
+            address_high: arm.table.programmed.address_high,
+            message_data: arm.table.programmed.message_data,
+            vector_control: arm.active_vector_control,
+            valid: true
+        };
+        if capability.control != arm.active_control ||
+           !capability.enabled || capability.function_masked ||
+           !pci_msix_activation_snapshot_equal(current_entry, expected_entry) {
+            let result = pci_msix_activation_result(
+                pci_msix_activation_quarantined_copy(arm.reservation),
+                arm.table, arm.original_control,
+                arm.masked_enabled_control, arm.active_control,
+                arm.active_vector_control,
+                PCI_MSIX_ARM_STATE_QUARANTINED
+            );
+            pci_msix_activation_unlock_irq(flags);
+            return result;
+        }
+    }
+
+    let function_masked_control =
+        capability.control | PCI_MSIX_CONTROL_FUNCTION_MASK;
+    if !pci_msix_activation_write_control(
+        arm.reservation.bdf,
+        arm.reservation.capability_offset,
+        function_masked_control) {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    let global_masked = pci_msix_activation_probe_capability(
+        arm.reservation.bdf);
+    if !pci_msix_activation_capability_matches(
+            global_masked, locked, arm.reservation) ||
+       global_masked.control != function_masked_control ||
+       !global_masked.function_masked {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    let masked_vector_control =
+        arm.table.programmed.vector_control | PCI_MSIX_TABLE_VECTOR_MASK;
+    x86_mmio_write32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL,
+        masked_vector_control);
+    __dma_fence();
+    if x86_mmio_read32(
+        arm.table.entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL
+    ) != masked_vector_control {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    let disabled_control =
+        function_masked_control & ~PCI_MSIX_CONTROL_ENABLE;
+    if !pci_msix_activation_write_control(
+        arm.reservation.bdf,
+        arm.reservation.capability_offset,
+        disabled_control) {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    let disabled = pci_msix_activation_probe_capability(
+        arm.reservation.bdf);
+    if !pci_msix_activation_capability_matches(
+            disabled, locked, arm.reservation) ||
+       disabled.control != disabled_control ||
+       disabled.enabled {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    if !pci_msix_teardown_restore_original_entry(arm) {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    if !pci_msix_activation_write_control(
+        arm.reservation.bdf,
+        arm.reservation.capability_offset,
+        arm.original_control) {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    let restored_capability = pci_msix_activation_probe_capability(
+        arm.reservation.bdf);
+    let restored_layout = pci_msix_release_layout_probe(
+        device, driver, table_claim, pba_claim);
+    let restored_entry = pci_msix_activation_snapshot(
+        arm.table.entry_physical);
+
+    if !pci_msix_activation_capability_matches(
+            restored_capability, restored_layout, arm.reservation) ||
+       restored_capability.control != arm.original_control ||
+       restored_capability.enabled ||
+       !pci_msix_activation_layout_geometry_equal(layout, restored_layout) ||
+       !pci_msix_activation_snapshot_equal(
+           restored_entry, arm.table.original) ||
+       !pci_msix_activation_owned_unbinding(
+           arm.reservation, device, driver) {
+        let result = pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+        pci_msix_activation_unlock_irq(flags);
+        return result;
+    }
+
+    pci_msix_activation_unlock_irq(flags);
+
+    let mut remaining = arm.reservation;
+    if pci_msix_reservation_is_quarantined(arm.reservation) {
+        remaining = pci_msix_retry_quarantined_cleanup(
+            arm.reservation, device, driver);
+    } else {
+        remaining = pci_msix_release_unarmed_reservation(
+            arm.reservation, device, driver);
+    }
+    if remaining.valid {
+        return pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(remaining),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+    }
+
+    return pci_msix_activation_result(
+        remaining, arm.table,
+        arm.original_control, arm.masked_enabled_control,
+        arm.active_control, arm.active_vector_control,
+        PCI_MSIX_ARM_STATE_RELEASED
+    );
+}
+
+@system
+pub fn pci_msix_disarm_and_release(
+    arm: PciMsixArmResult,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim
+) -> PciMsixArmResult {
+    if !arm.valid || arm.state != PCI_MSIX_ARM_STATE_ARMED {
+        return pci_msix_activation_result(
+            pci_msix_activation_quarantined_copy(arm.reservation),
+            arm.table, arm.original_control,
+            arm.masked_enabled_control, arm.active_control,
+            arm.active_vector_control,
+            PCI_MSIX_ARM_STATE_QUARANTINED
+        );
+    }
+    return pci_msix_teardown_internal(
+        arm, device, driver, table_claim, pba_claim, true);
+}
+
+@system
+pub fn pci_msix_retry_quarantined_teardown(
+    arm: PciMsixArmResult,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim
+) -> PciMsixArmResult {
+    if !arm.valid || arm.state != PCI_MSIX_ARM_STATE_QUARANTINED {
+        return arm;
+    }
+    return pci_msix_teardown_internal(
+        arm, device, driver, table_claim, pba_claim, false);
+}
+
+@system
+pub fn pci_msix_arm_is_armed(arm: PciMsixArmResult) -> bool {
+    return arm.valid &&
+           arm.state == PCI_MSIX_ARM_STATE_ARMED &&
+           pci_msix_reservation_is_ready(arm.reservation) &&
+           (arm.active_control & PCI_MSIX_CONTROL_ENABLE) != 0 &&
+           (arm.active_control & PCI_MSIX_CONTROL_FUNCTION_MASK) == 0 &&
+           (arm.active_vector_control & PCI_MSIX_TABLE_VECTOR_MASK) == 0;
+}
+
+@system
+pub fn pci_msix_arm_is_released(arm: PciMsixArmResult) -> bool {
+    return arm.valid &&
+           arm.state == PCI_MSIX_ARM_STATE_RELEASED &&
+           !arm.reservation.valid;
+}

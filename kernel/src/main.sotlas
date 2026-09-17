@@ -49,6 +49,8 @@ import kernel::drivers::pci_msix_capability::*;
 import kernel::drivers::pci_msix_layout::*;
 import kernel::drivers::pci_msix::*;
 import kernel::drivers::pci_msix_table::*;
+import kernel::drivers::pci_msix_release_layout::*;
+import kernel::drivers::pci_msix_activation::*;
 import kernel::drivers::pci_bar_sizing::*;
 import kernel::drivers::pci_device_bridge::*;
 import kernel::drivers::pci_msi::*;
