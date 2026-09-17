@@ -1,6 +1,6 @@
 # Baken OS — Driver Foundation Status
 
-Atualizado em 2026-09-16 (America/Fortaleza).
+Atualizado em 2026-09-17 (America/Fortaleza).
 
 Este arquivo e o checkpoint operacional curto da Driver Foundation. O historico detalhado permanece preservado em `BAKEN_OS_ROADMAP.md`, `KERNEL_HANDOFF.md`, `KERNEL_HANDOFF_APPENDIX.md` e nos appendices especificos da Driver Foundation.
 
@@ -13,9 +13,9 @@ O Baken OS ja atingiu boot em notebook real. A Driver Foundation deve preservar 
 - nenhum microcorte redesenha boot, allocator, interrupt core ou page tables sem necessidade provada;
 - Generic IRQ Registry permanece a unica autoridade de vetores dinamicos;
 - EOI permanece centralizado no dispatcher x86 existente;
-- PCI/MSI/MSI-X evoluem em microcortes pequenos, fail-closed e reversiveis;
+- PCI/MSI/MSI-X/DMA evoluem em microcortes pequenos, fail-closed e reversiveis;
 - nao empilhar funcionalidade sobre SHA candidato vermelho ou superseded por auditoria;
-- feature so vira `CERTIFIED` depois dos seis gates obrigatorios no mesmo SHA.
+- feature so vira `CERTIFIED` depois dos gates obrigatorios no mesmo SHA.
 
 ## Estados formais
 
@@ -28,182 +28,125 @@ PLANNED -> IMPLEMENTED -> VALIDATING -> CERTIFIED
 
 `IMPLEMENTED` significa somente que o codigo existe. Nao equivale a baseline certificada.
 
-## Baseline funcional certificada
+## Baseline certificada de fechamento do DF-7
 
 ```text
-72cc8ac13fca7ec4c250c3db532d8112f2253c3a
-fix(test): restore live MSI-X layout assertions
+1e4d82034941c291737c748adf1db9ca23563cc1
+test(pci): guard ivshmem MSI-X BAR sizing command restore
 ```
 
-Gates no mesmo SHA:
+No mesmo SHA passaram:
 
-- CI/CD + QEMU #1302: PASS
-- SMP Bring-up #405: PASS
-- NVMe-only Bare-Metal #502: PASS
-- HID Dual-device #161: PASS
-- SMP Fault Diagnostic #67: PASS
-- MSI EDU Runtime #7: PASS
+- CI/CD + Automated QEMU #1321;
+- SMP Bring-up #424;
+- NVMe-only Bare-Metal #521;
+- HID Dual-device #180;
+- SMP Fault Diagnostic #86;
+- MSI EDU Runtime #26;
+- MSI-X ivshmem Runtime #13.
 
-Essa baseline certifica o DF-7a, DF-7b e DF-7b1, preservando integralmente a prova runtime de MSI convencional do DF-6.
-
-Baseline anterior que fechou o DF-7a:
-
-```text
-a34434aad5c1a795cdac70458efe26adb8b3a50a
-feat(pci): add read-only MSI-X capability model
-```
-
-Gates: CI #1297, SMP #400, NVMe #497, HID #156, Fault #62 e MSI EDU #2, todos PASS.
+Esse checkpoint fecha a macroetapa DF-7 com entrega MSI-X real em QEMU `ivshmem-doorbell`, teardown fail-closed e guard estrutural do caminho de BAR sizing.
 
 ## Driver Foundation
 
 ```text
-DF-0  Architecture / contracts                    CERTIFIED
-DF-1  Driver API / descriptors                     CERTIFIED
-DF-2  Resource Manager                             CERTIFIED
-DF-3  Device Core                                  CERTIFIED
+DF-0   Architecture / contracts                    CERTIFIED
+DF-1   Driver API / descriptors                    CERTIFIED
+DF-2   Resource Manager                            CERTIFIED
+DF-3   Device Core                                 CERTIFIED
 DF-3.1 Transactional lifecycle                     CERTIFIED
-DF-4  Generic IRQ Registry                         CERTIFIED
-  DF-4a generation-safe registry                   CERTIFIED
-  DF-4b1 x86 dynamic dispatcher                    CERTIFIED
-DF-5  PCI Core v2                                  CERTIFIED
-  DF-5a CF8/CFC SMP-safe                           CERTIFIED
-  DF-5b ECAM/MCFG + CF8 fallback                   CERTIFIED
-  DF-5c bounded capability walkers                 CERTIFIED
-  DF-5d Device/Resource bridge                     CERTIFIED
-DF-6  MSI                                          CERTIFIED
-  DF-6a read-only capability model                 CERTIFIED
-  DF-6b source ownership + IRQ reservation         CERTIFIED
-  DF-6c transactional single-vector programming    CERTIFIED
-  DF-6d1 fail-closed disable/teardown               CERTIFIED
-  DF-6d2 QEMU EDU runtime proof                    CERTIFIED
-DF-7  MSI-X                                        IN PROGRESS
-  DF-7a read-only capability model                 CERTIFIED
-  DF-7b BAR-backed Table/PBA layout proof          CERTIFIED
+DF-4   Generic IRQ Registry                        CERTIFIED
+DF-5   PCI Core v2                                 CERTIFIED
+DF-6   MSI                                         CERTIFIED
+DF-7   MSI-X                                       CERTIFIED
+  DF-7a  read-only capability model                CERTIFIED
+  DF-7b  BAR-backed Table/PBA layout proof         CERTIFIED
   DF-7b1 controlled quiescent BAR sizing           CERTIFIED
-  DF-7c source/vector ownership                    IMPLEMENTED / VALIDATING
-  DF-7d masked table-entry programming             PLANNED
-  DF-7e activation/teardown/runtime proof          PLANNED
+  DF-7c  source/vector ownership                   CERTIFIED
+  DF-7d  masked table-entry programming            CERTIFIED
+  DF-7e1 activation + fail-closed teardown          CERTIFIED
+  DF-7e2 QEMU ivshmem runtime proof                CERTIFIED
+DF-8   DMA Device API                              IN PROGRESS
+  DF-8a read-only device constraints model         IMPLEMENTED / VALIDATING
+DF-9   MMIO Mapping API                            PLANNED
+DF-10  Bus Model                                   PLANNED
+DF-11  Class Registries                            PLANNED
 ```
 
-## DF-7a — MSI-X capability model — certificado
+## DF-8 — DMA Device API
 
-`kernel/src/drivers/pci_msix_capability.sotlas` interpreta somente a capability MSI-X `0x11` no config space:
+Objetivo da macroetapa: representar e aplicar constraints DMA por dispositivo sem substituir o allocator fisico existente e sem criar caminhos paralelos ao PMM/VMM/DMA ja certificados.
 
-- Message Control, Table Size, Enable e Function Mask;
-- BIR/offset de Table e PBA;
-- Table Size de 1..2048;
-- Table span `entries * 16`;
-- PBA span `ceil(entries / 64) * 8`;
-- overflow/bounds checks;
-- releitura integral antes de publicar;
-- zero MMIO/IRQ/config write/runtime call.
+### DF-8a — read-only device constraints model
 
-## DF-7b — layout Table/PBA contra BAR — correction-only
-
-O primeiro candidato DF-7b:
+Candidato atual:
 
 ```text
-e6bbc3bf1b3b85545a4cedca63b191dc08ce8e7c
-feat(pci): bind MSI-X windows to BAR ownership
+84cd12125940d8b2517d742b3ea63bdb17c6ccd4
+feat(dma): add DF-8a device constraint model
 ```
 
-foi **superseded antes de certificacao por auditoria**, independentemente do resultado eventual dos gates.
-
-### Motivo da auditoria
-
-`pci_probe_bar()` mantem a enumeracao global estritamente read-only e inicializa `PciBar.size = 0`. `pci_claim_bar()` aceita o `length` fornecido pelo driver quando `known_size == 0`.
-
-Portanto:
+O microcorte adiciona `DmaDeviceConstraints` em `kernel/src/memory/dma.sotlas` com apenas os limites que o allocator existente ja entende:
 
 ```text
-PciBarClaim.physical.length
-!= prova automatica da aperture real do BAR
+alignment
+max_address
+boundary
 ```
 
-Um caller poderia reivindicar um extent maior que a aperture fisica quando o tamanho ainda fosse desconhecido. O DF-7b nao pode usar esse valor sozinho para declarar Table/PBA seguras.
+Contratos:
 
-### Contrato corrigido do DF-7b
+- `dma_device_constraints(...)` valida alignment, address ceiling e boundary;
+- `dma_device_constraints_valid(...)` revalida o objeto antes de consumo;
+- `dma_buffer_satisfies_device_constraints(...)` e estritamente read-only e verifica alignment fisico, overflow do ultimo byte, teto de endereco e cruzamento de boundary;
+- nenhuma API DF-8a aloca/libera pagina, muda owner/fence, mapeia MMIO ou chama firmware;
+- `dma_alloc_for_device(size, alignment, max_address, boundary)` permanece intocado e continua chamando diretamente `pmm_alloc_pages_constrained(...)`;
+- xHCI/HID, NVMe, AHCI e storage nao sao migrados neste corte.
 
-O correction-only atual mantem o corte passivo, mas agora `pci_msix_layout_probe()` somente publica quando:
+Guardrails foram adicionados a `tests/test_dma_contract.py` para impedir que o modelo read-only vire allocator ou altere ownership por acidente.
 
-- o inventario PCI contem `PciBar.size > 0` para o mesmo BDF/BIR;
-- o BAR atual continua Memory BAR valido, 32 ou 64-bit, com a mesma base;
-- `PciBarClaim.logical` prova owner + BDF + BAR index;
-- `PciBarClaim.physical` e MMIO do mesmo owner;
-- `physical.start == BAR.base`;
-- `physical.length == PciBar.size` **exatamente**;
-- Table/PBA cabem em `PciBar.size`, nao em um extent escolhido pelo caller;
-- mesmo BIR para Table/PBA exige os mesmos ResourceHandles generation-safe;
-- lifecycle, capability, claims, BAR base e BAR size sao revalidados antes da publicacao.
-
-Enquanto `PciBar.size == 0`, o DF-7b deve falhar fechado. Isso e intencional.
-
-O DF-7b continua proibido de:
-
-- executar BAR sizing;
-- escrever PCI config space;
-- chamar `pci_claim_bar()`/`resource_claim()`/`resource_release()`;
-- mapear/ler/escrever MSI-X Table/PBA;
-- reservar/liberar IRQ;
-- alterar MSI-X Enable/Function Mask;
-- habilitar Memory Space/Bus Master;
-- tocar LAPIC/IOAPIC/IDT/EOI;
-- entrar no boot/runtime.
-
-## DF-7b1 — controlled quiescent BAR sizing — proximo pre-requisito
-
-A aperture real devera ser medida em microcorte separado. Requisitos de desenho antes de qualquer implementacao:
-
-- nunca inserir sizing destrutivo no scan global;
-- somente device ownership generation-safe;
-- exigir dispositivo quiescente e lifecycle apropriado;
-- snapshot completo de Command + BAR low/high;
-- nenhuma medicao enquanto DMA/Bus Master puder estar ativo;
-- decode Memory/I/O tratado de forma explicita e restaurado exatamente;
-- BAR 64-bit tratado atomica/transacionalmente como par low/high;
-- write-all-ones/read-mask/restore com readback de restauracao;
-- qualquer incerteza = falha fechada, sem publicar size;
-- `PciBar.size` so recebe valor depois de restauracao comprovada;
-- nenhum MSI-X MMIO e programado neste microcorte.
-
-## DF-7c — MSI-X source & vector ownership — validando
-
-`kernel/src/drivers/pci_msix.sotlas` estabelece a reserva de fonte logica exclusiva e vetor dinamico para MSI-X:
-
-- `RESOURCE_KIND_PCI_MSIX: u8 = 7` com exclusao mutua cruzada contra `RESOURCE_KIND_PCI_MSI` por BDF no Resource Manager;
-- Generic IRQ Registry como unica autoridade de vetores dinamicos generation-safe;
-- Exigencia de layout DF-7b valido previamente medido/provado contra aperture;
-- Checagem do capability walker: MSI convencional com Enable=0 se presente; MSI-X Enable=0 obrigatorio;
-- Ordem estrita de alocacao: source ownership -> IRQ reservation;
-- Ordem estrita de cleanup: IRQ release -> source release;
-- Quarentena transacional em rollback incerto ou perda de quiescencia comprovada;
-- API explicita de retry para reservas em quarentena (`pci_msix_retry_quarantined_cleanup`);
-- Table e PBA permanecem estritamente intocadas (zero escritas em MMIO/config space).
+DF-8a permanece `IMPLEMENTED / VALIDATING` ate os gates do head final passarem no mesmo SHA.
 
 ## Gates obrigatorios
 
-Para todo candidato funcional da Driver Foundation:
+Para candidatos funcionais da Driver Foundation, o conjunto atual e:
 
 ```text
-1. CI/CD + QEMU
+1. CI/CD + Automated QEMU
 2. SMP Bring-up
 3. NVMe-only Bare-Metal
 4. HID Dual-device
 5. SMP Fault Diagnostic
 6. MSI EDU Runtime
+7. MSI-X ivshmem Runtime
 ```
 
-O candidato correction-only que contem este status deve fechar os seis gates no mesmo SHA antes de qualquer promocao.
+Se qualquer gate falhar, o candidato entra em `correction-only` ate todos voltarem a verde no mesmo SHA corretivo.
+
+## Proximos microcortes, somente apos DF-8a certificado
+
+```text
+DF-8b typed constrained allocation
+-> consumir DmaDeviceConstraints sem duplicar allocator
+-> manter pmm_alloc_pages_constrained como backend unico
+-> nenhuma migracao de driver ainda
+
+DF-8c per-device integration
+-> migracao incremental de callers reais
+-> um subsistema por vez
+-> runtime proof + regressao dos gates existentes
+```
+
+A escolha exata do primeiro caller de DF-8c deve ser feita somente depois de DF-8b certificado e de auditoria dos requisitos reais de cada dispositivo.
 
 ## Regra de retomada
 
 ```text
 main HEAD
--> functional baseline certificada
+-> ultima baseline certificada
 -> candidate SHA
 -> auditorias conhecidas do candidate
--> seis gates do candidate
+-> gates do candidate
 -> correction-only se qualquer gate falhar OU auditoria invalidar a garantia
 -> somente entao escolher o proximo microcorte
 ```
