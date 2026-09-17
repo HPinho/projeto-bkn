@@ -49,7 +49,7 @@ jobs:
           python3 tests/test_pci_msix_reservation.py
 
       - name: Instrument CI-only MSI-X proof
-        shell: bash
+        shell: bash --noprofile --norc -e -o pipefail {0}
         run: |
           cp tests/fixtures/df7e2/pci_msix_ivshmem_proof.sotlas \
              kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
@@ -59,6 +59,12 @@ jobs:
 
           fixture = Path("kernel/src/drivers/pci_msix_ivshmem_proof.sotlas")
           text = fixture.read_text(encoding="utf-8")
+
+          def replace_once(old: str, new: str) -> None:
+              global text
+              count = text.count(old)
+              assert count == 1, f"expected one occurrence, got {count}: {old!r}"
+              text = text.replace(old, new, 1)
 
           stage_replacements = {
               'pci_msix_ivshmem_trace("BAKEN:MSIX=BOUND\\n".as_ptr(), 17);':
@@ -85,215 +91,84 @@ jobs:
                   "x86_serial_write_hex32_marker('X' as u8, 0xA0);",
           }
           for old, new in stage_replacements.items():
-              assert text.count(old) == 1, old
-              text = text.replace(old, new, 1)
+              replace_once(old, new)
 
-          # Pre-bind diagnostics. Keep these numeric because the textual trace helper
-          # did not reliably surface in the QEMU serial log on earlier attempts.
-          replacements = [
-              (
-                  "    if index == PCI_BRIDGE_INDEX_INVALID { return true; }\n",
-                  "    if index == PCI_BRIDGE_INDEX_INVALID {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x01);\n"
-                  "        return true;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if !external_interrupts_enabled() { return false; }\n",
-                  "    if !external_interrupts_enabled() {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x02);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if pci == (null as *const PciDevice) { return false; }\n",
-                  "    if pci == (null as *const PciDevice) {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x03);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||\n"
-                  "       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {\n"
-                  "        return false;\n"
-                  "    }\n",
-                  "    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||\n"
-                  "       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x04);\n"
-                  "        x86_serial_write_hex32_marker('G' as u8, reg_base as u32);\n"
-                  "        x86_serial_write_hex32_marker('M' as u8, msix_base as u32);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if !device.valid { return false; }\n",
-                  "    if !device.valid {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x05);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||\n"
-                  "       before_device.driver.valid { return false; }\n",
-                  "    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||\n"
-                  "       before_device.driver.valid {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x06);\n"
-                  "        x86_serial_write_hex32_marker('A' as u8, before_device.state as u32);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if !driver.valid { return false; }\n    unsafe {\n        PCI_MSIX_IVSHMEM_DRIVER = driver;\n",
-                  "    if !driver.valid {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x07);\n"
-                  "        return false;\n"
-                  "    }\n"
-                  "    unsafe {\n"
-                  "        PCI_MSIX_IVSHMEM_DRIVER = driver;\n",
-              ),
-              (
-                  "    if !driver_handle_equal(bound, driver) {\n        driver_unregister(driver);\n        return false;\n    }\n",
-                  "    if !driver_handle_equal(bound, driver) {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x08);\n"
-                  "        driver_unregister(driver);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
+          runtime_replacements = [
+              ("    if index == PCI_BRIDGE_INDEX_INVALID { return true; }\n",
+               "    if index == PCI_BRIDGE_INDEX_INVALID {\n        x86_serial_write_hex32_marker('X' as u8, 0x01);\n        return true;\n    }\n"),
+              ("    if !external_interrupts_enabled() { return false; }\n",
+               "    if !external_interrupts_enabled() {\n        x86_serial_write_hex32_marker('X' as u8, 0x02);\n        return false;\n    }\n"),
+              ("    if pci == (null as *const PciDevice) { return false; }\n",
+               "    if pci == (null as *const PciDevice) {\n        x86_serial_write_hex32_marker('X' as u8, 0x03);\n        return false;\n    }\n"),
+              ("    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||\n       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {\n        return false;\n    }\n",
+               "    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||\n       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {\n        x86_serial_write_hex32_marker('X' as u8, 0x04);\n        x86_serial_write_hex32_marker('G' as u8, reg_base as u32);\n        x86_serial_write_hex32_marker('M' as u8, msix_base as u32);\n        return false;\n    }\n"),
+              ("    if !device.valid { return false; }\n",
+               "    if !device.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x05);\n        return false;\n    }\n"),
+              ("    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||\n       before_device.driver.valid { return false; }\n",
+               "    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||\n       before_device.driver.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x06);\n        x86_serial_write_hex32_marker('A' as u8, before_device.state as u32);\n        return false;\n    }\n"),
+              ("    if !driver.valid { return false; }\n    unsafe {\n        PCI_MSIX_IVSHMEM_DRIVER = driver;\n",
+               "    if !driver.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x07);\n        return false;\n    }\n    unsafe {\n        PCI_MSIX_IVSHMEM_DRIVER = driver;\n"),
+              ("    if !driver_handle_equal(bound, driver) {\n        driver_unregister(driver);\n        return false;\n    }\n",
+               "    if !driver_handle_equal(bound, driver) {\n        x86_serial_write_hex32_marker('X' as u8, 0x08);\n        driver_unregister(driver);\n        return false;\n    }\n"),
           ]
-          for old, new in replacements:
-              assert text.count(old) == 1, old
-              text = text.replace(old, new, 1)
+          for old, new in runtime_replacements:
+              replace_once(old, new)
 
-          # Probe diagnostics distinguish driver matching from BAR/resource/MSI-X
-          # reservation failures hidden behind driver_bind().
-          probe_replacements = [
-              (
-                  "fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {\n    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n",
-                  "fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {\n"
-                  "    x86_serial_write_hex32_marker('X' as u8, 0x09);\n"
-                  "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n",
-              ),
-              (
-                  "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n    if !driver.valid { return false; }\n\n    let reg_claim = pci_claim_bar(\n",
-                  "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n"
-                  "    if !driver.valid {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x0A);\n"
-                  "        return false;\n"
-                  "    }\n\n"
-                  "    let reg_claim = pci_claim_bar(\n",
-              ),
-              (
-                  "    if !reg_claim.valid { return false; }\n",
-                  "    if !reg_claim.valid {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x0B);\n"
-                  "        return false;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if !msix_claim.valid {\n        pci_release_bar(reg_claim, device, driver);\n",
-                  "    if !msix_claim.valid {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x0C);\n"
-                  "        pci_release_bar(reg_claim, device, driver);\n",
-              ),
-              (
-                  "    if pci_msix_reservation_is_ready(reservation) { return true; }\n",
-                  "    if pci_msix_reservation_is_ready(reservation) {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x0D);\n"
-                  "        return true;\n"
-                  "    }\n",
-              ),
-              (
-                  "    if pci_msix_reservation_is_quarantined(reservation) { return true; }\n",
-                  "    if pci_msix_reservation_is_quarantined(reservation) {\n"
-                  "        x86_serial_write_hex32_marker('X' as u8, 0x0E);\n"
-                  "        return true;\n"
-                  "    }\n",
-              ),
-              (
-                  "    pci_release_bar(msix_claim, device, driver);\n    pci_release_bar(reg_claim, device, driver);\n",
-                  "    x86_serial_write_hex32_marker('X' as u8, 0x0F);\n"
-                  "    x86_serial_write_hex32_marker('L' as u8, reservation.state as u32);\n"
-                  "    pci_release_bar(msix_claim, device, driver);\n"
-                  "    pci_release_bar(reg_claim, device, driver);\n",
-              ),
-          ]
-          for old, new in probe_replacements:
-              assert text.count(old) == 1, old
-              text = text.replace(old, new, 1)
+          replace_once(
+              "fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {\n    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n",
+              "fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {\n    x86_serial_write_hex32_marker('X' as u8, 0x09);\n    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n")
+          replace_once(
+              "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n    if !driver.valid { return false; }\n\n    // DF-7b1 requires a generation-bound aperture proof before DF-7b can\n",
+              "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n    if !driver.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x0A);\n        return false;\n    }\n\n    // DF-7b1 requires a generation-bound aperture proof before DF-7b can\n")
+          replace_once(
+              "    if !sizing_claim.valid { return false; }\n",
+              "    if !sizing_claim.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x0B);\n        return false;\n    }\n")
+          replace_once(
+              "    let sizing = pci_measure_owned_bar(device, driver, sizing_claim);\n    if !sizing.valid || sizing.size == 0 {\n        pci_release_bar(sizing_claim, device, driver);\n        return false;\n    }\n",
+              "    let sizing = pci_measure_owned_bar(device, driver, sizing_claim);\n    x86_serial_write_hex32_marker('M' as u8, sizing.size as u32);\n    if !sizing.valid || sizing.size == 0 {\n        x86_serial_write_hex32_marker('X' as u8, 0x0C);\n        pci_release_bar(sizing_claim, device, driver);\n        return false;\n    }\n")
+          replace_once(
+              "    if !pci_release_bar(sizing_claim, device, driver) { return false; }\n",
+              "    if !pci_release_bar(sizing_claim, device, driver) {\n        x86_serial_write_hex32_marker('X' as u8, 0x0D);\n        return false;\n    }\n")
+          replace_once(
+              "    if !msix_claim.valid { return false; }\n",
+              "    if !msix_claim.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x0E);\n        x86_serial_write_hex32_marker('M' as u8, sizing.size as u32);\n        return false;\n    }\n")
+          replace_once(
+              "    if !reg_claim.valid {\n        pci_release_bar(msix_claim, device, driver);\n",
+              "    if !reg_claim.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x0F);\n        pci_release_bar(msix_claim, device, driver);\n")
+          replace_once(
+              "    if pci_msix_reservation_is_ready(reservation) { return true; }\n",
+              "    if pci_msix_reservation_is_ready(reservation) {\n        x86_serial_write_hex32_marker('X' as u8, 0xD0);\n        return true;\n    }\n")
+          replace_once(
+              "    if pci_msix_reservation_is_quarantined(reservation) { return true; }\n",
+              "    if pci_msix_reservation_is_quarantined(reservation) {\n        x86_serial_write_hex32_marker('X' as u8, 0xD1);\n        return true;\n    }\n")
+          replace_once(
+              "    pci_release_bar(reg_claim, device, driver);\n    pci_release_bar(msix_claim, device, driver);\n",
+              "    x86_serial_write_hex32_marker('X' as u8, 0xD2);\n    x86_serial_write_hex32_marker('L' as u8, reservation.state as u32);\n    pci_release_bar(reg_claim, device, driver);\n    pci_release_bar(msix_claim, device, driver);\n")
 
           anchor = "    let irq_before_doorbell = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };\n"
-          assert text.count(anchor) == 1
-          text = text.replace(
-              anchor,
-              anchor + "    x86_serial_write_hex32_marker('B' as u8, irq_before_doorbell);\n",
-              1,
-          )
-
+          replace_once(anchor, anchor + "    x86_serial_write_hex32_marker('B' as u8, irq_before_doorbell);\n")
           anchor = "    let first_delivered = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };\n"
-          assert text.count(anchor) == 1
-          text = text.replace(
-              anchor,
-              anchor + "    x86_serial_write_hex32_marker('C' as u8, first_delivered);\n"
-                       "    x86_serial_write_hex32_marker('X' as u8, 0x40);\n",
-              1,
-          )
-
+          replace_once(anchor, anchor + "    x86_serial_write_hex32_marker('C' as u8, first_delivered);\n    x86_serial_write_hex32_marker('X' as u8, 0x40);\n")
           anchor = "    if stable_spins < PCI_MSIX_IVSHMEM_STABLE_SPINS { return false; }\n"
-          assert text.count(anchor) == 1
-          text = text.replace(
-              anchor,
-              "    x86_serial_write_hex32_marker('S' as u8, stable_spins);\n"
-              "    x86_serial_write_hex32_marker('s' as u8, settle_spins);\n"
-              "    x86_serial_write_hex32_marker('X' as u8, 0x50);\n" + anchor,
-              1,
-          )
-
+          replace_once(anchor, "    x86_serial_write_hex32_marker('S' as u8, stable_spins);\n    x86_serial_write_hex32_marker('s' as u8, settle_spins);\n    x86_serial_write_hex32_marker('X' as u8, 0x50);\n" + anchor)
           anchor = "    let vector = arm.reservation.vector;\n    if !driver_unbind(device, driver) { return false; }\n"
-          assert text.count(anchor) == 1
-          text = text.replace(
-              anchor,
-              "    let vector = arm.reservation.vector;\n"
-              "    x86_serial_write_hex32_marker('X' as u8, 0x60);\n"
-              "    if !driver_unbind(device, driver) { return false; }\n",
-              1,
-          )
-
+          replace_once(anchor, "    let vector = arm.reservation.vector;\n    x86_serial_write_hex32_marker('X' as u8, 0x60);\n    if !driver_unbind(device, driver) { return false; }\n")
           anchor = "    let attached = device_core_snapshot(device);\n    let released = unsafe { PCI_MSIX_IVSHMEM_ARM };\n"
-          assert text.count(anchor) == 1
-          text = text.replace(
-              anchor,
-              anchor +
-              "    x86_serial_write_hex32_marker('R' as u8, resource_active_count());\n"
-              "    x86_serial_write_hex32_marker('r' as u8, before_resources);\n"
-              "    x86_serial_write_hex32_marker('I' as u8, irq_registry_active_count());\n"
-              "    x86_serial_write_hex32_marker('i' as u8, before_irqs);\n"
-              "    x86_serial_write_hex32_marker('N' as u8, attached.resource_count);\n"
-              "    x86_serial_write_hex32_marker('A' as u8, attached.state as u32);\n"
-              "    x86_serial_write_hex32_marker('L' as u8, released.state as u32);\n",
-              1,
-          )
+          replace_once(anchor, anchor + "    x86_serial_write_hex32_marker('R' as u8, resource_active_count());\n    x86_serial_write_hex32_marker('r' as u8, before_resources);\n    x86_serial_write_hex32_marker('I' as u8, irq_registry_active_count());\n    x86_serial_write_hex32_marker('i' as u8, before_irqs);\n    x86_serial_write_hex32_marker('N' as u8, attached.resource_count);\n    x86_serial_write_hex32_marker('A' as u8, attached.state as u32);\n    x86_serial_write_hex32_marker('L' as u8, released.state as u32);\n")
 
           fixture.write_text(text, encoding="utf-8")
           PY
 
           python3 - <<'PY'
           from pathlib import Path
-
           path = Path("kernel/src/baken_native_runtime.sotlas")
           text = path.read_text(encoding="utf-8")
-
           import_anchor = "import kernel::device::foundation_self_test::*;\n"
           assert text.count(import_anchor) == 1
-          text = text.replace(
-              import_anchor,
-              import_anchor + "import kernel::drivers::pci_msix_ivshmem_proof::*;\n",
-              1,
-          )
-
+          text = text.replace(import_anchor, import_anchor + "import kernel::drivers::pci_msix_ivshmem_proof::*;\n", 1)
           call_anchor = (
               '    if !device_foundation_emit_ready_marker() && x86_serial_is_ready() {\n'
-              '        baken_early_boot_fail("E-DF-MARKER\\0".as_ptr(), '
-              '"DRIVER FOUNDATION SERIAL MARKER\\0".as_ptr());\n'
+              '        baken_early_boot_fail("E-DF-MARKER\\0".as_ptr(), "DRIVER FOUNDATION SERIAL MARKER\\0".as_ptr());\n'
               '    }\n'
           )
           assert text.count(call_anchor) == 1
@@ -302,24 +177,17 @@ jobs:
               '    // CI-only DF-7e2: QEMU ivshmem proves real MSI-X delivery + teardown.\n'
               '    baken_early_boot_stage("PCI MSIX IVSHMEM RUNTIME PROOF\\0".as_ptr());\n'
               '    if !pci_msix_ivshmem_runtime_proof() {\n'
-              '        baken_early_boot_fail("E-MSIX-IVSHMEM\\0".as_ptr(), '
-              '"PCI MSIX IVSHMEM RUNTIME PROOF\\0".as_ptr());\n'
+              '        baken_early_boot_fail("E-MSIX-IVSHMEM\\0".as_ptr(), "PCI MSIX IVSHMEM RUNTIME PROOF\\0".as_ptr());\n'
               '    }\n'
           )
           text = text.replace(call_anchor, call_anchor + proof, 1)
           path.write_text(text, encoding="utf-8")
           PY
 
-          grep -Fq 'import kernel::drivers::pci_msix_ivshmem_proof::*;' \
-            kernel/src/baken_native_runtime.sotlas
-          grep -Fq 'pci_msix_ivshmem_runtime_proof()' \
-            kernel/src/baken_native_runtime.sotlas
-          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x08);" \
-            kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
-          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x0F);" \
-            kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
-          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x60);" \
-            kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
+          grep -Fq 'import kernel::drivers::pci_msix_ivshmem_proof::*;' kernel/src/baken_native_runtime.sotlas
+          grep -Fq 'pci_msix_ivshmem_runtime_proof()' kernel/src/baken_native_runtime.sotlas
+          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0xD0);" kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
+          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x60);" kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
 
       - name: Verify instrumented Sotlas kernel graph
         run: |
@@ -349,11 +217,9 @@ jobs:
           OVMF_VARS="${OVMF_CODE/CODE/VARS}"
           test -f "$OVMF_VARS"
           cp "$OVMF_VARS" build/OVMF_VARS_MSIX_IVSHMEM.fd
-          rm -f build/ivshmem.sock build/ivshmem-server.ready \
-                build/qemu-msix-ivshmem-serial.log build/qemu-msix-ivshmem-int.log
+          rm -f build/ivshmem.sock build/ivshmem-server.ready build/qemu-msix-ivshmem-serial.log build/qemu-msix-ivshmem-int.log
 
-          python3 tools/scripts/ivshmem_test_server.py \
-            --socket build/ivshmem.sock --ready build/ivshmem-server.ready &
+          python3 tools/scripts/ivshmem_test_server.py --socket build/ivshmem.sock --ready build/ivshmem-server.ready &
           server_pid=$!
           trap 'kill "$server_pid" 2>/dev/null || true' EXIT
           for i in $(seq 1 100); do
@@ -372,8 +238,7 @@ jobs:
             -device ivshmem-doorbell,vectors=1,chardev=ivshmem \
             -device qemu-xhci,id=xhci \
             -device usb-kbd,bus=xhci.0 \
-            -display none \
-            -monitor none \
+            -display none -monitor none \
             -serial file:build/qemu-msix-ivshmem-serial.log \
             -d int -D build/qemu-msix-ivshmem-int.log &
           qemu_pid=$!
@@ -381,25 +246,17 @@ jobs:
           found=0
           stop_reason=timeout
           for i in $(seq 1 1500); do
-            if test -f build/qemu-msix-ivshmem-serial.log &&
-               grep -Fxq 'BAKEN:PCI_MSIX_IVSHMEM_READY' build/qemu-msix-ivshmem-serial.log; then
-              found=1
-              stop_reason=complete
-              break
+            if test -f build/qemu-msix-ivshmem-serial.log && grep -Fxq 'BAKEN:PCI_MSIX_IVSHMEM_READY' build/qemu-msix-ivshmem-serial.log; then
+              found=1; stop_reason=complete; break
             fi
-            if test -f build/qemu-msix-ivshmem-serial.log &&
-               grep -Fq 'E-MSIX-IVSHMEM' build/qemu-msix-ivshmem-serial.log; then
-              stop_reason=msix-ivshmem-failure
-              break
+            if test -f build/qemu-msix-ivshmem-serial.log && grep -Fq 'E-MSIX-IVSHMEM' build/qemu-msix-ivshmem-serial.log; then
+              stop_reason=msix-ivshmem-failure; break
             fi
-            if test -f build/qemu-msix-ivshmem-serial.log &&
-               grep -Fq 'BAKEN:HEX=E:' build/qemu-msix-ivshmem-serial.log; then
-              stop_reason=cpu-exception
-              break
+            if test -f build/qemu-msix-ivshmem-serial.log && grep -Fq 'BAKEN:HEX=E:' build/qemu-msix-ivshmem-serial.log; then
+              stop_reason=cpu-exception; break
             fi
             if ! kill -0 "$qemu_pid" 2>/dev/null; then
-              stop_reason=qemu-exited
-              break
+              stop_reason=qemu-exited; break
             fi
             sleep 0.1
           done
