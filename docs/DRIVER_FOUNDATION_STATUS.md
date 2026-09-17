@@ -198,3 +198,24 @@ Invariantes:
 - o caminho de READ, PRDT, LBA e validacao da fixture permanece inalterado;
 - o `AHCI_WRITE_BUFFER` continua usando o allocator legado neste microcorte;
 - o guard global permite somente NVMe, `ahci_runtime.sotlas` e `ahci_block_read.sotlas` como callers tipados.
+
+
+### DF-8c4 — quarta integração por dispositivo: AHCI write buffer
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente o buffer dedicado de escrita em `kernel/src/drivers/ahci_block_read.sotlas` para constraints tipadas, com o mesmo perfil físico do read buffer:
+
+```text
+alignment   = AHCI_RUNTIME_PAGE_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- o buffer continua tendo uma pagina de 4096 bytes;
+- nenhuma constraint nova de hardware foi introduzida;
+- o buffer e validado por `dma_buffer_satisfies_device_constraints(...)` antes de `dma_share_with_device(...)`;
+- a emissao WRITE DMA, o clear, o READ-back real e a verificacao persistida permanecem inalterados;
+- como read e write residem no mesmo modulo, a lista global de arquivos callers tipados permanece em tres arquivos.
