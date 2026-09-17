@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do DMA físico pós-cutover, incluindo o modelo read-only DF-8a."""
+"""Guardrails do DMA físico pós-cutover, incluindo DF-8a/DF-8b."""
 from pathlib import Path
 import unittest
 ROOT=Path(__file__).resolve().parents[1]
@@ -18,7 +18,7 @@ class DmaContractTests(unittest.TestCase):
             self.assertNotIn(forbidden,body)
     def test_df8a_constraint_check_is_overflow_and_boundary_safe(self):
         text=DMA.read_text(encoding="utf-8")
-        body=text.split("pub fn dma_buffer_satisfies_device_constraints(",1)[1].split("pub fn dma_invalid_buffer",1)[0]
+        body=text.split("pub fn dma_buffer_satisfies_device_constraints(",1)[1].split("pub fn dma_alloc_for_constraints",1)[0]
         for token in ("dma_buffer_valid(buffer)","dma_device_constraints_valid(constraints)","physical_address & ((*constraints).alignment - 1)","let last = (*buffer).physical_address + (*buffer).size - 1;","last < (*buffer).physical_address","last > (*constraints).max_address","physical_address / (*constraints).boundary != last / (*constraints).boundary"): self.assertIn(token,body)
         for forbidden in ("pmm_alloc", "pmm_free", "__dma_fence", "owner =", "fence =", "dma_alloc_for_device("):
             self.assertNotIn(forbidden,body)
@@ -27,6 +27,34 @@ class DmaContractTests(unittest.TestCase):
         body=text.split("pub fn dma_alloc_for_device",1)[1]
         self.assertIn("pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)",body)
         self.assertNotIn("DmaDeviceConstraints",body)
+    def test_df8b_typed_allocation_delegates_to_existing_allocator_once(self):
+        text=DMA.read_text(encoding="utf-8")
+        body=text.split("pub fn dma_alloc_for_constraints(",1)[1].split("pub fn dma_invalid_buffer",1)[0]
+        for token in (
+            "size == 0",
+            "dma_device_constraints_valid(constraints)",
+            "dma_alloc_for_device(",
+            "(*constraints).alignment",
+            "(*constraints).max_address",
+            "(*constraints).boundary",
+        ):
+            self.assertIn(token,body)
+        self.assertEqual(body.count("dma_alloc_for_device("),1)
+        for forbidden in (
+            "pmm_alloc", "pmm_free", "direct_map_virtual_address", "__dma_fence",
+            "owner =", "fence =", "dma_submit_to_device(", "dma_share_with_device(",
+        ):
+            self.assertNotIn(forbidden,body)
+    def test_df8b_has_no_driver_callers_before_df8c(self):
+        kernel=ROOT/"kernel/src"
+        callers=[]
+        for path in kernel.rglob("*.sotlas"):
+            if path == DMA:
+                continue
+            code=code_without_comments(path)
+            if "dma_alloc_for_constraints(" in code:
+                callers.append(str(path.relative_to(ROOT)))
+        self.assertEqual(callers,[],"DF-8b must not migrate runtime callers before DF-8c")
     def test_dma_requires_active_pmm_and_vmm_before_exposing_memory(self):
         text=DMA.read_text(encoding="utf-8")
         for token in ("pub fn dma_allocator_available() -> bool","pmm_allocator_is_active()","vmm_is_active()","vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE","if !pmm_inventory_is_valid()","if !dma_allocator_available()","pmm_alloc_pages_aligned(page_count, alignment)","direct_map_virtual_address(physical)","if rounded < size { return dma_invalid_buffer(); }"): self.assertIn(token,text)
