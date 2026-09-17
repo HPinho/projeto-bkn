@@ -37,6 +37,8 @@ pub const PCI_MSIX_IVSHMEM_DOORBELL: u64 = 0x0C;
 pub const PCI_MSIX_IVSHMEM_ENTRY: u16 = 0;
 pub const PCI_MSIX_IVSHMEM_VECTOR: u32 = 0;
 pub const PCI_MSIX_IVSHMEM_SPIN_LIMIT: u32 = 10000000;
+pub const PCI_MSIX_IVSHMEM_STABLE_SPINS: u32 = 100000;
+pub const PCI_MSIX_IVSHMEM_MAX_BURST: u32 = 8;
 
 static mut PCI_MSIX_IVSHMEM_DRIVER: DriverHandle = DriverHandle {
     driver_id: 0, generation: 0, valid: false
@@ -408,18 +410,45 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
 
     let peer = x86_mmio_read32(reg_base + PCI_MSIX_IVSHMEM_POSITION);
     if peer > 0xFFFF { return false; }
+    let irq_before_doorbell = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };
     let doorbell = ((peer & 0xFFFF) << 16) | PCI_MSIX_IVSHMEM_VECTOR;
     __dma_fence();
     x86_mmio_write32(reg_base + PCI_MSIX_IVSHMEM_DOORBELL, doorbell);
 
+    // Prove an edge caused by the doorbell rather than assuming a 1:1 IRQ count.
+    // QEMU ivshmem loopback can coalesce or duplicate the receive notification, so
+    // the invariant is: at least one new IRQ arrives, then the counter stabilizes.
     let mut spins: u32 = 0;
     loop {
         let count = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };
-        if count != 0 || spins >= PCI_MSIX_IVSHMEM_SPIN_LIMIT { break; }
+        if count > irq_before_doorbell || spins >= PCI_MSIX_IVSHMEM_SPIN_LIMIT { break; }
         x86_cpu_pause();
         spins += 1;
     }
-    if unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT } != 1 { return false; }
+    let first_delivered = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };
+    if first_delivered <= irq_before_doorbell { return false; }
+    if first_delivered - irq_before_doorbell > PCI_MSIX_IVSHMEM_MAX_BURST { return false; }
+
+    let mut last_count = first_delivered;
+    let mut stable_spins: u32 = 0;
+    let mut settle_spins: u32 = 0;
+    loop {
+        let count = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };
+        if count != last_count {
+            if count < last_count || count - irq_before_doorbell > PCI_MSIX_IVSHMEM_MAX_BURST {
+                return false;
+            }
+            last_count = count;
+            stable_spins = 0;
+        } else {
+            stable_spins += 1;
+        }
+        if stable_spins >= PCI_MSIX_IVSHMEM_STABLE_SPINS ||
+           settle_spins >= PCI_MSIX_IVSHMEM_SPIN_LIMIT { break; }
+        x86_cpu_pause();
+        settle_spins += 1;
+    }
+    if stable_spins < PCI_MSIX_IVSHMEM_STABLE_SPINS { return false; }
 
     let vector = arm.reservation.vector;
     if !driver_unbind(device, driver) { return false; }
