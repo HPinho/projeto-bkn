@@ -88,6 +88,139 @@ jobs:
               assert text.count(old) == 1, old
               text = text.replace(old, new, 1)
 
+          # Pre-bind diagnostics. Keep these numeric because the textual trace helper
+          # did not reliably surface in the QEMU serial log on earlier attempts.
+          replacements = [
+              (
+                  "    if index == PCI_BRIDGE_INDEX_INVALID { return true; }\n",
+                  "    if index == PCI_BRIDGE_INDEX_INVALID {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x01);\n"
+                  "        return true;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if !external_interrupts_enabled() { return false; }\n",
+                  "    if !external_interrupts_enabled() {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x02);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if pci == (null as *const PciDevice) { return false; }\n",
+                  "    if pci == (null as *const PciDevice) {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x03);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||\n"
+                  "       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {\n"
+                  "        return false;\n"
+                  "    }\n",
+                  "    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||\n"
+                  "       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x04);\n"
+                  "        x86_serial_write_hex32_marker('G' as u8, reg_base as u32);\n"
+                  "        x86_serial_write_hex32_marker('M' as u8, msix_base as u32);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if !device.valid { return false; }\n",
+                  "    if !device.valid {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x05);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||\n"
+                  "       before_device.driver.valid { return false; }\n",
+                  "    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||\n"
+                  "       before_device.driver.valid {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x06);\n"
+                  "        x86_serial_write_hex32_marker('A' as u8, before_device.state as u32);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if !driver.valid { return false; }\n    unsafe {\n        PCI_MSIX_IVSHMEM_DRIVER = driver;\n",
+                  "    if !driver.valid {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x07);\n"
+                  "        return false;\n"
+                  "    }\n"
+                  "    unsafe {\n"
+                  "        PCI_MSIX_IVSHMEM_DRIVER = driver;\n",
+              ),
+              (
+                  "    if !driver_handle_equal(bound, driver) {\n        driver_unregister(driver);\n        return false;\n    }\n",
+                  "    if !driver_handle_equal(bound, driver) {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x08);\n"
+                  "        driver_unregister(driver);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+          ]
+          for old, new in replacements:
+              assert text.count(old) == 1, old
+              text = text.replace(old, new, 1)
+
+          # Probe diagnostics distinguish driver matching from BAR/resource/MSI-X
+          # reservation failures hidden behind driver_bind().
+          probe_replacements = [
+              (
+                  "fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {\n    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n",
+                  "fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {\n"
+                  "    x86_serial_write_hex32_marker('X' as u8, 0x09);\n"
+                  "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n",
+              ),
+              (
+                  "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n    if !driver.valid { return false; }\n\n    let reg_claim = pci_claim_bar(\n",
+                  "    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };\n"
+                  "    if !driver.valid {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x0A);\n"
+                  "        return false;\n"
+                  "    }\n\n"
+                  "    let reg_claim = pci_claim_bar(\n",
+              ),
+              (
+                  "    if !reg_claim.valid { return false; }\n",
+                  "    if !reg_claim.valid {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x0B);\n"
+                  "        return false;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if !msix_claim.valid {\n        pci_release_bar(reg_claim, device, driver);\n",
+                  "    if !msix_claim.valid {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x0C);\n"
+                  "        pci_release_bar(reg_claim, device, driver);\n",
+              ),
+              (
+                  "    if pci_msix_reservation_is_ready(reservation) { return true; }\n",
+                  "    if pci_msix_reservation_is_ready(reservation) {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x0D);\n"
+                  "        return true;\n"
+                  "    }\n",
+              ),
+              (
+                  "    if pci_msix_reservation_is_quarantined(reservation) { return true; }\n",
+                  "    if pci_msix_reservation_is_quarantined(reservation) {\n"
+                  "        x86_serial_write_hex32_marker('X' as u8, 0x0E);\n"
+                  "        return true;\n"
+                  "    }\n",
+              ),
+              (
+                  "    pci_release_bar(msix_claim, device, driver);\n    pci_release_bar(reg_claim, device, driver);\n",
+                  "    x86_serial_write_hex32_marker('X' as u8, 0x0F);\n"
+                  "    x86_serial_write_hex32_marker('L' as u8, reservation.state as u32);\n"
+                  "    pci_release_bar(msix_claim, device, driver);\n"
+                  "    pci_release_bar(reg_claim, device, driver);\n",
+              ),
+          ]
+          for old, new in probe_replacements:
+              assert text.count(old) == 1, old
+              text = text.replace(old, new, 1)
+
           anchor = "    let irq_before_doorbell = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };\n"
           assert text.count(anchor) == 1
           text = text.replace(
@@ -181,6 +314,10 @@ jobs:
             kernel/src/baken_native_runtime.sotlas
           grep -Fq 'pci_msix_ivshmem_runtime_proof()' \
             kernel/src/baken_native_runtime.sotlas
+          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x08);" \
+            kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
+          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x0F);" \
+            kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
           grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x60);" \
             kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
 
