@@ -104,13 +104,15 @@ fn pci_msix_layout_function(bdf: u32) -> u8 {
 }
 
 // Retorna tamanho somente quando o DF-7b1 publicou uma medida positiva para
-// exatamente o mesmo BDF/BAR/base e o tipo 32/64-bit continua consistente.
+// exatamente o mesmo BDF/geracao/BAR/base e o tipo 32/64-bit continua consistente.
 @system
-fn pci_msix_layout_known_bar_size(bdf: u32, target_bar: u8,
-                                  expected_base: u64, expected_64bit: bool) -> u64 {
-    let aperture = pci_bar_aperture_snapshot(bdf, target_bar, expected_base);
-    if !aperture.valid || aperture.size == 0 ||
-       aperture.is_64bit != expected_64bit {
+fn pci_msix_layout_known_bar_size(bdf: u32, device_generation: u32,
+                                  target_bar: u8, expected_base: u64,
+                                  expected_64bit: bool) -> u64 {
+    let aperture = pci_bar_aperture_snapshot(
+        bdf, device_generation, target_bar, expected_base);
+    if !aperture.valid || aperture.device_generation != device_generation ||
+       aperture.size == 0 || aperture.is_64bit != expected_64bit {
         return 0;
     }
     return aperture.size;
@@ -119,11 +121,13 @@ fn pci_msix_layout_known_bar_size(bdf: u32, target_bar: u8,
 // Faz sanity-check do valor ATUAL dos BAR registers sem executar sizing.
 // O scan sequencial impede aceitar como BIR o dword alto de um BAR 64-bit e
 // rejeita tipos de Memory BAR reservados. A publicacao exige tambem uma aperture
-// previamente medida no registry DF-7b1.
+// previamente medida no registry DF-7b1 para a mesma geracao do DeviceHandle.
 @system
-fn pci_msix_layout_bar_snapshot(bdf: u32, bus: u8, slot: u8, func: u8,
+fn pci_msix_layout_bar_snapshot(bdf: u32, device_generation: u32,
+                                bus: u8, slot: u8, func: u8,
                                 target_bar: u8) -> PciMsixBarSnapshot {
-    if target_bar >= 6 || pci_bdf_pack(0, bus, slot, func) != bdf {
+    if device_generation == DEVICE_GENERATION_INVALID || target_bar >= 6 ||
+       pci_bdf_pack(0, bus, slot, func) != bdf {
         return pci_msix_layout_invalid_bar();
     }
     let mut bar: u8 = 0;
@@ -150,7 +154,7 @@ fn pci_msix_layout_bar_snapshot(bdf: u32, bus: u8, slot: u8, func: u8,
             }
             let is_64bit = bar_type == 2;
             let size = pci_msix_layout_known_bar_size(
-                bdf, target_bar, base, is_64bit);
+                bdf, device_generation, target_bar, base, is_64bit);
             if base == 0 || size == 0 { return pci_msix_layout_invalid_bar(); }
             return PciMsixBarSnapshot { base: base, size: size, valid: true };
         }
@@ -179,6 +183,7 @@ fn pci_msix_layout_window_proof(claim: PciBarClaim, expected_bir: u8,
                                 device: DeviceHandle,
                                 driver: DriverHandle) -> PciMsixWindowProof {
     if !claim.valid || !claim.logical.valid || !claim.physical.valid ||
+       !device.valid || device.generation == DEVICE_GENERATION_INVALID ||
        claim.bar_index != expected_bir || expected_bir > PCI_MSIX_MAX_BIR ||
        bytes == 0 {
         return pci_msix_layout_invalid_window();
@@ -206,10 +211,11 @@ fn pci_msix_layout_window_proof(claim: PciBarClaim, expected_bir: u8,
     let bus = pci_msix_layout_bus(bdf);
     let slot = pci_msix_layout_slot(bdf);
     let func = pci_msix_layout_function(bdf);
-    let bar = pci_msix_layout_bar_snapshot(bdf, bus, slot, func, expected_bir);
+    let bar = pci_msix_layout_bar_snapshot(
+        bdf, device.generation, bus, slot, func, expected_bir);
 
     // O claim fisico so se torna uma prova de ownership da aperture quando seu
-    // comprimento coincide EXATAMENTE com a medida publicada pelo DF-7b1.
+    // comprimento coincide EXATAMENTE com a medida da mesma Device generation.
     if !bar.valid || physical.request.start != bar.base ||
        physical.request.length != bar.size {
         return pci_msix_layout_invalid_window();
@@ -247,12 +253,16 @@ fn pci_msix_layout_capability_equal(left: PciMsixCapability,
 }
 
 // DF-7b — resolve Table/PBA somente se o caller possuir BAR claim(s) MMIO
-// generation-safe E o DF-7b1 ja tiver publicado a aperture real desses BARs.
+// generation-safe E o DF-7b1 ja tiver publicado a aperture real desses BARs
+// para a mesma geracao do DeviceHandle.
 @system
 pub fn pci_msix_layout_probe(device: DeviceHandle, driver: DriverHandle,
                              table_claim: PciBarClaim,
                              pba_claim: PciBarClaim) -> PciMsixLayout {
-    if !device.valid || !driver.valid { return pci_msix_layout_invalid(); }
+    if !device.valid || device.generation == DEVICE_GENERATION_INVALID ||
+       !driver.valid {
+        return pci_msix_layout_invalid();
+    }
 
     let owner = device_core_snapshot(device);
     if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
@@ -288,8 +298,8 @@ pub fn pci_msix_layout_probe(device: DeviceHandle, driver: DriverHandle,
     );
     if !pba.valid { return pci_msix_layout_invalid(); }
 
-    // Revalida lifecycle, capability, ResourceHandles, BAR registers e aperture
-    // publicada antes de expor enderecos fisicos.
+    // Revalida lifecycle, capability, ResourceHandles, BAR registers, generation
+    // e aperture publicada antes de expor enderecos fisicos.
     let verify_owner = device_core_snapshot(device);
     if !verify_owner.valid || verify_owner.bus != DEVICE_BUS_PCI ||
        verify_owner.bus_instance != bdf ||

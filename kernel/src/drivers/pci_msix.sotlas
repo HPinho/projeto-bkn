@@ -1,7 +1,7 @@
 // Baken OS — DF-7c: reserva e ownership de fonte/vetor MSI-X sem programacao de hardware.
 //
 // Este modulo combina ownership logico exclusivo da fonte PCI_MSIX com um IrqHandle
-// generation-safe e exige layout DF-7b valido previamente provado contra aperture medida.
+// generation-safe e exige prova DF-7b reconstruida a partir de PciBarClaim vivos.
 // O Generic IRQ Registry continua sendo a unica autoridade sobre vetores dinamicos.
 // MSI-X Table e PBA NAO sao mapeadas, lidas ou escritas aqui. Nenhuma escrita em config
 // space ou MMIO e realizada neste microcorte; hardware permanece estritamente desabilitado.
@@ -192,6 +192,30 @@ fn pci_msix_quiescence_proven(bdf: u32, capability_offset: u16,
            !msix.enabled;
 }
 
+// Igualdade integral da prova DF-7b. Nenhum campo de endereco, aperture ou
+// capability pode mudar entre a prova anterior aos claims e a revalidacao final.
+@system
+fn pci_msix_layout_equal(left: PciMsixLayout, right: PciMsixLayout) -> bool {
+    return left.valid && right.valid &&
+           left.bdf == right.bdf &&
+           left.capability_offset == right.capability_offset &&
+           left.table_size == right.table_size &&
+           left.enabled == right.enabled &&
+           left.function_masked == right.function_masked &&
+           left.table_bar_index == right.table_bar_index &&
+           left.table_bar_base == right.table_bar_base &&
+           left.table_bar_size == right.table_bar_size &&
+           left.table_offset == right.table_offset &&
+           left.table_physical == right.table_physical &&
+           left.table_bytes == right.table_bytes &&
+           left.pba_bar_index == right.pba_bar_index &&
+           left.pba_bar_base == right.pba_bar_base &&
+           left.pba_bar_size == right.pba_bar_size &&
+           left.pba_offset == right.pba_offset &&
+           left.pba_physical == right.pba_physical &&
+           left.pba_bytes == right.pba_bytes;
+}
+
 @system
 fn pci_msix_cleanup_unarmed_claims(irq: IrqHandle, source: ResourceHandle,
                                    vector: u16, bdf: u32,
@@ -254,20 +278,23 @@ fn pci_msix_cleanup_unarmed_claims(irq: IrqHandle, source: ResourceHandle,
 
 // DF-7c — reserva single-vector de MSI-X sem programar hardware.
 //
-// Exige dispositivo em BINDING ou ACTIVE, layout DF-7b valido previamente provado
-// e capability MSI-X desabilitada. O Resource Manager garante exclusao mutua
-// de fonte entre MSI e MSI-X para o mesmo BDF. O Generic IRQ Registry e a autoridade
-// unica de vetores. A Table/PBA NAO sao mapeadas nem tocadas aqui.
+// O caller fornece somente PciBarClaim generation-safe. A prova DF-7b e sempre
+// reconstruida internamente antes da reserva e novamente depois dos claims, de modo
+// que um PciMsixLayout fabricado/stale nunca pode ser usado como autoridade.
+// O Resource Manager garante exclusao mutua de fonte entre MSI e MSI-X para o mesmo
+// BDF. O Generic IRQ Registry e a autoridade unica de vetores. Table/PBA nao sao tocadas.
 @system
 pub fn pci_msix_reserve_single(device: DeviceHandle, driver: DriverHandle,
-                               layout: PciMsixLayout,
+                               table_claim: PciBarClaim,
+                               pba_claim: PciBarClaim,
                                descriptor: IrqDescriptor) -> PciMsixReservation {
     let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
     if !pci_msix_owned_device(device, driver, &mut bdf) {
         return pci_msix_invalid_reservation();
     }
 
-    // Exige layout DF-7b valido para o mesmo BDF e desabilitado
+    // Prova live derivada dos ResourceHandles, BAR registers e aperture da mesma geracao.
+    let layout = pci_msix_layout_probe(device, driver, table_claim, pba_claim);
     if !layout.valid || layout.bdf != bdf || layout.enabled {
         return pci_msix_invalid_reservation();
     }
@@ -281,7 +308,13 @@ pub fn pci_msix_reserve_single(device: DeviceHandle, driver: DriverHandle,
     let capability = pci_msix_capability_probe(0, bus, slot_id, func);
     if !capability.valid || capability.enabled || capability.table_size == 0 ||
        capability.capability_offset != layout.capability_offset ||
-       capability.table_size != layout.table_size {
+       capability.table_size != layout.table_size ||
+       capability.table_bir != layout.table_bar_index ||
+       capability.table_offset != layout.table_offset ||
+       capability.table_bytes != layout.table_bytes ||
+       capability.pba_bir != layout.pba_bar_index ||
+       capability.pba_offset != layout.pba_offset ||
+       capability.pba_bytes != layout.pba_bytes {
         return pci_msix_invalid_reservation();
     }
 
@@ -319,7 +352,7 @@ pub fn pci_msix_reserve_single(device: DeviceHandle, driver: DriverHandle,
         );
     }
 
-    // Revalidacao TOCTOU de ownership, layout e quiescencia apos claims
+    // Revalidacao TOCTOU de ownership, layout completo e quiescencia apos claims.
     let mut verify_bdf: u32 = PCI_BRIDGE_BDF_INVALID;
     if !pci_msix_owned_device(device, driver, &mut verify_bdf) ||
        verify_bdf != bdf {
@@ -347,6 +380,15 @@ pub fn pci_msix_reserve_single(device: DeviceHandle, driver: DriverHandle,
 
     let verify_msi = pci_msi_capability_probe(0, bus, slot_id, func);
     if verify_msi.valid && verify_msi.enabled {
+        return pci_msix_cleanup_unarmed_claims(
+            irq, source, vector, bdf,
+            capability.capability_offset, capability.table_size,
+            device, driver
+        );
+    }
+
+    let verify_layout = pci_msix_layout_probe(device, driver, table_claim, pba_claim);
+    if !pci_msix_layout_equal(layout, verify_layout) {
         return pci_msix_cleanup_unarmed_claims(
             irq, source, vector, bdf,
             capability.capability_offset, capability.table_size,

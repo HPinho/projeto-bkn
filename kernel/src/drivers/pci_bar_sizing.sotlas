@@ -115,7 +115,8 @@ fn pci_bar_size_sources_quiet(bus: u8, slot: u8, func: u8) -> bool {
 pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
                              claim: PciBarClaim) -> PciBarSizeProof {
     let invalid = pci_bar_size_invalid_proof();
-    if !device.valid || !driver.valid || !claim.valid || claim.bar_index >= 6 {
+    if !device.valid || device.generation == DEVICE_GENERATION_INVALID ||
+       !driver.valid || !claim.valid || claim.bar_index >= 6 {
         return invalid;
     }
 
@@ -155,9 +156,10 @@ pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
         return invalid;
     }
 
-    // Aperture ja publicada nao e medida novamente por este caminho. Isso evita
-    // reabrir desnecessariamente a janela destrutiva write-all-ones.
-    let cached = pci_bar_aperture_snapshot(bdf, claim.bar_index, base);
+    // Aperture da mesma geracao ja publicada nao e medida novamente. Uma nova
+    // geracao do DeviceHandle nunca herda a medida antiga do mesmo BDF/BAR.
+    let cached = pci_bar_aperture_snapshot(
+        bdf, device.generation, claim.bar_index, base);
     if cached.valid { return invalid; }
 
     let measurement = pci_config_measure_memory_bar(
@@ -182,11 +184,14 @@ pub fn pci_measure_owned_bar(device: DeviceHandle, driver: DriverHandle,
     }
 
     if !pci_bar_aperture_publish(
-        bdf, claim.bar_index, measurement.base, measurement.size, measurement.is_64bit) {
+        bdf, device.generation, claim.bar_index,
+        measurement.base, measurement.size, measurement.is_64bit) {
         return invalid;
     }
-    let aperture = pci_bar_aperture_snapshot(bdf, claim.bar_index, measurement.base);
-    if !aperture.valid || aperture.size != measurement.size ||
+    let aperture = pci_bar_aperture_snapshot(
+        bdf, device.generation, claim.bar_index, measurement.base);
+    if !aperture.valid || aperture.device_generation != device.generation ||
+       aperture.size != measurement.size ||
        aperture.is_64bit != measurement.is_64bit {
         return invalid;
     }

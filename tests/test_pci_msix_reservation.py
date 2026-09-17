@@ -65,14 +65,21 @@ class PciMsixReservationContracts(unittest.TestCase):
         self.assertIn("IRQ_DYNAMIC_VECTOR_LAST", body)
         self.assertNotIn("kind: RESOURCE_KIND_IRQ", body)
 
-    # 4. Exigencia de layout DF-7b valido
-    def test_reservation_requires_valid_df7b_layout_matching_bdf_and_disabled(self):
+    # 4. O caller nao pode fornecer PciMsixLayout como autoridade
+    def test_reservation_derives_live_df7b_layout_from_generation_safe_claims(self):
         body = self._body("pci_msix_reserve_single")
+        signature = MSIX.split("pub fn pci_msix_reserve_single", 1)[1].split("{", 1)[0]
+        self.assertIn("table_claim: PciBarClaim", signature)
+        self.assertIn("pba_claim: PciBarClaim", signature)
+        self.assertNotIn("layout: PciMsixLayout", signature)
+        self.assertIn("let layout = pci_msix_layout_probe(device, driver, table_claim, pba_claim)", body)
         self.assertIn("!layout.valid", body)
         self.assertIn("layout.bdf != bdf", body)
         self.assertIn("layout.enabled", body)
         self.assertIn("capability.capability_offset != layout.capability_offset", body)
         self.assertIn("capability.table_size != layout.table_size", body)
+        self.assertIn("capability.table_bir != layout.table_bar_index", body)
+        self.assertIn("capability.pba_bir != layout.pba_bar_index", body)
 
     # 5. Tratamento de quiescencia e walker (MSI disabled se presente, MSI-X disabled)
     def test_reservation_handles_capability_walker_and_quiescence(self):
@@ -98,20 +105,36 @@ class PciMsixReservationContracts(unittest.TestCase):
             self.assertNotIn(forbidden, body)
 
     # 7. Revalidacao TOCTOU antes de publicar estado READY
-    def test_reservation_revalidates_device_source_and_capability_toctou(self):
+    def test_reservation_revalidates_device_source_layout_and_capability_toctou(self):
         body = self._body("pci_msix_reserve_single")
         self.assertGreaterEqual(body.count("pci_msix_owned_device"), 2)
         self.assertGreaterEqual(body.count("pci_msix_capability_probe"), 2)
+        self.assertGreaterEqual(body.count("pci_msix_layout_probe(device, driver, table_claim, pba_claim)"), 2)
         self.assertIn("pci_msix_source_owned(source, bdf, device, driver)", body)
+        self.assertIn("let verify_layout = pci_msix_layout_probe(device, driver, table_claim, pba_claim)", body)
+        self.assertIn("pci_msix_layout_equal(layout, verify_layout)", body)
         self.assertIn("verify.capability_offset != capability.capability_offset", body)
         self.assertIn("verify.control != capability.control", body)
         self.assertIn("verify.table_size != capability.table_size", body)
         self.assertIn("verify.enabled", body)
         self.assertIn("state: PCI_MSIX_RESERVATION_READY", body)
+        self.assertLess(body.index("pci_msix_layout_equal(layout, verify_layout)"),
+                        body.index("state: PCI_MSIX_RESERVATION_READY"))
         self.assertLess(body.index("verify.enabled"),
                         body.index("state: PCI_MSIX_RESERVATION_READY"))
 
-    # 8. Cleanup seguro na ordem inversa: IRQ -> source sob comprovacao de quiescencia
+    # 8. Igualdade integral impede aceitar endereco/aperture stale ou fabricado
+    def test_layout_equality_covers_all_programming_relevant_fields(self):
+        body = self._fn("pci_msix_layout_equal")
+        for field in (
+            "bdf", "capability_offset", "table_size", "enabled", "function_masked",
+            "table_bar_index", "table_bar_base", "table_bar_size", "table_offset",
+            "table_physical", "table_bytes", "pba_bar_index", "pba_bar_base",
+            "pba_bar_size", "pba_offset", "pba_physical", "pba_bytes",
+        ):
+            self.assertIn(f"left.{field} == right.{field}", body)
+
+    # 9. Cleanup seguro na ordem inversa: IRQ -> source sob comprovacao de quiescencia
     def test_cleanup_is_quiescence_gated_irq_then_source(self):
         body = self._fn("pci_msix_cleanup_unarmed_claims")
         proof = "pci_msix_quiescence_proven"
@@ -125,7 +148,7 @@ class PciMsixReservationContracts(unittest.TestCase):
         self.assertIn("pci_msix_quarantined_reservation", body)
         self.assertIn("remaining_irq = irq_invalid_handle()", body)
 
-    # 9. Release de reserva nao armada
+    # 10. Release de reserva nao armada
     def test_unarmed_release_returns_new_ownership_state_and_safe_cleanup(self):
         sig = MSIX.split("pub fn pci_msix_release_unarmed_reservation", 1)[1].split("{", 1)[0]
         body = self._body("pci_msix_release_unarmed_reservation")
@@ -138,7 +161,7 @@ class PciMsixReservationContracts(unittest.TestCase):
         self.assertNotIn("irq_registry_unregister", body)
         self.assertNotIn("resource_release(", body)
 
-    # 10. API de retry para quarentena
+    # 11. API de retry para quarentena
     def test_quarantined_cleanup_has_explicit_retry_contract(self):
         body = self._body("pci_msix_retry_quarantined_cleanup")
         self.assertIn("pci_msix_reservation_is_quarantined", body)
@@ -146,7 +169,7 @@ class PciMsixReservationContracts(unittest.TestCase):
         self.assertIn("return reservation", body)
         self.assertIn("pci_msix_cleanup_unarmed_claims", body)
 
-    # 11. Isolamento de bootstrap: boot do kernel intocado
+    # 12. Isolamento de bootstrap: boot do kernel intocado
     def test_bootstrap_isolation_and_no_boot_path_invocation(self):
         self.assertIn("import kernel::drivers::pci_msix::*;", MAIN)
         self.assertNotIn("pci_msix_reserve_single(", MAIN)

@@ -3,10 +3,11 @@
 // O scan PCI global continua estritamente read-only e PciBar.size permanece 0.
 // Somente uma medicao controlada/restaurada pode publicar aqui. O registro guarda
 // metadado de hardware, nao ownership: Device/Driver/Resource continuam sob o
-// Device Core/Resource Manager. Uma vez publicada, uma entrada e imutavel; qualquer
-// medida conflitante falha fechada.
+// Device Core/Resource Manager. Entradas sao vinculadas a geracao do DeviceHandle,
+// impedindo que uma aperture antiga autorize um novo dispositivo que reutilize o BDF.
 module kernel::drivers::pci_bar_aperture;
 
+import kernel::device::types::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 
@@ -16,6 +17,7 @@ pub const PCI_BAR_APERTURE_BDF_INVALID: u32 = 0xFFFFFFFF;
 @repr(C)
 pub struct PciBarAperture {
     pub bdf: u32;
+    pub device_generation: u32;
     pub bar_index: u8;
     pub base: u64;
     pub size: u64;
@@ -26,6 +28,7 @@ pub struct PciBarAperture {
 static mut PCI_BAR_APERTURES: [PciBarAperture; PCI_BAR_APERTURE_CAPACITY] = [
     PciBarAperture {
         bdf: PCI_BAR_APERTURE_BDF_INVALID,
+        device_generation: DEVICE_GENERATION_INVALID,
         bar_index: 0xFF,
         base: 0,
         size: 0,
@@ -41,6 +44,7 @@ static mut PCI_BAR_APERTURE_READY: bool = false;
 pub fn pci_bar_aperture_invalid() -> PciBarAperture {
     return PciBarAperture {
         bdf: PCI_BAR_APERTURE_BDF_INVALID,
+        device_generation: DEVICE_GENERATION_INVALID,
         bar_index: 0xFF,
         base: 0,
         size: 0,
@@ -110,12 +114,15 @@ fn pci_bar_aperture_unlock_irq(flags: u64) -> void {
     x86_irq_restore(flags);
 }
 
-// Publicacao write-once por (BDF,BAR). Repetir exatamente a mesma medida e
-// idempotente; qualquer divergencia e tratada como estado de hardware incerto.
+// Publicacao write-once por (BDF, DeviceGeneration, BAR). Repetir exatamente a
+// mesma medida e idempotente; qualquer divergencia na mesma geracao falha fechada.
 @system
-pub fn pci_bar_aperture_publish(bdf: u32, bar_index: u8, base: u64,
+pub fn pci_bar_aperture_publish(bdf: u32, device_generation: u32,
+                                bar_index: u8, base: u64,
                                 size: u64, is_64bit: bool) -> bool {
-    if bdf == PCI_BAR_APERTURE_BDF_INVALID || bar_index >= 6 || base == 0 ||
+    if bdf == PCI_BAR_APERTURE_BDF_INVALID ||
+       device_generation == DEVICE_GENERATION_INVALID ||
+       bar_index >= 6 || base == 0 ||
        !pci_bar_aperture_size_valid(size) || (base & (size - 1)) != 0 {
         return false;
     }
@@ -125,7 +132,9 @@ pub fn pci_bar_aperture_publish(bdf: u32, bar_index: u8, base: u64,
     let mut slot: usize = 0;
     while slot < PCI_BAR_APERTURE_CAPACITY {
         let entry = unsafe { PCI_BAR_APERTURES[slot] };
-        if entry.valid && entry.bdf == bdf && entry.bar_index == bar_index {
+        if entry.valid && entry.bdf == bdf &&
+           entry.device_generation == device_generation &&
+           entry.bar_index == bar_index {
             let same = entry.base == base && entry.size == size &&
                        entry.is_64bit == is_64bit;
             pci_bar_aperture_unlock_irq(flags);
@@ -143,6 +152,7 @@ pub fn pci_bar_aperture_publish(bdf: u32, bar_index: u8, base: u64,
     unsafe {
         PCI_BAR_APERTURES[free_slot] = PciBarAperture {
             bdf: bdf,
+            device_generation: device_generation,
             bar_index: bar_index,
             base: base,
             size: size,
@@ -155,11 +165,15 @@ pub fn pci_bar_aperture_publish(bdf: u32, bar_index: u8, base: u64,
 }
 
 // Snapshot somente de metadado. Nenhum handle de ownership e armazenado aqui;
-// consumidores devem revalidar Device/Driver/Resource separadamente.
+// consumidores devem revalidar Device/Driver/Resource separadamente. A geracao
+// impede reutilizacao de metadado depois de detach/re-attach no mesmo BDF.
 @system
-pub fn pci_bar_aperture_snapshot(bdf: u32, bar_index: u8,
+pub fn pci_bar_aperture_snapshot(bdf: u32, device_generation: u32,
+                                 bar_index: u8,
                                  expected_base: u64) -> PciBarAperture {
-    if bdf == PCI_BAR_APERTURE_BDF_INVALID || bar_index >= 6 || expected_base == 0 {
+    if bdf == PCI_BAR_APERTURE_BDF_INVALID ||
+       device_generation == DEVICE_GENERATION_INVALID ||
+       bar_index >= 6 || expected_base == 0 {
         return pci_bar_aperture_invalid();
     }
     let mut flags: u64 = 0;
@@ -168,7 +182,9 @@ pub fn pci_bar_aperture_snapshot(bdf: u32, bar_index: u8,
     let mut slot: usize = 0;
     while slot < PCI_BAR_APERTURE_CAPACITY {
         let entry = unsafe { PCI_BAR_APERTURES[slot] };
-        if entry.valid && entry.bdf == bdf && entry.bar_index == bar_index {
+        if entry.valid && entry.bdf == bdf &&
+           entry.device_generation == device_generation &&
+           entry.bar_index == bar_index {
             if entry.base == expected_base { result = entry; }
             break;
         }
