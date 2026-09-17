@@ -28,6 +28,77 @@ pub struct DmaBuffer {
     pub valid: bool;
 }
 
+// DF-8a: modelo read-only das limitações DMA impostas por um dispositivo.
+// Ele espelha exatamente os limites já aceitos pelo allocator existente; não
+// reserva páginas, não altera ownership e não cria um allocator paralelo.
+pub struct DmaDeviceConstraints {
+    pub alignment: u64;
+    pub max_address: u64;
+    pub boundary: u64;
+    pub valid: bool;
+}
+
+@system
+pub fn dma_invalid_device_constraints() -> DmaDeviceConstraints {
+    return DmaDeviceConstraints {
+        alignment: 0,
+        max_address: 0,
+        boundary: 0,
+        valid: false
+    };
+}
+
+@system
+pub fn dma_device_constraints(alignment: u64, max_address: u64, boundary: u64) -> DmaDeviceConstraints {
+    if !dma_alignment_valid(alignment) || max_address == 0 {
+        return dma_invalid_device_constraints();
+    }
+    if boundary != 0 && ((boundary & (boundary - 1)) != 0 || boundary < BAKEN_PAGE_SIZE) {
+        return dma_invalid_device_constraints();
+    }
+    return DmaDeviceConstraints {
+        alignment: alignment,
+        max_address: max_address,
+        boundary: boundary,
+        valid: true
+    };
+}
+
+@system
+pub fn dma_device_constraints_valid(constraints: *const DmaDeviceConstraints) -> bool {
+    if constraints == (null as *const DmaDeviceConstraints) { return false; }
+    unsafe {
+        if !(*constraints).valid || !dma_alignment_valid((*constraints).alignment) ||
+           (*constraints).max_address == 0 {
+            return false;
+        }
+        if (*constraints).boundary != 0 &&
+           (((*constraints).boundary & ((*constraints).boundary - 1)) != 0 ||
+            (*constraints).boundary < BAKEN_PAGE_SIZE) {
+            return false;
+        }
+        return true;
+    }
+}
+
+@system
+pub fn dma_buffer_satisfies_device_constraints(
+    buffer: *const DmaBuffer,
+    constraints: *const DmaDeviceConstraints
+) -> bool {
+    if !dma_buffer_valid(buffer) || !dma_device_constraints_valid(constraints) { return false; }
+    unsafe {
+        if ((*buffer).physical_address & ((*constraints).alignment - 1)) != 0 { return false; }
+        let last = (*buffer).physical_address + (*buffer).size - 1;
+        if last < (*buffer).physical_address || last > (*constraints).max_address { return false; }
+        if (*constraints).boundary != 0 &&
+           (*buffer).physical_address / (*constraints).boundary != last / (*constraints).boundary {
+            return false;
+        }
+        return true;
+    }
+}
+
 @system
 pub fn dma_invalid_buffer() -> DmaBuffer {
     return DmaBuffer {

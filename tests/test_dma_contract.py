@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Guardrails do DMA físico pós-cutover, sem dependência UEFI."""
+"""Guardrails do DMA físico pós-cutover, incluindo o modelo read-only DF-8a."""
 from pathlib import Path
 import unittest
 ROOT=Path(__file__).resolve().parents[1]
@@ -9,6 +9,24 @@ class DmaContractTests(unittest.TestCase):
     def test_dma_buffer_carries_virtual_and_physical_addresses(self):
         text=DMA.read_text(encoding="utf-8")
         for token in ("pub struct DmaBuffer","virtual_address: *mut u8","physical_address: u64","alignment: u64","owner: u32","fence: u64","valid: bool","pub fn dma_buffer_valid(buffer: *const DmaBuffer) -> bool"): self.assertIn(token,text)
+    def test_df8a_device_constraints_are_typed_and_read_only(self):
+        text=DMA.read_text(encoding="utf-8")
+        for token in ("pub struct DmaDeviceConstraints","pub fn dma_invalid_device_constraints() -> DmaDeviceConstraints","pub fn dma_device_constraints(alignment: u64, max_address: u64, boundary: u64) -> DmaDeviceConstraints","pub fn dma_device_constraints_valid(constraints: *const DmaDeviceConstraints) -> bool","pub fn dma_buffer_satisfies_device_constraints("): self.assertIn(token,text)
+        body=text.split("pub fn dma_device_constraints(alignment: u64, max_address: u64, boundary: u64)",1)[1].split("pub fn dma_device_constraints_valid",1)[0]
+        for token in ("dma_alignment_valid(alignment)","max_address == 0","boundary & (boundary - 1)","boundary < BAKEN_PAGE_SIZE"): self.assertIn(token,body)
+        for forbidden in ("pmm_alloc", "pmm_free", "dma_alloc(", "dma_alloc_for_device(", "dma_submit_to_device(", "dma_share_with_device("):
+            self.assertNotIn(forbidden,body)
+    def test_df8a_constraint_check_is_overflow_and_boundary_safe(self):
+        text=DMA.read_text(encoding="utf-8")
+        body=text.split("pub fn dma_buffer_satisfies_device_constraints(",1)[1].split("pub fn dma_invalid_buffer",1)[0]
+        for token in ("dma_buffer_valid(buffer)","dma_device_constraints_valid(constraints)","physical_address & ((*constraints).alignment - 1)","let last = (*buffer).physical_address + (*buffer).size - 1;","last < (*buffer).physical_address","last > (*constraints).max_address","physical_address / (*constraints).boundary != last / (*constraints).boundary"): self.assertIn(token,body)
+        for forbidden in ("pmm_alloc", "pmm_free", "__dma_fence", "owner =", "fence =", "dma_alloc_for_device("):
+            self.assertNotIn(forbidden,body)
+    def test_df8a_does_not_replace_existing_allocator_contract(self):
+        text=DMA.read_text(encoding="utf-8")
+        body=text.split("pub fn dma_alloc_for_device",1)[1]
+        self.assertIn("pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)",body)
+        self.assertNotIn("DmaDeviceConstraints",body)
     def test_dma_requires_active_pmm_and_vmm_before_exposing_memory(self):
         text=DMA.read_text(encoding="utf-8")
         for token in ("pub fn dma_allocator_available() -> bool","pmm_allocator_is_active()","vmm_is_active()","vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE","if !pmm_inventory_is_valid()","if !dma_allocator_available()","pmm_alloc_pages_aligned(page_count, alignment)","direct_map_virtual_address(physical)","if rounded < size { return dma_invalid_buffer(); }"): self.assertIn(token,text)
