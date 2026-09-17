@@ -4,7 +4,7 @@
 // and injects it into baken_native_runtime.sotlas. Production boot never invokes it.
 //
 // Proven lifecycle:
-// BINDING -> BAR0 + BAR1 ownership -> passive MSI-X source/vector reservation
+// BINDING -> BAR1 sizing proof -> exact BAR1 + BAR0 ownership -> passive MSI-X source/vector reservation
 // -> ACTIVE -> masked Table entry program -> transactional activation
 // -> real ivshmem self-doorbell MSI-X -> UNBINDING -> Function Mask -> entry mask
 // -> MSI-X Enable=0 -> exact Table/control restore -> IRQ/source/BAR release.
@@ -13,6 +13,7 @@ module kernel::drivers::pci_msix_ivshmem_proof;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::pci_config::*;
 import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_bar_sizing::*;
 import kernel::drivers::pci_msix::*;
 import kernel::drivers::pci_msix_table::*;
 import kernel::drivers::pci_msix_activation::*;
@@ -206,21 +207,37 @@ fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {
     let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };
     if !driver.valid { return false; }
 
-    let reg_claim = pci_claim_bar(
-        device, driver, PCI_MSIX_IVSHMEM_REG_BAR,
-        PCI_MSIX_IVSHMEM_REG_LENGTH);
-    if !reg_claim.valid { return false; }
-    unsafe { PCI_MSIX_IVSHMEM_REG_CLAIM = reg_claim; }
+    // DF-7b1 requires a generation-bound aperture proof before DF-7b can
+    // accept this BAR as authority for MSI-X Table/PBA placement. Measure while
+    // BINDING owns exactly one PciBarClaim (two resources), then reacquire the
+    // BAR with the exact measured aperture.
+    let sizing_claim = pci_claim_bar(
+        device, driver, PCI_MSIX_IVSHMEM_MSIX_BAR,
+        PCI_MSIX_IVSHMEM_MSIX_LENGTH);
+    if !sizing_claim.valid { return false; }
+
+    let sizing = pci_measure_owned_bar(device, driver, sizing_claim);
+    if !sizing.valid || sizing.size == 0 {
+        pci_release_bar(sizing_claim, device, driver);
+        return false;
+    }
+    if !pci_release_bar(sizing_claim, device, driver) { return false; }
 
     let msix_claim = pci_claim_bar(
         device, driver, PCI_MSIX_IVSHMEM_MSIX_BAR,
-        PCI_MSIX_IVSHMEM_MSIX_LENGTH);
-    if !msix_claim.valid {
-        pci_release_bar(reg_claim, device, driver);
-        unsafe { PCI_MSIX_IVSHMEM_REG_CLAIM = pci_bar_invalid_claim(); }
+        sizing.size);
+    if !msix_claim.valid { return false; }
+    unsafe { PCI_MSIX_IVSHMEM_MSIX_CLAIM = msix_claim; }
+
+    let reg_claim = pci_claim_bar(
+        device, driver, PCI_MSIX_IVSHMEM_REG_BAR,
+        PCI_MSIX_IVSHMEM_REG_LENGTH);
+    if !reg_claim.valid {
+        pci_release_bar(msix_claim, device, driver);
+        unsafe { PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim(); }
         return false;
     }
-    unsafe { PCI_MSIX_IVSHMEM_MSIX_CLAIM = msix_claim; }
+    unsafe { PCI_MSIX_IVSHMEM_REG_CLAIM = reg_claim; }
 
     // BAR1 contains both Table and PBA; pass the same generation-safe claim.
     let reservation = pci_msix_reserve_single(
@@ -232,11 +249,11 @@ fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {
     // A quarantined source must reach remove() while ownership is still retained.
     if pci_msix_reservation_is_quarantined(reservation) { return true; }
 
-    pci_release_bar(msix_claim, device, driver);
     pci_release_bar(reg_claim, device, driver);
+    pci_release_bar(msix_claim, device, driver);
     unsafe {
-        PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim();
         PCI_MSIX_IVSHMEM_REG_CLAIM = pci_bar_invalid_claim();
+        PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim();
     }
     return false;
 }
