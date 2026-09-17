@@ -72,6 +72,45 @@ class PciMsixIvshmemRuntimeProofContracts(unittest.TestCase):
             self.assertNotIn(token, mutation_path)
         self.assertNotIn("pba_physical", mutation_path)
 
+    def test_sizing_helper_only_quiesces_decode_master_and_restores_exact_command(self):
+        body = self._body("pci_msix_ivshmem_measure_msix_bar")
+
+        self.assertIn("let command_before = pci_config_read16(0, bus, slot_id, func, 0x04);", body)
+        self.assertIn("PCI_COMMAND_IO_SPACE | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER", body)
+        self.assertIn("let active_bits = command_before & decode_master_mask;", body)
+        self.assertIn("let quiescent = command_before & !decode_master_mask;", body)
+
+        quiesce = body.index("pci_config_write16(0, bus, slot_id, func, 0x04, quiescent)")
+        measure = body.index("pci_measure_owned_bar(device, driver, sizing_claim)")
+        restore = body.rindex("pci_config_write16(0, bus, slot_id, func, 0x04, command_before)")
+        restore_verify = body.rindex("pci_config_read16(0, bus, slot_id, func, 0x04) != command_before")
+        self.assertLess(quiesce, measure)
+        self.assertLess(measure, restore)
+        self.assertLess(restore, restore_verify)
+
+        # The helper may touch only the 16-bit PCI Command register around the real
+        # BAR measurement. It must not rewrite BARs, MSI-X Table/PBA state, INTx,
+        # or use any wider/raw config mutation primitive.
+        forbidden = (
+            "pci_config_write32(",
+            "pci_write_config32(",
+            "pci_enable_bus_master(",
+            "pci_enable_memory(",
+            "pci_write_command(",
+            "x86_mmio_write32(",
+            "pci_msix_table_program_masked_single(",
+            "pci_msix_activate_single(",
+            "pba_physical",
+        )
+        for token in forbidden:
+            self.assertNotIn(token, body)
+
+        self.assertEqual(body.count("pci_measure_owned_bar(device, driver, sizing_claim)"), 1)
+        self.assertGreaterEqual(
+            body.count("pci_config_write16(0, bus, slot_id, func, 0x04, command_before)"),
+            2,
+        )
+
     def test_remove_delegates_to_df7e1_teardown_before_bar_release(self):
         body = self._body("pci_msix_ivshmem_remove")
         disarm = body.index("pci_msix_disarm_and_release(")
