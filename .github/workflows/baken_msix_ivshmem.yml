@@ -1,0 +1,206 @@
+name: Baken OS MSI-X ivshmem Runtime Verification
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  msix-ivshmem-runtime:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v6
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install QEMU and Sotlas build dependencies
+        timeout-minutes: 20
+        run: |
+          ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          test -f "$ubuntu_sources"
+          apt_retry() {
+            local attempt=1
+            while ! timeout --foreground 6m sudo apt-get \
+              -o "Dir::Etc::sourcelist=${ubuntu_sources}" \
+              -o Dir::Etc::sourceparts=- \
+              -o Acquire::Retries=5 "$@"; do
+              if test "$attempt" -ge 3; then
+                echo "::error::apt-get $1 failed after $attempt attempts."
+                return 1
+              fi
+              attempt=$((attempt + 1))
+              sleep 10
+            done
+          }
+          apt_retry update
+          apt_retry install -y qemu-system-x86 ovmf mtools dosfstools xorriso mingw-w64
+
+      - name: Verify DF-7e2 structural contracts
+        run: |
+          python3 tests/test_pci_msix_ivshmem_proof.py
+          python3 tests/test_pci_msix_activation.py
+          python3 tests/test_pci_msix_table_programming.py
+          python3 tests/test_pci_msix_reservation.py
+
+      - name: Instrument CI-only MSI-X proof
+        shell: bash
+        run: |
+          cp tests/fixtures/df7e2/pci_msix_ivshmem_proof.sotlas \
+             kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("kernel/src/baken_native_runtime.sotlas")
+          text = path.read_text(encoding="utf-8")
+
+          import_anchor = "import kernel::device::foundation_self_test::*;\n"
+          assert text.count(import_anchor) == 1
+          text = text.replace(
+              import_anchor,
+              import_anchor + "import kernel::drivers::pci_msix_ivshmem_proof::*;\n",
+              1,
+          )
+
+          call_anchor = (
+              '    if !device_foundation_emit_ready_marker() && x86_serial_is_ready() {\n'
+              '        baken_early_boot_fail("E-DF-MARKER\\0".as_ptr(), '
+              '"DRIVER FOUNDATION SERIAL MARKER\\0".as_ptr());\n'
+              '    }\n'
+          )
+          assert text.count(call_anchor) == 1
+          proof = (
+              '\n'
+              '    // CI-only DF-7e2: QEMU ivshmem proves real MSI-X delivery + teardown.\n'
+              '    baken_early_boot_stage("PCI MSIX IVSHMEM RUNTIME PROOF\\0".as_ptr());\n'
+              '    if !pci_msix_ivshmem_runtime_proof() {\n'
+              '        baken_early_boot_fail("E-MSIX-IVSHMEM\\0".as_ptr(), '
+              '"PCI MSIX IVSHMEM RUNTIME PROOF\\0".as_ptr());\n'
+              '    }\n'
+          )
+          text = text.replace(call_anchor, call_anchor + proof, 1)
+          path.write_text(text, encoding="utf-8")
+          PY
+
+          grep -Fq 'import kernel::drivers::pci_msix_ivshmem_proof::*;' \
+            kernel/src/baken_native_runtime.sotlas
+          grep -Fq 'pci_msix_ivshmem_runtime_proof()' \
+            kernel/src/baken_native_runtime.sotlas
+
+      - name: Verify instrumented Sotlas kernel graph
+        run: |
+          python3 tools/sotlas_compile/compiler.py check kernel/src/main.sotlas
+
+      - name: Build instrumented native Sotlas UEFI kernel
+        run: |
+          mkdir -p build/iso_root/EFI/BOOT
+          SOTLAS_CC=x86_64-w64-mingw32-gcc python3 tools/sotlas_compile/compiler.py build \
+            kernel/src/main.sotlas \
+            --manifest build/sotlas-msix-ivshmem.manifest.json \
+            --output build/iso_root/EFI/BOOT/BOOTX64.EFI
+          test "$(head -c 2 build/iso_root/EFI/BOOT/BOOTX64.EFI)" = "MZ"
+
+      - name: Build UEFI ISO image
+        run: |
+          python3 tools/scripts/create_uefi_iso.py
+          test -s build/baken_os.iso
+
+      - name: Prove real MSI-X delivery and fail-closed teardown on ivshmem-doorbell
+        timeout-minutes: 4
+        shell: bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          echo "MSI-X ivshmem proof revision $(git rev-parse HEAD)"
+          OVMF_CODE="$(find /usr/share -type f -name 'OVMF_CODE*.fd' | sort | head -n 1)"
+          test -n "$OVMF_CODE"
+          OVMF_VARS="${OVMF_CODE/CODE/VARS}"
+          test -f "$OVMF_VARS"
+          cp "$OVMF_VARS" build/OVMF_VARS_MSIX_IVSHMEM.fd
+          rm -f build/ivshmem.sock build/ivshmem-server.ready \
+                build/qemu-msix-ivshmem-serial.log build/qemu-msix-ivshmem-int.log
+
+          python3 tools/scripts/ivshmem_test_server.py \
+            --socket build/ivshmem.sock --ready build/ivshmem-server.ready &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 100); do
+            test -f build/ivshmem-server.ready && break
+            sleep 0.05
+          done
+          test -f build/ivshmem-server.ready
+          test -S build/ivshmem.sock
+
+          qemu-system-x86_64 \
+            -machine q35 -smp 2 -m 512M -no-reboot \
+            -drive if=pflash,format=raw,readonly=on,file="$OVMF_CODE" \
+            -drive if=pflash,format=raw,file=build/OVMF_VARS_MSIX_IVSHMEM.fd \
+            -cdrom build/baken_os.iso \
+            -chardev socket,path=build/ivshmem.sock,id=ivshmem \
+            -device ivshmem-doorbell,vectors=1,chardev=ivshmem \
+            -device qemu-xhci,id=xhci \
+            -device usb-kbd,bus=xhci.0 \
+            -display none \
+            -monitor none \
+            -serial file:build/qemu-msix-ivshmem-serial.log \
+            -d int -D build/qemu-msix-ivshmem-int.log &
+          qemu_pid=$!
+
+          found=0
+          stop_reason=timeout
+          for i in $(seq 1 1500); do
+            if test -f build/qemu-msix-ivshmem-serial.log &&
+               grep -Fxq 'BAKEN:PCI_MSIX_IVSHMEM_READY' build/qemu-msix-ivshmem-serial.log; then
+              found=1
+              stop_reason=complete
+              break
+            fi
+            if test -f build/qemu-msix-ivshmem-serial.log &&
+               grep -Fq 'E-MSIX-IVSHMEM' build/qemu-msix-ivshmem-serial.log; then
+              stop_reason=msix-ivshmem-failure
+              break
+            fi
+            if test -f build/qemu-msix-ivshmem-serial.log &&
+               grep -Fq 'BAKEN:HEX=E:' build/qemu-msix-ivshmem-serial.log; then
+              stop_reason=cpu-exception
+              break
+            fi
+            if ! kill -0 "$qemu_pid" 2>/dev/null; then
+              stop_reason=qemu-exited
+              break
+            fi
+            sleep 0.1
+          done
+
+          kill "$qemu_pid" 2>/dev/null || true
+          wait "$qemu_pid" 2>/dev/null || true
+          kill "$server_pid" 2>/dev/null || true
+          wait "$server_pid" 2>/dev/null || true
+          trap - EXIT
+
+          test -f build/qemu-msix-ivshmem-serial.log
+          cat build/qemu-msix-ivshmem-serial.log
+          echo "MSI-X ivshmem proof: stop_reason=${stop_reason}"
+          grep -Fxq 'BAKEN:DRIVER_FOUNDATION_READY' build/qemu-msix-ivshmem-serial.log
+          grep -Fxq 'BAKEN:PCI_MSIX_IVSHMEM_READY' build/qemu-msix-ivshmem-serial.log
+          if grep -Fq 'BAKEN:HEX=E:' build/qemu-msix-ivshmem-serial.log; then
+            echo '::error::CPU exception reported during MSI-X ivshmem proof.'
+            tail -n 160 build/qemu-msix-ivshmem-int.log || true
+            exit 1
+          fi
+          test "$found" -eq 1
+
+      - name: Upload MSI-X ivshmem diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: qemu-msix-ivshmem-diagnostics
+          path: |
+            build/qemu-msix-ivshmem-serial.log
+            build/qemu-msix-ivshmem-int.log
+            build/sotlas-msix-ivshmem.manifest.json
+          if-no-files-found: warn
+          retention-days: 7

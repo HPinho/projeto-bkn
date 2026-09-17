@@ -1,0 +1,444 @@
+// Baken OS — DF-7e2 CI fixture: MSI-X end-to-end runtime proof on QEMU ivshmem-doorbell.
+//
+// Test-only module. The dedicated workflow copies this fixture into kernel/src/drivers
+// and injects it into baken_native_runtime.sotlas. Production boot never invokes it.
+//
+// Proven lifecycle:
+// BINDING -> BAR0 + BAR1 ownership -> passive MSI-X source/vector reservation
+// -> ACTIVE -> masked Table entry program -> transactional activation
+// -> real ivshmem self-doorbell MSI-X -> UNBINDING -> Function Mask -> entry mask
+// -> MSI-X Enable=0 -> exact Table/control restore -> IRQ/source/BAR release.
+module kernel::drivers::pci_msix_ivshmem_proof;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msix::*;
+import kernel::drivers::pci_msix_table::*;
+import kernel::drivers::pci_msix_activation::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::driver_registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+import kernel::interrupts::interrupt_enable::*;
+import kernel::memory::active_page_tables::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::serial::*;
+
+pub const PCI_MSIX_IVSHMEM_VENDOR_ID: u16 = 0x1AF4;
+pub const PCI_MSIX_IVSHMEM_DEVICE_ID: u16 = 0x1110;
+pub const PCI_MSIX_IVSHMEM_REG_BAR: u8 = 0;
+pub const PCI_MSIX_IVSHMEM_MSIX_BAR: u8 = 1;
+pub const PCI_MSIX_IVSHMEM_REG_LENGTH: u64 = 256;
+pub const PCI_MSIX_IVSHMEM_MSIX_LENGTH: u64 = 4096;
+pub const PCI_MSIX_IVSHMEM_POSITION: u64 = 0x08;
+pub const PCI_MSIX_IVSHMEM_DOORBELL: u64 = 0x0C;
+pub const PCI_MSIX_IVSHMEM_ENTRY: u16 = 0;
+pub const PCI_MSIX_IVSHMEM_VECTOR: u32 = 0;
+pub const PCI_MSIX_IVSHMEM_SPIN_LIMIT: u32 = 10000000;
+
+static mut PCI_MSIX_IVSHMEM_DRIVER: DriverHandle = DriverHandle {
+    driver_id: 0, generation: 0, valid: false
+};
+static mut PCI_MSIX_IVSHMEM_DEVICE: DeviceHandle = DeviceHandle {
+    device_id: 0, generation: 0, valid: false
+};
+static mut PCI_MSIX_IVSHMEM_REG_CLAIM: PciBarClaim = PciBarClaim {
+    logical: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    physical: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    bar_index: 0,
+    valid: false
+};
+static mut PCI_MSIX_IVSHMEM_MSIX_CLAIM: PciBarClaim = PciBarClaim {
+    logical: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    physical: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    bar_index: 0,
+    valid: false
+};
+static mut PCI_MSIX_IVSHMEM_RESERVATION: PciMsixReservation = PciMsixReservation {
+    source: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+    irq: IrqHandle { irq_id: 0, generation: 0, valid: false },
+    vector: 0,
+    bdf: 0xFFFFFFFF,
+    capability_offset: 0xFFFF,
+    table_size: 0,
+    state: PCI_MSIX_RESERVATION_INVALID,
+    valid: false
+};
+static mut PCI_MSIX_IVSHMEM_TABLE: PciMsixTableProgramResult = PciMsixTableProgramResult {
+    reservation: PciMsixReservation {
+        source: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+        irq: IrqHandle { irq_id: 0, generation: 0, valid: false },
+        vector: 0, bdf: 0xFFFFFFFF, capability_offset: 0xFFFF,
+        table_size: 0, state: PCI_MSIX_RESERVATION_INVALID, valid: false
+    },
+    entry_index: 0,
+    entry_physical: 0,
+    original: PciMsixTableEntrySnapshot {
+        address_low: 0, address_high: 0, message_data: 0,
+        vector_control: 0, valid: false
+    },
+    programmed: PciMsixTableEntrySnapshot {
+        address_low: 0, address_high: 0, message_data: 0,
+        vector_control: 0, valid: false
+    },
+    destination_apic_id: 0,
+    state: PCI_MSIX_TABLE_PROGRAM_INVALID,
+    valid: false
+};
+static mut PCI_MSIX_IVSHMEM_ARM: PciMsixArmResult = PciMsixArmResult {
+    reservation: PciMsixReservation {
+        source: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+        irq: IrqHandle { irq_id: 0, generation: 0, valid: false },
+        vector: 0, bdf: 0xFFFFFFFF, capability_offset: 0xFFFF,
+        table_size: 0, state: PCI_MSIX_RESERVATION_INVALID, valid: false
+    },
+    table: PciMsixTableProgramResult {
+        reservation: PciMsixReservation {
+            source: ResourceHandle { resource_id: 0, generation: 0, valid: false },
+            irq: IrqHandle { irq_id: 0, generation: 0, valid: false },
+            vector: 0, bdf: 0xFFFFFFFF, capability_offset: 0xFFFF,
+            table_size: 0, state: PCI_MSIX_RESERVATION_INVALID, valid: false
+        },
+        entry_index: 0, entry_physical: 0,
+        original: PciMsixTableEntrySnapshot {
+            address_low: 0, address_high: 0, message_data: 0,
+            vector_control: 0, valid: false
+        },
+        programmed: PciMsixTableEntrySnapshot {
+            address_low: 0, address_high: 0, message_data: 0,
+            vector_control: 0, valid: false
+        },
+        destination_apic_id: 0,
+        state: PCI_MSIX_TABLE_PROGRAM_INVALID,
+        valid: false
+    },
+    original_control: 0,
+    masked_enabled_control: 0,
+    active_control: 0,
+    active_vector_control: 0,
+    state: PCI_MSIX_ARM_STATE_INVALID,
+    valid: false
+};
+static mut PCI_MSIX_IVSHMEM_REG_BASE: u64 = 0;
+static mut PCI_MSIX_IVSHMEM_IRQ_COUNT: u32 = 0;
+
+@system
+fn pci_msix_ivshmem_invalid_table() -> PciMsixTableProgramResult {
+    let reservation = pci_msix_invalid_reservation();
+    return PciMsixTableProgramResult {
+        reservation: reservation,
+        entry_index: 0,
+        entry_physical: 0,
+        original: PciMsixTableEntrySnapshot {
+            address_low: 0, address_high: 0, message_data: 0,
+            vector_control: 0, valid: false
+        },
+        programmed: PciMsixTableEntrySnapshot {
+            address_low: 0, address_high: 0, message_data: 0,
+            vector_control: 0, valid: false
+        },
+        destination_apic_id: 0,
+        state: PCI_MSIX_TABLE_PROGRAM_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_ivshmem_invalid_arm() -> PciMsixArmResult {
+    let table = pci_msix_ivshmem_invalid_table();
+    return PciMsixArmResult {
+        reservation: table.reservation,
+        table: table,
+        original_control: 0,
+        masked_enabled_control: 0,
+        active_control: 0,
+        active_vector_control: 0,
+        state: PCI_MSIX_ARM_STATE_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_ivshmem_reset_state() -> void {
+    unsafe {
+        PCI_MSIX_IVSHMEM_DRIVER = driver_invalid_handle();
+        PCI_MSIX_IVSHMEM_DEVICE = device_invalid_handle();
+        PCI_MSIX_IVSHMEM_REG_CLAIM = pci_bar_invalid_claim();
+        PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim();
+        PCI_MSIX_IVSHMEM_RESERVATION = pci_msix_invalid_reservation();
+        PCI_MSIX_IVSHMEM_TABLE = pci_msix_ivshmem_invalid_table();
+        PCI_MSIX_IVSHMEM_ARM = pci_msix_ivshmem_invalid_arm();
+        PCI_MSIX_IVSHMEM_REG_BASE = 0;
+        PCI_MSIX_IVSHMEM_IRQ_COUNT = 0;
+    }
+}
+
+@system
+fn pci_msix_ivshmem_irq_handler(device: DeviceHandle, vector: u16) -> bool {
+    let expected_device = unsafe { PCI_MSIX_IVSHMEM_DEVICE };
+    let reservation = unsafe { PCI_MSIX_IVSHMEM_RESERVATION };
+    if !device_handle_equal(device, expected_device) ||
+       !pci_msix_reservation_is_ready(reservation) ||
+       vector != reservation.vector {
+        return false;
+    }
+    unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT += 1; }
+    return true;
+}
+
+static PCI_MSIX_IVSHMEM_IRQ_DESCRIPTOR: IrqDescriptor = IrqDescriptor {
+    handler: pci_msix_ivshmem_irq_handler
+};
+
+@system
+fn pci_msix_ivshmem_probe(device: DeviceHandle) -> bool {
+    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };
+    if !driver.valid { return false; }
+
+    let reg_claim = pci_claim_bar(
+        device, driver, PCI_MSIX_IVSHMEM_REG_BAR,
+        PCI_MSIX_IVSHMEM_REG_LENGTH);
+    if !reg_claim.valid { return false; }
+    unsafe { PCI_MSIX_IVSHMEM_REG_CLAIM = reg_claim; }
+
+    let msix_claim = pci_claim_bar(
+        device, driver, PCI_MSIX_IVSHMEM_MSIX_BAR,
+        PCI_MSIX_IVSHMEM_MSIX_LENGTH);
+    if !msix_claim.valid {
+        pci_release_bar(reg_claim, device, driver);
+        unsafe { PCI_MSIX_IVSHMEM_REG_CLAIM = pci_bar_invalid_claim(); }
+        return false;
+    }
+    unsafe { PCI_MSIX_IVSHMEM_MSIX_CLAIM = msix_claim; }
+
+    // BAR1 contains both Table and PBA; pass the same generation-safe claim.
+    let reservation = pci_msix_reserve_single(
+        device, driver, msix_claim, msix_claim,
+        PCI_MSIX_IVSHMEM_IRQ_DESCRIPTOR);
+    unsafe { PCI_MSIX_IVSHMEM_RESERVATION = reservation; }
+
+    if pci_msix_reservation_is_ready(reservation) { return true; }
+    // A quarantined source must reach remove() while ownership is still retained.
+    if pci_msix_reservation_is_quarantined(reservation) { return true; }
+
+    pci_release_bar(msix_claim, device, driver);
+    pci_release_bar(reg_claim, device, driver);
+    unsafe {
+        PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim();
+        PCI_MSIX_IVSHMEM_REG_CLAIM = pci_bar_invalid_claim();
+    }
+    return false;
+}
+
+@system
+fn pci_msix_ivshmem_remove(device: DeviceHandle) -> bool {
+    let driver = unsafe { PCI_MSIX_IVSHMEM_DRIVER };
+    let mut reservation = unsafe { PCI_MSIX_IVSHMEM_RESERVATION };
+    let mut arm = unsafe { PCI_MSIX_IVSHMEM_ARM };
+    let msix_claim = unsafe { PCI_MSIX_IVSHMEM_MSIX_CLAIM };
+    let reg_claim = unsafe { PCI_MSIX_IVSHMEM_REG_CLAIM };
+
+    if arm.valid && arm.state == PCI_MSIX_ARM_STATE_ARMED {
+        arm = pci_msix_disarm_and_release(
+            arm, device, driver, msix_claim, msix_claim);
+        unsafe { PCI_MSIX_IVSHMEM_ARM = arm; }
+        reservation = arm.reservation;
+    } else if arm.valid && arm.state == PCI_MSIX_ARM_STATE_QUARANTINED {
+        arm = pci_msix_retry_quarantined_teardown(
+            arm, device, driver, msix_claim, msix_claim);
+        unsafe { PCI_MSIX_IVSHMEM_ARM = arm; }
+        reservation = arm.reservation;
+    } else if pci_msix_reservation_is_ready(reservation) {
+        reservation = pci_msix_release_unarmed_reservation(
+            reservation, device, driver);
+    } else if pci_msix_reservation_is_quarantined(reservation) {
+        reservation = pci_msix_retry_quarantined_cleanup(
+            reservation, device, driver);
+    }
+
+    unsafe { PCI_MSIX_IVSHMEM_RESERVATION = reservation; }
+    if reservation.valid { return false; }
+
+    if !msix_claim.valid || !pci_release_bar(msix_claim, device, driver) {
+        return false;
+    }
+    if !reg_claim.valid || !pci_release_bar(reg_claim, device, driver) {
+        return false;
+    }
+
+    unsafe {
+        PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim();
+        PCI_MSIX_IVSHMEM_REG_CLAIM = pci_bar_invalid_claim();
+        PCI_MSIX_IVSHMEM_REG_BASE = 0;
+    }
+    return true;
+}
+
+static PCI_MSIX_IVSHMEM_DRIVER_DESCRIPTOR: DriverDescriptor = DriverDescriptor {
+    match_rule: DriverMatch {
+        bus: DEVICE_BUS_PCI,
+        class_code: DEVICE_CLASS_CONTROLLER,
+        vendor_id: PCI_MSIX_IVSHMEM_VENDOR_ID,
+        hardware_id: PCI_MSIX_IVSHMEM_DEVICE_ID
+    },
+    priority: 1001,
+    probe: pci_msix_ivshmem_probe,
+    remove: pci_msix_ivshmem_remove
+};
+
+@system
+fn pci_msix_ivshmem_find_index() -> u32 {
+    let count = pci_get_device_count();
+    let mut index: u32 = 0;
+    while index < count {
+        let pci = pci_get_device(index);
+        if pci != (null as *const PciDevice) &&
+           unsafe { (*pci).vendor_id == PCI_MSIX_IVSHMEM_VENDOR_ID &&
+                    (*pci).device_id == PCI_MSIX_IVSHMEM_DEVICE_ID } {
+            return index;
+        }
+        index += 1;
+    }
+    return PCI_BRIDGE_INDEX_INVALID;
+}
+
+@system
+fn pci_msix_ivshmem_unbind_before_table(device: DeviceHandle,
+                                        driver: DriverHandle) -> bool {
+    let owner = device_core_snapshot(device);
+    if owner.valid && owner.state == DEVICE_STATE_ACTIVE &&
+       driver_handle_equal(owner.driver, driver) {
+        driver_unbind(device, driver);
+    }
+    return false;
+}
+
+// Hardware without the CI ivshmem device is a no-op success. The dedicated workflow
+// requires the READY marker, therefore only a real QEMU ivshmem MSI-X delivery certifies.
+@system
+pub fn pci_msix_ivshmem_runtime_proof() -> bool {
+    let index = pci_msix_ivshmem_find_index();
+    if index == PCI_BRIDGE_INDEX_INVALID { return true; }
+    if !external_interrupts_enabled() { return false; }
+
+    let before_resources = resource_active_count();
+    let before_irqs = irq_registry_active_count();
+    let pci = pci_get_device(index);
+    if pci == (null as *const PciDevice) { return false; }
+
+    let reg_base = unsafe { (*pci).bars[PCI_MSIX_IVSHMEM_REG_BAR as usize].base_address };
+    let msix_base = unsafe { (*pci).bars[PCI_MSIX_IVSHMEM_MSIX_BAR as usize].base_address };
+    let reg_is_io = unsafe { (*pci).bars[PCI_MSIX_IVSHMEM_REG_BAR as usize].is_io };
+    let msix_is_io = unsafe { (*pci).bars[PCI_MSIX_IVSHMEM_MSIX_BAR as usize].is_io };
+    if reg_base == 0 || msix_base == 0 || reg_is_io || msix_is_io ||
+       (reg_base & 0xFF) != 0 || (msix_base & 0xFFF) != 0 {
+        return false;
+    }
+
+    pci_msix_ivshmem_reset_state();
+    let device = pci_claim_device(index);
+    if !device.valid { return false; }
+    let before_device = device_core_snapshot(device);
+    if !before_device.valid || before_device.state != DEVICE_STATE_ATTACHED ||
+       before_device.driver.valid { return false; }
+
+    let driver = driver_register(PCI_MSIX_IVSHMEM_DRIVER_DESCRIPTOR);
+    if !driver.valid { return false; }
+    unsafe {
+        PCI_MSIX_IVSHMEM_DRIVER = driver;
+        PCI_MSIX_IVSHMEM_DEVICE = device;
+        PCI_MSIX_IVSHMEM_REG_BASE = reg_base;
+        PCI_MSIX_IVSHMEM_IRQ_COUNT = 0;
+    }
+
+    let bound = driver_bind(device);
+    if !driver_handle_equal(bound, driver) {
+        driver_unregister(driver);
+        return false;
+    }
+
+    let active = device_core_snapshot(device);
+    let reservation = unsafe { PCI_MSIX_IVSHMEM_RESERVATION };
+    if !active.valid || active.state != DEVICE_STATE_ACTIVE ||
+       !driver_handle_equal(active.driver, driver) ||
+       !pci_msix_reservation_is_ready(reservation) {
+        return pci_msix_ivshmem_unbind_before_table(device, driver);
+    }
+
+    let bus = unsafe { (*pci).bus };
+    let slot_id = unsafe { (*pci).slot };
+    let func = unsafe { (*pci).func };
+    if pci_bdf_pack(0, bus, slot_id, func) != reservation.bdf {
+        return pci_msix_ivshmem_unbind_before_table(device, driver);
+    }
+
+    // ivshmem-doorbell is launched with Memory Space already enabled. DF-7e2
+    // intentionally refuses to change Command, INTx or Bus Master bits.
+    let command = pci_config_read16(0, bus, slot_id, func, 0x04);
+    if command == 0xFFFF || (command & PCI_COMMAND_MEMORY_SPACE) == 0 {
+        return pci_msix_ivshmem_unbind_before_table(device, driver);
+    }
+    if !active_page_tables_map_mmio_identity_4k(reg_base) {
+        return pci_msix_ivshmem_unbind_before_table(device, driver);
+    }
+
+    let msix_claim = unsafe { PCI_MSIX_IVSHMEM_MSIX_CLAIM };
+    let table = pci_msix_table_program_masked_single(
+        reservation, device, driver, msix_claim, msix_claim,
+        PCI_MSIX_IVSHMEM_ENTRY);
+    unsafe {
+        PCI_MSIX_IVSHMEM_TABLE = table;
+        PCI_MSIX_IVSHMEM_RESERVATION = table.reservation;
+    }
+    if !pci_msix_table_program_is_masked(table) {
+        // Do not release ownership after an uncertain Table mutation; QEMU is
+        // terminated by the proof workflow and the failure remains fail-closed.
+        return false;
+    }
+
+    let arm = pci_msix_activate_single(
+        table, device, driver, msix_claim, msix_claim);
+    unsafe {
+        PCI_MSIX_IVSHMEM_ARM = arm;
+        PCI_MSIX_IVSHMEM_RESERVATION = arm.reservation;
+    }
+    if !pci_msix_arm_is_armed(arm) { return false; }
+
+    let peer = x86_mmio_read32(reg_base + PCI_MSIX_IVSHMEM_POSITION);
+    if peer > 0xFFFF { return false; }
+    let doorbell = ((peer & 0xFFFF) << 16) | PCI_MSIX_IVSHMEM_VECTOR;
+    __dma_fence();
+    x86_mmio_write32(reg_base + PCI_MSIX_IVSHMEM_DOORBELL, doorbell);
+
+    let mut spins: u32 = 0;
+    loop {
+        let count = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };
+        if count != 0 || spins >= PCI_MSIX_IVSHMEM_SPIN_LIMIT { break; }
+        x86_cpu_pause();
+        spins += 1;
+    }
+    if unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT } != 1 { return false; }
+
+    let vector = arm.reservation.vector;
+    if !driver_unbind(device, driver) { return false; }
+    let attached = device_core_snapshot(device);
+    let released = unsafe { PCI_MSIX_IVSHMEM_ARM };
+    if !pci_msix_arm_is_released(released) ||
+       !attached.valid || attached.state != DEVICE_STATE_ATTACHED ||
+       attached.driver.valid || attached.resource_count != 0 ||
+       resource_active_count() != before_resources ||
+       irq_registry_active_count() != before_irqs {
+        return false;
+    }
+    if irq_registry_dispatch(vector) { return false; }
+    if !driver_unregister(driver) { return false; }
+
+    pci_msix_ivshmem_reset_state();
+    if x86_serial_is_ready() {
+        return x86_serial_write_buffer(
+            "BAKEN:PCI_MSIX_IVSHMEM_READY\n".as_ptr(), 29);
+    }
+    return true;
+}
