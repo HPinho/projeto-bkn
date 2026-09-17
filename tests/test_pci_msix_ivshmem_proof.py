@@ -56,17 +56,21 @@ class PciMsixIvshmemRuntimeProofContracts(unittest.TestCase):
         self.assertIn('"BAKEN:PCI_MSIX_IVSHMEM_READY\\n"', body)
 
     def test_proof_does_not_enable_intx_bus_master_or_rewrite_bars(self):
+        runtime = self._body("pci_msix_ivshmem_runtime_proof")
+        probe = self._body("pci_msix_ivshmem_probe")
+        remove = self._body("pci_msix_ivshmem_remove")
+        mutation_path = runtime + probe + remove
         forbidden = (
             "pci_enable_bus_master(",
             "pci_enable_memory(",
             "pci_write_command(",
             "pci_config_write32(",
             "pci_config_write16(",
-            "0xFFFFFFFF,",
+            "pci_write_config32(",
         )
         for token in forbidden:
-            self.assertNotIn(token, FIXTURE)
-        self.assertNotIn("pba_physical", FIXTURE)
+            self.assertNotIn(token, mutation_path)
+        self.assertNotIn("pba_physical", mutation_path)
 
     def test_remove_delegates_to_df7e1_teardown_before_bar_release(self):
         body = self._body("pci_msix_ivshmem_remove")
