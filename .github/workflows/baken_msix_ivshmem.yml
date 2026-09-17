@@ -53,6 +53,96 @@ jobs:
         run: |
           cp tests/fixtures/df7e2/pci_msix_ivshmem_proof.sotlas \
              kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          fixture = Path("kernel/src/drivers/pci_msix_ivshmem_proof.sotlas")
+          text = fixture.read_text(encoding="utf-8")
+
+          stage_replacements = {
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=BOUND\\n".as_ptr(), 17);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x10);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=TABLE\\n".as_ptr(), 17);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x20);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=ARMED\\n".as_ptr(), 17);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x30);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=EDGE\\n".as_ptr(), 16);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x41);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=SETTLED\\n".as_ptr(), 19);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x51);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=REMOVE_DISARM\\n".as_ptr(), 25);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x61);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=REMOVE_BARS\\n".as_ptr(), 23);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x62);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=UNBOUND\\n".as_ptr(), 19);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x70);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=RELEASED\\n".as_ptr(), 20);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x80);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=STALE\\n".as_ptr(), 17);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0x90);",
+              'pci_msix_ivshmem_trace("BAKEN:MSIX=UNREGISTERED\\n".as_ptr(), 24);':
+                  "x86_serial_write_hex32_marker('X' as u8, 0xA0);",
+          }
+          for old, new in stage_replacements.items():
+              assert text.count(old) == 1, old
+              text = text.replace(old, new, 1)
+
+          anchor = "    let irq_before_doorbell = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };\n"
+          assert text.count(anchor) == 1
+          text = text.replace(
+              anchor,
+              anchor + "    x86_serial_write_hex32_marker('B' as u8, irq_before_doorbell);\n",
+              1,
+          )
+
+          anchor = "    let first_delivered = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };\n"
+          assert text.count(anchor) == 1
+          text = text.replace(
+              anchor,
+              anchor + "    x86_serial_write_hex32_marker('C' as u8, first_delivered);\n"
+                       "    x86_serial_write_hex32_marker('X' as u8, 0x40);\n",
+              1,
+          )
+
+          anchor = "    if stable_spins < PCI_MSIX_IVSHMEM_STABLE_SPINS { return false; }\n"
+          assert text.count(anchor) == 1
+          text = text.replace(
+              anchor,
+              "    x86_serial_write_hex32_marker('S' as u8, stable_spins);\n"
+              "    x86_serial_write_hex32_marker('s' as u8, settle_spins);\n"
+              "    x86_serial_write_hex32_marker('X' as u8, 0x50);\n" + anchor,
+              1,
+          )
+
+          anchor = "    let vector = arm.reservation.vector;\n    if !driver_unbind(device, driver) { return false; }\n"
+          assert text.count(anchor) == 1
+          text = text.replace(
+              anchor,
+              "    let vector = arm.reservation.vector;\n"
+              "    x86_serial_write_hex32_marker('X' as u8, 0x60);\n"
+              "    if !driver_unbind(device, driver) { return false; }\n",
+              1,
+          )
+
+          anchor = "    let attached = device_core_snapshot(device);\n    let released = unsafe { PCI_MSIX_IVSHMEM_ARM };\n"
+          assert text.count(anchor) == 1
+          text = text.replace(
+              anchor,
+              anchor +
+              "    x86_serial_write_hex32_marker('R' as u8, resource_active_count());\n"
+              "    x86_serial_write_hex32_marker('r' as u8, before_resources);\n"
+              "    x86_serial_write_hex32_marker('I' as u8, irq_registry_active_count());\n"
+              "    x86_serial_write_hex32_marker('i' as u8, before_irqs);\n"
+              "    x86_serial_write_hex32_marker('N' as u8, attached.resource_count);\n"
+              "    x86_serial_write_hex32_marker('A' as u8, attached.state as u32);\n"
+              "    x86_serial_write_hex32_marker('L' as u8, released.state as u32);\n",
+              1,
+          )
+
+          fixture.write_text(text, encoding="utf-8")
+          PY
+
           python3 - <<'PY'
           from pathlib import Path
 
@@ -91,6 +181,8 @@ jobs:
             kernel/src/baken_native_runtime.sotlas
           grep -Fq 'pci_msix_ivshmem_runtime_proof()' \
             kernel/src/baken_native_runtime.sotlas
+          grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x60);" \
+            kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
 
       - name: Verify instrumented Sotlas kernel graph
         run: |
