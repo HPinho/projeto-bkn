@@ -59,8 +59,9 @@ class StorageDiscoveryTests(unittest.TestCase):
     def test_ahci_dma_runtime_uses_real_pmm_dma_and_programs_port_tables(self):
         text = AHCI_RUNTIME.read_text(encoding="utf-8")
         body = text.split("pub fn ahci_runtime_prepare_dma", 1)[1].split("pub fn ahci_runtime_identify_device", 1)[0]
-        for token in ("dma_alloc(", "dma_share_with_device", "PCI_COMMAND_BUS_MASTER", "AHCI_PX_CLB", "AHCI_PX_FB", "AHCI_PX_CMD", "AHCI_PX_CI", "AHCI_COMMAND_LIST_PAGE", "AHCI_RECEIVED_FIS_PAGE", "AHCI_COMMAND_TABLE_PAGE", "ahci_runtime_write64_pair", "x86_serial_write_stage_marker('c' as u8)"):
+        for token in ("dma_device_constraints(AHCI_RUNTIME_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", "dma_device_constraints_valid(&constraints)", "dma_alloc_for_constraints(", "dma_buffer_satisfies_device_constraints(&arena, &constraints)", "dma_share_with_device", "PCI_COMMAND_BUS_MASTER", "AHCI_PX_CLB", "AHCI_PX_FB", "AHCI_PX_CMD", "AHCI_PX_CI", "AHCI_COMMAND_LIST_PAGE", "AHCI_RECEIVED_FIS_PAGE", "AHCI_COMMAND_TABLE_PAGE", "ahci_runtime_write64_pair", "x86_serial_write_stage_marker('c' as u8)"):
             self.assertIn(token, body)
+        self.assertNotIn("dma_alloc(AHCI_RUNTIME_ARENA_PAGES", body)
         self.assertIn("*header = 5", body)
         self.assertIn("ctba_low", body)
         self.assertIn("ctba_high", body)
