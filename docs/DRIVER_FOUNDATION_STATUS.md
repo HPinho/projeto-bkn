@@ -35,18 +35,6 @@ PLANNED -> IMPLEMENTED -> VALIDATING -> CERTIFIED
 test(pci): guard ivshmem MSI-X BAR sizing command restore
 ```
 
-No mesmo SHA passaram:
-
-- CI/CD + Automated QEMU #1321;
-- SMP Bring-up #424;
-- NVMe-only Bare-Metal #521;
-- HID Dual-device #180;
-- SMP Fault Diagnostic #86;
-- MSI EDU Runtime #26;
-- MSI-X ivshmem Runtime #13.
-
-Esse checkpoint fecha a macroetapa DF-7 com entrega MSI-X real em QEMU `ivshmem-doorbell`, teardown fail-closed e guard estrutural do caminho de BAR sizing.
-
 ## Baseline certificada DF-8a
 
 ```text
@@ -54,7 +42,14 @@ e33e6780106edb61bdbca72fa818272d23e154e2
 docs(driver): open DF-8a validation baseline
 ```
 
-Os sete gates obrigatorios do SHA concluíram com sucesso. DF-8a formaliza constraints DMA por dispositivo sem alterar o allocator existente, PMM/VMM, ownership/fence ou drivers reais.
+## Baseline certificada DF-8b
+
+```text
+bf0d75503dec9a83246b2a66fd94539cfd2c62cf
+fix(test): ignore DMA comments in DF-8 guardrails
+```
+
+Os sete gates obrigatorios do SHA `bf0d75503dec9a83246b2a66fd94539cfd2c62cf` fecharam com sucesso. O DF-8b passa a ser a baseline certificada para typed constrained allocation.
 
 ## Driver Foundation
 
@@ -77,7 +72,8 @@ DF-7   MSI-X                                       CERTIFIED
   DF-7e2 QEMU ivshmem runtime proof                CERTIFIED
 DF-8   DMA Device API                              IN PROGRESS
   DF-8a read-only device constraints model         CERTIFIED
-  DF-8b typed constrained allocation               IMPLEMENTED / VALIDATING
+  DF-8b typed constrained allocation               CERTIFIED
+  DF-8c per-device integration / NVMe first        IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -91,46 +87,39 @@ Objetivo da macroetapa: representar e aplicar constraints DMA por dispositivo se
 
 **CERTIFIED.** Baseline `e33e6780106edb61bdbca72fa818272d23e154e2`.
 
-O microcorte adiciona `DmaDeviceConstraints` em `kernel/src/memory/dma.sotlas` com apenas os limites que o allocator existente ja entende:
-
-```text
-alignment
-max_address
-boundary
-```
-
-Contratos:
-
-- `dma_device_constraints(...)` valida alignment, address ceiling e boundary;
-- `dma_device_constraints_valid(...)` revalida o objeto antes de consumo;
-- `dma_buffer_satisfies_device_constraints(...)` e estritamente read-only e verifica alignment fisico, overflow do ultimo byte, teto de endereco e cruzamento de boundary;
-- nenhuma API DF-8a aloca/libera pagina, muda owner/fence, mapeia MMIO ou chama firmware;
-- `dma_alloc_for_device(size, alignment, max_address, boundary)` permanece o backend existente e continua chamando diretamente `pmm_alloc_pages_constrained(...)`;
-- xHCI/HID, NVMe, AHCI e storage nao foram migrados neste corte.
-
 ### DF-8b — typed constrained allocation
+
+**CERTIFIED.** Baseline `bf0d75503dec9a83246b2a66fd94539cfd2c62cf`.
+
+`dma_alloc_for_constraints(size, constraints)` valida o contrato tipado e delega exatamente uma vez para `dma_alloc_for_device(...)`, que continua usando `pmm_alloc_pages_constrained(...)` como unico backend fisico constrained.
+
+### DF-8c — per-device integration / NVMe first
 
 **IMPLEMENTED / VALIDATING.**
 
-O candidato adiciona `dma_alloc_for_constraints(size, constraints)` como entrada tipada estreita:
+Primeiro caller real escolhido: `kernel/src/drivers/nvme.sotlas`.
+
+Motivos:
+
+- ja possuia gate runtime dedicado NVMe-only;
+- ja usava constraints explicitas e simples;
+- a migracao preserva exatamente os valores anteriores: `alignment=4096`, `max_address=0xFFFFFFFFFFFFFFFF`, `boundary=0`;
+- nenhuma mudanca em MMIO, filas, sharing, IRQ, comandos NVMe, teardown ou PMM/VMM.
+
+Novo caminho:
 
 ```text
-DmaDeviceConstraints validas
--> dma_alloc_for_device(size, alignment, max_address, boundary)
--> backend fisico existente
+dma_device_constraints(4096, U64_MAX, 0)
+-> dma_device_constraints_valid(...)
+-> dma_alloc_for_constraints(20480, ...)
+-> dma_buffer_satisfies_device_constraints(...)
+-> dma_share_with_device(...)
 ```
 
-Invariantes do corte:
+Guardrails:
 
-- valida `size` e `DmaDeviceConstraints` antes de delegar;
-- chama `dma_alloc_for_device(...)` exatamente uma vez;
-- nao chama PMM diretamente;
-- nao altera owner/fence nem executa submit/share;
-- nao cria allocator paralelo;
-- nenhum caller de xHCI/HID/NVMe/AHCI/storage usa a API nova antes do DF-8c;
-- guardrails em `tests/test_dma_contract.py` bloqueiam essas regressoes.
-
-Candidato funcional: `158d98b1b310d01bd533a2571c0548b0fa89cec9`; guardrail: `72695e8a2847e3ec83adfee5c71c9f1e7f49df6c`.
+- `tests/test_foundation_nvme_gate.py` exige o caminho tipado e proibe a chamada legacy direta para a arena NVMe;
+- `tests/test_dma_contract.py` exige que, neste primeiro corte DF-8c, o unico caller de `dma_alloc_for_constraints(...)` fora de `dma.sotlas` seja `kernel/src/drivers/nvme.sotlas`.
 
 ## Gates obrigatorios
 
@@ -147,18 +136,6 @@ Para candidatos funcionais da Driver Foundation, o conjunto atual e:
 ```
 
 Se qualquer gate falhar, o candidato entra em `correction-only` ate todos voltarem a verde no mesmo SHA corretivo.
-
-## Proximo microcorte, somente apos DF-8b certificado
-
-```text
-DF-8c per-device integration
--> auditar requisitos reais de cada caller
--> migracao incremental de um subsistema por vez
--> preservar exatamente alignment/max_address/boundary atuais
--> runtime proof + regressao dos gates existentes
-```
-
-A escolha do primeiro caller deve ocorrer somente depois de DF-8b certificado e de auditoria das constraints reais, para nao transformar a API tipada em mudanca silenciosa de comportamento de hardware.
 
 ## Regra de retomada
 
