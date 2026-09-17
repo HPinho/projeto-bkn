@@ -1,0 +1,635 @@
+// Baken OS — DF-7d: programação transacional de uma entrada MSI-X mascarada.
+//
+// Este microcorte consome ownership DF-7c e layout DF-7b generation-safe.
+// Ele programa somente uma Table entry já mascarada e mantém MSI-X Enable=0.
+// Não altera Function Mask global, INTx, Bus Master, PBA ou config-space.
+// Qualquer incerteza depois da primeira escrita tenta rollback exato; se a
+// restauração não puder ser provada, o ownership é devolvido como QUARANTINED.
+module kernel::drivers::pci_msix_table;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msix_capability::*;
+import kernel::drivers::pci_msix_layout::*;
+import kernel::drivers::pci_msix::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+import kernel::interrupts::lapic::*;
+import kernel::memory::active_page_tables::*;
+import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const PCI_MSIX_TABLE_ENTRY_SIZE: u64 = 16;
+pub const PCI_MSIX_TABLE_ADDRESS_LOW_REL: u64 = 0;
+pub const PCI_MSIX_TABLE_ADDRESS_HIGH_REL: u64 = 4;
+pub const PCI_MSIX_TABLE_MESSAGE_DATA_REL: u64 = 8;
+pub const PCI_MSIX_TABLE_VECTOR_CONTROL_REL: u64 = 12;
+pub const PCI_MSIX_TABLE_VECTOR_MASK: u32 = 1;
+
+pub const PCI_MSIX_MESSAGE_ADDRESS_BASE: u32 = 0xFEE00000;
+pub const PCI_MSIX_MESSAGE_DEST_SHIFT: u32 = 12;
+pub const PCI_MSIX_MESSAGE_DEST_MASK: u32 = 0x000FF000;
+pub const PCI_MSIX_MESSAGE_DATA_VECTOR_MASK: u32 = 0x000000FF;
+
+pub const PCI_MSIX_TABLE_PROGRAM_INVALID: u8 = 0;
+pub const PCI_MSIX_TABLE_PROGRAM_READY: u8 = 1;
+pub const PCI_MSIX_TABLE_PROGRAMMED_MASKED: u8 = 2;
+pub const PCI_MSIX_TABLE_PROGRAM_QUARANTINED: u8 = 3;
+
+@repr(C)
+pub struct PciMsixTableEntrySnapshot {
+    pub address_low: u32;
+    pub address_high: u32;
+    pub message_data: u32;
+    pub vector_control: u32;
+    pub valid: bool;
+}
+
+@repr(C)
+pub struct PciMsixTableProgramResult {
+    pub reservation: PciMsixReservation;
+    pub entry_index: u16;
+    pub entry_physical: u64;
+    pub original: PciMsixTableEntrySnapshot;
+    pub programmed: PciMsixTableEntrySnapshot;
+    pub destination_apic_id: u8;
+    pub state: u8;
+    pub valid: bool;
+}
+
+static mut PCI_MSIX_TABLE_PROGRAM_LOCK: SpinLock = SpinLock { state: SPINLOCK_UNLOCKED };
+
+@system
+fn pci_msix_table_invalid_snapshot() -> PciMsixTableEntrySnapshot {
+    return PciMsixTableEntrySnapshot {
+        address_low: 0,
+        address_high: 0,
+        message_data: 0,
+        vector_control: 0,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_table_invalid_result(reservation: PciMsixReservation,
+                                 entry_index: u16) -> PciMsixTableProgramResult {
+    return PciMsixTableProgramResult {
+        reservation: reservation,
+        entry_index: entry_index,
+        entry_physical: 0,
+        original: pci_msix_table_invalid_snapshot(),
+        programmed: pci_msix_table_invalid_snapshot(),
+        destination_apic_id: 0,
+        state: PCI_MSIX_TABLE_PROGRAM_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_table_quarantined_copy(reservation: PciMsixReservation) -> PciMsixReservation {
+    if !reservation.valid { return reservation; }
+    return PciMsixReservation {
+        source: reservation.source,
+        irq: reservation.irq,
+        vector: reservation.vector,
+        bdf: reservation.bdf,
+        capability_offset: reservation.capability_offset,
+        table_size: reservation.table_size,
+        state: PCI_MSIX_RESERVATION_QUARANTINED,
+        valid: true
+    };
+}
+
+@system
+fn pci_msix_table_result(reservation: PciMsixReservation,
+                         entry_index: u16,
+                         entry_physical: u64,
+                         original: PciMsixTableEntrySnapshot,
+                         programmed: PciMsixTableEntrySnapshot,
+                         destination: u8,
+                         state: u8) -> PciMsixTableProgramResult {
+    return PciMsixTableProgramResult {
+        reservation: reservation,
+        entry_index: entry_index,
+        entry_physical: entry_physical,
+        original: original,
+        programmed: programmed,
+        destination_apic_id: destination,
+        state: state,
+        valid: state != PCI_MSIX_TABLE_PROGRAM_INVALID
+    };
+}
+
+@system
+fn pci_msix_table_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msix_table_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msix_table_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+@system
+fn pci_msix_table_device_active(device: DeviceHandle,
+                                driver: DriverHandle,
+                                bdf: u32) -> bool {
+    if !device.valid || !driver.valid || bdf == PCI_BRIDGE_BDF_INVALID {
+        return false;
+    }
+    let owner = device_core_snapshot(device);
+    return owner.valid && owner.bus == DEVICE_BUS_PCI &&
+           owner.bus_instance == bdf &&
+           driver_handle_equal(owner.driver, driver) &&
+           owner.state == DEVICE_STATE_ACTIVE;
+}
+
+@system
+fn pci_msix_table_source_owned(reservation: PciMsixReservation,
+                               device: DeviceHandle,
+                               driver: DriverHandle) -> bool {
+    if !reservation.source.valid { return false; }
+    let source = resource_snapshot(reservation.source);
+    return source.valid &&
+           source.request.kind == RESOURCE_KIND_PCI_MSIX &&
+           source.request.start == reservation.bdf as u64 &&
+           source.request.length == 1 &&
+           source.request.auxiliary == 0 &&
+           device_handle_equal(source.owner_device, device) &&
+           driver_handle_equal(source.owner_driver, driver);
+}
+
+@system
+fn pci_msix_table_irq_owned(reservation: PciMsixReservation) -> bool {
+    return reservation.irq.valid &&
+           reservation.vector >= IRQ_DYNAMIC_VECTOR_FIRST &&
+           reservation.vector <= IRQ_DYNAMIC_VECTOR_LAST &&
+           irq_registry_vector(reservation.irq) == reservation.vector;
+}
+
+@system
+fn pci_msix_table_reservation_owned(reservation: PciMsixReservation,
+                                    device: DeviceHandle,
+                                    driver: DriverHandle) -> bool {
+    return pci_msix_reservation_is_ready(reservation) &&
+           pci_msix_table_device_active(device, driver, reservation.bdf) &&
+           pci_msix_table_source_owned(reservation, device, driver) &&
+           pci_msix_table_irq_owned(reservation);
+}
+
+@system
+fn pci_msix_table_begin_operation_pins(reservation: PciMsixReservation,
+                                       device: DeviceHandle,
+                                       driver: DriverHandle) -> bool {
+    if !device_core_begin_active_operation(device, driver) { return false; }
+    if !irq_registry_begin_operation(reservation.irq, device, driver) {
+        if !device_core_end_active_operation(device, driver) {
+            loop { x86_cpu_pause(); }
+        }
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msix_table_end_operation_pins(reservation: PciMsixReservation,
+                                     device: DeviceHandle,
+                                     driver: DriverHandle) -> void {
+    if !irq_registry_end_operation(reservation.irq, device, driver) {
+        loop { x86_cpu_pause(); }
+    }
+    if !device_core_end_active_operation(device, driver) {
+        loop { x86_cpu_pause(); }
+    }
+}
+
+@system
+fn pci_msix_table_layout_equal(left: PciMsixLayout,
+                               right: PciMsixLayout) -> bool {
+    return left.valid && right.valid &&
+           left.bdf == right.bdf &&
+           left.capability_offset == right.capability_offset &&
+           left.table_size == right.table_size &&
+           left.enabled == right.enabled &&
+           left.function_masked == right.function_masked &&
+           left.table_bar_index == right.table_bar_index &&
+           left.table_bar_base == right.table_bar_base &&
+           left.table_bar_size == right.table_bar_size &&
+           left.table_offset == right.table_offset &&
+           left.table_physical == right.table_physical &&
+           left.table_bytes == right.table_bytes &&
+           left.pba_bar_index == right.pba_bar_index &&
+           left.pba_bar_base == right.pba_bar_base &&
+           left.pba_bar_size == right.pba_bar_size &&
+           left.pba_offset == right.pba_offset &&
+           left.pba_physical == right.pba_physical &&
+           left.pba_bytes == right.pba_bytes;
+}
+
+@system
+fn pci_msix_table_layout_matches_reservation(layout: PciMsixLayout,
+                                             reservation: PciMsixReservation) -> bool {
+    return layout.valid && !layout.enabled &&
+           layout.bdf == reservation.bdf &&
+           layout.capability_offset == reservation.capability_offset &&
+           layout.table_size == reservation.table_size &&
+           layout.table_size > 0 &&
+           layout.table_physical != 0 &&
+           layout.table_bytes >= PCI_MSIX_TABLE_ENTRY_SIZE;
+}
+
+@system
+fn pci_msix_table_quiescent(reservation: PciMsixReservation,
+                            layout: PciMsixLayout) -> bool {
+    if !pci_msix_table_layout_matches_reservation(layout, reservation) {
+        return false;
+    }
+    let bus = pci_msix_table_bus(reservation.bdf);
+    let slot_id = pci_msix_table_slot(reservation.bdf);
+    let func = pci_msix_table_function(reservation.bdf);
+    if pci_bdf_pack(0, bus, slot_id, func) != reservation.bdf { return false; }
+
+    let msi = pci_msi_capability_probe(0, bus, slot_id, func);
+    if msi.valid && msi.enabled { return false; }
+
+    let msix = pci_msix_capability_probe(0, bus, slot_id, func);
+    if !msix.valid || msix.enabled ||
+       msix.capability_offset != reservation.capability_offset ||
+       msix.table_size != reservation.table_size ||
+       msix.table_bir != layout.table_bar_index ||
+       msix.table_offset != layout.table_offset ||
+       msix.table_bytes != layout.table_bytes ||
+       msix.pba_bir != layout.pba_bar_index ||
+       msix.pba_offset != layout.pba_offset ||
+       msix.pba_bytes != layout.pba_bytes {
+        return false;
+    }
+
+    let command = pci_config_read16(0, bus, slot_id, func, 0x0004);
+    return (command & PCI_COMMAND_MEMORY_SPACE) != 0;
+}
+
+@system
+fn pci_msix_table_entry_address(layout: PciMsixLayout,
+                                entry_index: u16) -> u64 {
+    if !layout.valid || entry_index >= layout.table_size {
+        return 0;
+    }
+    let offset = (entry_index as u64) * PCI_MSIX_TABLE_ENTRY_SIZE;
+    if offset > layout.table_bytes ||
+       PCI_MSIX_TABLE_ENTRY_SIZE > layout.table_bytes - offset {
+        return 0;
+    }
+    let address = layout.table_physical + offset;
+    if address < layout.table_physical ||
+       address + PCI_MSIX_TABLE_ENTRY_SIZE < address {
+        return 0;
+    }
+    return address;
+}
+
+@system
+fn pci_msix_table_map_entry(entry_physical: u64) -> bool {
+    if entry_physical == 0 { return false; }
+    let last_byte = entry_physical + PCI_MSIX_TABLE_ENTRY_SIZE - 1;
+    if last_byte < entry_physical { return false; }
+
+    let first_page = x86_page_align_down(entry_physical);
+    let last_page = x86_page_align_down(last_byte);
+    if first_page == 0 || last_page == 0 { return false; }
+
+    if !active_page_tables_map_mmio_identity_4k(first_page) { return false; }
+    if last_page != first_page &&
+       !active_page_tables_map_mmio_identity_4k(last_page) {
+        return false;
+    }
+    return true;
+}
+
+@system
+fn pci_msix_table_snapshot(entry_physical: u64) -> PciMsixTableEntrySnapshot {
+    if entry_physical == 0 { return pci_msix_table_invalid_snapshot(); }
+    return PciMsixTableEntrySnapshot {
+        address_low: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_ADDRESS_LOW_REL),
+        address_high: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_ADDRESS_HIGH_REL),
+        message_data: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_MESSAGE_DATA_REL),
+        vector_control: x86_mmio_read32(
+            entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL),
+        valid: true
+    };
+}
+
+@system
+fn pci_msix_table_snapshot_equal(left: PciMsixTableEntrySnapshot,
+                                 right: PciMsixTableEntrySnapshot) -> bool {
+    return left.valid && right.valid &&
+           left.address_low == right.address_low &&
+           left.address_high == right.address_high &&
+           left.message_data == right.message_data &&
+           left.vector_control == right.vector_control;
+}
+
+@system
+fn pci_msix_table_program_lock_irq(saved_flags: *mut u64) -> bool {
+    if saved_flags == (null as *mut u64) { return false; }
+    let flags = x86_irq_save_disable();
+    unsafe {
+        if !spinlock_lock(&mut PCI_MSIX_TABLE_PROGRAM_LOCK) {
+            x86_irq_restore(flags);
+            return false;
+        }
+        *saved_flags = flags;
+    }
+    return true;
+}
+
+@system
+fn pci_msix_table_program_unlock_irq(flags: u64) -> void {
+    let mut released = false;
+    unsafe { released = spinlock_unlock(&mut PCI_MSIX_TABLE_PROGRAM_LOCK); }
+    if !released { loop { x86_cpu_pause(); } }
+    x86_irq_restore(flags);
+}
+
+@system
+fn pci_msix_table_restore_entry(reservation: PciMsixReservation,
+                                device: DeviceHandle,
+                                driver: DriverHandle,
+                                table_claim: PciBarClaim,
+                                pba_claim: PciBarClaim,
+                                expected_layout: PciMsixLayout,
+                                entry_physical: u64,
+                                original: PciMsixTableEntrySnapshot) -> bool {
+    if !original.valid ||
+       !pci_msix_table_reservation_owned(reservation, device, driver) {
+        return false;
+    }
+
+    let before = pci_msix_layout_probe(device, driver, table_claim, pba_claim);
+    if !pci_msix_table_layout_equal(expected_layout, before) ||
+       !pci_msix_table_quiescent(reservation, before) {
+        return false;
+    }
+
+    // Mantém a entry mascarada durante toda a restauração do payload.
+    let masked_control = original.vector_control | PCI_MSIX_TABLE_VECTOR_MASK;
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL, masked_control);
+    __dma_fence();
+    if x86_mmio_read32(
+        entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL) != masked_control {
+        return false;
+    }
+
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_ADDRESS_LOW_REL, original.address_low);
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_ADDRESS_HIGH_REL, original.address_high);
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_MESSAGE_DATA_REL, original.message_data);
+    __dma_fence();
+
+    // Vector Control original é a última escrita. MSI-X global continua disabled.
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL,
+        original.vector_control);
+    __dma_fence();
+
+    let restored = pci_msix_table_snapshot(entry_physical);
+    if !pci_msix_table_snapshot_equal(restored, original) {
+        return false;
+    }
+
+    let after = pci_msix_layout_probe(device, driver, table_claim, pba_claim);
+    return pci_msix_table_layout_equal(expected_layout, after) &&
+           pci_msix_table_quiescent(reservation, after) &&
+           pci_msix_table_reservation_owned(reservation, device, driver);
+}
+
+@system
+fn pci_msix_table_failure_after_write(reservation: PciMsixReservation,
+                                      device: DeviceHandle,
+                                      driver: DriverHandle,
+                                      table_claim: PciBarClaim,
+                                      pba_claim: PciBarClaim,
+                                      layout: PciMsixLayout,
+                                      entry_index: u16,
+                                      entry_physical: u64,
+                                      original: PciMsixTableEntrySnapshot,
+                                      programmed: PciMsixTableEntrySnapshot,
+                                      destination: u8) -> PciMsixTableProgramResult {
+    if pci_msix_table_restore_entry(
+        reservation, device, driver, table_claim, pba_claim,
+        layout, entry_physical, original
+    ) {
+        return pci_msix_table_result(
+            reservation, entry_index, entry_physical,
+            original, programmed, destination,
+            PCI_MSIX_TABLE_PROGRAM_READY
+        );
+    }
+
+    return pci_msix_table_result(
+        pci_msix_table_quarantined_copy(reservation),
+        entry_index, entry_physical, original, programmed, destination,
+        PCI_MSIX_TABLE_PROGRAM_QUARANTINED
+    );
+}
+
+// DF-7d — programa uma única entrada MSI-X, mas a deixa mascarada.
+// A função NÃO habilita MSI-X globalmente e NÃO desmascara a entry.
+@system
+pub fn pci_msix_table_program_masked_single(
+    reservation: PciMsixReservation,
+    device: DeviceHandle,
+    driver: DriverHandle,
+    table_claim: PciBarClaim,
+    pba_claim: PciBarClaim,
+    entry_index: u16
+) -> PciMsixTableProgramResult {
+    if !pci_msix_reservation_is_ready(reservation) ||
+       !pci_msix_table_device_active(device, driver, reservation.bdf) ||
+       !lapic_is_ready() || !active_page_tables_is_ready() {
+        return pci_msix_table_invalid_result(reservation, entry_index);
+    }
+
+    if !pci_msix_table_begin_operation_pins(reservation, device, driver) {
+        return pci_msix_table_result(
+            pci_msix_table_quarantined_copy(reservation),
+            entry_index, 0,
+            pci_msix_table_invalid_snapshot(),
+            pci_msix_table_invalid_snapshot(),
+            lapic_id(), PCI_MSIX_TABLE_PROGRAM_QUARANTINED
+        );
+    }
+
+    if !pci_msix_table_reservation_owned(reservation, device, driver) {
+        let result = pci_msix_table_result(
+            pci_msix_table_quarantined_copy(reservation),
+            entry_index, 0,
+            pci_msix_table_invalid_snapshot(),
+            pci_msix_table_invalid_snapshot(),
+            lapic_id(), PCI_MSIX_TABLE_PROGRAM_QUARANTINED
+        );
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let layout = pci_msix_layout_probe(device, driver, table_claim, pba_claim);
+    if !pci_msix_table_layout_matches_reservation(layout, reservation) ||
+       !pci_msix_table_quiescent(reservation, layout) {
+        let result = pci_msix_table_invalid_result(reservation, entry_index);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let entry_physical = pci_msix_table_entry_address(layout, entry_index);
+    if entry_physical == 0 || !pci_msix_table_map_entry(entry_physical) {
+        let result = pci_msix_table_invalid_result(reservation, entry_index);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    // Mapping/TLB shootdown ocorre antes do lock de programação com IF=0.
+    let mapped_layout = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_table_layout_equal(layout, mapped_layout) ||
+       !pci_msix_table_quiescent(reservation, mapped_layout) ||
+       !pci_msix_table_reservation_owned(reservation, device, driver) {
+        let result = pci_msix_table_invalid_result(reservation, entry_index);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let destination = lapic_id();
+    let address_low = PCI_MSIX_MESSAGE_ADDRESS_BASE |
+                      (((destination as u32) << PCI_MSIX_MESSAGE_DEST_SHIFT) &
+                       PCI_MSIX_MESSAGE_DEST_MASK);
+    let address_high: u32 = 0;
+    let message_data = (reservation.vector as u32) &
+                       PCI_MSIX_MESSAGE_DATA_VECTOR_MASK;
+
+    let mut flags: u64 = 0;
+    if !pci_msix_table_program_lock_irq(&mut flags) {
+        let result = pci_msix_table_invalid_result(reservation, entry_index);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    // Última revalidação antes da primeira escrita MMIO.
+    let locked_layout = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_table_layout_equal(layout, locked_layout) ||
+       !pci_msix_table_quiescent(reservation, locked_layout) ||
+       !pci_msix_table_reservation_owned(reservation, device, driver) {
+        let result = pci_msix_table_result(
+            pci_msix_table_quarantined_copy(reservation),
+            entry_index, entry_physical,
+            pci_msix_table_invalid_snapshot(),
+            pci_msix_table_invalid_snapshot(),
+            destination, PCI_MSIX_TABLE_PROGRAM_QUARANTINED
+        );
+        pci_msix_table_program_unlock_irq(flags);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let original = pci_msix_table_snapshot(entry_physical);
+    if !original.valid {
+        let result = pci_msix_table_invalid_result(reservation, entry_index);
+        pci_msix_table_program_unlock_irq(flags);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let masked_control = original.vector_control | PCI_MSIX_TABLE_VECTOR_MASK;
+    let programmed = PciMsixTableEntrySnapshot {
+        address_low: address_low,
+        address_high: address_high,
+        message_data: message_data,
+        vector_control: masked_control,
+        valid: true
+    };
+
+    // Primeira escrita: mask bit. Payload só é tocado após readback da máscara.
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL, masked_control);
+    __dma_fence();
+    if x86_mmio_read32(
+        entry_physical + PCI_MSIX_TABLE_VECTOR_CONTROL_REL) != masked_control {
+        let result = pci_msix_table_failure_after_write(
+            reservation, device, driver, table_claim, pba_claim,
+            layout, entry_index, entry_physical,
+            original, programmed, destination
+        );
+        pci_msix_table_program_unlock_irq(flags);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_ADDRESS_LOW_REL, address_low);
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_ADDRESS_HIGH_REL, address_high);
+    x86_mmio_write32(
+        entry_physical + PCI_MSIX_TABLE_MESSAGE_DATA_REL, message_data);
+    __dma_fence();
+
+    let readback = pci_msix_table_snapshot(entry_physical);
+    if !pci_msix_table_snapshot_equal(readback, programmed) ||
+       (readback.vector_control & PCI_MSIX_TABLE_VECTOR_MASK) == 0 {
+        let result = pci_msix_table_failure_after_write(
+            reservation, device, driver, table_claim, pba_claim,
+            layout, entry_index, entry_physical,
+            original, programmed, destination
+        );
+        pci_msix_table_program_unlock_irq(flags);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let final_layout = pci_msix_layout_probe(
+        device, driver, table_claim, pba_claim);
+    if !pci_msix_table_layout_equal(layout, final_layout) ||
+       !pci_msix_table_quiescent(reservation, final_layout) ||
+       !pci_msix_table_reservation_owned(reservation, device, driver) {
+        let result = pci_msix_table_failure_after_write(
+            reservation, device, driver, table_claim, pba_claim,
+            layout, entry_index, entry_physical,
+            original, programmed, destination
+        );
+        pci_msix_table_program_unlock_irq(flags);
+        pci_msix_table_end_operation_pins(reservation, device, driver);
+        return result;
+    }
+
+    let result = pci_msix_table_result(
+        reservation, entry_index, entry_physical,
+        original, programmed, destination,
+        PCI_MSIX_TABLE_PROGRAMMED_MASKED
+    );
+    pci_msix_table_program_unlock_irq(flags);
+    pci_msix_table_end_operation_pins(reservation, device, driver);
+    return result;
+}
+
+@system
+pub fn pci_msix_table_program_is_masked(result: PciMsixTableProgramResult) -> bool {
+    return result.valid &&
+           result.state == PCI_MSIX_TABLE_PROGRAMMED_MASKED &&
+           result.programmed.valid &&
+           (result.programmed.vector_control & PCI_MSIX_TABLE_VECTOR_MASK) != 0;
+}
