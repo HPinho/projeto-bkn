@@ -204,9 +204,9 @@ static PCI_MSIX_IVSHMEM_IRQ_DESCRIPTOR: IrqDescriptor = IrqDescriptor {
 };
 
 // DF-7b1 requires decode to be quiescent while BAR sizing writes all ones.
-// QEMU/OVMF leaves ivshmem Memory Space enabled, so the CI fixture temporarily
-// clears ONLY that bit, restores the exact original Command immediately after
-// measurement, and refuses to touch I/O Space, Bus Master or INTx state.
+// QEMU/OVMF leaves ivshmem Memory Space and Bus Master enabled, so the CI fixture
+// temporarily clears decode/bus-mastering bits, restores the exact original Command
+// immediately after measurement, and refuses to touch I/O Space or INTx state.
 @system
 fn pci_msix_ivshmem_measure_msix_bar(device: DeviceHandle, driver: DriverHandle,
                                      sizing_claim: PciBarClaim) -> PciBarSizeProof {
@@ -224,14 +224,13 @@ fn pci_msix_ivshmem_measure_msix_bar(device: DeviceHandle, driver: DriverHandle,
     let slot_id = ((bdf >> 3) & 0x1F) as u8;
     let func = (bdf & 0x07) as u8;
     let command_before = pci_config_read16(0, bus, slot_id, func, 0x04);
-    if command_before == 0xFFFF ||
-       (command_before & (PCI_COMMAND_IO_SPACE | PCI_COMMAND_BUS_MASTER)) != 0 {
+    if command_before == 0xFFFF || (command_before & PCI_COMMAND_IO_SPACE) != 0 {
         return invalid;
     }
 
-    let had_memory = (command_before & PCI_COMMAND_MEMORY_SPACE) != 0;
-    if had_memory {
-        let quiescent = command_before & !PCI_COMMAND_MEMORY_SPACE;
+    let active_bits = command_before & (PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER);
+    if active_bits != 0 {
+        let quiescent = command_before & !(PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER);
         if !pci_config_write16(0, bus, slot_id, func, 0x04, quiescent) ||
            pci_config_read16(0, bus, slot_id, func, 0x04) != quiescent {
             // Best-effort exact restoration before failing closed.
@@ -242,7 +241,7 @@ fn pci_msix_ivshmem_measure_msix_bar(device: DeviceHandle, driver: DriverHandle,
 
     let sizing = pci_measure_owned_bar(device, driver, sizing_claim);
 
-    if had_memory {
+    if active_bits != 0 {
         if !pci_config_write16(0, bus, slot_id, func, 0x04, command_before) ||
            pci_config_read16(0, bus, slot_id, func, 0x04) != command_before {
             return invalid;
