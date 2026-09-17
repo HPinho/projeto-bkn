@@ -116,8 +116,9 @@ class StorageDiscoveryTests(unittest.TestCase):
     def test_read_uses_dedicated_shared_dma_buffer_and_preserves_identify(self):
         text = AHCI_READ.read_text(encoding="utf-8")
         prep = text.split("fn ahci_read_prepare_buffer", 1)[1].split("fn ahci_read_magic_matches", 1)[0]
-        for token in ("dma_alloc(", "dma_buffer_cpu_owned", "dma_share_with_device", "AHCI_READ_BUFFER"):
+        for token in ("dma_device_constraints(AHCI_RUNTIME_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", "dma_device_constraints_valid(&constraints)", "dma_alloc_for_constraints(AHCI_RUNTIME_PAGE_SIZE, &constraints)", "dma_buffer_satisfies_device_constraints(&buffer, &constraints)", "dma_buffer_cpu_owned", "dma_share_with_device", "AHCI_READ_BUFFER"):
             self.assertIn(token, prep)
+        self.assertNotIn("dma_alloc(AHCI_RUNTIME_PAGE_SIZE, AHCI_RUNTIME_PAGE_SIZE)", prep)
         body = text.split("pub fn ahci_read_probe_sector0", 1)[1]
         self.assertIn("AHCI_READ_BUFFER.physical_address", body)
         self.assertIn("AHCI_READ_BUFFER.virtual_address", body)
