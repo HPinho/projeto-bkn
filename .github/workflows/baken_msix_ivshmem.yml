@@ -124,8 +124,8 @@ jobs:
               "    if !sizing_claim.valid { return false; }\n",
               "    if !sizing_claim.valid {\n        x86_serial_write_hex32_marker('X' as u8, 0x0B);\n        return false;\n    }\n")
           replace_once(
-              "    let sizing = pci_measure_owned_bar(device, driver, sizing_claim);\n    if !sizing.valid || sizing.size == 0 {\n        pci_release_bar(sizing_claim, device, driver);\n        return false;\n    }\n",
-              "    let sizing = pci_measure_owned_bar(device, driver, sizing_claim);\n    x86_serial_write_hex32_marker('M' as u8, sizing.size as u32);\n    if !sizing.valid || sizing.size == 0 {\n        x86_serial_write_hex32_marker('X' as u8, 0x0C);\n        pci_release_bar(sizing_claim, device, driver);\n        return false;\n    }\n")
+              "    let sizing = pci_msix_ivshmem_measure_msix_bar(device, driver, sizing_claim);\n    if !sizing.valid || sizing.size == 0 {\n        pci_release_bar(sizing_claim, device, driver);\n        return false;\n    }\n",
+              "    let sizing = pci_msix_ivshmem_measure_msix_bar(device, driver, sizing_claim);\n    x86_serial_write_hex32_marker('M' as u8, sizing.size as u32);\n    if !sizing.valid || sizing.size == 0 {\n        x86_serial_write_hex32_marker('X' as u8, 0x0C);\n        pci_release_bar(sizing_claim, device, driver);\n        return false;\n    }\n")
           replace_once(
               "    if !pci_release_bar(sizing_claim, device, driver) { return false; }\n",
               "    if !pci_release_bar(sizing_claim, device, driver) {\n        x86_serial_write_hex32_marker('X' as u8, 0x0D);\n        return false;\n    }\n")
@@ -186,6 +186,7 @@ jobs:
 
           grep -Fq 'import kernel::drivers::pci_msix_ivshmem_proof::*;' kernel/src/baken_native_runtime.sotlas
           grep -Fq 'pci_msix_ivshmem_runtime_proof()' kernel/src/baken_native_runtime.sotlas
+          grep -Fq "x86_serial_write_hex32_marker('M' as u8, sizing.size as u32);" kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
           grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0xD0);" kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
           grep -Fq "x86_serial_write_hex32_marker('X' as u8, 0x60);" kernel/src/drivers/pci_msix_ivshmem_proof.sotlas
 
