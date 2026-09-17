@@ -28,7 +28,10 @@ class FoundationNvmeGateTests(unittest.TestCase):
             "nvme_bar_size(dev)",
             "active_page_tables_map_mmio_identity_4k(NVME_BASE)",
             "nvme_wait_ready(0)",
-            "dma_alloc_for_device(20480, 4096, 0xFFFFFFFFFFFFFFFF, 0)",
+            "let constraints = dma_device_constraints(4096, 0xFFFFFFFFFFFFFFFF, 0);",
+            "dma_device_constraints_valid(&constraints)",
+            "dma_alloc_for_constraints(20480, &constraints)",
+            "dma_buffer_satisfies_device_constraints(&arena, &constraints)",
             "dma_share_with_device(&mut arena)",
             "nvme_store64(NVME_BASE + 0x28, NVME_PHYSICAL)",
             "nvme_store64(NVME_BASE + 0x30, NVME_PHYSICAL + 4096)",
@@ -42,6 +45,7 @@ class FoundationNvmeGateTests(unittest.TestCase):
             "nvme_command(0, 1, 0, NVME_PHYSICAL + 8192",
         ):
             self.assertIn(token, body)
+        self.assertNotIn("dma_alloc_for_device(20480, 4096, 0xFFFFFFFFFFFFFFFF, 0)", body)
 
     def test_command_path_tracks_cid_phase_sqid_and_poisoning(self):
         text = NVME.read_text(encoding="utf-8")
