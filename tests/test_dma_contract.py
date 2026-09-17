@@ -12,13 +12,14 @@ class DmaContractTests(unittest.TestCase):
     def test_df8a_device_constraints_are_typed_and_read_only(self):
         text=DMA.read_text(encoding="utf-8")
         for token in ("pub struct DmaDeviceConstraints","pub fn dma_invalid_device_constraints() -> DmaDeviceConstraints","pub fn dma_device_constraints(alignment: u64, max_address: u64, boundary: u64) -> DmaDeviceConstraints","pub fn dma_device_constraints_valid(constraints: *const DmaDeviceConstraints) -> bool","pub fn dma_buffer_satisfies_device_constraints("): self.assertIn(token,text)
-        body=text.split("pub fn dma_device_constraints(alignment: u64, max_address: u64, boundary: u64)",1)[1].split("pub fn dma_device_constraints_valid",1)[0]
+        code=code_without_comments(DMA)
+        body=code.split("pub fn dma_device_constraints(alignment: u64, max_address: u64, boundary: u64)",1)[1].split("pub fn dma_device_constraints_valid",1)[0]
         for token in ("dma_alignment_valid(alignment)","max_address == 0","boundary & (boundary - 1)","boundary < BAKEN_PAGE_SIZE"): self.assertIn(token,body)
         for forbidden in ("pmm_alloc", "pmm_free", "dma_alloc(", "dma_alloc_for_device(", "dma_submit_to_device(", "dma_share_with_device("):
             self.assertNotIn(forbidden,body)
     def test_df8a_constraint_check_is_overflow_and_boundary_safe(self):
-        text=DMA.read_text(encoding="utf-8")
-        body=text.split("pub fn dma_buffer_satisfies_device_constraints(",1)[1].split("pub fn dma_alloc_for_constraints",1)[0]
+        code=code_without_comments(DMA)
+        body=code.split("pub fn dma_buffer_satisfies_device_constraints(",1)[1].split("pub fn dma_alloc_for_constraints",1)[0]
         for token in ("dma_buffer_valid(buffer)","dma_device_constraints_valid(constraints)","physical_address & ((*constraints).alignment - 1)","let last = (*buffer).physical_address + (*buffer).size - 1;","last < (*buffer).physical_address","last > (*constraints).max_address","physical_address / (*constraints).boundary != last / (*constraints).boundary"): self.assertIn(token,body)
         for forbidden in ("pmm_alloc", "pmm_free", "__dma_fence", "owner =", "fence =", "dma_alloc_for_device("):
             self.assertNotIn(forbidden,body)
@@ -28,8 +29,8 @@ class DmaContractTests(unittest.TestCase):
         self.assertIn("pmm_alloc_pages_constrained(page_count, alignment, max_address, boundary)",body)
         self.assertNotIn("DmaDeviceConstraints",body)
     def test_df8b_typed_allocation_delegates_to_existing_allocator_once(self):
-        text=DMA.read_text(encoding="utf-8")
-        body=text.split("pub fn dma_alloc_for_constraints(",1)[1].split("pub fn dma_invalid_buffer",1)[0]
+        code=code_without_comments(DMA)
+        body=code.split("pub fn dma_alloc_for_constraints(",1)[1].split("pub fn dma_invalid_buffer",1)[0]
         for token in (
             "size == 0",
             "dma_device_constraints_valid(constraints)",
