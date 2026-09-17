@@ -46,7 +46,7 @@ class DmaContractTests(unittest.TestCase):
             "owner =", "fence =", "dma_submit_to_device(", "dma_share_with_device(",
         ):
             self.assertNotIn(forbidden,body)
-    def test_df8c_has_only_nvme_typed_allocation_caller(self):
+    def test_df8c_has_only_certified_typed_allocation_callers(self):
         kernel=ROOT/"kernel/src"
         callers=[]
         for path in kernel.rglob("*.sotlas"):
@@ -55,7 +55,11 @@ class DmaContractTests(unittest.TestCase):
             code=code_without_comments(path)
             if "dma_alloc_for_constraints(" in code:
                 callers.append(str(path.relative_to(ROOT)))
-        self.assertEqual(callers,["kernel/src/drivers/nvme.sotlas"],"DF-8c first integration must remain NVMe-only")
+        self.assertEqual(
+            sorted(callers),
+            ["kernel/src/drivers/ahci_runtime.sotlas","kernel/src/drivers/nvme.sotlas"],
+            "DF-8c integration must remain limited to NVMe and the AHCI runtime arena"
+        )
     def test_dma_requires_active_pmm_and_vmm_before_exposing_memory(self):
         text=DMA.read_text(encoding="utf-8")
         for token in ("pub fn dma_allocator_available() -> bool","pmm_allocator_is_active()","vmm_is_active()","vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE","if !pmm_inventory_is_valid()","if !dma_allocator_available()","pmm_alloc_pages_aligned(page_count, alignment)","direct_map_virtual_address(physical)","if rounded < size { return dma_invalid_buffer(); }"): self.assertIn(token,text)
