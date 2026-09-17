@@ -23,8 +23,9 @@ class AhciBlockWriteTests(unittest.TestCase):
     def test_write_gate_uses_dedicated_shared_dma_buffer(self):
         text = AHCI.read_text(encoding="utf-8")
         prep = text.split("fn ahci_write_prepare_buffer", 1)[1].split("fn ahci_write_fill_magic", 1)[0]
-        for token in ("AHCI_WRITE_BUFFER", "dma_alloc(", "dma_buffer_cpu_owned", "dma_share_with_device"):
+        for token in ("AHCI_WRITE_BUFFER", "dma_device_constraints(AHCI_RUNTIME_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", "dma_device_constraints_valid(&constraints)", "dma_alloc_for_constraints(AHCI_RUNTIME_PAGE_SIZE, &constraints)", "dma_buffer_satisfies_device_constraints(&buffer, &constraints)", "dma_buffer_cpu_owned", "dma_share_with_device"):
             self.assertIn(token, prep)
+        self.assertNotIn("dma_alloc(AHCI_RUNTIME_PAGE_SIZE, AHCI_RUNTIME_PAGE_SIZE)", prep)
         probe = text.split("pub fn ahci_write_probe_sector1", 1)[1].split("fn ahci_read_magic_matches", 1)[0]
         self.assertIn("AHCI_WRITE_BUFFER.virtual_address", probe)
         self.assertNotIn("AHCI_READ_BUFFER.virtual_address", probe)
