@@ -99,6 +99,27 @@ pub fn dma_buffer_satisfies_device_constraints(
     }
 }
 
+// DF-8b: entrada tipada para alocação DMA constrained. O backend físico
+// permanece exclusivamente dma_alloc_for_device()/pmm_alloc_pages_constrained;
+// este wrapper não duplica política, não altera ownership e não migra drivers.
+@system
+pub fn dma_alloc_for_constraints(
+    size: u64,
+    constraints: *const DmaDeviceConstraints
+) -> DmaBuffer {
+    if size == 0 || !dma_device_constraints_valid(constraints) {
+        return dma_invalid_buffer();
+    }
+    unsafe {
+        return dma_alloc_for_device(
+            size,
+            (*constraints).alignment,
+            (*constraints).max_address,
+            (*constraints).boundary
+        );
+    }
+}
+
 @system
 pub fn dma_invalid_buffer() -> DmaBuffer {
     return DmaBuffer {
@@ -133,7 +154,7 @@ pub fn dma_buffer_valid(buffer: *const DmaBuffer) -> bool {
         }
         if (*buffer).owner == DMA_OWNER_DEVICE && (*buffer).fence == 0 { return false; }
         if (*buffer).owner == DMA_OWNER_SHARED && (*buffer).fence != 0 { return false; }
-        if ((*buffer).physical_address & ((*buffer).alignment - 1)) != 0 { return false; }
+        if (((*buffer).physical_address & ((*buffer).alignment - 1)) != 0) { return false; }
         if ((*buffer).size % BAKEN_PAGE_SIZE) != 0 { return false; }
         return direct_map_virtual_address((*buffer).physical_address) ==
             ((*buffer).virtual_address as u64);
