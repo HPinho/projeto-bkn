@@ -153,3 +153,26 @@ Documentacao complementar:
 
 - `BAKEN_OS_DRIVER_FOUNDATION_ROADMAP_APPENDIX.md`
 - `KERNEL_DRIVER_FOUNDATION_HANDOFF_APPENDIX.md`
+
+
+### DF-8c2 — segunda integração por dispositivo: AHCI runtime
+
+**IMPLEMENTED / VALIDATING.**
+
+O segundo corte migra somente a arena principal de `kernel/src/drivers/ahci_runtime.sotlas` para o contrato tipado, preservando o comportamento anterior:
+
+```text
+alignment   = AHCI_RUNTIME_PAGE_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- a arena continua com `AHCI_RUNTIME_ARENA_PAGES * AHCI_RUNTIME_PAGE_SIZE`;
+- nenhuma constraint nova de hardware foi introduzida;
+- `dma_alloc_for_constraints(...)` continua delegando ao backend constrained existente;
+- o buffer e validado por `dma_buffer_satisfies_device_constraints(...)` antes de ser publicado ao hardware;
+- `dma_share_with_device(...)`, programacao CLB/FB, Bus Master e IDENTIFY permanecem inalterados;
+- buffers AHCI de leitura/escrita continuam fora deste microcorte;
+- o guard global permite somente NVMe e `ahci_runtime.sotlas` como callers tipados.
