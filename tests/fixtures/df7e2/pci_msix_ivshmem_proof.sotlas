@@ -203,10 +203,10 @@ static PCI_MSIX_IVSHMEM_IRQ_DESCRIPTOR: IrqDescriptor = IrqDescriptor {
     handler: pci_msix_ivshmem_irq_handler
 };
 
-// DF-7b1 requires decode to be quiescent while BAR sizing writes all ones.
-// QEMU/OVMF leaves ivshmem Memory Space and Bus Master enabled, so the CI fixture
-// temporarily clears decode/bus-mastering bits, restores the exact original Command
-// immediately after measurement, and refuses to touch I/O Space or INTx state.
+// DF-7b1 requires decode and bus master to be quiescent while BAR sizing writes all ones.
+// QEMU/OVMF leaves ivshmem decode and bus mastering enabled, so the CI fixture
+// temporarily clears decode/bus-mastering bits (IO, Memory, Bus Master), restores the exact
+// original Command immediately after measurement, and preserves all other Command state.
 @system
 fn pci_msix_ivshmem_measure_msix_bar(device: DeviceHandle, driver: DriverHandle,
                                      sizing_claim: PciBarClaim) -> PciBarSizeProof {
@@ -224,13 +224,15 @@ fn pci_msix_ivshmem_measure_msix_bar(device: DeviceHandle, driver: DriverHandle,
     let slot_id = ((bdf >> 3) & 0x1F) as u8;
     let func = (bdf & 0x07) as u8;
     let command_before = pci_config_read16(0, bus, slot_id, func, 0x04);
-    if command_before == 0xFFFF || (command_before & PCI_COMMAND_IO_SPACE) != 0 {
+    if command_before == 0xFFFF {
         return invalid;
     }
 
-    let active_bits = command_before & (PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER);
+    let decode_master_mask: u16 =
+        PCI_COMMAND_IO_SPACE | PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER;
+    let active_bits = command_before & decode_master_mask;
     if active_bits != 0 {
-        let quiescent = command_before & !(PCI_COMMAND_MEMORY_SPACE | PCI_COMMAND_BUS_MASTER);
+        let quiescent = command_before & !decode_master_mask;
         if !pci_config_write16(0, bus, slot_id, func, 0x04, quiescent) ||
            pci_config_read16(0, bus, slot_id, func, 0x04) != quiescent {
             // Best-effort exact restoration before failing closed.
