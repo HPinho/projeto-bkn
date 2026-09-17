@@ -152,8 +152,11 @@ fn ahci_write_prepare_buffer() -> bool {
         }
     }
 
-    let mut buffer = dma_alloc(AHCI_RUNTIME_PAGE_SIZE, AHCI_RUNTIME_PAGE_SIZE);
-    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    let constraints = dma_device_constraints(AHCI_RUNTIME_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut buffer = dma_alloc_for_constraints(AHCI_RUNTIME_PAGE_SIZE, &constraints);
+    if !dma_buffer_cpu_owned(&buffer) ||
+       !dma_buffer_satisfies_device_constraints(&buffer, &constraints) { return false; }
     if !ahci_block_zero(buffer.virtual_address, buffer.size) { return false; }
     if !dma_share_with_device(&mut buffer) { return false; }
     unsafe { AHCI_WRITE_BUFFER = buffer; }
