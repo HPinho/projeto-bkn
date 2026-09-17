@@ -176,3 +176,25 @@ Invariantes:
 - `dma_share_with_device(...)`, programacao CLB/FB, Bus Master e IDENTIFY permanecem inalterados;
 - buffers AHCI de leitura/escrita continuam fora deste microcorte;
 - o guard global permite somente NVMe e `ahci_runtime.sotlas` como callers tipados.
+
+
+### DF-8c3 — terceira integração por dispositivo: AHCI read buffer
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente o buffer dedicado de leitura em `kernel/src/drivers/ahci_block_read.sotlas` para constraints tipadas:
+
+```text
+alignment   = AHCI_RUNTIME_PAGE_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- o buffer continua tendo uma pagina de 4096 bytes;
+- nenhuma constraint nova de hardware foi introduzida;
+- o buffer e validado por `dma_buffer_satisfies_device_constraints(...)` antes de `dma_share_with_device(...)`;
+- o caminho de READ, PRDT, LBA e validacao da fixture permanece inalterado;
+- o `AHCI_WRITE_BUFFER` continua usando o allocator legado neste microcorte;
+- o guard global permite somente NVMe, `ahci_runtime.sotlas` e `ahci_block_read.sotlas` como callers tipados.
