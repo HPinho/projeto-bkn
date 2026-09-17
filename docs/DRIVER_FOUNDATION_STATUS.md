@@ -47,6 +47,15 @@ No mesmo SHA passaram:
 
 Esse checkpoint fecha a macroetapa DF-7 com entrega MSI-X real em QEMU `ivshmem-doorbell`, teardown fail-closed e guard estrutural do caminho de BAR sizing.
 
+## Baseline certificada DF-8a
+
+```text
+e33e6780106edb61bdbca72fa818272d23e154e2
+docs(driver): open DF-8a validation baseline
+```
+
+Os sete gates obrigatorios do SHA concluíram com sucesso. DF-8a formaliza constraints DMA por dispositivo sem alterar o allocator existente, PMM/VMM, ownership/fence ou drivers reais.
+
 ## Driver Foundation
 
 ```text
@@ -67,7 +76,8 @@ DF-7   MSI-X                                       CERTIFIED
   DF-7e1 activation + fail-closed teardown          CERTIFIED
   DF-7e2 QEMU ivshmem runtime proof                CERTIFIED
 DF-8   DMA Device API                              IN PROGRESS
-  DF-8a read-only device constraints model         IMPLEMENTED / VALIDATING
+  DF-8a read-only device constraints model         CERTIFIED
+  DF-8b typed constrained allocation               IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -79,12 +89,7 @@ Objetivo da macroetapa: representar e aplicar constraints DMA por dispositivo se
 
 ### DF-8a — read-only device constraints model
 
-Candidato atual:
-
-```text
-84cd12125940d8b2517d742b3ea63bdb17c6ccd4
-feat(dma): add DF-8a device constraint model
-```
+**CERTIFIED.** Baseline `e33e6780106edb61bdbca72fa818272d23e154e2`.
 
 O microcorte adiciona `DmaDeviceConstraints` em `kernel/src/memory/dma.sotlas` com apenas os limites que o allocator existente ja entende:
 
@@ -100,12 +105,32 @@ Contratos:
 - `dma_device_constraints_valid(...)` revalida o objeto antes de consumo;
 - `dma_buffer_satisfies_device_constraints(...)` e estritamente read-only e verifica alignment fisico, overflow do ultimo byte, teto de endereco e cruzamento de boundary;
 - nenhuma API DF-8a aloca/libera pagina, muda owner/fence, mapeia MMIO ou chama firmware;
-- `dma_alloc_for_device(size, alignment, max_address, boundary)` permanece intocado e continua chamando diretamente `pmm_alloc_pages_constrained(...)`;
-- xHCI/HID, NVMe, AHCI e storage nao sao migrados neste corte.
+- `dma_alloc_for_device(size, alignment, max_address, boundary)` permanece o backend existente e continua chamando diretamente `pmm_alloc_pages_constrained(...)`;
+- xHCI/HID, NVMe, AHCI e storage nao foram migrados neste corte.
 
-Guardrails foram adicionados a `tests/test_dma_contract.py` para impedir que o modelo read-only vire allocator ou altere ownership por acidente.
+### DF-8b — typed constrained allocation
 
-DF-8a permanece `IMPLEMENTED / VALIDATING` ate os gates do head final passarem no mesmo SHA.
+**IMPLEMENTED / VALIDATING.**
+
+O candidato adiciona `dma_alloc_for_constraints(size, constraints)` como entrada tipada estreita:
+
+```text
+DmaDeviceConstraints validas
+-> dma_alloc_for_device(size, alignment, max_address, boundary)
+-> backend fisico existente
+```
+
+Invariantes do corte:
+
+- valida `size` e `DmaDeviceConstraints` antes de delegar;
+- chama `dma_alloc_for_device(...)` exatamente uma vez;
+- nao chama PMM diretamente;
+- nao altera owner/fence nem executa submit/share;
+- nao cria allocator paralelo;
+- nenhum caller de xHCI/HID/NVMe/AHCI/storage usa a API nova antes do DF-8c;
+- guardrails em `tests/test_dma_contract.py` bloqueiam essas regressoes.
+
+Candidato funcional: `158d98b1b310d01bd533a2571c0548b0fa89cec9`; guardrail: `72695e8a2847e3ec83adfee5c71c9f1e7f49df6c`.
 
 ## Gates obrigatorios
 
@@ -123,21 +148,17 @@ Para candidatos funcionais da Driver Foundation, o conjunto atual e:
 
 Se qualquer gate falhar, o candidato entra em `correction-only` ate todos voltarem a verde no mesmo SHA corretivo.
 
-## Proximos microcortes, somente apos DF-8a certificado
+## Proximo microcorte, somente apos DF-8b certificado
 
 ```text
-DF-8b typed constrained allocation
--> consumir DmaDeviceConstraints sem duplicar allocator
--> manter pmm_alloc_pages_constrained como backend unico
--> nenhuma migracao de driver ainda
-
 DF-8c per-device integration
--> migracao incremental de callers reais
--> um subsistema por vez
+-> auditar requisitos reais de cada caller
+-> migracao incremental de um subsistema por vez
+-> preservar exatamente alignment/max_address/boundary atuais
 -> runtime proof + regressao dos gates existentes
 ```
 
-A escolha exata do primeiro caller de DF-8c deve ser feita somente depois de DF-8b certificado e de auditoria dos requisitos reais de cada dispositivo.
+A escolha do primeiro caller deve ocorrer somente depois de DF-8b certificado e de auditoria das constraints reais, para nao transformar a API tipada em mudanca silenciosa de comportamento de hardware.
 
 ## Regra de retomada
 
