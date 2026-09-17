@@ -1,0 +1,444 @@
+// Baken OS — DF-7c: reserva e ownership de fonte/vetor MSI-X sem programacao de hardware.
+//
+// Este modulo combina ownership logico exclusivo da fonte PCI_MSIX com um IrqHandle
+// generation-safe e exige layout DF-7b valido previamente provado contra aperture medida.
+// O Generic IRQ Registry continua sendo a unica autoridade sobre vetores dinamicos.
+// MSI-X Table e PBA NAO sao mapeadas, lidas ou escritas aqui. Nenhuma escrita em config
+// space ou MMIO e realizada neste microcorte; hardware permanece estritamente desabilitado.
+module kernel::drivers::pci_msix;
+
+import kernel::drivers::pci_bus::*;
+import kernel::drivers::pci_config::*;
+import kernel::drivers::pci_capabilities::*;
+import kernel::drivers::pci_device_bridge::*;
+import kernel::drivers::pci_msix_capability::*;
+import kernel::drivers::pci_msix_layout::*;
+import kernel::device::types::*;
+import kernel::device::registry::*;
+import kernel::device::resource_manager::*;
+import kernel::interrupts::registry::*;
+import kernel::arch::x86_64::cpu::*;
+import kernel::sync::spinlock::*;
+
+pub const PCI_MSIX_RESERVATION_INVALID: u8 = 0;
+pub const PCI_MSIX_RESERVATION_READY: u8 = 1;
+pub const PCI_MSIX_RESERVATION_QUARANTINED: u8 = 2;
+
+@repr(C)
+pub struct PciMsixReservation {
+    pub source: ResourceHandle;
+    pub irq: IrqHandle;
+    pub vector: u16;
+    pub bdf: u32;
+    pub capability_offset: u16;
+    pub table_size: u16;
+    pub state: u8;
+    pub valid: bool;
+}
+
+@system
+pub fn pci_msix_invalid_reservation() -> PciMsixReservation {
+    return PciMsixReservation {
+        source: resource_invalid_handle(),
+        irq: irq_invalid_handle(),
+        vector: 0,
+        bdf: PCI_BRIDGE_BDF_INVALID,
+        capability_offset: PCI_CAPABILITY_OFFSET_INVALID,
+        table_size: 0,
+        state: PCI_MSIX_RESERVATION_INVALID,
+        valid: false
+    };
+}
+
+@system
+fn pci_msix_quarantined_reservation(source: ResourceHandle, irq: IrqHandle,
+                                    vector: u16, bdf: u32,
+                                    capability_offset: u16,
+                                    table_size: u16) -> PciMsixReservation {
+    return PciMsixReservation {
+        source: source,
+        irq: irq,
+        vector: vector,
+        bdf: bdf,
+        capability_offset: capability_offset,
+        table_size: table_size,
+        state: PCI_MSIX_RESERVATION_QUARANTINED,
+        valid: source.valid || irq.valid
+    };
+}
+
+@system
+pub fn pci_msix_reservation_is_ready(reservation: PciMsixReservation) -> bool {
+    return reservation.valid &&
+           reservation.state == PCI_MSIX_RESERVATION_READY &&
+           reservation.source.valid &&
+           reservation.irq.valid &&
+           reservation.vector >= IRQ_DYNAMIC_VECTOR_FIRST &&
+           reservation.vector <= IRQ_DYNAMIC_VECTOR_LAST &&
+           reservation.bdf != PCI_BRIDGE_BDF_INVALID;
+}
+
+@system
+pub fn pci_msix_reservation_is_quarantined(reservation: PciMsixReservation) -> bool {
+    return reservation.valid &&
+           reservation.state == PCI_MSIX_RESERVATION_QUARANTINED;
+}
+
+@system
+fn pci_msix_bus(bdf: u32) -> u8 {
+    return ((bdf >> 8) & 0xFF) as u8;
+}
+
+@system
+fn pci_msix_slot(bdf: u32) -> u8 {
+    return ((bdf >> 3) & 0x1F) as u8;
+}
+
+@system
+fn pci_msix_function(bdf: u32) -> u8 {
+    return (bdf & 0x07) as u8;
+}
+
+@system
+fn pci_msix_find_device(bus: u8, slot: u8, func: u8) -> *const PciDevice {
+    let count = pci_get_device_count();
+    let mut i: u32 = 0;
+    while i < count {
+        let pci = pci_get_device(i);
+        if pci != (null as *const PciDevice) &&
+           unsafe { (*pci).bus == bus && (*pci).slot == slot && (*pci).func == func } {
+            return pci;
+        }
+        i += 1;
+    }
+    return null as *const PciDevice;
+}
+
+@system
+fn pci_msix_owned_device(device: DeviceHandle, driver: DriverHandle,
+                         out_bdf: *mut u32) -> bool {
+    if !device.valid || !driver.valid || out_bdf == (null as *mut u32) {
+        return false;
+    }
+    let owner = device_core_snapshot(device);
+    if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
+       !driver_handle_equal(owner.driver, driver) ||
+       (owner.state != DEVICE_STATE_BINDING && owner.state != DEVICE_STATE_ACTIVE) {
+        return false;
+    }
+    let bdf = owner.bus_instance;
+    if bdf == PCI_BRIDGE_BDF_INVALID || ((bdf >> 16) & 0xFFFF) != 0 {
+        return false;
+    }
+    unsafe { *out_bdf = bdf; }
+    return true;
+}
+
+@system
+fn pci_msix_owned_device_for_release(device: DeviceHandle, driver: DriverHandle,
+                                     out_bdf: *mut u32) -> bool {
+    if !device.valid || !driver.valid || out_bdf == (null as *mut u32) {
+        return false;
+    }
+    let owner = device_core_snapshot(device);
+    if !owner.valid || owner.bus != DEVICE_BUS_PCI ||
+       !driver_handle_equal(owner.driver, driver) ||
+       (owner.state != DEVICE_STATE_BINDING &&
+        owner.state != DEVICE_STATE_ACTIVE &&
+        owner.state != DEVICE_STATE_UNBINDING) {
+        return false;
+    }
+    let bdf = owner.bus_instance;
+    if bdf == PCI_BRIDGE_BDF_INVALID || ((bdf >> 16) & 0xFFFF) != 0 {
+        return false;
+    }
+    unsafe { *out_bdf = bdf; }
+    return true;
+}
+
+@system
+fn pci_msix_source_owned(source: ResourceHandle, bdf: u32,
+                         device: DeviceHandle, driver: DriverHandle) -> bool {
+    let claim = resource_snapshot(source);
+    return claim.valid &&
+           claim.request.kind == RESOURCE_KIND_PCI_MSIX &&
+           claim.request.start == bdf as u64 &&
+           claim.request.length == 1 &&
+           claim.request.auxiliary == 0 &&
+           device_handle_equal(claim.owner_device, device) &&
+           driver_handle_equal(claim.owner_driver, driver);
+}
+
+@system
+fn pci_msix_quiescence_proven(bdf: u32, capability_offset: u16,
+                              table_size: u16) -> bool {
+    let bus = pci_msix_bus(bdf);
+    let slot = pci_msix_slot(bdf);
+    let func = pci_msix_function(bdf);
+    if pci_bdf_pack(0, bus, slot, func) != bdf { return false; }
+
+    let pci = pci_msix_find_device(bus, slot, func);
+    if pci == (null as *const PciDevice) { return false; }
+
+    // Regra do capability walker: se MSI convencional for valido, deve estar desabilitado
+    let msi = pci_msi_capability_probe(0, bus, slot, func);
+    if msi.valid && msi.enabled { return false; }
+
+    // MSI-X precisa ser valido, apontar para o mesmo offset/size e estar desabilitado
+    let msix = pci_msix_capability_probe(0, bus, slot, func);
+    return msix.valid &&
+           msix.capability_offset == capability_offset &&
+           msix.table_size == table_size &&
+           !msix.enabled;
+}
+
+@system
+fn pci_msix_cleanup_unarmed_claims(irq: IrqHandle, source: ResourceHandle,
+                                   vector: u16, bdf: u32,
+                                   capability_offset: u16, table_size: u16,
+                                   device: DeviceHandle,
+                                   driver: DriverHandle) -> PciMsixReservation {
+    if !source.valid && !irq.valid { return pci_msix_invalid_reservation(); }
+
+    if irq.valid && !source.valid {
+        return pci_msix_quarantined_reservation(
+            source, irq, vector, bdf, capability_offset, table_size
+        );
+    }
+    if source.valid && !pci_msix_source_owned(source, bdf, device, driver) {
+        return pci_msix_quarantined_reservation(
+            source, irq, vector, bdf, capability_offset, table_size
+        );
+    }
+    if !pci_msix_quiescence_proven(bdf, capability_offset, table_size) {
+        return pci_msix_quarantined_reservation(
+            source, irq, vector, bdf, capability_offset, table_size
+        );
+    }
+
+    let mut remaining_irq = irq;
+    let mut remaining_source = source;
+    let mut remaining_vector = vector;
+
+    if remaining_irq.valid {
+        if remaining_vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+           remaining_vector > IRQ_DYNAMIC_VECTOR_LAST ||
+           irq_registry_vector(remaining_irq) != remaining_vector {
+            return pci_msix_quarantined_reservation(
+                remaining_source, remaining_irq, remaining_vector,
+                bdf, capability_offset, table_size
+            );
+        }
+        if !irq_registry_unregister(remaining_irq, device, driver) {
+            return pci_msix_quarantined_reservation(
+                remaining_source, remaining_irq, remaining_vector,
+                bdf, capability_offset, table_size
+            );
+        }
+        remaining_irq = irq_invalid_handle();
+        remaining_vector = 0;
+    }
+
+    if remaining_source.valid {
+        if !resource_release(remaining_source, device, driver) {
+            return pci_msix_quarantined_reservation(
+                remaining_source, remaining_irq, remaining_vector,
+                bdf, capability_offset, table_size
+            );
+        }
+        remaining_source = resource_invalid_handle();
+    }
+
+    return pci_msix_invalid_reservation();
+}
+
+// DF-7c — reserva single-vector de MSI-X sem programar hardware.
+//
+// Exige dispositivo em BINDING ou ACTIVE, layout DF-7b valido previamente provado
+// e capability MSI-X desabilitada. O Resource Manager garante exclusao mutua
+// de fonte entre MSI e MSI-X para o mesmo BDF. O Generic IRQ Registry e a autoridade
+// unica de vetores. A Table/PBA NAO sao mapeadas nem tocadas aqui.
+@system
+pub fn pci_msix_reserve_single(device: DeviceHandle, driver: DriverHandle,
+                               layout: PciMsixLayout,
+                               descriptor: IrqDescriptor) -> PciMsixReservation {
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_msix_owned_device(device, driver, &mut bdf) {
+        return pci_msix_invalid_reservation();
+    }
+
+    // Exige layout DF-7b valido para o mesmo BDF e desabilitado
+    if !layout.valid || layout.bdf != bdf || layout.enabled {
+        return pci_msix_invalid_reservation();
+    }
+
+    let bus = pci_msix_bus(bdf);
+    let slot_id = pci_msix_slot(bdf);
+    let func = pci_msix_function(bdf);
+    let pci = pci_msix_find_device(bus, slot_id, func);
+    if pci == (null as *const PciDevice) { return pci_msix_invalid_reservation(); }
+
+    let capability = pci_msix_capability_probe(0, bus, slot_id, func);
+    if !capability.valid || capability.enabled || capability.table_size == 0 ||
+       capability.capability_offset != layout.capability_offset ||
+       capability.table_size != layout.table_size {
+        return pci_msix_invalid_reservation();
+    }
+
+    // Regra do capability walker: se MSI convencional estiver presente, exige Enable=0.
+    // Se nao estiver presente, exclusao cruzada no Resource Manager impede dual ownership.
+    let msi_cap = pci_msi_capability_probe(0, bus, slot_id, func);
+    if msi_cap.valid && msi_cap.enabled {
+        return pci_msix_invalid_reservation();
+    }
+
+    // Claim logico exclusivo da fonte MSI-X.
+    let source = resource_claim(device, driver, ResourceRequest {
+        kind: RESOURCE_KIND_PCI_MSIX,
+        start: bdf as u64,
+        length: 1,
+        auxiliary: 0
+    });
+    if !source.valid { return pci_msix_invalid_reservation(); }
+
+    let irq = irq_registry_register(device, driver, descriptor);
+    if !irq.valid {
+        return pci_msix_cleanup_unarmed_claims(
+            irq, source, 0, bdf,
+            capability.capability_offset, capability.table_size,
+            device, driver
+        );
+    }
+
+    let vector = irq_registry_vector(irq);
+    if vector < IRQ_DYNAMIC_VECTOR_FIRST || vector > IRQ_DYNAMIC_VECTOR_LAST {
+        return pci_msix_cleanup_unarmed_claims(
+            irq, source, vector, bdf,
+            capability.capability_offset, capability.table_size,
+            device, driver
+        );
+    }
+
+    // Revalidacao TOCTOU de ownership, layout e quiescencia apos claims
+    let mut verify_bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_msix_owned_device(device, driver, &mut verify_bdf) ||
+       verify_bdf != bdf {
+        return pci_msix_cleanup_unarmed_claims(
+            irq, source, vector, bdf,
+            capability.capability_offset, capability.table_size,
+            device, driver
+        );
+    }
+
+    if !pci_msix_source_owned(source, bdf, device, driver) {
+        return pci_msix_quarantined_reservation(
+            source, irq, vector, bdf,
+            capability.capability_offset, capability.table_size
+        );
+    }
+
+    let verify_pci = pci_msix_find_device(bus, slot_id, func);
+    if verify_pci == (null as *const PciDevice) {
+        return pci_msix_quarantined_reservation(
+            source, irq, vector, bdf,
+            capability.capability_offset, capability.table_size
+        );
+    }
+
+    let verify_msi = pci_msi_capability_probe(0, bus, slot_id, func);
+    if verify_msi.valid && verify_msi.enabled {
+        return pci_msix_cleanup_unarmed_claims(
+            irq, source, vector, bdf,
+            capability.capability_offset, capability.table_size,
+            device, driver
+        );
+    }
+
+    let verify = pci_msix_capability_probe(0, bus, slot_id, func);
+    if !verify.valid || verify.enabled ||
+       verify.capability_offset != capability.capability_offset ||
+       verify.control != capability.control ||
+       verify.table_size != capability.table_size ||
+       verify.table_bir != capability.table_bir ||
+       verify.table_offset != capability.table_offset ||
+       verify.pba_bir != capability.pba_bir ||
+       verify.pba_offset != capability.pba_offset {
+        return pci_msix_cleanup_unarmed_claims(
+            irq, source, vector, bdf,
+            capability.capability_offset, capability.table_size,
+            device, driver
+        );
+    }
+
+    return PciMsixReservation {
+        source: source,
+        irq: irq,
+        vector: vector,
+        bdf: bdf,
+        capability_offset: capability.capability_offset,
+        table_size: capability.table_size,
+        state: PCI_MSIX_RESERVATION_READY,
+        valid: true
+    };
+}
+
+@system
+pub fn pci_msix_release_unarmed_reservation(reservation: PciMsixReservation,
+                                             device: DeviceHandle,
+                                             driver: DriverHandle) -> PciMsixReservation {
+    if !pci_msix_reservation_is_ready(reservation) {
+        return reservation;
+    }
+
+    if irq_registry_vector(reservation.irq) != reservation.vector {
+        return pci_msix_quarantined_reservation(
+            reservation.source, reservation.irq, reservation.vector,
+            reservation.bdf, reservation.capability_offset,
+            reservation.table_size
+        );
+    }
+
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_msix_owned_device_for_release(device, driver, &mut bdf) ||
+       bdf != reservation.bdf {
+        return pci_msix_quarantined_reservation(
+            reservation.source, reservation.irq, reservation.vector,
+            reservation.bdf, reservation.capability_offset,
+            reservation.table_size
+        );
+    }
+
+    return pci_msix_cleanup_unarmed_claims(
+        reservation.irq, reservation.source, reservation.vector,
+        bdf, reservation.capability_offset, reservation.table_size,
+        device, driver
+    );
+}
+
+@system
+pub fn pci_msix_retry_quarantined_cleanup(reservation: PciMsixReservation,
+                                          device: DeviceHandle,
+                                          driver: DriverHandle) -> PciMsixReservation {
+    if !pci_msix_reservation_is_quarantined(reservation) {
+        return reservation;
+    }
+
+    let mut bdf: u32 = PCI_BRIDGE_BDF_INVALID;
+    if !pci_msix_owned_device_for_release(device, driver, &mut bdf) ||
+       bdf != reservation.bdf {
+        return reservation;
+    }
+
+    if reservation.irq.valid &&
+       (reservation.vector < IRQ_DYNAMIC_VECTOR_FIRST ||
+        reservation.vector > IRQ_DYNAMIC_VECTOR_LAST ||
+        irq_registry_vector(reservation.irq) != reservation.vector) {
+        return reservation;
+    }
+
+    return pci_msix_cleanup_unarmed_claims(
+        reservation.irq, reservation.source, reservation.vector,
+        bdf, reservation.capability_offset, reservation.table_size,
+        device, driver
+    );
+}

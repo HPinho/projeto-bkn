@@ -13,7 +13,10 @@ BRIDGE = (ROOT / "kernel/src/drivers/pci_device_bridge.sotlas").read_text(encodi
 class PciMsiSourceOwnershipTests(unittest.TestCase):
     def test_pci_msi_has_dedicated_logical_resource_kind(self):
         self.assertIn("RESOURCE_KIND_PCI_MSI: u8 = 6", TYPES)
-        self.assertIn("request.kind > RESOURCE_KIND_PCI_MSI", MANAGER)
+        self.assertTrue(
+            "request.kind > RESOURCE_KIND_PCI_MSI" in MANAGER or
+            "request.kind > RESOURCE_KIND_PCI_MSIX" in MANAGER
+        )
         msi_valid = MANAGER.split("if request.kind == RESOURCE_KIND_PCI_MSI", 1)[1].split("}", 1)[0]
         self.assertIn("request.length == 1", msi_valid)
         self.assertIn("request.auxiliary == 0", msi_valid)

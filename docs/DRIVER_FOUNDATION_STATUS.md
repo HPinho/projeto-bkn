@@ -31,29 +31,29 @@ PLANNED -> IMPLEMENTED -> VALIDATING -> CERTIFIED
 ## Baseline funcional certificada
 
 ```text
-a34434aad5c1a795cdac70458efe26adb8b3a50a
-feat(pci): add read-only MSI-X capability model
+72cc8ac13fca7ec4c250c3db532d8112f2253c3a
+fix(test): restore live MSI-X layout assertions
 ```
 
 Gates no mesmo SHA:
 
-- CI/CD + QEMU #1297: PASS
-- SMP Bring-up #400: PASS
-- NVMe-only Bare-Metal #497: PASS
-- HID Dual-device #156: PASS
-- SMP Fault Diagnostic #62: PASS
-- MSI EDU Runtime #2: PASS
+- CI/CD + QEMU #1302: PASS
+- SMP Bring-up #405: PASS
+- NVMe-only Bare-Metal #502: PASS
+- HID Dual-device #161: PASS
+- SMP Fault Diagnostic #67: PASS
+- MSI EDU Runtime #7: PASS
 
-Essa baseline certifica o DF-7a e preserva integralmente a prova runtime de MSI convencional do DF-6.
+Essa baseline certifica o DF-7a, DF-7b e DF-7b1, preservando integralmente a prova runtime de MSI convencional do DF-6.
 
-Baseline anterior que fechou o DF-6:
+Baseline anterior que fechou o DF-7a:
 
 ```text
-b6cf5725439d946d017f6cd23e2ff14970d85a6b
-test(pci): add QEMU EDU MSI runtime proof
+a34434aad5c1a795cdac70458efe26adb8b3a50a
+feat(pci): add read-only MSI-X capability model
 ```
 
-Gates: CI #1296, SMP #399, NVMe #496, HID #155, Fault #61 e MSI EDU #1, todos PASS. O MSI EDU observou `BAKEN:PCI_MSI_EDU_READY`, nenhuma excecao de CPU e `stop_reason=complete`.
+Gates: CI #1297, SMP #400, NVMe #497, HID #156, Fault #62 e MSI EDU #2, todos PASS.
 
 ## Driver Foundation
 
@@ -79,9 +79,9 @@ DF-6  MSI                                          CERTIFIED
   DF-6d2 QEMU EDU runtime proof                    CERTIFIED
 DF-7  MSI-X                                        IN PROGRESS
   DF-7a read-only capability model                 CERTIFIED
-  DF-7b BAR-backed Table/PBA layout proof          IMPLEMENTED / VALIDATING
-  DF-7b1 controlled quiescent BAR sizing           PLANNED
-  DF-7c source/vector ownership                    BLOCKED BY DF-7b/DF-7b1
+  DF-7b BAR-backed Table/PBA layout proof          CERTIFIED
+  DF-7b1 controlled quiescent BAR sizing           CERTIFIED
+  DF-7c source/vector ownership                    IMPLEMENTED / VALIDATING
   DF-7d masked table-entry programming             PLANNED
   DF-7e activation/teardown/runtime proof          PLANNED
 ```
@@ -167,7 +167,19 @@ A aperture real devera ser medida em microcorte separado. Requisitos de desenho 
 - `PciBar.size` so recebe valor depois de restauracao comprovada;
 - nenhum MSI-X MMIO e programado neste microcorte.
 
-DF-7c permanece bloqueado ate DF-7b estar certificado e existir caminho seguro para obter `PciBar.size` quando necessario.
+## DF-7c — MSI-X source & vector ownership — validando
+
+`kernel/src/drivers/pci_msix.sotlas` estabelece a reserva de fonte logica exclusiva e vetor dinamico para MSI-X:
+
+- `RESOURCE_KIND_PCI_MSIX: u8 = 7` com exclusao mutua cruzada contra `RESOURCE_KIND_PCI_MSI` por BDF no Resource Manager;
+- Generic IRQ Registry como unica autoridade de vetores dinamicos generation-safe;
+- Exigencia de layout DF-7b valido previamente medido/provado contra aperture;
+- Checagem do capability walker: MSI convencional com Enable=0 se presente; MSI-X Enable=0 obrigatorio;
+- Ordem estrita de alocacao: source ownership -> IRQ reservation;
+- Ordem estrita de cleanup: IRQ release -> source release;
+- Quarentena transacional em rollback incerto ou perda de quiescencia comprovada;
+- API explicita de retry para reservas em quarentena (`pci_msix_retry_quarantined_cleanup`);
+- Table e PBA permanecem estritamente intocadas (zero escritas em MMIO/config space).
 
 ## Gates obrigatorios
 

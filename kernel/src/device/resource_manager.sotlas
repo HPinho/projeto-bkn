@@ -68,7 +68,7 @@ fn resource_unlock_irq(flags: u64) -> void {
 
 @system
 fn resource_request_valid(request: ResourceRequest) -> bool {
-    if request.kind == RESOURCE_KIND_NONE || request.kind > RESOURCE_KIND_PCI_MSI ||
+    if request.kind == RESOURCE_KIND_NONE || request.kind > RESOURCE_KIND_PCI_MSIX ||
        request.length == 0 || request.start + request.length < request.start {
         return false;
     }
@@ -78,7 +78,7 @@ fn resource_request_valid(request: ResourceRequest) -> bool {
     if request.kind == RESOURCE_KIND_PCI_BAR {
         return request.length == 1 && request.auxiliary < 6;
     }
-    if request.kind == RESOURCE_KIND_PCI_MSI {
+    if request.kind == RESOURCE_KIND_PCI_MSI || request.kind == RESOURCE_KIND_PCI_MSIX {
         return request.length == 1 && request.auxiliary == 0;
     }
     return request.auxiliary == 0;
@@ -92,11 +92,16 @@ fn resource_ranges_overlap(left: ResourceRequest, right: ResourceRequest) -> boo
 
 @system
 fn resource_requests_conflict(left: ResourceRequest, right: ResourceRequest) -> bool {
+    if (left.kind == RESOURCE_KIND_PCI_MSI && right.kind == RESOURCE_KIND_PCI_MSIX) ||
+       (left.kind == RESOURCE_KIND_PCI_MSIX && right.kind == RESOURCE_KIND_PCI_MSI) {
+        return left.start == right.start;
+    }
     if left.kind != right.kind { return false; }
     if left.kind == RESOURCE_KIND_PCI_BAR {
         return left.start == right.start && left.auxiliary == right.auxiliary;
     }
-    if left.kind == RESOURCE_KIND_IRQ || left.kind == RESOURCE_KIND_PCI_MSI {
+    if left.kind == RESOURCE_KIND_IRQ || left.kind == RESOURCE_KIND_PCI_MSI ||
+       left.kind == RESOURCE_KIND_PCI_MSIX {
         return left.start == right.start;
     }
     return resource_ranges_overlap(left, right);
