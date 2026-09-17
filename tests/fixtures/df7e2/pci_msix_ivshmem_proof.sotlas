@@ -127,6 +127,13 @@ static mut PCI_MSIX_IVSHMEM_REG_BASE: u64 = 0;
 static mut PCI_MSIX_IVSHMEM_IRQ_COUNT: u32 = 0;
 
 @system
+fn pci_msix_ivshmem_trace(message: *const u8, length: u64) -> void {
+    if x86_serial_is_ready() {
+        x86_serial_write_buffer(message, length);
+    }
+}
+
+@system
 fn pci_msix_ivshmem_invalid_table() -> PciMsixTableProgramResult {
     let reservation = pci_msix_invalid_reservation();
     return PciMsixTableProgramResult {
@@ -247,6 +254,7 @@ fn pci_msix_ivshmem_remove(device: DeviceHandle) -> bool {
             arm, device, driver, msix_claim, msix_claim);
         unsafe { PCI_MSIX_IVSHMEM_ARM = arm; }
         reservation = arm.reservation;
+        pci_msix_ivshmem_trace("BAKEN:MSIX=REMOVE_DISARM\n".as_ptr(), 25);
     } else if arm.valid && arm.state == PCI_MSIX_ARM_STATE_QUARANTINED {
         arm = pci_msix_retry_quarantined_teardown(
             arm, device, driver, msix_claim, msix_claim);
@@ -269,6 +277,7 @@ fn pci_msix_ivshmem_remove(device: DeviceHandle) -> bool {
     if !reg_claim.valid || !pci_release_bar(reg_claim, device, driver) {
         return false;
     }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=REMOVE_BARS\n".as_ptr(), 23);
 
     unsafe {
         PCI_MSIX_IVSHMEM_MSIX_CLAIM = pci_bar_invalid_claim();
@@ -360,6 +369,7 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
         driver_unregister(driver);
         return false;
     }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=BOUND\n".as_ptr(), 17);
 
     let active = device_core_snapshot(device);
     let reservation = unsafe { PCI_MSIX_IVSHMEM_RESERVATION };
@@ -399,6 +409,7 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
         // terminated by the proof workflow and the failure remains fail-closed.
         return false;
     }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=TABLE\n".as_ptr(), 17);
 
     let arm = pci_msix_activate_single(
         table, device, driver, msix_claim, msix_claim);
@@ -407,6 +418,7 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
         PCI_MSIX_IVSHMEM_RESERVATION = arm.reservation;
     }
     if !pci_msix_arm_is_armed(arm) { return false; }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=ARMED\n".as_ptr(), 17);
 
     let peer = x86_mmio_read32(reg_base + PCI_MSIX_IVSHMEM_POSITION);
     if peer > 0xFFFF { return false; }
@@ -428,6 +440,7 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
     let first_delivered = unsafe { PCI_MSIX_IVSHMEM_IRQ_COUNT };
     if first_delivered <= irq_before_doorbell { return false; }
     if first_delivered - irq_before_doorbell > PCI_MSIX_IVSHMEM_MAX_BURST { return false; }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=EDGE\n".as_ptr(), 16);
 
     let mut last_count = first_delivered;
     let mut stable_spins: u32 = 0;
@@ -449,9 +462,11 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
         settle_spins += 1;
     }
     if stable_spins < PCI_MSIX_IVSHMEM_STABLE_SPINS { return false; }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=SETTLED\n".as_ptr(), 19);
 
     let vector = arm.reservation.vector;
     if !driver_unbind(device, driver) { return false; }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=UNBOUND\n".as_ptr(), 19);
     let attached = device_core_snapshot(device);
     let released = unsafe { PCI_MSIX_IVSHMEM_ARM };
     if !pci_msix_arm_is_released(released) ||
@@ -461,8 +476,11 @@ pub fn pci_msix_ivshmem_runtime_proof() -> bool {
        irq_registry_active_count() != before_irqs {
         return false;
     }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=RELEASED\n".as_ptr(), 20);
     if irq_registry_dispatch(vector) { return false; }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=STALE\n".as_ptr(), 17);
     if !driver_unregister(driver) { return false; }
+    pci_msix_ivshmem_trace("BAKEN:MSIX=UNREGISTERED\n".as_ptr(), 24);
 
     pci_msix_ivshmem_reset_state();
     if x86_serial_is_ready() {
