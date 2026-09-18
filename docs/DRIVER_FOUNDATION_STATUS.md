@@ -92,7 +92,8 @@ DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9c2 WC preflight/UC restore primitives            CERTIFIED
   DF-9c3 Generic WC promotion with rollback            CERTIFIED
   DF-9c4 Runtime PAT capability probe                  CERTIFIED
-  DF-9c5 Generic WT/WB PAT-index backends              IMPLEMENTED / VALIDATING
+  DF-9c5 Generic WT/WB PAT-index backends              CERTIFIED
+  DF-9d1 PCI ECAM typed UC mapping migration            IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -546,7 +547,7 @@ Este microcorte prova capacidades PAT sem alterar mappings:
 
 ## DF-9c5 — Generic WT/WB PAT-index backends
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `4153471441d9a27ce69c142e9fe8c8b3d10bff7f`.
 
 Este corte fecha o modelo de cache policy sem presumir indices PAT:
 
@@ -557,3 +558,17 @@ Este corte fecha o modelo de cache policy sem presumir indices PAT:
   `x86_pat_pte_bits()` e verifica a selecao escrita;
 - qualquer falha de promocao normaliza o range novamente para UC;
 - nenhum driver foi migrado e nenhum caller passa a solicitar WT/WB neste corte.
+
+
+## DF-9d1 — PCI ECAM typed UC mapping migration
+
+**IMPLEMENTED / VALIDATING.**
+
+Primeira migracao real de caller MMIO:
+
+- somente `kernel/src/drivers/pci_config.sotlas` muda;
+- cada pagina ECAM continua sendo mapeada individualmente e mantida no mesmo cache;
+- politica permanece exatamente UC;
+- o mapper tipado recebe `mmio_describe_identity(page, 4096, MMIO_CACHE_POLICY_UC)`;
+- fallback CF8/CFC, lock PCI_CONFIG, extended-space policy e cache capacity permanecem inalterados;
+- nenhum MSI-X, xHCI, storage, APIC, GPIO ou AML e migrado neste corte.

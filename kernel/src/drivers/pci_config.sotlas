@@ -12,6 +12,7 @@ import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 import kernel::acpi::mcfg::*;
 import kernel::memory::active_page_tables::*;
+import kernel::memory::mmio_mapping::*;
 
 pub const PCI_CONFIG_BACKEND_NONE: u8 = 0;
 pub const PCI_CONFIG_BACKEND_LEGACY_CF8CFC: u8 = 1;
@@ -195,7 +196,8 @@ fn pci_config_ecam_map_page_locked(page: u64) -> bool {
     unsafe {
         if PCI_CONFIG_ECAM_PAGE_COUNT >= PCI_CONFIG_ECAM_PAGE_CACHE_CAPACITY as u32 { return false; }
     }
-    if !active_page_tables_map_mmio_identity_4k(page) { return false; }
+    let mapping = mmio_describe_identity(page, 4096, MMIO_CACHE_POLICY_UC);
+    if !mapping.valid || !mmio_map_identity(&mapping) { return false; }
     unsafe {
         let index = PCI_CONFIG_ECAM_PAGE_COUNT as usize;
         PCI_CONFIG_ECAM_PAGES[index] = page;
