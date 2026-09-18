@@ -111,6 +111,42 @@ fn xhci_slot_reuse_capture_for(slot_id: u8, epoch: u32) -> bool {
 }
 
 @system
+pub fn xhci_slot_reuse_finalize_failed_for(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED ||
+       !xhci_slot_reuse_guard_blocked_for(slot_id, epoch) {
+        return false;
+    }
+
+    let flags = xhci_slot_reuse_lock_irq();
+    if flags == 0 { return false; }
+
+    let mut ok = xhci_device_table_slot_is_valid(slot_id) &&
+        xhci_device_table_slot_epoch(slot_id) == epoch &&
+        xhci_device_table_state(slot_id) == XHCI_DEVICE_STATE_FAILED &&
+        xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+
+    if ok {
+        ok = xhci_device_table_release(slot_id, epoch);
+    }
+    if ok {
+        ok = !xhci_device_table_slot_is_valid(slot_id) &&
+             xhci_slot_reuse_guard_blocked_for(slot_id, epoch);
+    }
+    if ok {
+        ok = xhci_slot_reuse_guard_release_for(slot_id, epoch);
+    }
+    if ok {
+        ok = xhci_slot_reuse_guard_release_complete_for(slot_id, epoch);
+    }
+
+    xhci_slot_reuse_unlock_irq(flags);
+    return ok;
+}
+
+@system
 pub fn xhci_slot_reuse_registry_released_for(slot_id: u8, epoch: u32) -> bool {
     let index = xhci_slot_reuse_index(slot_id);
     if index >= XHCI_DEVICE_SLOT_CAPACITY || epoch == 0 { return false; }

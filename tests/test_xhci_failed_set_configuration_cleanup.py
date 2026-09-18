@@ -143,7 +143,9 @@ class XhciFailedSetConfigurationCleanupTests(unittest.TestCase):
         self.assertLess(evaluate, ep0)
         self.assertLess(ep0, address)
 
-        return_expr = final_return_expression(self.failed_enum)
+        logical_start = self.failed_enum.index("let logical_released =")
+        logical_end = self.failed_enum.index("if !logical_released", logical_start)
+        return_expr = self.failed_enum[logical_start:logical_end]
         for required in (
             "set_configuration_released",
             "evaluate_released",

@@ -91,16 +91,18 @@ class XhciFailedAddressCleanupTests(unittest.TestCase):
         self.assertLess(configuration, descriptor)
         self.assertLess(descriptor, address)
 
-    def test_enumeration_keeps_physical_owners_quarantined(self):
-        forbidden = (
-            "dma_release",
-            "dma_unshare_from_device",
-            "xhci_context_release",
-            "xhci_device_table_release",
-            "xhci_slot_release",
-        )
-        for token in forbidden:
-            self.assertNotIn(token, self.failed_enum)
+    def test_enumeration_releases_physical_owners_only_after_logical_address_cleanup(self):
+        address = self.failed_enum.index("xhci_address_release_failed_for_epoch(slot_id, epoch)")
+        descriptor_dma = self.failed_enum.index("xhci_hid_descriptor_release_failed_dma_for_epoch(slot_id, epoch)")
+        report_dma = self.failed_enum.index("xhci_hid_report_release_failed_dma_for_epoch(slot_id, epoch)")
+        ring = self.failed_enum.index("xhci_hid_context_release_failed_ring_for_epoch(slot_id, epoch)")
+        context = self.failed_enum.index("xhci_context_release_failed_arena_for_epoch(slot_id, epoch)")
+        finalize = self.failed_enum.index("xhci_slot_reuse_finalize_failed_for(slot_id, epoch)")
+        self.assertLess(address, descriptor_dma)
+        self.assertLess(descriptor_dma, report_dma)
+        self.assertLess(report_dma, ring)
+        self.assertLess(ring, context)
+        self.assertLess(context, finalize)
 
 
 if __name__ == "__main__":

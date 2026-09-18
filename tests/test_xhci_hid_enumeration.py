@@ -128,8 +128,7 @@ class XhciHidEnumerationTests(unittest.TestCase):
             "xhci_hid_context_release_failed_ring_for_epoch(slot_id, epoch)",
             "xhci_slot_quiesce_failed_for_epoch(slot_id, epoch)",
             "xhci_context_release_failed_arena_for_epoch(slot_id, epoch)",
-            "xhci_device_table_release(slot_id, epoch)",
-            "xhci_slot_reuse_guard_release_for(slot_id, epoch)",
+            "xhci_slot_reuse_finalize_failed_for(slot_id, epoch)",
         ]
         positions = [body.index(token) for token in order]
         self.assertEqual(positions, sorted(positions))

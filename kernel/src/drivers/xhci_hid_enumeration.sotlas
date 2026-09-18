@@ -28,6 +28,7 @@ import kernel::drivers::xhci_set_configuration::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_transfer::*;
 import kernel::drivers::xhci_slot_reuse_guard::*;
+import kernel::drivers::xhci_slot_reuse::*;
 
 pub const XHCI_HID_ENUMERATION_SCAN_LIMIT: u16 = 256;
 
@@ -104,9 +105,7 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     if !xhci_hid_context_release_failed_ring_for_epoch(slot_id, epoch) { return false; }
     if !xhci_slot_quiesce_failed_for_epoch(slot_id, epoch) { return false; }
     if !xhci_context_release_failed_arena_for_epoch(slot_id, epoch) { return false; }
-    if !xhci_device_table_release(slot_id, epoch) || xhci_device_table_slot_is_valid(slot_id) { return false; }
-    if !xhci_slot_reuse_guard_release_for(slot_id, epoch) ||
-       !xhci_slot_reuse_guard_release_complete_for(slot_id, epoch) { return false; }
+    if !xhci_slot_reuse_finalize_failed_for(slot_id, epoch) { return false; }
     return true;
 }
 

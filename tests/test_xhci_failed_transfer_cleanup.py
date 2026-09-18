@@ -151,9 +151,9 @@ class XhciFailedTransferCleanupTests(unittest.TestCase):
         self.assertLess(evaluate, ep0)
         self.assertLess(ep0, address)
 
-        return_start = self.failed_enum.rfind("return ")
-        self.assertGreaterEqual(return_start, 0)
-        return_expression = self.failed_enum[return_start:]
+        logical_start = self.failed_enum.index("let logical_released =")
+        logical_end = self.failed_enum.index("if !logical_released", logical_start)
+        return_expression = self.failed_enum[logical_start:logical_end]
         for owner in (
             "identity_released",
             "transfer_released",

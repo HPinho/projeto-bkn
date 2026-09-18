@@ -120,7 +120,8 @@ class XhciConfigurationFailedRollbackTests(unittest.TestCase):
         )
         self.assertLess(disable, configuration)
         self.assertLess(configuration, descriptor)
-        self.assertNotIn("xhci_device_table_release", body)
+        self.assertIn("xhci_slot_reuse_finalize_failed_for(slot_id, epoch)", body)
+        self.assertNotIn("xhci_slot_reuse_guard_release_for", body)
 
     def test_configuration_recovery_does_not_own_command_or_event_ring_or_pmm(self):
         code = "\n".join(
