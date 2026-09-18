@@ -80,10 +80,15 @@ class MmioMappingContractTests(unittest.TestCase):
         self.assertIn("MMIO_PAT_INDEX_INVALID", body)
         self.assertNotIn("page_table_map_4k", body)
 
-    def test_df9a_does_not_migrate_drivers(self):
+    def test_df9d_allows_only_certified_typed_driver_callers(self):
         drivers = ROOT / "kernel/src/drivers"
+        allowed = {"pci_config.sotlas"}
         for path in drivers.glob("*.sotlas"):
-            self.assertNotIn("mmio_map_identity(", path.read_text(encoding="utf-8"))
+            text = path.read_text(encoding="utf-8")
+            if path.name in allowed:
+                self.assertIn("mmio_map_identity(", text)
+            else:
+                self.assertNotIn("mmio_map_identity(", text)
 
 
 if __name__ == "__main__":
