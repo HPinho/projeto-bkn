@@ -82,7 +82,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c7 xHCI device-descriptor buffer integration   CERTIFIED
   DF-8c8 xHCI configuration-buffer integration       CERTIFIED
   DF-8c9 xHCI HID transfer-ring integration           CERTIFIED
-  DF-8c10 xHCI HID report-buffer integration          IMPLEMENTED / VALIDATING
+  DF-8c10 xHCI HID report-buffer integration          CERTIFIED
+  DF-8c11 xHCI HID descriptor-buffer integration      IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -340,7 +341,7 @@ Invariantes:
 
 ### DF-8c10 — decima integração por dispositivo: xHCI HID report buffer
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `5125585be18b831a2402898d917371f951d2c33c`.
 
 Este corte migra somente o buffer DMA de reports HID Interrupt IN em `kernel/src/drivers/xhci_hid_report.sotlas` para constraints tipadas:
 
@@ -358,3 +359,25 @@ Invariantes:
 - TRB publish, doorbell, producer cycle, completion e pending bookkeeping permanecem inalterados;
 - parser HID, input-device map, event queue e fallback boot keyboard/mouse permanecem fora deste corte;
 - o guard global passa a permitir exatamente nove arquivos callers tipados.
+
+
+### DF-8c11 — decima primeira integração por dispositivo: xHCI HID descriptor buffer
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente o buffer DMA persistente do HID Report Descriptor em `kernel/src/drivers/xhci_hid_descriptor.sotlas` para constraints tipadas:
+
+```text
+alignment   = XHCI_HID_DESCRIPTOR_DMA_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- o buffer continua com uma pagina de 4096 bytes;
+- owner per-slot e quarantine antes do EP0 submit permanecem inalterados;
+- submit/wait ambiguo continua preservando o owner para recovery;
+- identity teardown generation-safe e teardown DMA exact-epoch permanecem inalterados;
+- parser HID, InputDevice, field map e event binding permanecem fora deste corte;
+- o guard global passa a permitir exatamente dez arquivos callers tipados.

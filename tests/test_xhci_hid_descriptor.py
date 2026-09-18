@@ -50,6 +50,11 @@ class XhciHidDescriptorTests(unittest.TestCase):
         self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
         self.assertNotIn("static mut XHCI_HID_DESCRIPTOR_READY:", text)
         self.assertNotIn("static mut XHCI_HID_INPUT_DEVICE_ID:", text)
+        self.assertIn("dma_device_constraints(XHCI_HID_DESCRIPTOR_DMA_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", text)
+        self.assertIn("dma_device_constraints_valid(&constraints)", text)
+        self.assertIn("dma_alloc_for_constraints(XHCI_HID_DESCRIPTOR_DMA_SIZE, &constraints)", text)
+        self.assertIn("dma_buffer_satisfies_device_constraints(&buffer, &constraints)", text)
+        self.assertNotIn("dma_alloc(XHCI_HID_DESCRIPTOR_DMA_SIZE", text)
         self.assertNotIn("static mut XHCI_HID_INPUT_DEVICE_GENERATION:", text)
         self.assertNotIn("static mut XHCI_HID_DESCRIPTOR_BUFFER:", text)
 

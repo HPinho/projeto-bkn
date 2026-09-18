@@ -612,8 +612,11 @@ fn xhci_hid_descriptor_probe_internal_for_slot(slot_id: u8) -> bool {
         if XHCI_HID_DESCRIPTOR_STATES[state_index].buffer.valid { return false; }
     }
 
-    let mut buffer = dma_alloc(XHCI_HID_DESCRIPTOR_DMA_SIZE, XHCI_HID_DESCRIPTOR_DMA_SIZE);
-    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    let constraints = dma_device_constraints(XHCI_HID_DESCRIPTOR_DMA_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut buffer = dma_alloc_for_constraints(XHCI_HID_DESCRIPTOR_DMA_SIZE, &constraints);
+    if !dma_buffer_cpu_owned(&buffer) ||
+       !dma_buffer_satisfies_device_constraints(&buffer, &constraints) { return false; }
     if !xhci_hid_descriptor_zero(buffer.virtual_address, length as u64) {
         xhci_hid_descriptor_release_temporary(&mut buffer);
         return false;
