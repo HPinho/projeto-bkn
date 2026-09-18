@@ -49,13 +49,13 @@ class XhciHidContextRollbackTests(unittest.TestCase):
 
     def test_cr3_is_validated_before_allocating_ring(self):
         cr3 = self.prepare.index("x86_read_cr3_raw() == 0")
-        alloc = self.prepare.index("dma_alloc(XHCI_HID_RING_SIZE")
+        alloc = self.prepare.index("dma_alloc_for_constraints(XHCI_HID_RING_SIZE")
         self.assertLess(cr3, alloc)
 
     def test_input_context_is_snapshotted_before_dma_allocation(self):
         snapshot = self.prepare.index("let old_drop_flags")
         dequeue = self.prepare.index("let old_ep_dequeue")
-        alloc = self.prepare.index("dma_alloc(XHCI_HID_RING_SIZE")
+        alloc = self.prepare.index("dma_alloc_for_constraints(XHCI_HID_RING_SIZE")
         self.assertLess(snapshot, alloc)
         self.assertLess(dequeue, alloc)
         for token in (

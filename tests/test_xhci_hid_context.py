@@ -35,8 +35,12 @@ class XhciHidContextTests(unittest.TestCase):
 
     def test_hid_ring_is_pmm_dma_backed_and_linked(self):
         text = HID.read_text(encoding="utf-8")
-        self.assertIn("dma_alloc(XHCI_HID_RING_SIZE, XHCI_HID_RING_SIZE)", text)
+        self.assertIn("dma_alloc_for_constraints(XHCI_HID_RING_SIZE, &constraints)", text)
         self.assertIn("xhci_ring_bind", text)
+        self.assertIn("dma_device_constraints(XHCI_HID_RING_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", text)
+        self.assertIn("dma_alloc_for_constraints(XHCI_HID_RING_SIZE, &constraints)", text)
+        self.assertIn("dma_buffer_satisfies_device_constraints(&ring_buffer, &constraints)", text)
+        self.assertNotIn("dma_alloc(XHCI_HID_RING_SIZE", text)
         self.assertIn("xhci_trb_link", text)
         self.assertIn("dma_share_with_device", text)
 

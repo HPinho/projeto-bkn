@@ -80,7 +80,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c5 xHCI runtime-arena typed integration        CERTIFIED
   DF-8c6 xHCI slot-context arena integration         CERTIFIED
   DF-8c7 xHCI device-descriptor buffer integration   CERTIFIED
-  DF-8c8 xHCI configuration-buffer integration       IMPLEMENTED / VALIDATING
+  DF-8c8 xHCI configuration-buffer integration       CERTIFIED
+  DF-8c9 xHCI HID transfer-ring integration           IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -294,7 +295,7 @@ Invariantes:
 
 ### DF-8c8 — oitava integração por dispositivo: xHCI configuration buffers
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `74477451185abea2ec316064ce0e263fbb569712`.
 
 Este corte migra os dois pontos de alocação do Configuration Descriptor em `kernel/src/drivers/xhci_configuration.sotlas` (header e leitura completa) para constraints tipadas:
 
@@ -311,3 +312,26 @@ Invariantes:
 - submit/wait ambiguo continua fail-closed;
 - parsing de HID/interface/endpoint e o fluxo SET_CONFIGURATION permanecem inalterados;
 - o guard global passa a permitir exatamente sete arquivos callers tipados.
+
+
+### DF-8c9 — nona integração por dispositivo: xHCI HID transfer ring
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente o HID Interrupt IN Transfer Ring em `kernel/src/drivers/xhci_hid_context.sotlas` para constraints tipadas:
+
+```text
+alignment   = XHCI_HID_RING_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- o ring continua com uma pagina de 4096 bytes e 256 TRBs;
+- snapshot do Input Context ocorre antes da alocacao;
+- zero/bind/write/share failures continuam passando pelo rollback existente;
+- restore do Input Context continua precedendo release do candidato;
+- o ring so e publicado depois de `dma_share_with_device(...)`;
+- Configure Endpoint, Event Ring, report buffer e input-event pipeline permanecem fora deste corte;
+- o guard global passa a permitir exatamente oito arquivos callers tipados.

@@ -303,8 +303,11 @@ pub fn xhci_hid_context_prepare_for_slot(slot_id: u8,
     let old_ep_dequeue = xhci_hid_context_read64(input, endpoint_offset + 8);
     let old_ep_dw4 = xhci_hid_context_read32(input, endpoint_offset + 16);
 
-    let mut ring_buffer = dma_alloc(XHCI_HID_RING_SIZE, XHCI_HID_RING_SIZE);
-    if !dma_buffer_cpu_owned(&ring_buffer) { return false; }
+    let constraints = dma_device_constraints(XHCI_HID_RING_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut ring_buffer = dma_alloc_for_constraints(XHCI_HID_RING_SIZE, &constraints);
+    if !dma_buffer_cpu_owned(&ring_buffer) ||
+       !dma_buffer_satisfies_device_constraints(&ring_buffer, &constraints) { return false; }
     if !xhci_hid_context_zero(ring_buffer.virtual_address, ring_buffer.size) {
         xhci_hid_context_release_unpublished_ring(ring_buffer);
         return false;
