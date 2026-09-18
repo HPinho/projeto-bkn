@@ -78,7 +78,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c3 AHCI read-buffer typed integration          CERTIFIED
   DF-8c4 AHCI write-buffer typed integration         CERTIFIED
   DF-8c5 xHCI runtime-arena typed integration        CERTIFIED
-  DF-8c6 xHCI slot-context arena integration         IMPLEMENTED / VALIDATING
+  DF-8c6 xHCI slot-context arena integration         CERTIFIED
+  DF-8c7 xHCI device-descriptor buffer integration   IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -249,7 +250,7 @@ Invariantes:
 
 ### DF-8c6 — sexta integração por dispositivo: xHCI slot-context arena
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `75ef2c00d64d1770052d1790324a7bb7b8df57ee`.
 
 Este corte migra somente a arena de Device Context / Input Context / EP0 Transfer Ring em `kernel/src/drivers/xhci_context.sotlas` para constraints tipadas:
 
@@ -267,3 +268,24 @@ Invariantes:
 - rollback pre-DCBAA, rollback pos-DCBAA, unshare e release permanecem inalterados;
 - Address Device, doorbells e command/event rings nao foram movidos para este corte;
 - o guard global passa a permitir exatamente cinco arquivos callers tipados.
+
+
+### DF-8c7 — setima integração por dispositivo: xHCI device-descriptor buffers
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra os dois pontos de alocação do Device Descriptor em `kernel/src/drivers/xhci_descriptor.sotlas` (probe curto de 8 bytes e leitura completa de 18 bytes) para constraints tipadas, preservando o mesmo buffer físico de uma página:
+
+```text
+alignment   = XHCI_DESCRIPTOR_DMA_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- ambos os caminhos continuam usando um buffer de 4096 bytes;
+- publish per-slot, quarantine, completion, teardown exact-epoch e tombstones permanecem inalterados;
+- submit/wait ambiguo continua fail-closed e nunca libera o buffer publicado;
+- nenhum endpoint, doorbell, Address Device ou command/event ring foi alterado;
+- o guard global passa a permitir exatamente seis arquivos callers tipados.

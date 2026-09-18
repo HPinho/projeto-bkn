@@ -272,8 +272,11 @@ pub fn xhci_probe_device_descriptor_8_for_slot(slot_id: u8) -> bool {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].probe_max_packet0 = 0;
     }
 
-    let mut buffer = dma_alloc(XHCI_DESCRIPTOR_DMA_SIZE, XHCI_DESCRIPTOR_DMA_SIZE);
-    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    let constraints = dma_device_constraints(XHCI_DESCRIPTOR_DMA_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut buffer = dma_alloc_for_constraints(XHCI_DESCRIPTOR_DMA_SIZE, &constraints);
+    if !dma_buffer_cpu_owned(&buffer) ||
+       !dma_buffer_satisfies_device_constraints(&buffer, &constraints) { return false; }
     if !xhci_descriptor_zero(buffer.virtual_address, USB_DEVICE_DESCRIPTOR_PROBE_LENGTH as u64) {
         xhci_descriptor_release_temporary(&mut buffer);
         return false;
@@ -393,8 +396,11 @@ pub fn xhci_get_device_descriptor_for_slot(slot_id: u8) -> bool {
         XHCI_DEVICE_DESCRIPTOR_STATES[index].max_packet0 = 0;
     }
 
-    let mut buffer = dma_alloc(XHCI_DESCRIPTOR_DMA_SIZE, XHCI_DESCRIPTOR_DMA_SIZE);
-    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    let constraints = dma_device_constraints(XHCI_DESCRIPTOR_DMA_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut buffer = dma_alloc_for_constraints(XHCI_DESCRIPTOR_DMA_SIZE, &constraints);
+    if !dma_buffer_cpu_owned(&buffer) ||
+       !dma_buffer_satisfies_device_constraints(&buffer, &constraints) { return false; }
     if !xhci_descriptor_zero(buffer.virtual_address, USB_DEVICE_DESCRIPTOR_LENGTH as u64) {
         xhci_descriptor_release_temporary(&mut buffer);
         return false;
