@@ -85,7 +85,8 @@ DF-8   DMA Device API                              CERTIFIED
   DF-8c10 xHCI HID report-buffer integration          CERTIFIED
   DF-8c11 xHCI HID descriptor-buffer integration      CERTIFIED
   DF-8c12 AHCI generic block-I/O buffer integration   CERTIFIED
-DF-9   MMIO Mapping API                            PLANNED
+DF-9   MMIO Mapping API                            IN PROGRESS
+  DF-9a Typed MMIO range/policy contract              IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -407,7 +408,7 @@ Invariantes:
 
 ## Fechamento DF-8 — DMA Device API
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `2818f21ac0c4673a0eab201744ba123294b19734`.
 
 A auditoria final apos DF-8c12 confirma:
 
@@ -422,7 +423,7 @@ Quando os sete gates deste fechamento estiverem verdes no mesmo SHA, DF-8 pode s
 
 ### Correction-only HID — recovery de reenumeracao FAILED
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `2818f21ac0c4673a0eab201744ba123294b19734`.
 
 A validacao de fechamento do DF-8 expôs uma lacuna preexistente no segundo ciclo real de hotplug: uma falha transitória depois de Enable Slot podia deixar o slot em `FAILED` indefinidamente. O recovery já neutralizava mailbox e estados lógicos, mas preservava owners físicos e Device Table entry.
 
@@ -441,3 +442,17 @@ FAILED exact slot+epoch
 ```
 
 Nenhum timeout, marker ou criterio do workflow HID foi relaxado. O DF-8 permanece VALIDATING ate os sete gates fecharem verdes no mesmo SHA corretivo.
+
+
+## DF-9a — Typed MMIO range/policy contract
+
+**IMPLEMENTED / VALIDATING.**
+
+Primeiro microcorte do MMIO Mapping API:
+
+- adiciona `MmioMapping` com base física original, tamanho, page base, page count e cache policy;
+- políticas tipadas: `UC`, `WC`, `WT`, `WB`;
+- somente `UC` é suportado neste corte e delega página a página ao backend certificado `active_page_tables_map_mmio_identity_4k()`;
+- `WC`, `WT` e `WB` existem no contrato, mas falham fechado até backends explícitos;
+- nenhum driver, APIC, ECAM, AML ou framebuffer é migrado neste corte;
+- intervalos com overflow, tamanho zero, endereço zero ou política inválida falham fechado.

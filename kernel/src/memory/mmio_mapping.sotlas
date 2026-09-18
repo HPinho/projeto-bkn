@@ -1,0 +1,115 @@
+// Baken OS — DF-9a: contrato tipado de mapeamento MMIO.
+//
+// Primeiro microcorte: modela intervalo + politica de cache e implementa somente
+// o backend UC identity já certificado. WC/WT/WB permanecem fail-closed até
+// backends explícitos serem introduzidos; nenhum driver é migrado aqui.
+
+module kernel::memory::mmio_mapping;
+
+import kernel::arch::x86_64::paging::*;
+import kernel::memory::active_page_tables::*;
+
+pub const MMIO_CACHE_POLICY_INVALID: u8 = 0;
+pub const MMIO_CACHE_POLICY_UC: u8 = 1;
+pub const MMIO_CACHE_POLICY_WC: u8 = 2;
+pub const MMIO_CACHE_POLICY_WT: u8 = 3;
+pub const MMIO_CACHE_POLICY_WB: u8 = 4;
+
+pub struct MmioMapping {
+    pub physical_base: u64;
+    pub size: u64;
+    pub page_base: u64;
+    pub page_count: u64;
+    pub cache_policy: u8;
+    pub writable: bool;
+    pub valid: bool;
+}
+
+@system
+pub fn mmio_invalid_mapping() -> MmioMapping {
+    return MmioMapping {
+        physical_base: 0,
+        size: 0,
+        page_base: 0,
+        page_count: 0,
+        cache_policy: MMIO_CACHE_POLICY_INVALID,
+        writable: false,
+        valid: false
+    };
+}
+
+@system
+pub fn mmio_cache_policy_valid(policy: u8) -> bool {
+    return policy == MMIO_CACHE_POLICY_UC ||
+           policy == MMIO_CACHE_POLICY_WC ||
+           policy == MMIO_CACHE_POLICY_WT ||
+           policy == MMIO_CACHE_POLICY_WB;
+}
+
+@system
+fn mmio_range_end(base: u64, size: u64) -> u64 {
+    if base == 0 || size == 0 { return 0; }
+    let end = base + size;
+    if end <= base { return 0; }
+    return end;
+}
+
+@system
+pub fn mmio_describe_identity(base: u64, size: u64, policy: u8) -> MmioMapping {
+    if !mmio_cache_policy_valid(policy) { return mmio_invalid_mapping(); }
+    let end = mmio_range_end(base, size);
+    if end == 0 { return mmio_invalid_mapping(); }
+
+    let first = x86_page_align_down(base);
+    let limit = x86_page_align_up(end);
+    if first == 0 || limit == 0 || limit < end || limit <= first {
+        return mmio_invalid_mapping();
+    }
+    let span = limit - first;
+    if (span & 0xFFF) != 0 { return mmio_invalid_mapping(); }
+    let pages = span / 4096;
+    if pages == 0 { return mmio_invalid_mapping(); }
+
+    return MmioMapping {
+        physical_base: base,
+        size: size,
+        page_base: first,
+        page_count: pages,
+        cache_policy: policy,
+        writable: true,
+        valid: true
+    };
+}
+
+@system
+pub fn mmio_mapping_supported(mapping: *const MmioMapping) -> bool {
+    if mapping == (null as *const MmioMapping) { return false; }
+    unsafe {
+        return (*mapping).valid &&
+               (*mapping).cache_policy == MMIO_CACHE_POLICY_UC &&
+               (*mapping).page_count != 0;
+    }
+}
+
+@system
+pub fn mmio_map_identity(mapping: *const MmioMapping) -> bool {
+    if !mmio_mapping_supported(mapping) || !active_page_tables_is_ready() {
+        return false;
+    }
+
+    let mut page: u64 = 0;
+    let mut count: u64 = 0;
+    unsafe {
+        page = (*mapping).page_base;
+        count = (*mapping).page_count;
+    }
+
+    let mut index: u64 = 0;
+    while index < count {
+        if !active_page_tables_map_mmio_identity_4k(page) { return false; }
+        if page > 0xFFFFFFFFFFFFEFFF { return false; }
+        page += 4096;
+        index += 1;
+    }
+    return true;
+}
