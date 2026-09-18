@@ -222,6 +222,92 @@ pub fn active_page_tables_map_ram_identity_4k(physical_address: u64,
 }
 
 @system
+fn active_mmio_identity_uc_pte_locked(page: u64) -> bool {
+    if page == 0 || !x86_page_aligned(page) { return false; }
+    let pte = active_runtime_pte_locked(page);
+    if !x86_pte_present(pte) || x86_pte_address(pte) != page {
+        return false;
+    }
+    let required = X86_PTE_WRITABLE | X86_PTE_NX |
+        X86_PTE_WRITE_THROUGH | X86_PTE_CACHE_DISABLE;
+    if (pte & required) != required { return false; }
+    if (pte & X86_PTE_USER) != 0 { return false; }
+    // UC identity backend atual seleciona PAT index 3: PWT=1, PCD=1, PAT=0.
+    return (pte & 0x98) == (X86_PTE_WRITE_THROUGH | X86_PTE_CACHE_DISABLE);
+}
+
+@system
+pub fn active_mmio_identity_uc_range_ready(page_base: u64, page_count: u64) -> bool {
+    if !active_page_tables_is_ready() || page_base == 0 ||
+       !x86_page_aligned(page_base) || page_count == 0 ||
+       page_count > (0xFFFFFFFFFFFFFFFF / 4096) {
+        return false;
+    }
+    let span = page_count * 4096;
+    if page_base + span <= page_base { return false; }
+
+    let flags_irq = active_page_tables_lock_irq();
+    if flags_irq == 0 { return false; }
+    let mut page = page_base;
+    let mut index: u64 = 0;
+    let mut ready = true;
+    while index < page_count {
+        if !active_mmio_identity_uc_pte_locked(page) {
+            ready = false;
+            break;
+        }
+        page += 4096;
+        index += 1;
+    }
+    active_page_tables_unlock_irq(flags_irq);
+    return ready;
+}
+
+@system
+fn active_mmio_restore_uc_locked(page_base: u64, page_count: u64) -> bool {
+    let mut page = page_base;
+    let mut index: u64 = 0;
+    while index < page_count {
+        let leaf = active_runtime_leaf_locked(page);
+        if !leaf.valid { return false; }
+        let old = page_table_read_entry(leaf, x86_pt_index(page));
+        if !x86_pte_present(old) || x86_pte_address(old) != page { return false; }
+        let desired = (old & ~0x98) |
+            X86_PTE_WRITE_THROUGH | X86_PTE_CACHE_DISABLE;
+        if !page_table_write_entry(leaf, x86_pt_index(page), desired) ||
+           !active_page_tables_publish_locked(page) {
+            return false;
+        }
+        let observed = page_table_read_entry(leaf, x86_pt_index(page));
+        if (observed & 0x98) !=
+           (X86_PTE_WRITE_THROUGH | X86_PTE_CACHE_DISABLE) {
+            return false;
+        }
+        page += 4096;
+        index += 1;
+    }
+    __dma_fence();
+    return true;
+}
+
+@system
+pub fn active_mmio_restore_identity_uc(page_base: u64, page_count: u64) -> bool {
+    if !active_page_tables_is_ready() || page_base == 0 ||
+       !x86_page_aligned(page_base) || page_count == 0 ||
+       page_count > (0xFFFFFFFFFFFFFFFF / 4096) {
+        return false;
+    }
+    let span = page_count * 4096;
+    if page_base + span <= page_base { return false; }
+
+    let flags_irq = active_page_tables_lock_irq();
+    if flags_irq == 0 { return false; }
+    let restored = active_mmio_restore_uc_locked(page_base, page_count);
+    active_page_tables_unlock_irq(flags_irq);
+    return restored;
+}
+
+@system
 pub fn active_framebuffer_write_combining(base: u64, size: u64) -> bool {
     if !active_page_tables_is_ready() || base == 0 || size == 0 || size > 268435456 { return false; }
     let end = base + size;

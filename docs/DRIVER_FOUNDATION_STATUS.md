@@ -88,7 +88,8 @@ DF-8   DMA Device API                              CERTIFIED
 DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9a Typed MMIO range/policy contract              CERTIFIED
   DF-9b MMIO ownership/claim integration              CERTIFIED
-  DF-9c1 Cache-policy backend capability model         IMPLEMENTED / VALIDATING
+  DF-9c1 Cache-policy backend capability model         CERTIFIED
+  DF-9c2 WC preflight/UC restore primitives            IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -481,7 +482,7 @@ ao Resource Manager certificado:
 
 ## DF-9c1 — Cache-policy backend capability model
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `2a9a3b51f03667c6cd4a8eaf017af33462ca0b8d`.
 
 Este microcorte separa a politica solicitada do backend realmente utilizavel:
 
@@ -493,3 +494,19 @@ Este microcorte separa a politica solicitada do backend realmente utilizavel:
 - nenhum driver muda e nenhum BAR passa a usar WC por inferencia;
 - a proxima etapa de WC generico exige rollback atomico de PTE antes de poder ser
   exposta ao contrato MMIO geral.
+
+
+## DF-9c2 — WC preflight / UC restore primitives
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte ainda nao expõe WC ao mapper generico. Ele adiciona somente as
+primitivas necessárias para uma promoção futura com rollback:
+
+- preflight exige cada página como identity mapping, RW, NX, supervisor-only e
+  seleção UC atual `PWT|PCD` (PAT index 3);
+- validação de range é overflow-safe e serializada pelo lock das active page tables;
+- restauração UC recompõe explicitamente a seleção PAT UC e publica TLB shootdown
+  página a página;
+- `__dma_fence()` fecha a restauração;
+- nenhum driver ou caller MMIO passa a usar WC neste microcorte.
