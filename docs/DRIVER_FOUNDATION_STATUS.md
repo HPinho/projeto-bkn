@@ -93,7 +93,8 @@ DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9c3 Generic WC promotion with rollback            CERTIFIED
   DF-9c4 Runtime PAT capability probe                  CERTIFIED
   DF-9c5 Generic WT/WB PAT-index backends              CERTIFIED
-  DF-9d1 PCI ECAM typed UC mapping migration            IMPLEMENTED / VALIDATING
+  DF-9d1 PCI ECAM typed UC mapping migration            CERTIFIED
+  DF-9d2 MSI-X table typed UC mapping migration         IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -562,7 +563,7 @@ Este corte fecha o modelo de cache policy sem presumir indices PAT:
 
 ## DF-9d1 — PCI ECAM typed UC mapping migration
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `014f9e79b9f5845edaf57bc45ab4abdf1c500099`.
 
 Primeira migracao real de caller MMIO:
 
@@ -572,3 +573,19 @@ Primeira migracao real de caller MMIO:
 - o mapper tipado recebe `mmio_describe_identity(page, 4096, MMIO_CACHE_POLICY_UC)`;
 - fallback CF8/CFC, lock PCI_CONFIG, extended-space policy e cache capacity permanecem inalterados;
 - nenhum MSI-X, xHCI, storage, APIC, GPIO ou AML e migrado neste corte.
+
+
+## DF-9d2 — MSI-X table typed UC mapping migration
+
+**IMPLEMENTED / VALIDATING.**
+
+Segundo caller real migrado:
+
+- somente `kernel/src/drivers/pci_msix_table.sotlas` muda no runtime;
+- o footprint antigo e preservado exatamente: primeira pagina da entry e,
+  somente se a entry de 16 bytes cruzar a fronteira de 4 KiB, a ultima pagina;
+- cada pagina continua UC e e descrita como range tipado de 4096 bytes;
+- PBA nao e mapeada neste corte;
+- programacao masked, readback, rollback de entry, ownership e quarantine
+  permanecem inalterados;
+- `pci_msix_activation.sotlas` permanece no backend legado para o DF-9d3.

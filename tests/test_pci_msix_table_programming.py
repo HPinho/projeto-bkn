@@ -83,9 +83,13 @@ class PciMsixTableProgrammingContracts(unittest.TestCase):
         mapping = self._fn("pci_msix_table_map_entry")
         self.assertIn("x86_page_align_down(entry_physical)", mapping)
         self.assertIn("x86_page_align_down(last_byte)", mapping)
-        self.assertIn("active_page_tables_map_mmio_identity_4k(first_page)", mapping)
+        self.assertIn("mmio_describe_identity(", mapping)
+        self.assertIn("first_page, 4096, MMIO_CACHE_POLICY_UC", mapping)
+        self.assertIn("mmio_map_identity(&first_mapping)", mapping)
         self.assertIn("last_page != first_page", mapping)
-        self.assertIn("active_page_tables_map_mmio_identity_4k(last_page)", mapping)
+        self.assertIn("last_page, 4096, MMIO_CACHE_POLICY_UC", mapping)
+        self.assertIn("mmio_map_identity(&last_mapping)", mapping)
+        self.assertNotIn("active_page_tables_map_mmio_identity_4k", mapping)
 
     def test_mapping_happens_before_irq_disabled_program_lock(self):
         body = self._pub("pci_msix_table_program_masked_single")
@@ -165,6 +169,7 @@ class PciMsixTableProgrammingContracts(unittest.TestCase):
             self.assertNotIn(forbidden, TABLE)
         self.assertNotIn("layout.pba_physical +", TABLE)
         self.assertNotIn("active_page_tables_map_mmio_identity_4k(layout.pba_physical", TABLE)
+        self.assertNotIn("mmio_describe_identity(layout.pba_physical", TABLE)
 
 
 if __name__ == "__main__":
