@@ -57,8 +57,8 @@ class DmaContractTests(unittest.TestCase):
                 callers.append(str(path.relative_to(ROOT)))
         self.assertEqual(
             sorted(callers),
-            ["kernel/src/drivers/ahci_block_read.sotlas","kernel/src/drivers/ahci_runtime.sotlas","kernel/src/drivers/nvme.sotlas","kernel/src/drivers/xhci_runtime.sotlas"],
-            "DF-8c integration must remain limited to NVMe, AHCI runtime/read-write buffers, and xHCI runtime arena"
+            ["kernel/src/drivers/ahci_block_read.sotlas","kernel/src/drivers/ahci_runtime.sotlas","kernel/src/drivers/nvme.sotlas","kernel/src/drivers/xhci_context.sotlas","kernel/src/drivers/xhci_runtime.sotlas"],
+            "DF-8c integration must remain limited to certified NVMe/AHCI callers plus xHCI runtime and context arenas"
         )
     def test_dma_requires_active_pmm_and_vmm_before_exposing_memory(self):
         text=DMA.read_text(encoding="utf-8")

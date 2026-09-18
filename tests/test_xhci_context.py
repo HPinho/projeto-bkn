@@ -25,6 +25,11 @@ class XhciContextTests(unittest.TestCase):
         self.assertIn("XHCI_CONTEXT_SLOT_CAPACITY", text)
         self.assertIn("pub fn xhci_context_prepare_for_slot(slot_id: u8)", text)
         self.assertIn("XHCI_CONTEXTS[index].arena = arena", text)
+        self.assertIn("dma_device_constraints(XHCI_CONTEXT_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", text)
+        self.assertIn("dma_device_constraints_valid(&constraints)", text)
+        self.assertIn("dma_alloc_for_constraints(", text)
+        self.assertIn("dma_buffer_satisfies_device_constraints(&arena, &constraints)", text)
+        self.assertNotIn("dma_alloc(XHCI_CONTEXT_ARENA_PAGES", text)
 
     def test_ep0_packet_size_depends_on_port_speed(self):
         text = CONTEXT.read_text(encoding="utf-8")

@@ -315,9 +315,14 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
         return false;
     }
 
-    let mut arena = dma_alloc(XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE,
-                              XHCI_CONTEXT_PAGE_SIZE);
-    if !dma_buffer_cpu_owned(&arena) { return false; }
+    let constraints = dma_device_constraints(XHCI_CONTEXT_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut arena = dma_alloc_for_constraints(
+        XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE,
+        &constraints
+    );
+    if !dma_buffer_cpu_owned(&arena) ||
+       !dma_buffer_satisfies_device_constraints(&arena, &constraints) { return false; }
     if !xhci_context_zero(arena.virtual_address, arena.size) {
         xhci_context_release_unpublished_arena(arena);
         return false;

@@ -77,7 +77,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c2 AHCI runtime typed integration              CERTIFIED
   DF-8c3 AHCI read-buffer typed integration          CERTIFIED
   DF-8c4 AHCI write-buffer typed integration         CERTIFIED
-  DF-8c5 xHCI runtime-arena typed integration        IMPLEMENTED / VALIDATING
+  DF-8c5 xHCI runtime-arena typed integration        CERTIFIED
+  DF-8c6 xHCI slot-context arena integration         IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -227,7 +228,7 @@ Invariantes:
 
 ### DF-8c5 — quinta integração por dispositivo: xHCI runtime arena
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `6107fdea189e9c592e087457ceb7222a2082bfb1`.
 
 Este corte migra somente a arena principal de `kernel/src/drivers/xhci_runtime.sotlas` para constraints tipadas, preservando o contrato físico existente:
 
@@ -244,3 +245,25 @@ Invariantes:
 - a arena e validada por `dma_buffer_satisfies_device_constraints(...)` antes de qualquer subbuffer ser derivado;
 - nenhum doorbell, Bus Master, start do controller, ERST programming ou ownership de rings foi alterado;
 - o guard global passa a permitir exatamente quatro arquivos callers tipados.
+
+
+### DF-8c6 — sexta integração por dispositivo: xHCI slot-context arena
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente a arena de Device Context / Input Context / EP0 Transfer Ring em `kernel/src/drivers/xhci_context.sotlas` para constraints tipadas:
+
+```text
+alignment   = XHCI_CONTEXT_PAGE_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- a arena continua tendo exatamente 3 paginas por slot;
+- Device Context, Input Context e EP0 Ring continuam derivados da mesma arena;
+- a arena e validada antes de zeroing/publicacao;
+- rollback pre-DCBAA, rollback pos-DCBAA, unshare e release permanecem inalterados;
+- Address Device, doorbells e command/event rings nao foram movidos para este corte;
+- o guard global passa a permitir exatamente cinco arquivos callers tipados.

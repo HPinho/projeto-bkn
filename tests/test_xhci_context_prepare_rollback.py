@@ -52,7 +52,7 @@ class XhciContextPrepareRollbackTests(unittest.TestCase):
         self.assertIn("XHCI_CONTEXT_ARENA_PAGES: u64 = 3", self.text)
         self.assertEqual(
             self.prepare.count(
-                "dma_alloc(XHCI_CONTEXT_ARENA_PAGES * XHCI_CONTEXT_PAGE_SIZE"
+                "dma_alloc_for_constraints("
             ),
             1,
         )
@@ -63,7 +63,7 @@ class XhciContextPrepareRollbackTests(unittest.TestCase):
     def test_cr3_and_zero_dcbaa_are_proved_before_alloc(self):
         cr3 = self.prepare.index("x86_read_cr3_raw() == 0")
         dcbaa = self.prepare.index("xhci_context_dcbaa_slot_value(slot_id)", cr3)
-        alloc = self.prepare.index("dma_alloc(XHCI_CONTEXT_ARENA_PAGES")
+        alloc = self.prepare.index("dma_alloc_for_constraints(")
         self.assertLess(cr3, dcbaa)
         self.assertLess(dcbaa, alloc)
         self.assertIn("dcbaa_before == XHCI_CONTEXT_DCBAA_INVALID", self.prepare)
