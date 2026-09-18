@@ -90,7 +90,8 @@ DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9b MMIO ownership/claim integration              CERTIFIED
   DF-9c1 Cache-policy backend capability model         CERTIFIED
   DF-9c2 WC preflight/UC restore primitives            CERTIFIED
-  DF-9c3 Generic WC promotion with rollback            IMPLEMENTED / VALIDATING
+  DF-9c3 Generic WC promotion with rollback            CERTIFIED
+  DF-9c4 Runtime PAT capability probe                  IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -515,7 +516,7 @@ primitivas necessárias para uma promoção futura com rollback:
 
 ## DF-9c3 — Generic WC promotion with rollback
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `6ee39eeef5e097a376e6da7a82615caf06b0ec5a`.
 
 Primeiro backend WC generico, ainda sem migracao de drivers:
 
@@ -526,3 +527,17 @@ Primeiro backend WC generico, ainda sem migracao de drivers:
 - qualquer falha tenta normalizar o range inteiro novamente para UC antes de retornar;
 - o mapper aceita agora UC e WC; WT/WB continuam fail-closed;
 - nenhum driver usa WC via esta API neste microcorte.
+
+
+## DF-9c4 — Runtime PAT capability probe
+
+**IMPLEMENTED / VALIDATING.**
+
+Este microcorte prova capacidades PAT sem alterar mappings:
+
+- preserva `arch/x86_64/pat.sotlas` como helper puro de bits PTE;
+- novo modulo separado le `IA32_PAT` via `x86_read_msr(0x277)`;
+- tipos UC/WC/WT/WB sao identificados pelo valor real das oito entradas PAT;
+- nenhum indice PAT e presumido/hardcoded para WT ou WB;
+- a busca falha fechado com `MMIO_PAT_INDEX_INVALID` quando o tipo nao existe;
+- nenhuma PTE, driver ou BAR e modificado neste corte.

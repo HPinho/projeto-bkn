@@ -1,0 +1,65 @@
+// Baken OS — DF-9c4: prova runtime das capacidades PAT.
+//
+// Mantem arch/x86_64/pat.sotlas puro. Esta camada apenas le IA32_PAT e
+// identifica em runtime quais indices representam os tipos de memoria usados
+// pelo contrato MMIO. Nenhuma PTE e alterada aqui.
+
+module kernel::memory::mmio_pat_policy;
+
+import kernel::arch::x86_64::cpu::*;
+import kernel::arch::x86_64::pat::*;
+
+pub const IA32_PAT_MSR: u32 = 0x277;
+
+pub const PAT_MEMORY_TYPE_UC: u8 = 0x00;
+pub const PAT_MEMORY_TYPE_WC: u8 = 0x01;
+pub const PAT_MEMORY_TYPE_WT: u8 = 0x04;
+pub const PAT_MEMORY_TYPE_WP: u8 = 0x05;
+pub const PAT_MEMORY_TYPE_WB: u8 = 0x06;
+pub const PAT_MEMORY_TYPE_UC_MINUS: u8 = 0x07;
+
+pub const MMIO_PAT_INDEX_INVALID: u8 = 0xFF;
+
+@system
+pub fn mmio_pat_entry_type(pat: u64, index: u8) -> u8 {
+    if !x86_pat_index_valid(index) { return 0xFF; }
+    let shift = (index as u64) * 8;
+    return ((pat >> shift) & 0xFF) as u8;
+}
+
+@system
+pub fn mmio_pat_memory_type_supported(memory_type: u8) -> bool {
+    return memory_type == PAT_MEMORY_TYPE_UC ||
+           memory_type == PAT_MEMORY_TYPE_WC ||
+           memory_type == PAT_MEMORY_TYPE_WT ||
+           memory_type == PAT_MEMORY_TYPE_WB;
+}
+
+@system
+pub fn mmio_pat_find_index_in_value(pat: u64, memory_type: u8) -> u8 {
+    if !mmio_pat_memory_type_supported(memory_type) {
+        return MMIO_PAT_INDEX_INVALID;
+    }
+    let mut index: u8 = 0;
+    while index < X86_PAT_INDEX_COUNT {
+        if mmio_pat_entry_type(pat, index) == memory_type {
+            return index;
+        }
+        index += 1;
+    }
+    return MMIO_PAT_INDEX_INVALID;
+}
+
+@system
+pub fn mmio_pat_find_runtime_index(memory_type: u8) -> u8 {
+    if !mmio_pat_memory_type_supported(memory_type) {
+        return MMIO_PAT_INDEX_INVALID;
+    }
+    let pat = x86_read_msr(IA32_PAT_MSR);
+    return mmio_pat_find_index_in_value(pat, memory_type);
+}
+
+@system
+pub fn mmio_pat_runtime_has(memory_type: u8) -> bool {
+    return mmio_pat_find_runtime_index(memory_type) != MMIO_PAT_INDEX_INVALID;
+}
