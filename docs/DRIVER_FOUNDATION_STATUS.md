@@ -81,7 +81,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c6 xHCI slot-context arena integration         CERTIFIED
   DF-8c7 xHCI device-descriptor buffer integration   CERTIFIED
   DF-8c8 xHCI configuration-buffer integration       CERTIFIED
-  DF-8c9 xHCI HID transfer-ring integration           IMPLEMENTED / VALIDATING
+  DF-8c9 xHCI HID transfer-ring integration           CERTIFIED
+  DF-8c10 xHCI HID report-buffer integration          IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -316,7 +317,7 @@ Invariantes:
 
 ### DF-8c9 — nona integração por dispositivo: xHCI HID transfer ring
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `13ecd2a02caeed26fc71029c5419b3ae81f4fd06`.
 
 Este corte migra somente o HID Interrupt IN Transfer Ring em `kernel/src/drivers/xhci_hid_context.sotlas` para constraints tipadas:
 
@@ -335,3 +336,25 @@ Invariantes:
 - o ring so e publicado depois de `dma_share_with_device(...)`;
 - Configure Endpoint, Event Ring, report buffer e input-event pipeline permanecem fora deste corte;
 - o guard global passa a permitir exatamente oito arquivos callers tipados.
+
+
+### DF-8c10 — decima integração por dispositivo: xHCI HID report buffer
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente o buffer DMA de reports HID Interrupt IN em `kernel/src/drivers/xhci_hid_report.sotlas` para constraints tipadas:
+
+```text
+alignment   = XHCI_HID_REPORT_DMA_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- o buffer continua com uma pagina de 4096 bytes;
+- owner antigo ou em quarentena continua bloqueando novo prepare antes da alocacao;
+- zero/share failures continuam liberando apenas o candidato nao publicado;
+- TRB publish, doorbell, producer cycle, completion e pending bookkeeping permanecem inalterados;
+- parser HID, input-device map, event queue e fallback boot keyboard/mouse permanecem fora deste corte;
+- o guard global passa a permitir exatamente nove arquivos callers tipados.

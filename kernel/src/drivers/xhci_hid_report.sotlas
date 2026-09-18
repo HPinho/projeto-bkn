@@ -340,8 +340,11 @@ pub fn xhci_hid_report_prepare_for_slot(slot_id: u8) -> bool {
         if XHCI_HID_REPORT_STATES[state_index].buffer.valid { return false; }
     }
 
-    let mut buffer = dma_alloc(XHCI_HID_REPORT_DMA_SIZE, XHCI_HID_REPORT_DMA_SIZE);
-    if !dma_buffer_cpu_owned(&buffer) { return false; }
+    let constraints = dma_device_constraints(XHCI_HID_REPORT_DMA_SIZE, 0xFFFFFFFFFFFFFFFF, 0);
+    if !dma_device_constraints_valid(&constraints) { return false; }
+    let mut buffer = dma_alloc_for_constraints(XHCI_HID_REPORT_DMA_SIZE, &constraints);
+    if !dma_buffer_cpu_owned(&buffer) ||
+       !dma_buffer_satisfies_device_constraints(&buffer, &constraints) { return false; }
     if !xhci_hid_report_zero(buffer.virtual_address, buffer.size) {
         xhci_hid_report_release_unpublished_buffer(buffer);
         return false;

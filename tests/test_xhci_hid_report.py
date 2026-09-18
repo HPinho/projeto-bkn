@@ -22,6 +22,11 @@ class XhciHidReportTests(unittest.TestCase):
         self.assertIn("pub fn xhci_hid_report_complete_for_slot(slot_id: u8)", text)
         self.assertIn("xhci_device_table_slot_epoch(slot_id)", text)
         self.assertNotIn("static mut XHCI_HID_REPORT_BUFFER:", text)
+        self.assertIn("dma_device_constraints(XHCI_HID_REPORT_DMA_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", text)
+        self.assertIn("dma_device_constraints_valid(&constraints)", text)
+        self.assertIn("dma_alloc_for_constraints(XHCI_HID_REPORT_DMA_SIZE, &constraints)", text)
+        self.assertIn("dma_buffer_satisfies_device_constraints(&buffer, &constraints)", text)
+        self.assertNotIn("dma_alloc(XHCI_HID_REPORT_DMA_SIZE", text)
 
     def test_report_path_requires_same_slot_configuration_endpoint_map_events_and_identity(self):
         text = HID.read_text(encoding="utf-8")

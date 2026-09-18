@@ -45,7 +45,7 @@ class XhciHidReportPrepareRollbackTests(unittest.TestCase):
         self.assertNotIn("pmm_free", self.release)
 
     def test_prepare_rejects_old_published_or_quarantined_owner_before_alloc(self):
-        alloc = self.prepare.index("dma_alloc(XHCI_HID_REPORT_DMA_SIZE")
+        alloc = self.prepare.index("dma_alloc_for_constraints(XHCI_HID_REPORT_DMA_SIZE")
         same_epoch = self.prepare.index(
             "XHCI_HID_REPORT_STATES[state_index].epoch == epoch"
         )
@@ -62,7 +62,7 @@ class XhciHidReportPrepareRollbackTests(unittest.TestCase):
         self.assertLess(stale_buffer, alloc)
 
     def test_zero_and_share_failures_rollback_only_unpublished_candidate(self):
-        alloc = self.prepare.index("dma_alloc(XHCI_HID_REPORT_DMA_SIZE")
+        alloc = self.prepare.index("dma_alloc_for_constraints(XHCI_HID_REPORT_DMA_SIZE")
         zero = self.prepare.index("xhci_hid_report_zero", alloc)
         zero_release = self.prepare.index(
             "xhci_hid_report_release_unpublished_buffer(buffer)", zero
