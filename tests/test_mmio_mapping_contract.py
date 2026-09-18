@@ -31,10 +31,12 @@ class MmioMappingContractTests(unittest.TestCase):
         ):
             self.assertIn(token, self.text)
         supported = self.text.split("pub fn mmio_mapping_supported", 1)[1].split("@system", 1)[0]
-        self.assertIn("(*mapping).cache_policy == MMIO_CACHE_POLICY_UC", supported)
-        self.assertNotIn("MMIO_CACHE_POLICY_WC", supported)
-        self.assertNotIn("MMIO_CACHE_POLICY_WT", supported)
-        self.assertNotIn("MMIO_CACHE_POLICY_WB", supported)
+        generic = self.text.split("pub fn mmio_generic_mapping_supported", 1)[1].split("@system", 1)[0]
+        self.assertIn("mmio_generic_mapping_supported(mapping)", supported)
+        self.assertIn("MMIO_BACKEND_IDENTITY_UC", generic)
+        self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", generic)
+        self.assertNotIn("MMIO_CACHE_POLICY_WT", generic)
+        self.assertNotIn("MMIO_CACHE_POLICY_WB", generic)
 
     def test_backend_capabilities_distinguish_generic_uc_from_dedicated_wc(self):
         backend = self.text.split("pub fn mmio_cache_policy_backend", 1)[1].split("@system", 1)[0]
