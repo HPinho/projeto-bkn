@@ -24,7 +24,9 @@ class XhciControllerTests(unittest.TestCase):
         first_read = body.index("x86_mmio_read32(mmio + XHCI_CAPLENGTH_HCIVERSION)")
         self.assertLess(mapping, first_read)
         helper = text.split("fn xhci_map_mmio_address", 1)[1].split("fn xhci_map_required_mmio", 1)[0]
-        self.assertIn("active_page_tables_map_mmio_identity_4k", helper)
+        self.assertIn("mmio_describe_identity(page, 4096, MMIO_CACHE_POLICY_UC)", helper)
+        self.assertIn("mmio_map_identity(&mapping)", helper)
+        self.assertNotIn("active_page_tables_map_mmio_identity_4k", helper)
 
     def test_reset_contract_halts_then_hcrst_then_waits_cnr(self):
         text = CTRL.read_text(encoding="utf-8")

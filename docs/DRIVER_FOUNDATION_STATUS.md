@@ -95,7 +95,8 @@ DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9c5 Generic WT/WB PAT-index backends              CERTIFIED
   DF-9d1 PCI ECAM typed UC mapping migration            CERTIFIED
   DF-9d2 MSI-X table typed UC mapping migration         CERTIFIED
-  DF-9d3 MSI-X activation typed UC mapping migration    IMPLEMENTED / VALIDATING
+  DF-9d3 MSI-X activation typed UC mapping migration    CERTIFIED
+  DF-9d4 xHCI controller typed UC mapping migration     IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -594,7 +595,7 @@ Segundo caller real migrado:
 
 ## DF-9d3 — MSI-X activation typed UC mapping migration
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `9447be5884e2cfb2b14e631d2bbeb8124c34018a`.
 
 Terceiro caller real migrado:
 
@@ -605,3 +606,19 @@ Terceiro caller real migrado:
 - ordem global-mask -> entry-unmask -> function-unmask, teardown, rollback,
   ownership e quarantine permanecem inalterados;
 - nenhum PBA, xHCI, storage, APIC, GPIO, I2C ou AML e migrado neste corte.
+
+
+## DF-9d4 — xHCI controller typed UC mapping migration
+
+**IMPLEMENTED / VALIDATING.**
+
+Quarto caller real migrado:
+
+- somente `kernel/src/drivers/xhci_controller.sotlas` muda no runtime;
+- o helper continua arredondando cada endereco para exatamente uma pagina de 4096 bytes;
+- politica permanece UC;
+- capability, operational registers e USB Legacy handoff continuam usando o mesmo
+  helper e a mesma ordem de mapping antes de acesso MMIO;
+- Memory Space enable, reset HCRST, CNR/HCHalted polling e Bus Master off
+  permanecem inalterados;
+- demais helpers xHCI continuam no backend legado para microcortes posteriores.

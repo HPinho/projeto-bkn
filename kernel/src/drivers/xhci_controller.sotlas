@@ -10,6 +10,7 @@ module kernel::drivers::xhci_controller;
 import kernel::arch::x86_64::cpu::*;
 import kernel::arch::x86_64::serial::*;
 import kernel::memory::active_page_tables::*;
+import kernel::memory::mmio_mapping::*;
 import kernel::drivers::pci_bus::*;
 import kernel::drivers::xhci_discovery::*;
 
@@ -66,7 +67,10 @@ fn xhci_page_base(address: u64) -> u64 {
 @system
 fn xhci_map_mmio_address(address: u64) -> bool {
     if address == 0 { return false; }
-    return active_page_tables_map_mmio_identity_4k(xhci_page_base(address));
+    let page = xhci_page_base(address);
+    if page == 0 { return false; }
+    let mapping = mmio_describe_identity(page, 4096, MMIO_CACHE_POLICY_UC);
+    return mapping.valid && mmio_map_identity(&mapping);
 }
 
 @system
