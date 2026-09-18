@@ -94,7 +94,8 @@ DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9c4 Runtime PAT capability probe                  CERTIFIED
   DF-9c5 Generic WT/WB PAT-index backends              CERTIFIED
   DF-9d1 PCI ECAM typed UC mapping migration            CERTIFIED
-  DF-9d2 MSI-X table typed UC mapping migration         IMPLEMENTED / VALIDATING
+  DF-9d2 MSI-X table typed UC mapping migration         CERTIFIED
+  DF-9d3 MSI-X activation typed UC mapping migration    IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -577,7 +578,7 @@ Primeira migracao real de caller MMIO:
 
 ## DF-9d2 — MSI-X table typed UC mapping migration
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `3f40fe1d01b3f26126c0bc22afafa2a74693fb9f`.
 
 Segundo caller real migrado:
 
@@ -589,3 +590,18 @@ Segundo caller real migrado:
 - programacao masked, readback, rollback de entry, ownership e quarantine
   permanecem inalterados;
 - `pci_msix_activation.sotlas` permanece no backend legado para o DF-9d3.
+
+
+## DF-9d3 — MSI-X activation typed UC mapping migration
+
+**IMPLEMENTED / VALIDATING.**
+
+Terceiro caller real migrado:
+
+- somente `kernel/src/drivers/pci_msix_activation.sotlas` muda no runtime;
+- o footprint antigo e preservado exatamente: primeira pagina da entry e,
+  somente em straddle dos 16 bytes, a ultima pagina;
+- cada pagina permanece UC e usa range tipado de 4096 bytes;
+- ordem global-mask -> entry-unmask -> function-unmask, teardown, rollback,
+  ownership e quarantine permanecem inalterados;
+- nenhum PBA, xHCI, storage, APIC, GPIO, I2C ou AML e migrado neste corte.

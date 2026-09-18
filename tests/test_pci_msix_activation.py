@@ -37,6 +37,17 @@ class PciMsixActivationContracts(unittest.TestCase):
         self.assertIn("device_core_begin_active_operation", begin)
         self.assertIn("irq_registry_begin_operation", begin)
 
+    def test_entry_mapping_uses_typed_uc_without_expanding_footprint(self):
+        mapping = self._fn("pci_msix_activation_map_entry")
+        self.assertIn("x86_page_align_down(entry_physical)", mapping)
+        self.assertIn("x86_page_align_down(last_byte)", mapping)
+        self.assertIn("first_page, 4096, MMIO_CACHE_POLICY_UC", mapping)
+        self.assertIn("mmio_map_identity(&first_mapping)", mapping)
+        self.assertIn("last_page != first_page", mapping)
+        self.assertIn("last_page, 4096, MMIO_CACHE_POLICY_UC", mapping)
+        self.assertIn("mmio_map_identity(&last_mapping)", mapping)
+        self.assertNotIn("active_page_tables_map_mmio_identity_4k", mapping)
+
     def test_activation_order_is_global_mask_then_entry_unmask_then_function_unmask(self):
         body = self._pub("pci_msix_activate_single")
         enable = body.index("PCI_MSIX_CONTROL_ENABLE |")

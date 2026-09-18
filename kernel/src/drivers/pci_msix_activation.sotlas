@@ -23,6 +23,7 @@ import kernel::device::registry::*;
 import kernel::device::resource_manager::*;
 import kernel::interrupts::registry::*;
 import kernel::memory::active_page_tables::*;
+import kernel::memory::mmio_mapping::*;
 import kernel::arch::x86_64::paging::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
@@ -309,10 +310,18 @@ fn pci_msix_activation_map_entry(entry_physical: u64) -> bool {
     let first_page = x86_page_align_down(entry_physical);
     let last_page = x86_page_align_down(last_byte);
     if first_page == 0 || last_page == 0 { return false; }
-    if !active_page_tables_map_mmio_identity_4k(first_page) { return false; }
-    if last_page != first_page &&
-       !active_page_tables_map_mmio_identity_4k(last_page) {
+    let first_mapping = mmio_describe_identity(
+        first_page, 4096, MMIO_CACHE_POLICY_UC);
+    if !first_mapping.valid || !mmio_map_identity(&first_mapping) {
         return false;
+    }
+
+    if last_page != first_page {
+        let last_mapping = mmio_describe_identity(
+            last_page, 4096, MMIO_CACHE_POLICY_UC);
+        if !last_mapping.valid || !mmio_map_identity(&last_mapping) {
+            return false;
+        }
     }
     return true;
 }
