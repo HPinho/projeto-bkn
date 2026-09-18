@@ -178,6 +178,21 @@ class XhciHidHotplugRuntimeTests(unittest.TestCase):
         self.assertIn("BAKEN:USB_HID_HOTPLUG_DETACH_READY", self.workflow)
         self.assertIn("BAKEN:USB_HID_HOTPLUG_RECONNECT_READY", self.workflow)
 
+    def test_failed_reenumeration_cannot_pin_slot_forever(self):
+        enum = (ROOT / "kernel/src/drivers/xhci_hid_enumeration.sotlas").read_text(encoding="utf-8")
+        body = enum.split("fn xhci_hid_enumeration_disable_failed_slot", 1)[1]
+        body = body.split("fn xhci_hid_enumeration_restore_active", 1)[0]
+        for token in (
+            "xhci_hid_descriptor_release_failed_dma_for_epoch(slot_id, epoch)",
+            "xhci_hid_report_release_failed_dma_for_epoch(slot_id, epoch)",
+            "xhci_hid_context_release_failed_ring_for_epoch(slot_id, epoch)",
+            "xhci_context_release_failed_arena_for_epoch(slot_id, epoch)",
+            "xhci_device_table_release(slot_id, epoch)",
+            "xhci_slot_reuse_guard_release_for(slot_id, epoch)",
+        ):
+            self.assertIn(token, body)
+
+
 
 if __name__ == "__main__":
     unittest.main()

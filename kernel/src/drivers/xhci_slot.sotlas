@@ -134,6 +134,22 @@ pub fn xhci_slot_is_ready() -> bool {
 }
 
 @system
+pub fn xhci_slot_quiesce_failed_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    if slot_id == 0 || epoch == 0 || !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED { return false; }
+    unsafe {
+        if XHCI_SLOT_ID == slot_id {
+            XHCI_SLOT_READY = false;
+            XHCI_SLOT_ID = 0;
+            XHCI_SLOT_PORT_ID = 0;
+            XHCI_SLOT_TYPE = 0;
+        }
+        return XHCI_SLOT_ID != slot_id;
+    }
+}
+
+@system
 pub fn xhci_slot_is_ready_for(slot_id: u8) -> bool {
     if slot_id == 0 || !xhci_device_table_slot_is_valid(slot_id) { return false; }
     let state = xhci_device_table_state(slot_id);

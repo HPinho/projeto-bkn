@@ -509,6 +509,35 @@ pub fn xhci_hid_context_active_slot_id() -> u8 {
 }
 
 @system
+pub fn xhci_hid_context_release_failed_ring_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_hid_context_index(slot_id);
+    if index >= XHCI_HID_CONTEXT_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED { return false; }
+    unsafe {
+        if XHCI_HID_CONTEXTS[index].epoch != epoch {
+            return !XHCI_HID_CONTEXTS[index].ring.valid && XHCI_HID_CONTEXTS[index].ring_physical == 0;
+        }
+        if XHCI_HID_CONTEXTS[index].ring.valid {
+            if dma_buffer_shared(&XHCI_HID_CONTEXTS[index].ring) &&
+               !dma_unshare_from_device(&mut XHCI_HID_CONTEXTS[index].ring) { return false; }
+            if !dma_buffer_cpu_owned(&XHCI_HID_CONTEXTS[index].ring) ||
+               !dma_release(&mut XHCI_HID_CONTEXTS[index].ring) { return false; }
+        }
+        XHCI_HID_CONTEXTS[index].ready = false;
+        XHCI_HID_CONTEXTS[index].dci = 0;
+        XHCI_HID_CONTEXTS[index].endpoint_address = 0;
+        XHCI_HID_CONTEXTS[index].max_packet = 0;
+        XHCI_HID_CONTEXTS[index].interval = 0;
+        XHCI_HID_CONTEXTS[index].ring = dma_invalid_buffer();
+        XHCI_HID_CONTEXTS[index].ring_physical = 0;
+        if XHCI_HID_CONTEXT_ACTIVE_SLOT_ID == slot_id { XHCI_HID_CONTEXT_ACTIVE_SLOT_ID = 0; }
+    }
+    return true;
+}
+
+@system
 pub fn xhci_hid_context_is_ready() -> bool {
     return xhci_hid_context_is_ready_for(xhci_hid_context_active_slot_id());
 }

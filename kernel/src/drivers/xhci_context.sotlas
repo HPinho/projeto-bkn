@@ -408,6 +408,54 @@ pub fn xhci_context_prepare_for_slot(slot_id: u8) -> bool {
 }
 
 @system
+pub fn xhci_context_release_failed_arena_for_epoch(slot_id: u8, epoch: u32) -> bool {
+    let index = xhci_context_index(slot_id);
+    if index >= XHCI_CONTEXT_SLOT_CAPACITY || slot_id == 0 || epoch == 0 ||
+       !xhci_device_table_slot_is_valid(slot_id) ||
+       xhci_device_table_slot_epoch(slot_id) != epoch ||
+       xhci_device_table_state(slot_id) != XHCI_DEVICE_STATE_FAILED { return false; }
+    unsafe {
+        if XHCI_CONTEXTS[index].epoch != epoch {
+            return !XHCI_CONTEXTS[index].arena.valid &&
+                   XHCI_CONTEXTS[index].device_physical == 0 &&
+                   XHCI_CONTEXTS[index].input_physical == 0 &&
+                   XHCI_CONTEXTS[index].ep0_ring_physical == 0;
+        }
+    }
+    let dcbaa = xhci_context_dcbaa_slot_value(slot_id);
+    if dcbaa == XHCI_CONTEXT_DCBAA_INVALID { return false; }
+    if dcbaa != 0 {
+        let dcbaa_physical = xhci_runtime_dcbaa_physical();
+        if dcbaa_physical == 0 { return false; }
+        let dcbaa_virtual = direct_map_virtual_address(dcbaa_physical);
+        if dcbaa_virtual == 0 { return false; }
+        let offset = (slot_id as u64) * 8;
+        unsafe { *((dcbaa_virtual + offset) as *mut u64) = 0; }
+        if x86_read_cr3_raw() == 0 || xhci_context_dcbaa_slot_value(slot_id) != 0 { return false; }
+    }
+    unsafe {
+        if XHCI_CONTEXTS[index].arena.valid {
+            if dma_buffer_shared(&XHCI_CONTEXTS[index].arena) &&
+               !dma_unshare_from_device(&mut XHCI_CONTEXTS[index].arena) { return false; }
+            if !dma_buffer_cpu_owned(&XHCI_CONTEXTS[index].arena) ||
+               !dma_release(&mut XHCI_CONTEXTS[index].arena) { return false; }
+        }
+        XHCI_CONTEXTS[index].ready = false;
+        XHCI_CONTEXTS[index].context_size = 0;
+        XHCI_CONTEXTS[index].arena = dma_invalid_buffer();
+        XHCI_CONTEXTS[index].device_physical = 0;
+        XHCI_CONTEXTS[index].input_physical = 0;
+        XHCI_CONTEXTS[index].ep0_ring_physical = 0;
+        XHCI_CONTEXTS[index].ep0_max_packet = 0;
+        if XHCI_CONTEXT_SLOT_ID == slot_id {
+            XHCI_CONTEXT_READY = false;
+            XHCI_CONTEXT_SLOT_ID = 0;
+        }
+    }
+    return true;
+}
+
+@system
 pub fn xhci_context_prepare_for_enabled_slot() -> bool {
     unsafe {
         XHCI_CONTEXT_READY = false;

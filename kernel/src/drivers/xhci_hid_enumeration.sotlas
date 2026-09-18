@@ -27,6 +27,7 @@ import kernel::drivers::xhci_hid_descriptor::*;
 import kernel::drivers::xhci_set_configuration::*;
 import kernel::drivers::xhci_hid_report::*;
 import kernel::drivers::xhci_transfer::*;
+import kernel::drivers::xhci_slot_reuse_guard::*;
 
 pub const XHCI_HID_ENUMERATION_SCAN_LIMIT: u16 = 256;
 
@@ -90,12 +91,23 @@ fn xhci_hid_enumeration_disable_failed_slot(slot_id: u8, epoch: u32) -> bool {
     // em quarentena até os microcortes específicos de owners físicos.
     let address_released = xhci_address_release_failed_for_epoch(slot_id, epoch);
 
-    // Outros owners parciais ainda permanecem em FAILED e serão fechados nos
-    // próximos microcortes; device table/Slot ID continuam reservados por design.
-    return identity_released && transfer_released && configuration_released &&
-        descriptor_released && set_configuration_released &&
-        configure_endpoint_released && evaluate_released && ep0_released &&
-        address_released;
+    let logical_released = identity_released && transfer_released &&
+        configuration_released && descriptor_released &&
+        set_configuration_released && configure_endpoint_released &&
+        evaluate_released && ep0_released && address_released;
+    if !logical_released { return false; }
+
+    if !xhci_slot_reuse_guard_block_for(slot_id, epoch) ||
+       !xhci_slot_reuse_guard_blocked_for(slot_id, epoch) { return false; }
+    if !xhci_hid_descriptor_release_failed_dma_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_hid_report_release_failed_dma_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_hid_context_release_failed_ring_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_slot_quiesce_failed_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_context_release_failed_arena_for_epoch(slot_id, epoch) { return false; }
+    if !xhci_device_table_release(slot_id, epoch) || xhci_device_table_slot_is_valid(slot_id) { return false; }
+    if !xhci_slot_reuse_guard_release_for(slot_id, epoch) ||
+       !xhci_slot_reuse_guard_release_complete_for(slot_id, epoch) { return false; }
+    return true;
 }
 
 @system

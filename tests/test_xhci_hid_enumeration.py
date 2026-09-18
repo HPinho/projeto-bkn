@@ -116,6 +116,24 @@ class XhciHidEnumerationTests(unittest.TestCase):
         self.assertNotIn("\n    xhci_device_table_release(", body)
         self.assertIn("quarentena", text)
 
+    def test_failed_enumeration_releases_physical_owners_before_registry_reuse(self):
+        text = ENUM.read_text(encoding="utf-8")
+        body = text.split("fn xhci_hid_enumeration_disable_failed_slot", 1)[1]
+        body = body.split("fn xhci_hid_enumeration_restore_active", 1)[0]
+        order = [
+            "xhci_command_execute(command, slot_id)",
+            "xhci_slot_reuse_guard_block_for(slot_id, epoch)",
+            "xhci_hid_descriptor_release_failed_dma_for_epoch(slot_id, epoch)",
+            "xhci_hid_report_release_failed_dma_for_epoch(slot_id, epoch)",
+            "xhci_hid_context_release_failed_ring_for_epoch(slot_id, epoch)",
+            "xhci_slot_quiesce_failed_for_epoch(slot_id, epoch)",
+            "xhci_context_release_failed_arena_for_epoch(slot_id, epoch)",
+            "xhci_device_table_release(slot_id, epoch)",
+            "xhci_slot_reuse_guard_release_for(slot_id, epoch)",
+        ]
+        positions = [body.index(token) for token in order]
+        self.assertEqual(positions, sorted(positions))
+
     def test_next_connected_iteration_is_bounded_and_skips_ports_with_slots(self):
         text = ENUM.read_text(encoding="utf-8")
         body = text.split("pub fn xhci_hid_enumerate_next_connected", 1)[1]

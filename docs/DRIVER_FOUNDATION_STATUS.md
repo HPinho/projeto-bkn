@@ -418,3 +418,26 @@ A auditoria final apos DF-8c12 confirma:
 - `dma_alloc_for_constraints(...)` continua delegando exatamente uma vez ao backend existente `dma_alloc_for_device(...)`.
 
 Quando os sete gates deste fechamento estiverem verdes no mesmo SHA, DF-8 pode ser promovido a **CERTIFIED** e o proximo macrobloco passa a ser **DF-9 — MMIO Mapping API**.
+
+
+### Correction-only HID — recovery de reenumeracao FAILED
+
+**IMPLEMENTED / VALIDATING.**
+
+A validacao de fechamento do DF-8 expôs uma lacuna preexistente no segundo ciclo real de hotplug: uma falha transitória depois de Enable Slot podia deixar o slot em `FAILED` indefinidamente. O recovery já neutralizava mailbox e estados lógicos, mas preservava owners físicos e Device Table entry.
+
+Este correction-only fecha, depois de Command Completion de Disable Slot:
+
+```text
+FAILED exact slot+epoch
+-> block reuse guard
+-> release HID Report Descriptor DMA
+-> release HID Report DMA
+-> release HID Transfer Ring
+-> clear failed slot alias
+-> clear DCBAA + release Device/Input/EP0 context arena
+-> device_table_release
+-> release reuse guard
+```
+
+Nenhum timeout, marker ou criterio do workflow HID foi relaxado. O DF-8 permanece VALIDATING ate os sete gates fecharem verdes no mesmo SHA corretivo.
