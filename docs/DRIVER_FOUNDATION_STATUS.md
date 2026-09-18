@@ -79,7 +79,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c4 AHCI write-buffer typed integration         CERTIFIED
   DF-8c5 xHCI runtime-arena typed integration        CERTIFIED
   DF-8c6 xHCI slot-context arena integration         CERTIFIED
-  DF-8c7 xHCI device-descriptor buffer integration   IMPLEMENTED / VALIDATING
+  DF-8c7 xHCI device-descriptor buffer integration   CERTIFIED
+  DF-8c8 xHCI configuration-buffer integration       IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -272,7 +273,7 @@ Invariantes:
 
 ### DF-8c7 — setima integração por dispositivo: xHCI device-descriptor buffers
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `6ddc9ec20b6c4a517499f238046558cad12fa4c1`.
 
 Este corte migra os dois pontos de alocação do Device Descriptor em `kernel/src/drivers/xhci_descriptor.sotlas` (probe curto de 8 bytes e leitura completa de 18 bytes) para constraints tipadas, preservando o mesmo buffer físico de uma página:
 
@@ -289,3 +290,24 @@ Invariantes:
 - submit/wait ambiguo continua fail-closed e nunca libera o buffer publicado;
 - nenhum endpoint, doorbell, Address Device ou command/event ring foi alterado;
 - o guard global passa a permitir exatamente seis arquivos callers tipados.
+
+
+### DF-8c8 — oitava integração por dispositivo: xHCI configuration buffers
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra os dois pontos de alocação do Configuration Descriptor em `kernel/src/drivers/xhci_configuration.sotlas` (header e leitura completa) para constraints tipadas:
+
+```text
+alignment   = XHCI_CONFIGURATION_DMA_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- ambos os caminhos continuam usando um buffer de 4096 bytes;
+- owner per-slot, quarantine, completion terminal, teardown exact-epoch e tombstones permanecem inalterados;
+- submit/wait ambiguo continua fail-closed;
+- parsing de HID/interface/endpoint e o fluxo SET_CONFIGURATION permanecem inalterados;
+- o guard global passa a permitir exatamente sete arquivos callers tipados.
