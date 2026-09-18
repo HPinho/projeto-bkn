@@ -15,6 +15,10 @@ pub const MMIO_CACHE_POLICY_WC: u8 = 2;
 pub const MMIO_CACHE_POLICY_WT: u8 = 3;
 pub const MMIO_CACHE_POLICY_WB: u8 = 4;
 
+pub const MMIO_BACKEND_NONE: u8 = 0;
+pub const MMIO_BACKEND_IDENTITY_UC: u8 = 1;
+pub const MMIO_BACKEND_FRAMEBUFFER_WC: u8 = 2;
+
 pub struct MmioMapping {
     pub physical_base: u64;
     pub size: u64;
@@ -82,12 +86,33 @@ pub fn mmio_describe_identity(base: u64, size: u64, policy: u8) -> MmioMapping {
 }
 
 @system
-pub fn mmio_mapping_supported(mapping: *const MmioMapping) -> bool {
+pub fn mmio_cache_policy_backend(policy: u8) -> u8 {
+    if policy == MMIO_CACHE_POLICY_UC {
+        return MMIO_BACKEND_IDENTITY_UC;
+    }
+    if policy == MMIO_CACHE_POLICY_WC {
+        // WC existe no kernel, mas somente no caminho dedicado de framebuffer.
+        // O backend generico MMIO ainda nao pode adotá-lo sem rollback de PTE.
+        return MMIO_BACKEND_FRAMEBUFFER_WC;
+    }
+    return MMIO_BACKEND_NONE;
+}
+
+@system
+pub fn mmio_generic_mapping_supported(mapping: *const MmioMapping) -> bool {
     if mapping == (null as *const MmioMapping) { return false; }
     unsafe {
         return (*mapping).valid &&
-               (*mapping).cache_policy == MMIO_CACHE_POLICY_UC &&
+               mmio_cache_policy_backend((*mapping).cache_policy) == MMIO_BACKEND_IDENTITY_UC &&
                (*mapping).page_count != 0;
+    }
+}
+
+@system
+pub fn mmio_mapping_supported(mapping: *const MmioMapping) -> bool {
+    if mapping == (null as *const MmioMapping) { return false; }
+    unsafe {
+        return mmio_generic_mapping_supported(mapping);
     }
 }
 

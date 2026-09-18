@@ -87,7 +87,8 @@ DF-8   DMA Device API                              CERTIFIED
   DF-8c12 AHCI generic block-I/O buffer integration   CERTIFIED
 DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9a Typed MMIO range/policy contract              CERTIFIED
-  DF-9b MMIO ownership/claim integration              IMPLEMENTED / VALIDATING
+  DF-9b MMIO ownership/claim integration              CERTIFIED
+  DF-9c1 Cache-policy backend capability model         IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -461,7 +462,7 @@ Primeiro microcorte do MMIO Mapping API:
 
 ## DF-9b — MMIO ownership/claim integration
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `5b39f1e0cc3b0b90f404b736ce1bff2f34b95600`.
 
 Este microcorte nao cria um registry paralelo. Ele liga o contrato `MmioMapping`
 ao Resource Manager certificado:
@@ -476,3 +477,19 @@ ao Resource Manager certificado:
 - release nao remove PTE identity neste corte, pois o backend atual nao tem
   ownership de VA/unmap seguro para MMIO compartilhado;
 - nenhum driver e migrado no DF-9b.
+
+
+## DF-9c1 — Cache-policy backend capability model
+
+**IMPLEMENTED / VALIDATING.**
+
+Este microcorte separa a politica solicitada do backend realmente utilizavel:
+
+- `UC` -> `MMIO_BACKEND_IDENTITY_UC`, backend generico suportado;
+- `WC` -> `MMIO_BACKEND_FRAMEBUFFER_WC`, reconhecido como backend dedicado existente,
+  mas deliberadamente nao aceito pelo mapper MMIO generico;
+- `WT` e `WB` -> `MMIO_BACKEND_NONE`, fail-closed;
+- `mmio_generic_mapping_supported()` aceita somente o backend UC generico;
+- nenhum driver muda e nenhum BAR passa a usar WC por inferencia;
+- a proxima etapa de WC generico exige rollback atomico de PTE antes de poder ser
+  exposta ao contrato MMIO geral.

@@ -36,6 +36,15 @@ class MmioMappingContractTests(unittest.TestCase):
         self.assertNotIn("MMIO_CACHE_POLICY_WT", supported)
         self.assertNotIn("MMIO_CACHE_POLICY_WB", supported)
 
+    def test_backend_capabilities_distinguish_generic_uc_from_dedicated_wc(self):
+        backend = self.text.split("pub fn mmio_cache_policy_backend", 1)[1].split("@system", 1)[0]
+        self.assertIn("MMIO_BACKEND_IDENTITY_UC", backend)
+        self.assertIn("MMIO_BACKEND_FRAMEBUFFER_WC", backend)
+        self.assertIn("MMIO_BACKEND_NONE", backend)
+        generic = self.text.split("pub fn mmio_generic_mapping_supported", 1)[1].split("@system", 1)[0]
+        self.assertIn("MMIO_BACKEND_IDENTITY_UC", generic)
+        self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", generic)
+
     def test_range_description_is_page_rounded_and_overflow_safe(self):
         body = self.text.split("pub fn mmio_describe_identity", 1)[1].split("@system", 1)[0]
         for token in (
@@ -51,6 +60,7 @@ class MmioMappingContractTests(unittest.TestCase):
         body = self.text.split("pub fn mmio_map_identity", 1)[1]
         self.assertIn("active_page_tables_map_mmio_identity_4k(page)", body)
         self.assertIn("mmio_mapping_supported(mapping)", body)
+        self.assertIn("mmio_generic_mapping_supported(mapping)", self.text)
         self.assertNotIn("page_table_map_4k", body)
         self.assertNotIn("X86_PTE_CACHE_DISABLE", body)
         self.assertNotIn("X86_PTE_WRITE_THROUGH", body)
