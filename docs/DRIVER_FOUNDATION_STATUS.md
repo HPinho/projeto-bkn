@@ -83,7 +83,8 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c8 xHCI configuration-buffer integration       CERTIFIED
   DF-8c9 xHCI HID transfer-ring integration           CERTIFIED
   DF-8c10 xHCI HID report-buffer integration          CERTIFIED
-  DF-8c11 xHCI HID descriptor-buffer integration      IMPLEMENTED / VALIDATING
+  DF-8c11 xHCI HID descriptor-buffer integration      CERTIFIED
+  DF-8c12 AHCI generic block-I/O buffer integration   IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -363,7 +364,7 @@ Invariantes:
 
 ### DF-8c11 — decima primeira integração por dispositivo: xHCI HID descriptor buffer
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `6deb7110fd878cd9394f11ba2314b08189b002c0`.
 
 Este corte migra somente o buffer DMA persistente do HID Report Descriptor em `kernel/src/drivers/xhci_hid_descriptor.sotlas` para constraints tipadas:
 
@@ -381,3 +382,24 @@ Invariantes:
 - identity teardown generation-safe e teardown DMA exact-epoch permanecem inalterados;
 - parser HID, InputDevice, field map e event binding permanecem fora deste corte;
 - o guard global passa a permitir exatamente dez arquivos callers tipados.
+
+
+### DF-8c12 — decima segunda integração por dispositivo: AHCI generic block-I/O buffer
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente o buffer DMA persistente de I/O genérico em `kernel/src/drivers/ahci_block_io.sotlas` para constraints tipadas:
+
+```text
+alignment   = AHCI_RUNTIME_PAGE_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- o buffer continua com uma pagina de 4096 bytes;
+- READ/WRITE genericos continuam compartilhando o mesmo buffer;
+- PRDT, FIS, LBA28/LBA48, command issue e polling permanecem inalterados;
+- nenhuma constraint nova de hardware foi introduzida;
+- o guard global passa a permitir exatamente onze arquivos callers tipados.

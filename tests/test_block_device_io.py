@@ -27,6 +27,21 @@ class BlockDeviceIoTests(unittest.TestCase):
         self.assertIn("((lba >> 40) & 0xFF) as u8", body)
         self.assertNotIn("AHCI_WRITE_TEST_LBA", body)
 
+    def test_ahci_generic_io_uses_typed_dma_constraints(self):
+        text = AHCI_IO.read_text(encoding="utf-8")
+        prep = text.split("fn ahci_block_io_prepare_buffer", 1)[1].split("fn ahci_block_io_issue", 1)[0]
+        for token in (
+            "dma_device_constraints(AHCI_RUNTIME_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0)",
+            "dma_device_constraints_valid(&constraints)",
+            "dma_alloc_for_constraints(AHCI_RUNTIME_PAGE_SIZE, &constraints)",
+            "dma_buffer_satisfies_device_constraints(&buffer, &constraints)",
+            "dma_buffer_cpu_owned(&buffer)",
+            "dma_share_with_device(&mut buffer)",
+            "AHCI_BLOCK_IO_BUFFER = buffer",
+        ):
+            self.assertIn(token, prep)
+        self.assertNotIn("dma_alloc(AHCI_RUNTIME_PAGE_SIZE, AHCI_RUNTIME_PAGE_SIZE)", prep)
+
     def test_generic_io_depends_on_runtime_and_capacity_not_ci_probe_flags(self):
         text = AHCI_IO.read_text(encoding="utf-8")
         read = text.split("pub fn ahci_block_io_read_sector", 1)[1].split("pub fn ahci_block_io_write_sector", 1)[0]
