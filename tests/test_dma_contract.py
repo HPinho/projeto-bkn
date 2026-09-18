@@ -60,6 +60,30 @@ class DmaContractTests(unittest.TestCase):
             ["kernel/src/drivers/ahci_block_io.sotlas","kernel/src/drivers/ahci_block_read.sotlas","kernel/src/drivers/ahci_runtime.sotlas","kernel/src/drivers/nvme.sotlas","kernel/src/drivers/xhci_configuration.sotlas","kernel/src/drivers/xhci_context.sotlas","kernel/src/drivers/xhci_descriptor.sotlas","kernel/src/drivers/xhci_hid_context.sotlas","kernel/src/drivers/xhci_hid_descriptor.sotlas","kernel/src/drivers/xhci_hid_report.sotlas","kernel/src/drivers/xhci_runtime.sotlas"],
             "DF-8c integration must remain limited to certified NVMe/AHCI callers plus xHCI runtime/context/descriptor/configuration, HID context/report descriptor/report buffers"
         )
+    def test_df8_closure_leaves_no_legacy_device_dma_callers(self):
+        kernel = ROOT / "kernel/src"
+        legacy_device_callers = []
+        direct_constrained_callers = []
+        for path in kernel.rglob("*.sotlas"):
+            if path == DMA:
+                continue
+            rel = str(path.relative_to(ROOT))
+            code = code_without_comments(path)
+            if rel.startswith("kernel/src/drivers/") and "dma_alloc(" in code:
+                legacy_device_callers.append(rel)
+            if "dma_alloc_for_device(" in code:
+                direct_constrained_callers.append(rel)
+        self.assertEqual(
+            sorted(legacy_device_callers),
+            ["kernel/src/drivers/storage_discovery.sotlas"],
+            "Only the generic storage certification probe may keep plain dma_alloc under drivers",
+        )
+        self.assertEqual(
+            sorted(direct_constrained_callers),
+            ["kernel/src/storage/foundation_probe.sotlas"],
+            "foundation_memory_probe is the sole raw constrained-backend proof outside dma.sotlas",
+        )
+
     def test_dma_requires_active_pmm_and_vmm_before_exposing_memory(self):
         text=DMA.read_text(encoding="utf-8")
         for token in ("pub fn dma_allocator_available() -> bool","pmm_allocator_is_active()","vmm_is_active()","vmm_direct_map_base() == BAKEN_DIRECT_MAP_BASE","if !pmm_inventory_is_valid()","if !dma_allocator_available()","pmm_alloc_pages_aligned(page_count, alignment)","direct_map_virtual_address(physical)","if rounded < size { return dma_invalid_buffer(); }"): self.assertIn(token,text)

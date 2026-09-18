@@ -70,7 +70,7 @@ DF-7   MSI-X                                       CERTIFIED
   DF-7d  masked table-entry programming            CERTIFIED
   DF-7e1 activation + fail-closed teardown          CERTIFIED
   DF-7e2 QEMU ivshmem runtime proof                CERTIFIED
-DF-8   DMA Device API                              IN PROGRESS
+DF-8   DMA Device API                              CERTIFIED
   DF-8a read-only device constraints model         CERTIFIED
   DF-8b typed constrained allocation               CERTIFIED
   DF-8c per-device integration / NVMe first        CERTIFIED
@@ -84,7 +84,7 @@ DF-8   DMA Device API                              IN PROGRESS
   DF-8c9 xHCI HID transfer-ring integration           CERTIFIED
   DF-8c10 xHCI HID report-buffer integration          CERTIFIED
   DF-8c11 xHCI HID descriptor-buffer integration      CERTIFIED
-  DF-8c12 AHCI generic block-I/O buffer integration   IMPLEMENTED / VALIDATING
+  DF-8c12 AHCI generic block-I/O buffer integration   CERTIFIED
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -386,7 +386,7 @@ Invariantes:
 
 ### DF-8c12 — decima segunda integração por dispositivo: AHCI generic block-I/O buffer
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `db5aa0ce3866184f5e39d6bdb1338d244cf5a25d`.
 
 Este corte migra somente o buffer DMA persistente de I/O genérico em `kernel/src/drivers/ahci_block_io.sotlas` para constraints tipadas:
 
@@ -403,3 +403,18 @@ Invariantes:
 - PRDT, FIS, LBA28/LBA48, command issue e polling permanecem inalterados;
 - nenhuma constraint nova de hardware foi introduzida;
 - o guard global passa a permitir exatamente onze arquivos callers tipados.
+
+
+## Fechamento DF-8 — DMA Device API
+
+**IMPLEMENTED / VALIDATING.**
+
+A auditoria final apos DF-8c12 confirma:
+
+- NVMe, AHCI e xHCI de runtime normal nao possuem mais callers legados de `dma_alloc(...)` para buffers diretamente entregues ao dispositivo;
+- `kernel/src/drivers/storage_discovery.sotlas` preserva `dma_alloc(...)` somente para um buffer CPU-side do gate destrutivo de certificacao de BlockDevice; o DMA real ocorre dentro do driver AHCI ja migrado;
+- `kernel/src/storage/foundation_probe.sotlas` preserva `dma_alloc_for_device(...)` deliberadamente como prova direta do backend constrained e nao como caminho normal de driver;
+- buffers GPT/FAT32 e outros callers de `dma_alloc(...)` em `kernel/src/storage/` sao memoria interna de storage, nao contratos DMA por dispositivo;
+- `dma_alloc_for_constraints(...)` continua delegando exatamente uma vez ao backend existente `dma_alloc_for_device(...)`.
+
+Quando os sete gates deste fechamento estiverem verdes no mesmo SHA, DF-8 pode ser promovido a **CERTIFIED** e o proximo macrobloco passa a ser **DF-9 — MMIO Mapping API**.
