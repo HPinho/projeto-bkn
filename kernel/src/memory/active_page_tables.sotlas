@@ -308,6 +308,82 @@ pub fn active_mmio_restore_identity_uc(page_base: u64, page_count: u64) -> bool 
 }
 
 @system
+pub fn active_mmio_promote_identity_wc(page_base: u64, page_count: u64) -> bool {
+    if !active_page_tables_is_ready() || page_base == 0 ||
+       !x86_page_aligned(page_base) || page_count == 0 ||
+       page_count > (0xFFFFFFFFFFFFFFFF / 4096) {
+        return false;
+    }
+    let span = page_count * 4096;
+    if page_base + span <= page_base { return false; }
+
+    let flags_irq = active_page_tables_lock_irq();
+    if flags_irq == 0 { return false; }
+
+    // Preflight completo sob o mesmo lock: nenhuma pagina muda antes de todas
+    // provarem identity + RW + NX + supervisor + UC.
+    let mut page = page_base;
+    let mut index: u64 = 0;
+    let mut ready = true;
+    while index < page_count {
+        if !active_mmio_identity_uc_pte_locked(page) {
+            ready = false;
+            break;
+        }
+        page += 4096;
+        index += 1;
+    }
+    if !ready || !__pat_install_wc() {
+        active_page_tables_unlock_irq(flags_irq);
+        return false;
+    }
+
+    page = page_base;
+    index = 0;
+    let mut promoted = true;
+    while index < page_count {
+        let leaf = active_runtime_leaf_locked(page);
+        if !leaf.valid {
+            promoted = false;
+            break;
+        }
+        let old = page_table_read_entry(leaf, x86_pt_index(page));
+        if !x86_pte_present(old) || x86_pte_address(old) != page {
+            promoted = false;
+            break;
+        }
+
+        // PAT index 7 = PAT|PCD|PWT. __pat_install_wc() garante WC nesse indice.
+        let desired = (old & ~0x98) | 0x98;
+        if !page_table_write_entry(leaf, x86_pt_index(page), desired) ||
+           !active_page_tables_publish_locked(page) {
+            promoted = false;
+            break;
+        }
+        let observed = page_table_read_entry(leaf, x86_pt_index(page));
+        if (observed & 0x98) != 0x98 {
+            promoted = false;
+            break;
+        }
+        page += 4096;
+        index += 1;
+    }
+
+    if !promoted {
+        // O preflight provou que todo o range era UC antes da primeira escrita.
+        // Normalizar o range inteiro e mais simples e mais seguro que rastrear
+        // apenas as paginas potencialmente modificadas.
+        active_mmio_restore_uc_locked(page_base, page_count);
+        active_page_tables_unlock_irq(flags_irq);
+        return false;
+    }
+
+    __dma_fence();
+    active_page_tables_unlock_irq(flags_irq);
+    return true;
+}
+
+@system
 pub fn active_framebuffer_write_combining(base: u64, size: u64) -> bool {
     if !active_page_tables_is_ready() || base == 0 || size == 0 || size > 268435456 { return false; }
     let end = base + size;

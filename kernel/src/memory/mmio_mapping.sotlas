@@ -18,6 +18,7 @@ pub const MMIO_CACHE_POLICY_WB: u8 = 4;
 pub const MMIO_BACKEND_NONE: u8 = 0;
 pub const MMIO_BACKEND_IDENTITY_UC: u8 = 1;
 pub const MMIO_BACKEND_FRAMEBUFFER_WC: u8 = 2;
+pub const MMIO_BACKEND_IDENTITY_WC: u8 = 3;
 
 pub struct MmioMapping {
     pub physical_base: u64;
@@ -91,9 +92,7 @@ pub fn mmio_cache_policy_backend(policy: u8) -> u8 {
         return MMIO_BACKEND_IDENTITY_UC;
     }
     if policy == MMIO_CACHE_POLICY_WC {
-        // WC existe no kernel, mas somente no caminho dedicado de framebuffer.
-        // O backend generico MMIO ainda nao pode adotá-lo sem rollback de PTE.
-        return MMIO_BACKEND_FRAMEBUFFER_WC;
+        return MMIO_BACKEND_IDENTITY_WC;
     }
     return MMIO_BACKEND_NONE;
 }
@@ -102,9 +101,10 @@ pub fn mmio_cache_policy_backend(policy: u8) -> u8 {
 pub fn mmio_generic_mapping_supported(mapping: *const MmioMapping) -> bool {
     if mapping == (null as *const MmioMapping) { return false; }
     unsafe {
-        return (*mapping).valid &&
-               mmio_cache_policy_backend((*mapping).cache_policy) == MMIO_BACKEND_IDENTITY_UC &&
-               (*mapping).page_count != 0;
+        if !(*mapping).valid || (*mapping).page_count == 0 { return false; }
+        let backend = mmio_cache_policy_backend((*mapping).cache_policy);
+        return backend == MMIO_BACKEND_IDENTITY_UC ||
+               backend == MMIO_BACKEND_IDENTITY_WC;
     }
 }
 
@@ -124,11 +124,14 @@ pub fn mmio_map_identity(mapping: *const MmioMapping) -> bool {
 
     let mut page: u64 = 0;
     let mut count: u64 = 0;
+    let mut backend: u8 = MMIO_BACKEND_NONE;
     unsafe {
         page = (*mapping).page_base;
         count = (*mapping).page_count;
+        backend = mmio_cache_policy_backend((*mapping).cache_policy);
     }
 
+    let page_base = page;
     let mut index: u64 = 0;
     while index < count {
         if !active_page_tables_map_mmio_identity_4k(page) { return false; }
@@ -136,5 +139,13 @@ pub fn mmio_map_identity(mapping: *const MmioMapping) -> bool {
         page += 4096;
         index += 1;
     }
-    return true;
+
+    if backend == MMIO_BACKEND_IDENTITY_WC {
+        if !active_mmio_promote_identity_wc(page_base, count) {
+            active_mmio_restore_identity_uc(page_base, count);
+            return false;
+        }
+    }
+    return backend == MMIO_BACKEND_IDENTITY_UC ||
+           backend == MMIO_BACKEND_IDENTITY_WC;
 }

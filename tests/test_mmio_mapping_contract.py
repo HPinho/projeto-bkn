@@ -34,6 +34,7 @@ class MmioMappingContractTests(unittest.TestCase):
         generic = self.text.split("pub fn mmio_generic_mapping_supported", 1)[1].split("@system", 1)[0]
         self.assertIn("mmio_generic_mapping_supported(mapping)", supported)
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", generic)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WC", generic)
         self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", generic)
         self.assertNotIn("MMIO_CACHE_POLICY_WT", generic)
         self.assertNotIn("MMIO_CACHE_POLICY_WB", generic)
@@ -41,10 +42,11 @@ class MmioMappingContractTests(unittest.TestCase):
     def test_backend_capabilities_distinguish_generic_uc_from_dedicated_wc(self):
         backend = self.text.split("pub fn mmio_cache_policy_backend", 1)[1].split("@system", 1)[0]
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", backend)
-        self.assertIn("MMIO_BACKEND_FRAMEBUFFER_WC", backend)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WC", backend)
         self.assertIn("MMIO_BACKEND_NONE", backend)
         generic = self.text.split("pub fn mmio_generic_mapping_supported", 1)[1].split("@system", 1)[0]
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", generic)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WC", generic)
         self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", generic)
 
     def test_range_description_is_page_rounded_and_overflow_safe(self):
@@ -58,14 +60,16 @@ class MmioMappingContractTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
 
-    def test_mapping_delegates_only_to_existing_uc_backend(self):
+    def test_mapping_stages_uc_before_optional_wc_promotion(self):
         body = self.text.split("pub fn mmio_map_identity", 1)[1]
-        self.assertIn("active_page_tables_map_mmio_identity_4k(page)", body)
+        uc = body.index("active_page_tables_map_mmio_identity_4k(page)")
+        wc = body.index("active_mmio_promote_identity_wc(page_base, count)", uc)
+        rollback = body.index("active_mmio_restore_identity_uc(page_base, count)", wc)
+        self.assertLess(uc, wc)
+        self.assertLess(wc, rollback)
         self.assertIn("mmio_mapping_supported(mapping)", body)
         self.assertIn("mmio_generic_mapping_supported(mapping)", self.text)
         self.assertNotIn("page_table_map_4k", body)
-        self.assertNotIn("X86_PTE_CACHE_DISABLE", body)
-        self.assertNotIn("X86_PTE_WRITE_THROUGH", body)
 
     def test_df9a_does_not_migrate_drivers(self):
         drivers = ROOT / "kernel/src/drivers"

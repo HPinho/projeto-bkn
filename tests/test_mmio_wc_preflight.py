@@ -50,13 +50,27 @@ class MmioWcPreflightTests(unittest.TestCase):
         self.assertIn("active_page_tables_publish_locked(page)", body)
         self.assertIn("__dma_fence()", body)
 
-    def test_df9c2_does_not_expose_generic_wc_mapping(self):
+    def test_df9c3_wc_promotion_is_preflighted_and_rollback_capable(self):
+        body = self.active.split("pub fn active_mmio_promote_identity_wc", 1)[1].split(
+            "@system", 1
+        )[0]
+        preflight = body.index("active_mmio_identity_uc_pte_locked(page)")
+        install = body.index("__pat_install_wc()", preflight)
+        write = body.index("page_table_write_entry", install)
+        rollback = body.index("active_mmio_restore_uc_locked(page_base, page_count)", write)
+        self.assertLess(preflight, install)
+        self.assertLess(install, write)
+        self.assertLess(write, rollback)
+        self.assertIn("(old & ~0x98) | 0x98", body)
+        self.assertIn("active_page_tables_publish_locked(page)", body)
+        self.assertIn("__dma_fence()", body)
+
         mapper = self.mmio.split("pub fn mmio_generic_mapping_supported", 1)[1].split(
             "@system", 1
         )[0]
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", mapper)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WC", mapper)
         self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", mapper)
-        self.assertNotIn("active_mmio_restore_identity_uc", self.mmio)
 
 
 if __name__ == "__main__":
