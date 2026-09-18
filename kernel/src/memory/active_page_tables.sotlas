@@ -13,6 +13,7 @@ import kernel::memory::page_table_mapper::*;
 import kernel::memory::direct_map::*;
 import kernel::memory::tlb_shootdown::*;
 import kernel::arch::x86_64::paging::*;
+import kernel::arch::x86_64::pat::*;
 import kernel::arch::x86_64::cpu::*;
 import kernel::sync::spinlock::*;
 
@@ -305,6 +306,79 @@ pub fn active_mmio_restore_identity_uc(page_base: u64, page_count: u64) -> bool 
     let restored = active_mmio_restore_uc_locked(page_base, page_count);
     active_page_tables_unlock_irq(flags_irq);
     return restored;
+}
+
+@system
+pub fn active_mmio_promote_identity_pat_index(page_base: u64,
+                                              page_count: u64,
+                                              pat_index: u8) -> bool {
+    if !active_page_tables_is_ready() || page_base == 0 ||
+       !x86_page_aligned(page_base) || page_count == 0 ||
+       !x86_pat_index_valid(pat_index) ||
+       page_count > (0xFFFFFFFFFFFFFFFF / 4096) {
+        return false;
+    }
+    let span = page_count * 4096;
+    if page_base + span <= page_base { return false; }
+
+    let flags_irq = active_page_tables_lock_irq();
+    if flags_irq == 0 { return false; }
+
+    let mut page = page_base;
+    let mut index: u64 = 0;
+    let mut ready = true;
+    while index < page_count {
+        if !active_mmio_identity_uc_pte_locked(page) {
+            ready = false;
+            break;
+        }
+        page += 4096;
+        index += 1;
+    }
+    if !ready {
+        active_page_tables_unlock_irq(flags_irq);
+        return false;
+    }
+
+    let selection = x86_pat_pte_bits(pat_index);
+    page = page_base;
+    index = 0;
+    let mut promoted = true;
+    while index < page_count {
+        let leaf = active_runtime_leaf_locked(page);
+        if !leaf.valid {
+            promoted = false;
+            break;
+        }
+        let old = page_table_read_entry(leaf, x86_pt_index(page));
+        if !x86_pte_present(old) || x86_pte_address(old) != page {
+            promoted = false;
+            break;
+        }
+        let desired = (old & ~X86_PAT_PTE_SELECTION_MASK) | selection;
+        if !page_table_write_entry(leaf, x86_pt_index(page), desired) ||
+           !active_page_tables_publish_locked(page) {
+            promoted = false;
+            break;
+        }
+        let observed = page_table_read_entry(leaf, x86_pt_index(page));
+        if (observed & X86_PAT_PTE_SELECTION_MASK) != selection {
+            promoted = false;
+            break;
+        }
+        page += 4096;
+        index += 1;
+    }
+
+    if !promoted {
+        active_mmio_restore_uc_locked(page_base, page_count);
+        active_page_tables_unlock_irq(flags_irq);
+        return false;
+    }
+
+    __dma_fence();
+    active_page_tables_unlock_irq(flags_irq);
+    return true;
 }
 
 @system

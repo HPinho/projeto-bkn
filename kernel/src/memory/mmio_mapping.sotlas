@@ -8,6 +8,7 @@ module kernel::memory::mmio_mapping;
 
 import kernel::arch::x86_64::paging::*;
 import kernel::memory::active_page_tables::*;
+import kernel::memory::mmio_pat_policy::*;
 
 pub const MMIO_CACHE_POLICY_INVALID: u8 = 0;
 pub const MMIO_CACHE_POLICY_UC: u8 = 1;
@@ -19,6 +20,8 @@ pub const MMIO_BACKEND_NONE: u8 = 0;
 pub const MMIO_BACKEND_IDENTITY_UC: u8 = 1;
 pub const MMIO_BACKEND_FRAMEBUFFER_WC: u8 = 2;
 pub const MMIO_BACKEND_IDENTITY_WC: u8 = 3;
+pub const MMIO_BACKEND_IDENTITY_WT: u8 = 4;
+pub const MMIO_BACKEND_IDENTITY_WB: u8 = 5;
 
 pub struct MmioMapping {
     pub physical_base: u64;
@@ -94,6 +97,12 @@ pub fn mmio_cache_policy_backend(policy: u8) -> u8 {
     if policy == MMIO_CACHE_POLICY_WC {
         return MMIO_BACKEND_IDENTITY_WC;
     }
+    if policy == MMIO_CACHE_POLICY_WT {
+        return MMIO_BACKEND_IDENTITY_WT;
+    }
+    if policy == MMIO_CACHE_POLICY_WB {
+        return MMIO_BACKEND_IDENTITY_WB;
+    }
     return MMIO_BACKEND_NONE;
 }
 
@@ -104,7 +113,9 @@ pub fn mmio_generic_mapping_supported(mapping: *const MmioMapping) -> bool {
         if !(*mapping).valid || (*mapping).page_count == 0 { return false; }
         let backend = mmio_cache_policy_backend((*mapping).cache_policy);
         return backend == MMIO_BACKEND_IDENTITY_UC ||
-               backend == MMIO_BACKEND_IDENTITY_WC;
+               backend == MMIO_BACKEND_IDENTITY_WC ||
+               backend == MMIO_BACKEND_IDENTITY_WT ||
+               backend == MMIO_BACKEND_IDENTITY_WB;
     }
 }
 
@@ -145,7 +156,22 @@ pub fn mmio_map_identity(mapping: *const MmioMapping) -> bool {
             active_mmio_restore_identity_uc(page_base, count);
             return false;
         }
+    } else if backend == MMIO_BACKEND_IDENTITY_WT ||
+              backend == MMIO_BACKEND_IDENTITY_WB {
+        let memory_type = if backend == MMIO_BACKEND_IDENTITY_WT {
+            PAT_MEMORY_TYPE_WT
+        } else {
+            PAT_MEMORY_TYPE_WB
+        };
+        let pat_index = mmio_pat_find_runtime_index(memory_type);
+        if pat_index == MMIO_PAT_INDEX_INVALID ||
+           !active_mmio_promote_identity_pat_index(page_base, count, pat_index) {
+            active_mmio_restore_identity_uc(page_base, count);
+            return false;
+        }
     }
     return backend == MMIO_BACKEND_IDENTITY_UC ||
-           backend == MMIO_BACKEND_IDENTITY_WC;
+           backend == MMIO_BACKEND_IDENTITY_WC ||
+           backend == MMIO_BACKEND_IDENTITY_WT ||
+           backend == MMIO_BACKEND_IDENTITY_WB;
 }

@@ -35,14 +35,18 @@ class MmioMappingContractTests(unittest.TestCase):
         self.assertIn("mmio_generic_mapping_supported(mapping)", supported)
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", generic)
         self.assertIn("MMIO_BACKEND_IDENTITY_WC", generic)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WT", generic)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WB", generic)
         self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", generic)
-        self.assertNotIn("MMIO_CACHE_POLICY_WT", generic)
-        self.assertNotIn("MMIO_CACHE_POLICY_WB", generic)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WT", generic)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WB", generic)
 
     def test_backend_capabilities_distinguish_generic_uc_from_dedicated_wc(self):
         backend = self.text.split("pub fn mmio_cache_policy_backend", 1)[1].split("@system", 1)[0]
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", backend)
         self.assertIn("MMIO_BACKEND_IDENTITY_WC", backend)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WT", backend)
+        self.assertIn("MMIO_BACKEND_IDENTITY_WB", backend)
         self.assertIn("MMIO_BACKEND_NONE", backend)
         generic = self.text.split("pub fn mmio_generic_mapping_supported", 1)[1].split("@system", 1)[0]
         self.assertIn("MMIO_BACKEND_IDENTITY_UC", generic)
@@ -60,15 +64,20 @@ class MmioMappingContractTests(unittest.TestCase):
         ):
             self.assertIn(token, body)
 
-    def test_mapping_stages_uc_before_optional_wc_promotion(self):
+    def test_mapping_stages_uc_before_optional_pat_promotion(self):
         body = self.text.split("pub fn mmio_map_identity", 1)[1]
         uc = body.index("active_page_tables_map_mmio_identity_4k(page)")
         wc = body.index("active_mmio_promote_identity_wc(page_base, count)", uc)
-        rollback = body.index("active_mmio_restore_identity_uc(page_base, count)", wc)
+        pat_lookup = body.index("mmio_pat_find_runtime_index(memory_type)", wc)
+        generic = body.index("active_mmio_promote_identity_pat_index(page_base, count, pat_index)", pat_lookup)
+        rollback = body.index("active_mmio_restore_identity_uc(page_base, count)", generic)
         self.assertLess(uc, wc)
-        self.assertLess(wc, rollback)
-        self.assertIn("mmio_mapping_supported(mapping)", body)
-        self.assertIn("mmio_generic_mapping_supported(mapping)", self.text)
+        self.assertLess(wc, pat_lookup)
+        self.assertLess(pat_lookup, generic)
+        self.assertLess(generic, rollback)
+        self.assertIn("PAT_MEMORY_TYPE_WT", body)
+        self.assertIn("PAT_MEMORY_TYPE_WB", body)
+        self.assertIn("MMIO_PAT_INDEX_INVALID", body)
         self.assertNotIn("page_table_map_4k", body)
 
     def test_df9a_does_not_migrate_drivers(self):

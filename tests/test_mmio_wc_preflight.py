@@ -72,6 +72,19 @@ class MmioWcPreflightTests(unittest.TestCase):
         self.assertIn("MMIO_BACKEND_IDENTITY_WC", mapper)
         self.assertNotIn("MMIO_BACKEND_FRAMEBUFFER_WC", mapper)
 
+    def test_generic_pat_promotion_uses_runtime_index_bits_and_rolls_back(self):
+        body = self.active.split("pub fn active_mmio_promote_identity_pat_index", 1)[1].split(
+            "@system", 1
+        )[0]
+        self.assertIn("x86_pat_index_valid(pat_index)", body)
+        self.assertIn("x86_pat_pte_bits(pat_index)", body)
+        self.assertIn("X86_PAT_PTE_SELECTION_MASK", body)
+        self.assertIn("active_mmio_identity_uc_pte_locked(page)", body)
+        self.assertIn("active_mmio_restore_uc_locked(page_base, page_count)", body)
+        self.assertIn("active_page_tables_publish_locked(page)", body)
+        self.assertIn("__dma_fence()", body)
+
+
 
 if __name__ == "__main__":
     unittest.main()
