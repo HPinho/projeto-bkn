@@ -73,7 +73,11 @@ DF-7   MSI-X                                       CERTIFIED
 DF-8   DMA Device API                              IN PROGRESS
   DF-8a read-only device constraints model         CERTIFIED
   DF-8b typed constrained allocation               CERTIFIED
-  DF-8c per-device integration / NVMe first        IMPLEMENTED / VALIDATING
+  DF-8c per-device integration / NVMe first        CERTIFIED
+  DF-8c2 AHCI runtime typed integration              CERTIFIED
+  DF-8c3 AHCI read-buffer typed integration          CERTIFIED
+  DF-8c4 AHCI write-buffer typed integration         CERTIFIED
+  DF-8c5 xHCI runtime-arena typed integration        IMPLEMENTED / VALIDATING
 DF-9   MMIO Mapping API                            PLANNED
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
@@ -157,7 +161,7 @@ Documentacao complementar:
 
 ### DF-8c2 — segunda integração por dispositivo: AHCI runtime
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `253ed951efd2bc47e86fe2172c63e7b072b162fa`.
 
 O segundo corte migra somente a arena principal de `kernel/src/drivers/ahci_runtime.sotlas` para o contrato tipado, preservando o comportamento anterior:
 
@@ -180,7 +184,7 @@ Invariantes:
 
 ### DF-8c3 — terceira integração por dispositivo: AHCI read buffer
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `a80599f6b0951bb43688cf2a0737a29a66fe2980`.
 
 Este corte migra somente o buffer dedicado de leitura em `kernel/src/drivers/ahci_block_read.sotlas` para constraints tipadas:
 
@@ -202,7 +206,7 @@ Invariantes:
 
 ### DF-8c4 — quarta integração por dispositivo: AHCI write buffer
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `2b537336858b93105bc1fece62d0f17c604f7949`.
 
 Este corte migra somente o buffer dedicado de escrita em `kernel/src/drivers/ahci_block_read.sotlas` para constraints tipadas, com o mesmo perfil físico do read buffer:
 
@@ -219,3 +223,24 @@ Invariantes:
 - o buffer e validado por `dma_buffer_satisfies_device_constraints(...)` antes de `dma_share_with_device(...)`;
 - a emissao WRITE DMA, o clear, o READ-back real e a verificacao persistida permanecem inalterados;
 - como read e write residem no mesmo modulo, a lista global de arquivos callers tipados permanece em tres arquivos.
+
+
+### DF-8c5 — quinta integração por dispositivo: xHCI runtime arena
+
+**IMPLEMENTED / VALIDATING.**
+
+Este corte migra somente a arena principal de `kernel/src/drivers/xhci_runtime.sotlas` para constraints tipadas, preservando o contrato físico existente:
+
+```text
+alignment   = XHCI_RUNTIME_PAGE_SIZE (4096)
+max_address = 0xFFFFFFFFFFFFFFFF
+boundary    = 0
+```
+
+Invariantes:
+
+- `total_pages`, DCBAA, Command Ring, Event Ring, ERST e scratchpads permanecem no mesmo layout contiguo;
+- nenhuma constraint nova de hardware foi introduzida;
+- a arena e validada por `dma_buffer_satisfies_device_constraints(...)` antes de qualquer subbuffer ser derivado;
+- nenhum doorbell, Bus Master, start do controller, ERST programming ou ownership de rings foi alterado;
+- o guard global passa a permitir exatamente quatro arquivos callers tipados.

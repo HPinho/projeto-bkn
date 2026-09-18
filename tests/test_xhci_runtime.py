@@ -18,8 +18,12 @@ class XhciRuntimeTests(unittest.TestCase):
     def test_runtime_uses_real_dma_and_single_contiguous_arena(self):
         text = RUNTIME.read_text(encoding="utf-8")
         self.assertIn("import kernel::memory::dma::*;", text)
-        self.assertIn("let arena = dma_alloc(total_pages * XHCI_RUNTIME_PAGE_SIZE", text)
+        self.assertIn("dma_device_constraints(XHCI_RUNTIME_PAGE_SIZE, 0xFFFFFFFFFFFFFFFF, 0)", text)
+        self.assertIn("dma_device_constraints_valid(&constraints)", text)
+        self.assertIn("dma_alloc_for_constraints(total_pages * XHCI_RUNTIME_PAGE_SIZE, &constraints)", text)
         self.assertIn("dma_buffer_cpu_owned(&arena)", text)
+        self.assertIn("dma_buffer_satisfies_device_constraints(&arena, &constraints)", text)
+        self.assertNotIn("dma_alloc(total_pages * XHCI_RUNTIME_PAGE_SIZE", text)
         self.assertNotIn("uefi", _code_only(text).lower())
 
     def test_runtime_contains_dcbaa_command_event_erst_layout(self):
