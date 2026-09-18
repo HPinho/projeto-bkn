@@ -61,6 +61,7 @@ import kernel::device::registry::*;
 import kernel::device::lifecycle::*;
 import kernel::device::driver_registry::*;
 import kernel::device::resource_manager::*;
+import kernel::device::mmio_claim::*;
 import kernel::device::foundation_self_test::*;
 import kernel::drivers::hda_controller::*;
 import kernel::drivers::i2c_core::*;

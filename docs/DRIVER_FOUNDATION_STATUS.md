@@ -86,7 +86,8 @@ DF-8   DMA Device API                              CERTIFIED
   DF-8c11 xHCI HID descriptor-buffer integration      CERTIFIED
   DF-8c12 AHCI generic block-I/O buffer integration   CERTIFIED
 DF-9   MMIO Mapping API                            IN PROGRESS
-  DF-9a Typed MMIO range/policy contract              IMPLEMENTED / VALIDATING
+  DF-9a Typed MMIO range/policy contract              CERTIFIED
+  DF-9b MMIO ownership/claim integration              IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -446,7 +447,7 @@ Nenhum timeout, marker ou criterio do workflow HID foi relaxado. O DF-8 permanec
 
 ## DF-9a — Typed MMIO range/policy contract
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `5228d4b05da295e0e9f96958a2caa45d85b7768f`.
 
 Primeiro microcorte do MMIO Mapping API:
 
@@ -456,3 +457,22 @@ Primeiro microcorte do MMIO Mapping API:
 - `WC`, `WT` e `WB` existem no contrato, mas falham fechado até backends explícitos;
 - nenhum driver, APIC, ECAM, AML ou framebuffer é migrado neste corte;
 - intervalos com overflow, tamanho zero, endereço zero ou política inválida falham fechado.
+
+
+## DF-9b — MMIO ownership/claim integration
+
+**IMPLEMENTED / VALIDATING.**
+
+Este microcorte nao cria um registry paralelo. Ele liga o contrato `MmioMapping`
+ao Resource Manager certificado:
+
+- claim usa `RESOURCE_KIND_MMIO`;
+- o range reivindicado cobre paginas inteiras (`page_base + page_count * 4096`),
+  evitando dois owners com aliases na mesma pagina;
+- `resource_claim()` ocorre antes de qualquer mapeamento;
+- falha em `mmio_map_identity()` executa rollback por
+  `resource_release(resource, device, driver)`;
+- release de claim e generation/owner-safe pelo Resource Manager;
+- release nao remove PTE identity neste corte, pois o backend atual nao tem
+  ownership de VA/unmap seguro para MMIO compartilhado;
+- nenhum driver e migrado no DF-9b.

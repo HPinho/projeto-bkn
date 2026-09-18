@@ -1,0 +1,80 @@
+// Baken OS — DF-9b: ownership de ranges MMIO sobre o Resource Manager.
+//
+// Nao cria um segundo registry. Claims MMIO reutilizam RESOURCE_KIND_MMIO,
+// geracoes e conflito de ranges já certificados pelo Device Foundation.
+// O claim cobre paginas inteiras para impedir aliases com políticas divergentes.
+
+module kernel::device::mmio_claim;
+
+import kernel::device::types::*;
+import kernel::device::resource_manager::*;
+import kernel::memory::mmio_mapping::*;
+
+pub struct MmioClaim {
+    pub resource: ResourceHandle;
+    pub mapping: MmioMapping;
+    pub valid: bool;
+}
+
+@system
+pub fn mmio_invalid_claim() -> MmioClaim {
+    return MmioClaim {
+        resource: resource_invalid_handle(),
+        mapping: mmio_invalid_mapping(),
+        valid: false
+    };
+}
+
+@system
+fn mmio_claim_length(mapping: *const MmioMapping) -> u64 {
+    if mapping == (null as *const MmioMapping) { return 0; }
+    unsafe {
+        if !(*mapping).valid || (*mapping).page_count == 0 ||
+           (*mapping).page_count > (0xFFFFFFFFFFFFFFFF / 4096) {
+            return 0;
+        }
+        return (*mapping).page_count * 4096;
+    }
+}
+
+@system
+pub fn mmio_claim_and_map_identity(device: DeviceHandle,
+                                   driver: DriverHandle,
+                                   mapping: MmioMapping) -> MmioClaim {
+    if !device.valid || !driver.valid || !mmio_mapping_supported(&mapping) ||
+       !resource_manager_is_ready() {
+        return mmio_invalid_claim();
+    }
+    let length = mmio_claim_length(&mapping);
+    if length == 0 || mapping.page_base + length <= mapping.page_base {
+        return mmio_invalid_claim();
+    }
+
+    let resource = resource_claim(device, driver, ResourceRequest {
+        kind: RESOURCE_KIND_MMIO,
+        start: mapping.page_base,
+        length: length,
+        auxiliary: 0
+    });
+    if !resource.valid { return mmio_invalid_claim(); }
+
+    if !mmio_map_identity(&mapping) {
+        resource_release(resource, device, driver);
+        return mmio_invalid_claim();
+    }
+
+    return MmioClaim { resource: resource, mapping: mapping, valid: true };
+}
+
+// Release de ownership apenas. O backend identity atual nao possui unmap seguro
+// para MMIO compartilhado/firmware, portanto esta API deliberadamente nao remove
+// PTEs. DF-9c/9d podem adicionar lifecycle de unmap quando houver ownership de VA.
+@system
+pub fn mmio_release_claim(claim: MmioClaim,
+                          device: DeviceHandle,
+                          driver: DriverHandle) -> bool {
+    if !claim.valid || !claim.resource.valid || !device.valid || !driver.valid {
+        return false;
+    }
+    return resource_release(claim.resource, device, driver);
+}
