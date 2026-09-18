@@ -96,7 +96,8 @@ DF-9   MMIO Mapping API                            IN PROGRESS
   DF-9d1 PCI ECAM typed UC mapping migration            CERTIFIED
   DF-9d2 MSI-X table typed UC mapping migration         CERTIFIED
   DF-9d3 MSI-X activation typed UC mapping migration    CERTIFIED
-  DF-9d4 xHCI controller typed UC mapping migration     IMPLEMENTED / VALIDATING
+  DF-9d4 xHCI controller typed UC mapping migration     CERTIFIED
+  DF-9d5 xHCI PORTSC typed UC mapping migration        IMPLEMENTED / VALIDATING
 DF-10  Bus Model                                   PLANNED
 DF-11  Class Registries                            PLANNED
 ```
@@ -610,7 +611,7 @@ Terceiro caller real migrado:
 
 ## DF-9d4 — xHCI controller typed UC mapping migration
 
-**IMPLEMENTED / VALIDATING.**
+**CERTIFIED.** Baseline `aa2f6d2cf7cf6f2453fb00894c766628e990992d`.
 
 Quarto caller real migrado:
 
@@ -620,5 +621,22 @@ Quarto caller real migrado:
 - capability, operational registers e USB Legacy handoff continuam usando o mesmo
   helper e a mesma ordem de mapping antes de acesso MMIO;
 - Memory Space enable, reset HCRST, CNR/HCHalted polling e Bus Master off
+  permanecem inalterados;
+- demais helpers xHCI continuam no backend legado para microcortes posteriores.
+
+
+## DF-9d5 — xHCI PORTSC typed UC mapping migration
+
+**IMPLEMENTED / VALIDATING.**
+
+Quinto caller real migrado:
+
+- somente `kernel/src/drivers/xhci_port.sotlas` muda no runtime;
+- `xhci_port_map()` continua arredondando o registrador para exatamente uma
+  pagina de 4096 bytes;
+- politica permanece UC;
+- `xhci_port_scan()` continua read-only: mapeia antes de ler PORTSC e nao
+  escreve registradores de porta;
+- inventario, contagem de portas conectadas, speed id e iteracao bounded
   permanecem inalterados;
 - demais helpers xHCI continuam no backend legado para microcortes posteriores.

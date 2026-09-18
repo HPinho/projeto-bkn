@@ -82,7 +82,7 @@ class MmioMappingContractTests(unittest.TestCase):
 
     def test_df9d_allows_only_certified_typed_driver_callers(self):
         drivers = ROOT / "kernel/src/drivers"
-        allowed = {"pci_config.sotlas", "pci_msix_table.sotlas", "pci_msix_activation.sotlas", "xhci_controller.sotlas"}
+        allowed = {"pci_config.sotlas", "pci_msix_table.sotlas", "pci_msix_activation.sotlas", "xhci_controller.sotlas", "xhci_port.sotlas"}
         for path in drivers.glob("*.sotlas"):
             text = path.read_text(encoding="utf-8")
             if path.name in allowed:
